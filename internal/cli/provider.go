@@ -45,12 +45,14 @@ type providerRouteJSON struct {
 	ModelsPath string `json:"models_path"`
 }
 
-// providerJSON 是 provider ls --json 的一行。protocols 恒为数组，没有路由时是 []。
+// providerJSON 是 provider ls / add --json 的一行。protocols 恒为数组，没有路由时是 []。
+// DefaultProtocol 是有效默认协议（见 DESIGN 5.8），一条路由都没有时为空串。
 type providerJSON struct {
-	Name      string              `json:"name"`
-	BaseURL   string              `json:"base_url"`
-	Protocols []providerRouteJSON `json:"protocols"`
-	Note      string              `json:"note"`
+	Name            string              `json:"name"`
+	BaseURL         string              `json:"base_url"`
+	DefaultProtocol string              `json:"default_protocol"`
+	Protocols       []providerRouteJSON `json:"protocols"`
+	Note            string              `json:"note"`
 }
 
 func routeJSONs(routes []store.ProviderRoute) []providerRouteJSON {
@@ -77,13 +79,18 @@ func routeCell(routes []store.ProviderRoute) string {
 	return strings.Join(parts, "、")
 }
 
-// defaultProtocol 是厂商的默认协议：按协议名排序的第一条路由。
-// 账号的 --protocol 留空时用它，provider ls 也显示它，两处同一个规则。
-func defaultProtocol(routes []store.ProviderRoute) string {
-	if len(routes) == 0 {
-		return ""
+// effectiveDefaultProtocol 问 store 要厂商的有效默认协议，cli 不自己算排序兜底（见 DESIGN 5.8）。
+// 厂商在但一条路由都没有时 store 返回 ErrProviderNoRoutes：这里换成空串，
+// 让调用方显示「无路由」而不是让整条命令失败。
+func effectiveDefaultProtocol(st *store.Store, name string) (string, error) {
+	proto, err := st.EffectiveProviderProtocol(name)
+	if errors.Is(err, store.ErrProviderNoRoutes) {
+		return "", nil
 	}
-	return routes[0].Protocol
+	if err != nil {
+		return "", err
+	}
+	return proto, nil
 }
 
 func cmdProviderLs(e *Env, args []string) error {
@@ -104,22 +111,27 @@ func cmdProviderLs(e *Env, args []string) error {
 	}
 
 	routesByProvider := make([][]store.ProviderRoute, len(providers))
+	defaults := make([]string, len(providers))
 	for i, p := range providers {
 		routes, err := a.st.ProviderRoutes(p.Name)
 		if err != nil {
 			return err
 		}
 		routesByProvider[i] = routes
+		if defaults[i], err = effectiveDefaultProtocol(a.st, p.Name); err != nil {
+			return err
+		}
 	}
 
 	if e.JSON {
 		out := make([]providerJSON, 0, len(providers))
 		for i, p := range providers {
 			out = append(out, providerJSON{
-				Name:      p.Name,
-				BaseURL:   p.BaseURL,
-				Protocols: routeJSONs(routesByProvider[i]),
-				Note:      p.Note,
+				Name:            p.Name,
+				BaseURL:         p.BaseURL,
+				DefaultProtocol: defaults[i],
+				Protocols:       routeJSONs(routesByProvider[i]),
+				Note:            p.Note,
 			})
 		}
 		return e.printJSON(out)
@@ -132,7 +144,8 @@ func cmdProviderLs(e *Env, args []string) error {
 
 	rows := make([][]string, 0, len(providers))
 	for i, p := range providers {
-		proto := defaultProtocol(routesByProvider[i])
+		// 一条路由都没有时默认协议列写 -，路由列已经说明它在按后缀猜路径。
+		proto := defaults[i]
 		if proto == "" {
 			proto = "-"
 		}
@@ -178,7 +191,8 @@ func parseRoute(provider, expr string) (store.ProviderRoute, error) {
 
 func cmdProviderAdd(e *Env, args []string) error {
 	fs := newFlagSet(e, "provider add", "写入或更新厂商与它的路由")
-	baseURL := fs.String("base-url", "", "厂商的默认地址，如 https://api.deepseek.com")
+	baseURL := fs.String("base-url", "", "厂商的默认地址，如 https://api.deepseek.com；\n新建厂商必填，补已有厂商的路由或默认协议时省略则保留库里的地址")
+	protocol := fs.String("protocol", "", "这家的默认协议（anthropic | openai-chat | openai-responses）；\n它是默认值而不是一条路由，必须落在本次或此前用 --route 声明过的协议上，留空则不设置")
 	note := fs.String("note", "", "备注，留空时保留已有备注")
 	var exprs routeFlags
 	fs.Var(&exprs, "route", "路由表达式 <协议>=<路径>[:<模型列表路径>]，可重复，例如 "+routeExample)
@@ -186,7 +200,7 @@ func cmdProviderAdd(e *Env, args []string) error {
 		return err
 	}
 
-	usage := fmt.Sprintf("用法：switchboard provider add <名称> --base-url <地址> [--note <备注>] [--route %s]", routeExample)
+	usage := fmt.Sprintf("用法：switchboard provider add <名称> [--base-url <地址>] [--protocol <协议>] [--note <备注>] [--route %s]", routeExample)
 	if fs.NArg() > 1 {
 		return usagef("%s", usage)
 	}
@@ -194,11 +208,12 @@ func cmdProviderAdd(e *Env, args []string) error {
 	if name == "" {
 		return usagef("%s", usage)
 	}
-	if *baseURL == "" {
-		return usagef("--base-url 必填，例如 switchboard provider add %s --base-url https://api.example.com --route %s", name, routeExample)
-	}
-	if !strings.HasPrefix(*baseURL, "http://") && !strings.HasPrefix(*baseURL, "https://") {
+	// 给了地址就先校验格式；没给时先查厂商在不在，存在则用库里的地址（新建厂商另行要求）。
+	if *baseURL != "" && !strings.HasPrefix(*baseURL, "http://") && !strings.HasPrefix(*baseURL, "https://") {
 		return usagef("--base-url %q 要以 http:// 或 https:// 开头，例如 switchboard provider add %s --base-url https://api.example.com", *baseURL, name)
+	}
+	if *protocol != "" && !isWireProtocol(*protocol) {
+		return usagef("--protocol %q 不认识，只能是 anthropic、openai-chat、openai-responses；它是这家的默认协议，要落在本次或此前用 --route 声明过的路由上，例如 switchboard provider add %s --base-url https://api.example.com --route %s --protocol openai-chat", *protocol, name, routeExample)
 	}
 
 	routes := make([]store.ProviderRoute, 0, len(exprs))
@@ -217,37 +232,58 @@ func cmdProviderAdd(e *Env, args []string) error {
 	defer a.Close()
 
 	// 末尾斜杠在这里去掉，存进来的就是拼接时实际用的形式（见 DESIGN 5.8）。
-	p := store.Provider{Name: name, BaseURL: strings.TrimRight(*baseURL, "/"), Note: *note}
+	// DefaultProtocol 留空表示不动这一列：重复 add 不会把已有默认协议清掉。
+	p := store.Provider{Name: name, Note: *note, DefaultProtocol: *protocol}
 	existing, getErr := a.st.GetProvider(name)
 	switch {
 	case getErr == nil:
+		// 省略 --base-url 时保留库里的地址：补一条路由或改默认协议不该逼人重粘地址。
+		p.BaseURL = existing.BaseURL
+		if *baseURL != "" {
+			p.BaseURL = strings.TrimRight(*baseURL, "/")
+		}
 		// 没给 --note 时保留原备注：改一条路由不该把备注顺手清掉。
 		if !flagWasSet(fs, "note") {
 			p.Note = existing.Note
 		}
 	case errors.Is(getErr, store.ErrProviderNotFound):
+		if *baseURL == "" {
+			return usagef("新建厂商 %s 需要 --base-url，例如 switchboard provider add %s --base-url https://api.example.com --route %s；补已有厂商的路由或默认协议时可以省略它", name, name, routeExample)
+		}
+		p.BaseURL = strings.TrimRight(*baseURL, "/")
 	default:
 		return getErr
 	}
 
+	// 默认协议指不到已声明的路由时，store 整笔拒绝（路由与默认协议同一个事务），
+	// 错误文案已经写清哪条路由缺、下一步运行什么，这里原样交给调用方，退出码 1。
 	if err := a.st.AddProvider(p, routes); err != nil {
-		return fmt.Errorf("写入厂商 %s 失败: %w", name, err)
+		return err
 	}
 
 	after, err := a.st.ProviderRoutes(name)
 	if err != nil {
 		return err
 	}
+	def, err := effectiveDefaultProtocol(a.st, name)
+	if err != nil {
+		return err
+	}
 
 	if e.JSON {
 		return e.printJSON(providerJSON{
-			Name:      p.Name,
-			BaseURL:   p.BaseURL,
-			Protocols: routeJSONs(after),
-			Note:      p.Note,
+			Name:            p.Name,
+			BaseURL:         p.BaseURL,
+			DefaultProtocol: def,
+			Protocols:       routeJSONs(after),
+			Note:            p.Note,
 		})
 	}
-	fmt.Fprintf(e.Stdout, "已写入厂商 %s（%s），这次提交 %d 条路由，现有 %d 条\n", p.Name, p.BaseURL, len(routes), len(after))
+	line := fmt.Sprintf("已写入厂商 %s（%s），这次提交 %d 条路由，现有 %d 条", p.Name, p.BaseURL, len(routes), len(after))
+	if def != "" {
+		line += "，默认协议 " + def
+	}
+	fmt.Fprintln(e.Stdout, line)
 	if len(after) == 0 {
 		fmt.Fprintln(e.Stdout, "还没有路由，账号会按 base_url 后缀猜路径；声明一条：switchboard provider add "+name+" --base-url "+p.BaseURL+" --route "+routeExample)
 	}
@@ -331,25 +367,37 @@ func flagWasSet(fs *flagSet, name string) bool {
 	return seen
 }
 
-// lookupProvider 按厂商表解析默认地址与默认协议，第二个返回值 false 表示表里没有这一行。
-// 厂商行存在但一条路由都没声明时协议回退到 openai-chat，地址仍是厂商的 base_url。
-func lookupProvider(st *store.Store, name string) (baseURL, protocol string, found bool, err error) {
+// providerDefaults 是厂商表能给账号补的两项默认值。
+// Found 为 false 表示表里没有这一行；NoRoutes 为 true 表示厂商行在、但一条路由都没声明，
+// 这时算不出默认协议，由调用方决定报错还是回退（见 DESIGN 5.8）。
+type providerDefaults struct {
+	BaseURL  string
+	Protocol string
+	Found    bool
+	NoRoutes bool
+}
+
+// lookupProvider 按厂商表解析默认地址与默认协议。协议只问 store 的有效默认协议，
+// 不在 cli 里再算一遍排序兜底（见 DESIGN 5.8）。
+func lookupProvider(st *store.Store, name string) (providerDefaults, error) {
 	p, err := st.GetProvider(name)
 	if errors.Is(err, store.ErrProviderNotFound) {
-		return "", "", false, nil
+		return providerDefaults{}, nil
 	}
 	if err != nil {
-		return "", "", false, err
+		return providerDefaults{}, err
 	}
-	routes, err := st.ProviderRoutes(name)
+	d := providerDefaults{BaseURL: p.BaseURL, Found: true}
+	proto, err := st.EffectiveProviderProtocol(name)
+	if errors.Is(err, store.ErrProviderNoRoutes) {
+		d.NoRoutes = true
+		return d, nil
+	}
 	if err != nil {
-		return "", "", false, err
+		return providerDefaults{}, err
 	}
-	proto := defaultProtocol(routes)
-	if proto == "" {
-		proto = gateway.ProtocolChat
-	}
-	return p.BaseURL, proto, true, nil
+	d.Protocol = proto
+	return d, nil
 }
 
 // unknownProviderError 说明厂商表里没有这一行，并给出最接近的已知厂商与下一步命令。

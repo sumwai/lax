@@ -28,24 +28,25 @@ func TestAccountAddUsesProviderTable(t *testing.T) {
 		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	// 默认协议取该厂商按协议名排序的第一条路由：deepseek 的 anthropic 排在 openai-chat 前。
+	// 默认协议取库里的有效默认协议：deepseek 显式存了 openai-chat，
+	// 单靠排序会得到 anthropic（anthropic 排在 openai-chat 前）。
 	code, out, stderr := run(t, "account", "add", "ds1", "--provider", "deepseek", "--key", "sk-1", "--json")
 	if code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 	ds1 := mustAccountAdd(t, out)
-	if ds1.BaseURL != "https://api.deepseek.com" || ds1.Protocol != "anthropic" {
-		t.Fatalf("deepseek 账号的默认值 = %+v，期望 base_url 取厂商表、协议取第一条路由", ds1)
+	if ds1.BaseURL != "https://api.deepseek.com" || ds1.Protocol != "openai-chat" {
+		t.Fatalf("deepseek 账号的默认值 = %+v，期望 base_url 取厂商表、协议取库里的 openai-chat", ds1)
 	}
 
 	// --protocol 覆盖默认协议，地址仍来自厂商表。
 	code, out, stderr = run(t, "account", "add", "ds2",
-		"--provider", "deepseek", "--protocol", "openai-chat", "--key", "sk-2", "--json")
+		"--provider", "deepseek", "--protocol", "anthropic", "--key", "sk-2", "--json")
 	if code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 	ds2 := mustAccountAdd(t, out)
-	if ds2.BaseURL != "https://api.deepseek.com" || ds2.Protocol != "openai-chat" {
+	if ds2.BaseURL != "https://api.deepseek.com" || ds2.Protocol != "anthropic" {
 		t.Fatalf("--protocol 应覆盖默认协议 = %+v", ds2)
 	}
 
@@ -56,7 +57,7 @@ func TestAccountAddUsesProviderTable(t *testing.T) {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 	ds3 := mustAccountAdd(t, out)
-	if ds3.BaseURL != "http://127.0.0.1:9" || ds3.Protocol != "anthropic" {
+	if ds3.BaseURL != "http://127.0.0.1:9" || ds3.Protocol != "openai-chat" {
 		t.Fatalf("--base-url 应覆盖厂商地址 = %+v", ds3)
 	}
 
@@ -80,6 +81,51 @@ func TestAccountAddUsesProviderTable(t *testing.T) {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("协议错误的文案应列出 %q: %s", want, stderr)
 		}
+	}
+}
+
+// TestAccountAddProviderWithoutRoutes 覆盖厂商行在、但一条路由都没声明的情况：
+// 没给 --protocol 也没给 --base-url 时报错并给出三条下一步，给了任一个都能加。
+func TestAccountAddProviderWithoutRoutes(t *testing.T) {
+	sandbox(t)
+	if code, _, stderr := run(t, "init"); code != 0 {
+		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := run(t, "provider", "add", "noroute", "--base-url", "https://api.example.com"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	code, out, stderr := run(t, "account", "add", "n1", "--provider", "noroute", "--key", "sk-1")
+	if code != 1 {
+		t.Fatalf("厂商无路由的退出码 = %d，期望 1", code)
+	}
+	if out != "" {
+		t.Fatalf("报错时不该写 stdout: %s", out)
+	}
+	for _, want := range []string{"switchboard provider add noroute", "--protocol", "--base-url", "--route"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+		}
+	}
+
+	// 显式 --protocol 时照常能加，地址仍取厂商的 base_url。
+	code, out, stderr = run(t, "account", "add", "n2",
+		"--provider", "noroute", "--protocol", "anthropic", "--key", "sk-2", "--json")
+	if code != 0 {
+		t.Fatalf("带 --protocol 的退出码 = %d，stderr = %s", code, stderr)
+	}
+	if got := mustAccountAdd(t, out); got.Protocol != "anthropic" || got.BaseURL != "https://api.example.com" {
+		t.Fatalf("带 --protocol 的账号 = %+v", got)
+	}
+
+	// 只给 --base-url 时按自建地址加账号，协议回退 openai-chat（见 DESIGN 5.8）。
+	code, out, stderr = run(t, "account", "add", "n3",
+		"--provider", "noroute", "--base-url", "http://127.0.0.1:9", "--key", "sk-3", "--json")
+	if code != 0 {
+		t.Fatalf("带 --base-url 的退出码 = %d，stderr = %s", code, stderr)
+	}
+	if got := mustAccountAdd(t, out); got.Protocol != "openai-chat" || got.BaseURL != "http://127.0.0.1:9" {
+		t.Fatalf("带 --base-url 的账号 = %+v", got)
 	}
 }
 

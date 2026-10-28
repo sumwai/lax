@@ -151,17 +151,26 @@ func cmdAccountAdd(e *Env, args []string) error {
 	// 厂商的默认地址与默认协议来自厂商表，不在代码里硬编码（见 DESIGN 5.8）。
 	proto := *protocol
 	base := *baseURL
-	defBase, defProto, found, err := lookupProvider(a.st, *provider)
+	defs, err := lookupProvider(a.st, *provider)
 	if err != nil {
 		return err
 	}
-	if found {
+	if defs.Found {
 		if base == "" {
-			base = defBase
+			base = defs.BaseURL
 		}
 		if proto == "" {
-			proto = defProto
+			proto = defs.Protocol
 		}
+	}
+	// 厂商行在但一条路由都没声明时 store 算不出默认协议：显式给了 --base-url
+	// 就按自建地址加账号，协议回退 openai-chat（见 DESIGN 5.8）；否则报错让人先声明路由。
+	if proto == "" && defs.NoRoutes {
+		if *baseURL == "" {
+			return fmt.Errorf("厂商 %q 在厂商表里但一条路由都没声明，算不出默认协议（地址 %s）；先运行 switchboard provider add %s --base-url %s --route %s 声明路由，或给本命令加 --protocol <协议> 指定，或给 --base-url 按自建地址加账号",
+				*provider, defs.BaseURL, *provider, defs.BaseURL, routeExample)
+		}
+		proto = gateway.ProtocolChat
 	}
 	if proto == "" {
 		proto = gateway.ProtocolChat
