@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 )
 
 const (
@@ -130,9 +131,52 @@ func newFlagSet(e *Env, name, summary string) *flagSet {
 	fs.BoolVar(&e.JSON, "json", e.JSON, "以 JSON 输出")
 	fs.Usage = func() {
 		fmt.Fprintf(e.Stderr, "%s %s — %s\n\n用法：\n  %s %s [参数]\n\n参数：\n", appName, name, summary, appName, name)
-		fs.PrintDefaults()
+		printFlagDefaults(e.Stderr, fs)
 	}
 	return &flagSet{FlagSet: fs}
+}
+
+// printFlagDefaults 打印参数清单。flag 自带的 PrintDefaults 只印一个短横线，
+// 与本程序其它地方的写法不一致，所以自己印。
+func printFlagDefaults(w io.Writer, fs *flag.FlagSet) {
+	fs.VisitAll(func(f *flag.Flag) {
+		placeholder, usage := flag.UnquoteUsage(f)
+		line := "  --" + f.Name
+		if placeholder != "" {
+			line += " " + placeholder
+		}
+		if placeholder == "" && len(f.Name) == 1 {
+			// 单个字母的开关参数值不值一行，跟在名字后面。
+			line += "\t"
+		} else {
+			line += "\n    \t"
+		}
+		line += strings.ReplaceAll(usage, "\n", "\n    \t")
+		if !zeroDefault(f, placeholder) {
+			if placeholder == "string" {
+				line += fmt.Sprintf(" (default %q)", f.DefValue)
+			} else {
+				line += fmt.Sprintf(" (default %s)", f.DefValue)
+			}
+		}
+		fmt.Fprintln(w, line)
+	})
+}
+
+// zeroDefault 判断参数默认值是否等于该类型的零值，是就不写进参数清单。
+func zeroDefault(f *flag.Flag, placeholder string) bool {
+	switch placeholder {
+	case "string":
+		return f.DefValue == ""
+	case "":
+		// 开关参数
+		return f.DefValue == "false"
+	case "duration":
+		return f.DefValue == "0s"
+	case "int", "int64", "uint", "uint64", "float", "float64":
+		return f.DefValue == "0"
+	}
+	return f.DefValue == ""
 }
 
 // flagSet 让位置参数可以出现在参数前后任意位置，与常见命令行习惯一致。

@@ -87,7 +87,7 @@ func cmdAccountSetEnabled(e *Env, args []string, sub string, enabled bool) error
 	}
 	if enabled {
 		// 手工启用意味着人工确认过，顺手清掉冷却，不用再等。
-		if err := a.st.SetCooldown(acc.ID, 0, ""); err != nil {
+		if err := a.st.ClearFailure(acc.ID); err != nil {
 			return err
 		}
 	}
