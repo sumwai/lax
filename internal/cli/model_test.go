@@ -710,3 +710,109 @@ func TestModelProbeLimitCountsPendingOnly(t *testing.T) {
 		t.Fatalf("--limit 1 应只探待探的 m3，实际 %s", out)
 	}
 }
+
+// TestModelProbeStopsAtUnauthorized 确认一个账号碰到 401 就停下，后续账号一条请求都不发。
+func TestModelProbeStopsAtUnauthorized(t *testing.T) {
+	sandbox(t)
+	bad := newProbeUpstream(t, []string{"m1"}, map[string]int{"m1": http.StatusUnauthorized})
+	next := newProbeUpstream(t, []string{"m2"}, nil)
+
+	addProbeAccount(t, bad, "a-bad", "--priority", "10")
+	addProbeAccount(t, next, "b-next", "--priority", "20")
+
+	code, out, stderr := run(t, "model", "probe", "--json")
+	if code != 1 {
+		t.Fatalf("碰到 401 时退出码 = %d，期望 1；stdout = %s，stderr = %s", code, out, stderr)
+	}
+	if !strings.Contains(stderr, "凭据") {
+		t.Fatalf("stderr 应说明凭据被拒: %s", stderr)
+	}
+	probes := mustProbeRows(t, out)
+	if len(probes) != 1 || probes["m1"].Status != "auth" {
+		t.Fatalf("401 之后不该再探后续账号，实际探了 %d 个: %s", len(probes), out)
+	}
+	if got := len(next.requestBodies()); got != 0 {
+		t.Fatalf("后续账号的假上游收到 %d 条请求，期望 0 条", got)
+	}
+
+	st := openTestStore(t)
+	acc, err := st.GetAccount("a-bad")
+	if err != nil {
+		t.Fatalf("读账号: %v", err)
+	}
+	if acc.Enabled {
+		t.Fatal("401 之后账号应被停用")
+	}
+	after, err := st.GetAccount("b-next")
+	if err != nil {
+		t.Fatalf("读账号: %v", err)
+	}
+	rows, err := st.AccountModels(after.ID)
+	if err != nil {
+		t.Fatalf("读模型行: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("后续账号不该被处理，实际写了 %d 行: %v", len(rows), rows)
+	}
+}
+
+// TestModelProbeNeverPrintsKey 确认凭据不进任何输出：上游把 key 回显进错误体，
+// 人读表格、--json、以及写进 requests 的错误摘要里都只能是 ***。
+func TestModelProbeNeverPrintsKey(t *testing.T) {
+	sandbox(t)
+	const key = "sk-echo-check-4242"
+
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
+			_, _ = io.WriteString(w, `{"data":[{"id":"m1"}]}`)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"message":"invalid api key `+key+`"}}`)
+	}))
+	t.Cleanup(up.Close)
+
+	if code, _, stderr := run(t, "init"); code != 0 {
+		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
+		"--base-url", up.URL, "--key", key); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	code, out, stderr := run(t, "model", "probe", "--account", "ds1")
+	if code != 1 {
+		t.Fatalf("凭据被拒时退出码 = %d，期望 1；stdout = %s", code, out)
+	}
+	code, jsonOut, jsonErr := run(t, "model", "probe", "--account", "ds1", "--json", "--refresh")
+	if code != 1 {
+		t.Fatalf("凭据被拒时退出码 = %d，期望 1；stdout = %s", code, jsonOut)
+	}
+	for name, text := range map[string]string{
+		"人读表格":       out,
+		"人读 stderr":  stderr,
+		"--json 输出":  jsonOut,
+		"--json 错误流": jsonErr,
+	} {
+		if strings.Contains(text, key) {
+			t.Fatalf("%s 泄漏了凭据: %s", name, text)
+		}
+	}
+
+	st := openTestStore(t)
+	recs, err := st.RecentRequests(10)
+	if err != nil {
+		t.Fatalf("读请求记录: %v", err)
+	}
+	if len(recs) == 0 {
+		t.Fatal("探活应写下请求记录")
+	}
+	for _, rec := range recs {
+		if strings.Contains(rec.Error, key) {
+			t.Fatalf("请求记录的错误摘要泄漏了凭据: %s", rec.Error)
+		}
+		if rec.HTTPStatus != http.StatusUnauthorized || rec.OK {
+			t.Fatalf("401 的探活行应是 401 且不 ok: %+v", rec)
+		}
+	}
+}

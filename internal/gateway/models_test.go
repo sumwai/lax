@@ -471,3 +471,153 @@ func TestProbeModelRecordsFailedRequest(t *testing.T) {
 		}
 	})
 }
+
+// anthropic 的探活行要把缓存读与缓存写一起记下：5.5 说这两列由该协议的 scanner 读出。
+func TestProbeModelRecordsCacheTokens(t *testing.T) {
+	f := newFixture(t)
+
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant",
+			"content":[{"type":"text","text":"p"}],
+			"usage":{"input_tokens":13,"output_tokens":1,
+				"cache_read_input_tokens":2,"cache_creation_input_tokens":5}}`)
+	}))
+	defer up.Close()
+
+	acc := f.add(t, "claude1", gateway.ProtocolAnthropic, up.URL, "sk-ant-test", []string{"claude-x"}, 100)
+	gs := newGateway(t, f)
+
+	if _, err := gs.ProbeModel(context.Background(), acc, "claude-x"); err != nil {
+		t.Fatalf("探活: %v", err)
+	}
+
+	recs, err := f.st.RecentRequests(10)
+	if err != nil {
+		t.Fatalf("读请求记录: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("探活应写 1 行请求记录，实际 %d 行", len(recs))
+	}
+	rec := recs[0]
+	if rec.InTokens != 13 || rec.OutTokens != 1 {
+		t.Fatalf("token = %d/%d，期望 13/1", rec.InTokens, rec.OutTokens)
+	}
+	if rec.CacheRead != 2 || rec.CacheWrite != 5 {
+		t.Fatalf("缓存 = %d/%d，期望 2/5（cache_read_input_tokens / cache_creation_input_tokens）",
+			rec.CacheRead, rec.CacheWrite)
+	}
+}
+
+// chat 探活行只带缓存读，缓存写保持既有约定记 0。
+func TestProbeModelChatRowHasNoCacheWrite(t *testing.T) {
+	f := newFixture(t)
+
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-1","object":"chat.completion",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"p"},"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":7,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":3}}}`)
+	}))
+	defer up.Close()
+
+	acc := f.add(t, "ds1", gateway.ProtocolChat, up.URL, "sk-test", []string{"m1"}, 100)
+	gs := newGateway(t, f)
+
+	if _, err := gs.ProbeModel(context.Background(), acc, "m1"); err != nil {
+		t.Fatalf("探活: %v", err)
+	}
+
+	recs, err := f.st.RecentRequests(10)
+	if err != nil {
+		t.Fatalf("读请求记录: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("探活应写 1 行请求记录，实际 %d 行", len(recs))
+	}
+	rec := recs[0]
+	if rec.InTokens != 7 || rec.OutTokens != 1 || rec.CacheRead != 3 {
+		t.Fatalf("token 与缓存读 = %d/%d/%d，期望 7/1/3", rec.InTokens, rec.OutTokens, rec.CacheRead)
+	}
+	if rec.CacheWrite != 0 {
+		t.Fatalf("chat 没有缓存写入字段，cache_write 应记 0，实际 %d", rec.CacheWrite)
+	}
+}
+
+// 401 那条真实计费的调用同样要留一行请求记录，供 usage 汇总。
+func TestProbeModelUnauthorizedRecordsRequestRow(t *testing.T) {
+	f := newFixture(t)
+
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"message":"invalid api key"}}`)
+	}))
+	defer up.Close()
+
+	acc := f.add(t, "ds1", gateway.ProtocolChat, up.URL, "sk-bad-key", []string{"m1"}, 100)
+	gs := newGateway(t, f)
+
+	res, err := gs.ProbeModel(context.Background(), acc, "m1")
+	if err != nil {
+		t.Fatalf("停用成功时不该返回错误: %v", err)
+	}
+	if res.Status != store.ModelAuthFailed {
+		t.Fatalf("状态 = %q，期望 %q", res.Status, store.ModelAuthFailed)
+	}
+
+	recs, err := f.st.RecentRequests(10)
+	if err != nil {
+		t.Fatalf("读请求记录: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("401 也应写 1 行请求记录，实际 %d 行", len(recs))
+	}
+	rec := recs[0]
+	if rec.HTTPStatus != http.StatusUnauthorized || rec.OK {
+		t.Fatalf("状态 = %d，ok = %v，期望 401 且不 ok", rec.HTTPStatus, rec.OK)
+	}
+	if rec.InTokens != 0 || rec.OutTokens != 0 {
+		t.Fatalf("非 2xx 的 token 应记 0，实际 %d/%d", rec.InTokens, rec.OutTokens)
+	}
+	if rec.Error == "" {
+		t.Fatal("401 的探活行应记下错误摘要")
+	}
+	if strings.Contains(rec.Error, "sk-bad-key") {
+		t.Fatalf("错误摘要泄漏了凭据: %s", rec.Error)
+	}
+}
+
+// 停用账号失败时结论仍是 auth：调用方靠它决定「碰到 401 就停下」，
+// 改写成 error 会让整批探活继续拿同一份坏凭据试下去。
+func TestProbeModelUnauthorizedKeepsAuthWhenDisableFails(t *testing.T) {
+	f := newFixture(t)
+
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"message":"invalid api key"}}`)
+	}))
+	defer up.Close()
+
+	const key = "sk-bad-key"
+	acc := f.add(t, "ds1", gateway.ProtocolChat, up.URL, key, []string{"m1"}, 100)
+	gs := newGateway(t, f)
+
+	// 关掉数据库连接，让 SetEnabled 必然失败。
+	if err := f.st.DB().Close(); err != nil {
+		t.Fatalf("关闭数据库: %v", err)
+	}
+
+	res, err := gs.ProbeModel(context.Background(), acc, "m1")
+	if err == nil {
+		t.Fatal("停用失败时应返回错误，否则运维看不到账号还开着")
+	}
+	if res.Status != store.ModelAuthFailed {
+		t.Fatalf("停用失败不该改写结论，状态 = %q，期望 %q", res.Status, store.ModelAuthFailed)
+	}
+	if !strings.Contains(err.Error(), "停用") {
+		t.Fatalf("错误应说明停用失败: %v", err)
+	}
+	if strings.Contains(err.Error(), key) {
+		t.Fatalf("错误文本泄漏了凭据: %v", err)
+	}
+}

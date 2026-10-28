@@ -123,7 +123,7 @@ func (s *Server) ProbeModel(ctx context.Context, a store.Account, model string) 
 	if err != nil {
 		res.Status = store.ModelError
 		res.Message = scrubSecret("上游请求失败: "+err.Error(), string(key))
-		s.recordProbeRequest(a, model, start, res, 0, 0)
+		s.recordProbeRequest(a, model, start, res, probeUsage{})
 		return res, nil
 	}
 	defer resp.Body.Close()
@@ -131,9 +131,9 @@ func (s *Server) ProbeModel(ctx context.Context, a store.Account, model string) 
 	res.HTTPStatus = resp.StatusCode
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
-		in, out := probeUsage(a.Protocol, body)
+		usage := readProbeUsage(a.Protocol, body)
 		res.Status = store.ModelUsable
-		s.recordProbeRequest(a, model, start, res, in, out)
+		s.recordProbeRequest(a, model, start, res, usage)
 		return res, nil
 	}
 
@@ -143,8 +143,13 @@ func (s *Server) ProbeModel(ctx context.Context, a store.Account, model string) 
 	var storeErr error
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
+		// 401 是凭据问题，先把结论定下来，再试着停用账号。
+		// 停用失败不能改写结论：调用方靠 auth 决定「碰到 401 就停下」，
+		// 改成 error 会让它继续拿同一份坏凭据试下一个模型、下一个账号。
 		res.Status = store.ModelAuthFailed
-		storeErr = s.store.SetEnabled(a.ID, false, msg)
+		if err := s.store.SetEnabled(a.ID, false, msg); err != nil {
+			storeErr = fmt.Errorf("停用账号 %s 失败，需手工处理: %w", a.Name, err)
+		}
 	case resp.StatusCode == http.StatusForbidden:
 		res.Status = store.ModelForbidden
 	case resp.StatusCode == http.StatusNotFound:
@@ -158,24 +163,34 @@ func (s *Server) ProbeModel(ctx context.Context, a store.Account, model string) 
 	default:
 		res.Status = store.ModelError
 	}
-	s.recordProbeRequest(a, model, start, res, 0, 0)
+	s.recordProbeRequest(a, model, start, res, probeUsage{})
 	return res, storeErr
 }
 
-// probeUsage 用该协议的 usage scanner 从响应体里读用量，读不到时为 0。
-func probeUsage(protocol string, body []byte) (in, out int64) {
+// probeUsage 是一次上游调用里读出来的用量。缓存读写同样要记账：
+// anthropic 的 scanner 两个都读，chat 与 responses 只读缓存读，缓存写恒为 0。
+type probeUsage struct {
+	in         int64
+	out        int64
+	cacheRead  int64
+	cacheWrite int64
+}
+
+// readProbeUsage 用该协议的 usage scanner 从响应体里读用量，读不到时为 0。
+func readProbeUsage(protocol string, body []byte) probeUsage {
 	scanner, err := translate.NewUsageScanner(protocol)
 	if err != nil {
-		return 0, 0
+		return probeUsage{}
 	}
 	scanner.Feed(body)
-	in, out, _, _ = scanner.Usage()
-	return in, out
+	var u probeUsage
+	u.in, u.out, u.cacheRead, u.cacheWrite = scanner.Usage()
+	return u
 }
 
 // recordProbeRequest 把探活的这次上游调用记进 requests。探活是真实计费的调用，
 // 不记就等于在用量里消失。记账失败只写日志，不改变探活结论。
-func (s *Server) recordProbeRequest(a store.Account, model string, start time.Time, res ModelProbe, in, out int64) {
+func (s *Server) recordProbeRequest(a store.Account, model string, start time.Time, res ModelProbe, usage probeUsage) {
 	rec := &store.RequestRecord{
 		TS:             start.Unix(),
 		Inbound:        a.Protocol,
@@ -185,8 +200,10 @@ func (s *Server) recordProbeRequest(a store.Account, model string, start time.Ti
 		AccountID:      a.ID,
 		HTTPStatus:     res.HTTPStatus,
 		OK:             res.HTTPStatus >= 200 && res.HTTPStatus < 300,
-		InTokens:       in,
-		OutTokens:      out,
+		InTokens:       usage.in,
+		OutTokens:      usage.out,
+		CacheRead:      usage.cacheRead,
+		CacheWrite:     usage.cacheWrite,
 		LatencyMS:      res.Latency.Milliseconds(),
 		Error:          res.Message,
 	}

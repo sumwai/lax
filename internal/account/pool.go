@@ -58,6 +58,24 @@ func Supports(a store.Account, model string) bool {
 	return false
 }
 
+// SettledFresh 判断一条探活结论是否还在新鲜期内，决定这一轮能否跳过重新探活。
+// 只有有定论的状态（usable / forbidden / notfound）才可能新鲜：synced 从未探过，
+// auth 与 error 是临时结论，都得重探。checked_at 为 0 视为没探过。
+// 差值为负说明库里存的是未来时间戳（时钟回拨或别的机器写过库），这类行同样不算新鲜：
+// 未来时间戳恒小于 maxAge，不排除的话它们会永远被跳过。
+func SettledFresh(status string, checkedAt int64, now time.Time, maxAge time.Duration) bool {
+	switch status {
+	case store.ModelUsable, store.ModelForbidden, store.ModelNotFound:
+	default:
+		return false
+	}
+	if checkedAt <= 0 {
+		return false
+	}
+	age := now.Sub(time.Unix(checkedAt, 0))
+	return age >= 0 && age <= maxAge
+}
+
 // Available 判断账号此刻能否接请求。
 func Available(a store.Account, now time.Time) bool {
 	if !a.Enabled {

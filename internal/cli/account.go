@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"switchboard/internal/account"
 	"switchboard/internal/gateway"
 	"switchboard/internal/secret"
 	"switchboard/internal/store"
@@ -736,7 +737,7 @@ func cmdModelProbe(e *Env, args []string) error {
 		now := time.Now()
 		skipped := 0
 		for _, c := range probeCandidates(rows, *only) {
-			if freshEnabled && settledFresh(c.status, c.checkedAt, now, *maxAge) {
+			if freshEnabled && account.SettledFresh(c.status, c.checkedAt, now, *maxAge) {
 				skipped++
 				continue
 			}
@@ -774,8 +775,10 @@ func cmdModelProbe(e *Env, args []string) error {
 		}
 
 		if counts[store.ModelAuthFailed] > 0 {
+			// 凭据不行了，后续账号接着探只会重复同一条错误：停下，
+			// 但已经探出来的行仍要打印，人得看得见是哪一步卡住的。
 			authFailed = acc.Name
-			continue
+			break
 		}
 
 		// 选号列表取库里全部 usable，不是本次探出来的那几个：
@@ -870,18 +873,20 @@ func probeCandidates(rows []store.AccountModel, only string) []probeCandidate {
 	return out
 }
 
-// settledFresh 判断一个模型的结论是否还在新鲜期内：状态有定论（可用 / 无权 / 不存在），
-// checked_at 非 0 且距今不超过 maxAge。其余状态（待探活 / 凭据被拒 / 失败）没有定论，必须重探。
-func settledFresh(status string, checkedAt int64, now time.Time, maxAge time.Duration) bool {
-	switch status {
-	case store.ModelUsable, store.ModelForbidden, store.ModelNotFound:
-	default:
-		return false
+// mergeProbeError 把探活返回的错误并进结果。结论已定时只把原因补进备注，不改写状态：
+// 401 之后停用账号失败的错误若改写成 error，auth 就被吞掉，调用方不再「碰到 401 就停下」，
+// 账号里也会留下一个与实际情况相反的结论。只有还没定结论的错误（解密失败、构造请求失败）
+// 才记成 error。
+func mergeProbeError(model string, res gateway.ModelProbe, err error) gateway.ModelProbe {
+	if res.Status == "" {
+		return gateway.ModelProbe{Model: model, Status: store.ModelError, Message: err.Error()}
 	}
-	if checkedAt <= 0 {
-		return false
+	if res.Message == "" {
+		res.Message = err.Error()
+		return res
 	}
-	return now.Sub(time.Unix(checkedAt, 0)) <= maxAge
+	res.Message += "；" + err.Error()
+	return res
 }
 
 // probeModels 用固定大小的 worker pool 并发探活一个账号的模型。
@@ -911,7 +916,7 @@ func probeModels(ctx context.Context, gs *gateway.Server, st *store.Store,
 			defer pcancel()
 			res, err := gs.ProbeModel(pctx, acc, model)
 			if err != nil {
-				res = gateway.ModelProbe{Model: model, Status: store.ModelError, Message: err.Error()}
+				res = mergeProbeError(model, res, err)
 			}
 			results[i] = res
 			// 每个 goroutine 只写自己那一行，底层连接串行，不共享事务。
