@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -192,7 +193,8 @@ func NormalizePath(raw string) string {
 	return path
 }
 
-// collapseSlashes 把连续斜杠合并成一个。
+// collapseSlashes 把连续斜杠合并成一个。调用方只把它用在路径部分：
+// 查询串与 `#` 之后的片段里斜杠连写是值的一部分，合并会改掉语义。
 func collapseSlashes(s string) string {
 	if !strings.Contains(s, "//") {
 		return s
@@ -215,26 +217,51 @@ func collapseSlashes(s string) string {
 	return b.String()
 }
 
-// NormalizeBaseURL 校验并规整厂商地址：必须是 http:// 或 https:// 开头，
-// scheme 之后合并重复斜杠并去掉末尾斜杠，`https://api.example.com//api/paas/v4/`
-// 因此变成 `https://api.example.com/api/paas/v4`——真实存在的前缀原样保留。
+// NormalizeBaseURL 校验并规整厂商地址。
+//
+// 校验用 url.Parse 做：scheme 只认 http 与 https（大小写不敏感，落库时归一成小写），
+// 缺主机名时报错——`https://` 里没有地址，用它拼出来的请求地址是畸形的，
+// 不能当成一条可用的 base_url 落库。缺 scheme 与别的 scheme 同样是错误。
+//
+// 规整只作用在路径部分：合并重复斜杠、去掉末尾斜杠，因此
+// `https://api.example.com//api/paas/v4/` 变成 `https://api.example.com/api/paas/v4`——
+// 真实存在的前缀原样保留。授权部分（含端口与用户信息）、查询串与 `#` 之后的内容一个字不动：
+// 那里合并斜杠会改掉语义（`?next=//a//b` 是值，不是路径）。`..` 与 `.` 段也原样保留，
+// 静默改写等于把地址换成另一个地址。
+//
 // 三个写入口（CreateProvider、SetProvider、AddProvider）都在这里过一道，cli 那层不再是唯一防线：
 // 脏地址一旦落库，转发与模型同步都会拿它拼路径。
-// 读侧拼地址（gateway.joinEndpoint 等）也用它，保证最终地址在 scheme 之外不出现 `//`。
+// 读侧拼地址（gateway.joinEndpoint 等）也用它，保证最终地址的路径里不出现 `//`。
 func NormalizeBaseURL(raw string) (string, error) {
-	u := strings.TrimSpace(raw)
-	if u == "" {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
 		return "", errors.New("缺少 base_url")
 	}
-	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
-		return "", fmt.Errorf("base_url %q 要以 http:// 或 https:// 开头，例如 https://api.example.com", raw)
+	u, err := url.Parse(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("base_url %q 不是合法地址: %v", trimmed, err)
 	}
-	// 只合并 scheme 之后的斜杠：`https://` 里那一对是协议的一部分。
-	if i := strings.Index(u, "://"); i >= 0 {
-		u = u[:i+3] + collapseSlashes(u[i+3:])
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", fmt.Errorf("base_url %q 要以 http:// 或 https:// 开头，例如 https://api.example.com", trimmed)
 	}
-	u = strings.TrimRight(u, "/")
-	return u, nil
+	if u.Host == "" {
+		return "", fmt.Errorf("base_url %q 里没有主机名：需要完整地址，例如 https://api.deepseek.com", trimmed)
+	}
+
+	// 重建时只动路径：授权部分、查询串与 `#` 之后的内容照抄原文，
+	// 避免规整顺手改掉它们的形状（百分号转义也因此原样保留）。
+	rest := trimmed[strings.Index(trimmed, "://")+len("://"):]
+	authority, tail := rest, ""
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		authority, tail = rest[:i], rest[i:]
+	}
+	suffix := ""
+	if i := strings.IndexAny(tail, "?#"); i >= 0 {
+		tail, suffix = tail[:i], tail[i:]
+	}
+	path := strings.TrimRight(collapseSlashes(tail), "/")
+	return scheme + "://" + authority + path + suffix, nil
 }
 
 // DeriveModelsPath 是 models_path 的写入默认值：openai-chat 的路由把尾部 /chat/completions

@@ -18,7 +18,7 @@ import (
 
 // ModelsEndpoint 是 base_url 加 /v1/models 的兜底：账号没有厂商行、或厂商一条路由都没声明时用它，
 // 末尾带不带 /v1 都行。正常路径上的地址走 Server.modelsEndpoint（按厂商覆盖与路由的 models_path 取）。
-// base_url 先按 store.NormalizeBaseURL 规整，最终地址在 scheme 之外不会出现 `//`。
+// base_url 先按 store.NormalizeBaseURL 规整，最终地址的路径部分不会出现 `//`。
 func ModelsEndpoint(base string) string {
 	base = normalizedBase(base)
 	if strings.HasSuffix(base, "/v1") {

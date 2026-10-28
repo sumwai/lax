@@ -1006,14 +1006,17 @@ func (e *responsesStreamEncoder) Emit(d Delta) []SSEEvent {
 		events = append(events, e.completed(d.StopReason, d.Usage)...)
 
 	case DeltaError:
+		// 先发一条 error 事件说明出了什么事，再发 response.failed 收尾：responses 的客户端
+		// 认终态事件，把一次失败报成 completed 会与请求记录里的 ok=0 自相矛盾。
 		events = append(events, e.event("error", map[string]any{
 			"message": d.Text,
 		}))
+		events = append(events, e.failed(d.Text)...)
 	}
 	return events
 }
 
-// Finish 补齐收尾。已经发过 completed 时不再重复。
+// Finish 补齐收尾。已经发过 completed 或 response.failed 时不再重复。
 func (e *responsesStreamEncoder) Finish() []SSEEvent {
 	if e.finished {
 		return nil
@@ -1053,6 +1056,26 @@ func (e *responsesStreamEncoder) completed(reason string, usage *Usage) []SSEEve
 		}
 	}
 	return []SSEEvent{e.event("response.completed", map[string]any{"response": resp})}
+}
+
+// failed 发 response.failed：上游断流或上游自己报了错误时，客户端得到的终态是失败。
+// 形状与直通路径补的那一帧一致（status=failed 加 server_error），两条路径对断流的结论因此相同。
+func (e *responsesStreamEncoder) failed(message string) []SSEEvent {
+	if e.sentStop {
+		return nil
+	}
+	e.sentStop = true
+	e.finished = true
+
+	resp := map[string]any{
+		"id":     e.id,
+		"object": "response",
+		"status": "failed",
+		"model":  e.model,
+		"output": []any{},
+		"error":  map[string]string{"code": "server_error", "message": message},
+	}
+	return []SSEEvent{e.event("response.failed", map[string]any{"response": resp})}
 }
 
 // allocIndex 分配下一个 output 序号。

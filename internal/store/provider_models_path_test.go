@@ -541,6 +541,19 @@ func TestStoreWritePathsValidateBaseURL(t *testing.T) {
 	if err := st.AddProvider(store.Provider{Name: "a", BaseURL: "api.example.com"}, chat); err == nil {
 		t.Fatal("AddProvider 应拒绝不带协议头的地址")
 	}
+	// 只有 scheme、没有主机名的地址以前会被规整成 "https:" 落库，拼出来的地址是畸形的：
+	// 三个写入口都必须拒绝它，并且一行都不落。
+	for _, hostless := range []string{"https://", "https:///"} {
+		if err := st.AddProvider(store.Provider{Name: "a", BaseURL: hostless}, chat); err == nil {
+			t.Fatalf("AddProvider 应拒绝没有主机名的地址 %q", hostless)
+		}
+		if err := st.CreateProvider(store.Provider{Name: "a", BaseURL: hostless}, chat); err == nil {
+			t.Fatalf("CreateProvider 应拒绝没有主机名的地址 %q", hostless)
+		}
+		if _, err := st.GetProvider("a"); err == nil {
+			t.Fatalf("被拒的地址 %q 不该落库", hostless)
+		}
+	}
 	if err := st.AddProvider(store.Provider{Name: "b", BaseURL: "https://b.example.com/"}, chat); err != nil {
 		t.Fatalf("AddProvider: %v", err)
 	}

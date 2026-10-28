@@ -472,10 +472,16 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 	}
 
 	var usage translate.Usage
+	// upstreamErr 记上游自己发过来的错误帧正文：客户端已经收到那条错误，这里不再补一个，
+	// 但它仍然说明这次请求失败了，请求记录要写上游的原话而不是一句泛泛的断流。
+	var upstreamErr string
 	emit := func(deltas []translate.Delta) error {
 		for _, d := range deltas {
 			if d.Usage != nil {
 				usage = *d.Usage
+			}
+			if d.Kind == translate.DeltaError {
+				upstreamErr = d.Text
 			}
 			if err := write(enc.Emit(d)); err != nil {
 				return err
@@ -488,7 +494,13 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 		return attempt{status: http.StatusOK, wrote: true, message: "客户端断开", err: err}
 	}
 
+	// ended 记「上游把收尾帧发过来了」：收尾帧没到就是断流，判据与直通路径一致
+	// （DESIGN 5.2 第 6 条、5.4），不单靠解码器报错——干净 EOF 时解码器一声不响。
+	var ended bool
 	scanErr := translate.ScanSSE(resp.Body, func(event string, data []byte) error {
+		if streamFrameEnded(outbound, event, data) {
+			ended = true
+		}
 		if string(bytes.TrimSpace(data)) == "[DONE]" {
 			return nil
 		}
@@ -499,17 +511,31 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 		return emit(deltas)
 	})
 
-	if scanErr != nil {
-		_ = write([]translate.SSEEvent{translate.ErrorEvent("api_error", scanErr.Error())})
+	failure := ""
+	switch {
+	case scanErr != nil:
+		failure = "上游流式响应中断: " + scanErr.Error()
+	case !ended && upstreamErr != "":
+		failure = "上游流式响应失败: " + upstreamErr
+	case !ended:
+		failure = truncatedMessage
+	}
+	if failure != "" && upstreamErr == "" {
+		// 错误增量走编码器，不另写一帧：入站协议是 responses 时它就是 error 加
+		// response.failed，是 anthropic 时是 event: error——形状跟入站协议走。
+		_ = emit([]translate.Delta{{Kind: translate.DeltaError, Text: failure}})
 	}
 	_ = emit(dec.Close())
 	_ = write(enc.Finish())
 
 	res := attempt{status: http.StatusOK, wrote: true, inTok: usage.In, outTok: usage.Out,
 		cacheRead: usage.CacheRead, cacheWrite: usage.CacheWrite}
-	if scanErr != nil {
-		res.message = "上游流式响应中断: " + scanErr.Error()
-		res.err = scanErr
+	if failure != "" {
+		res.message = failure
+		res.err = errStreamTruncated
+		if scanErr != nil {
+			res.err = scanErr
+		}
 	}
 	return res
 }
@@ -530,8 +556,22 @@ func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, p
 	// ended 记「收尾帧已经转发给客户端了」：收尾帧之后再断开不算断流，不再补任何字节，
 	// 完整流的字节因此与上游逐字节一致。
 	var ended bool
-	// tail 是最后写出的至多两个字节，用来判断已写出的内容是不是停在帧边界上。
+	// tail 是最后写出的至多四个字节，用来判断已写出的内容是不是停在帧边界上（\n\n 或 \r\n\r\n）。
 	var tail []byte
+	// eventName 是当前帧的 event: 行，遇到空行就清掉：具名事件的收尾帧光凭事件名就能认。
+	var eventName string
+	// dataBuf 攒当前帧的 data 行：一帧可以有好几行 data，按 \n 拼起来才是完整 JSON，
+	// 多行缩进的收尾帧因此也算收尾。
+	var dataBuf []byte
+	checkFrame := func() {
+		if len(dataBuf) == 0 {
+			return
+		}
+		scanner.Feed(dataBuf)
+		if streamFrameEnded(protocol, eventName, dataBuf) {
+			ended = true
+		}
+	}
 
 	for {
 		line, err := buf.ReadBytes('\n')
@@ -540,16 +580,22 @@ func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, p
 				return attempt{status: http.StatusOK, wrote: true, message: "客户端断开", err: werr}
 			}
 			tail = append(tail, line...)
-			if len(tail) > 2 {
-				tail = tail[len(tail)-2:]
+			if len(tail) > 4 {
+				tail = tail[len(tail)-4:]
 			}
 			trimmed := bytes.TrimRight(line, "\r\n")
-			if bytes.HasPrefix(trimmed, []byte("data:")) {
-				data := bytes.TrimSpace(trimmed[len("data:"):])
-				scanner.Feed(data)
-				if streamFrameEnded(protocol, data) {
-					ended = true
+			switch {
+			case len(trimmed) == 0:
+				// 帧边界：一帧收完再交给 scanner 与收尾判定。
+				checkFrame()
+				eventName, dataBuf = "", nil
+			case bytes.HasPrefix(trimmed, []byte("event:")):
+				eventName = strings.TrimSpace(string(trimmed[len("event:"):]))
+			case bytes.HasPrefix(trimmed, []byte("data:")):
+				if len(dataBuf) > 0 {
+					dataBuf = append(dataBuf, '\n')
 				}
+				dataBuf = append(dataBuf, bytes.TrimSpace(trimmed[len("data:"):])...)
 			}
 			flush()
 		}
@@ -560,6 +606,8 @@ func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, p
 			break
 		}
 	}
+	// 最后一帧可能没有空行结尾：攒下的字节仍然算一帧，用量与收尾判定不能丢。
+	checkFrame()
 
 	in, out, cacheRead, cacheWrite := scanner.Usage()
 	res := attempt{status: http.StatusOK, wrote: true, inTok: in, outTok: out,
@@ -570,8 +618,8 @@ func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, p
 	}
 	if !ended {
 		if res.err == nil {
-			// 干净的 EOF 也可能断在半路：收尾帧没到就是断流，与转换路径上解码器报错的判据一致。
-			res.message = "上游流式响应中断: 收尾帧之前连接就结束了"
+			// 干净的 EOF 也可能断在半路：收尾帧没到就是断流，与转换路径同一个判据。
+			res.message = truncatedMessage
 			res.err = errStreamTruncated
 		}
 		appendStreamTail(w, flush, tail, passthroughTail(protocol, res.message, in, out))
@@ -582,24 +630,39 @@ func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, p
 // errStreamTruncated 表示上游在收尾帧之前就结束了连接（干净的 EOF，读不出别的错）。
 var errStreamTruncated = errors.New("上游流式响应在收尾帧之前结束")
 
+// truncatedMessage 是断流记在 requests 里的说明，也是发给客户端的错误帧正文。
+// 直通与转换两条路径用同一句话，客户端看到的与账上记的对得上。
+const truncatedMessage = "上游流式响应中断: 收尾帧之前连接就结束了"
+
 // streamFrameEnded 判断这一帧是不是该协议的收尾帧：anthropic 的 message_stop、
-// openai-chat 的 [DONE]、openai-responses 的三个终态事件。
-// 只看帧里的类型字段，不看正文，正文里出现同名文字不会被当成收尾。
-func streamFrameEnded(protocol string, data []byte) bool {
+// openai-chat 的 [DONE]、openai-responses 的 response.completed / response.incomplete /
+// response.failed。事件名与帧里的 type 字段都认：解析 JSON 取 type，不按字节子串找，
+// `{"type": "message_stop"}` 这种带空格或换行缩进的合法帧因此也算收尾；
+// SSE 的 event: 行直接给了名字（上游只写事件名、data 是别的形状）时同样算。
+func streamFrameEnded(protocol, event string, data []byte) bool {
+	trimmed := bytes.TrimSpace(data)
+	// chat 的 [DONE] 既没有事件名也不是 JSON，单独认。
+	if protocol == ProtocolChat && string(trimmed) == "[DONE]" {
+		return true
+	}
+
+	name := strings.TrimSpace(event)
+	if name == "" && len(trimmed) > 0 && trimmed[0] == '{' {
+		var env struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(trimmed, &env); err == nil {
+			name = env.Type
+		}
+	}
+
 	switch protocol {
 	case ProtocolAnthropic:
-		return bytes.Contains(data, []byte(`"type":"message_stop"`))
-	case ProtocolChat:
-		return string(bytes.TrimSpace(data)) == "[DONE]"
+		return name == "message_stop"
 	case ProtocolResponses:
-		for _, marker := range [][]byte{
-			[]byte(`"type":"response.completed"`),
-			[]byte(`"type":"response.incomplete"`),
-			[]byte(`"type":"response.failed"`),
-		} {
-			if bytes.Contains(data, marker) {
-				return true
-			}
+		switch name {
+		case "response.completed", "response.incomplete", "response.failed":
+			return true
 		}
 	}
 	return false
@@ -658,9 +721,11 @@ func passthroughTail(protocol, message string, in, out int64) []translate.SSEEve
 
 // appendStreamTail 把收尾帧追加到已写出的字节后面，前面已经发出去的内容一个字节都不改。
 // 已写出的内容停在半行或半帧（没以空行结尾）时先补一个空行：不补的话追加的第一行会被并进
-// 上一个事件，客户端那边仍然不是一个结束了的流。
+// 上一个事件，客户端那边仍然不是一个结束了的流。行尾两种都认：`\n\n` 与 CRLF 流的 `\r\n\r\n`
+// 都是帧边界，后者已经结束了一帧，再补 `\n\n` 只会多出一个空帧。
 func appendStreamTail(w io.Writer, flush func(), written []byte, events []translate.SSEEvent) {
-	if len(written) > 0 && !bytes.HasSuffix(written, []byte("\n\n")) {
+	if len(written) > 0 && !bytes.HasSuffix(written, []byte("\n\n")) &&
+		!bytes.HasSuffix(written, []byte("\r\n\r\n")) {
 		if _, err := w.Write([]byte("\n\n")); err != nil {
 			return
 		}
@@ -705,7 +770,7 @@ func (s *Server) endpoint(a store.Account, protocol string) string {
 	return joinEndpoint(a.BaseURL, route.Path)
 }
 
-// normalizedBase 规整 base_url：scheme 之后合并重复斜杠、去掉末尾斜杠。
+// normalizedBase 规整 base_url：只合并路径里的重复斜杠、去掉末尾斜杠（见 store.NormalizeBaseURL）。
 // store.NormalizeBaseURL 还会校验协议头，这里只是拼地址，脏地址交给 http.NewRequest 报错。
 func normalizedBase(base string) string {
 	if u, err := store.NormalizeBaseURL(base); err == nil {
@@ -716,7 +781,8 @@ func normalizedBase(base string) string {
 
 // joinEndpoint 把 base_url 与路由里的完整路径拼起来，两者都按 store 的同一套规则规整：
 // base_url 去尾斜杠（scheme 之后合并重复斜杠），路径补一个前导斜杠、合并重复斜杠、去尾斜杠，
-// 因此最终地址在 scheme 之外不出现 `//`，`base_url` 里真实存在的前缀（如 /api/paas/v4）原样保留。
+// 因此最终地址的路径部分不出现 `//`，`base_url` 里真实存在的前缀（如 /api/paas/v4）原样保留。
+// 规整只碰路径（DESIGN 5.8）：`base_url` 里的查询串与 `#` 之后的内容照抄，拼路径时不改动它们。
 // 其余一律照抄，不推 /v1、不猜后缀。
 func joinEndpoint(base, path string) string {
 	return normalizedBase(base) + store.NormalizePath(path)

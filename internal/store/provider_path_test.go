@@ -33,9 +33,10 @@ func TestNormalizePath(t *testing.T) {
 	}
 }
 
-// TestNormalizeBaseURL 钉住地址规整：scheme 之后合并重复斜杠、去掉末尾斜杠，
-// 真实存在的前缀不改；协议头不对仍然是错误，这一条与「不拒绝输入」无关——
-// 没有 scheme 的地址拼不出可用的请求地址。
+// TestNormalizeBaseURL 钉住地址规整：scheme 只认 http、https（大小写不敏感，归一成小写），
+// 缺主机名是错误（`https://` 拼不出可用地址），规整只作用在路径部分——授权部分、查询串
+// 与 `#` 之后的内容原样保留，`..` 与 `.` 段也不静默改写。
+// 前缀不对仍然是错误，这一条与「不拒绝输入」无关：没有 scheme 的地址拼不出可用的请求地址。
 func TestNormalizeBaseURL(t *testing.T) {
 	ok := []struct{ raw, want string }{
 		{"https://api.example.com", "https://api.example.com"},
@@ -44,6 +45,21 @@ func TestNormalizeBaseURL(t *testing.T) {
 		{"https://api.example.com/api/paas/v4/", "https://api.example.com/api/paas/v4"},
 		{"https://api.example.com//api//paas//v4//", "https://api.example.com/api/paas/v4"},
 		{"http://127.0.0.1:8080", "http://127.0.0.1:8080"},
+		// 带端口的地址：端口属于授权部分，不能被当成路径合并或去尾。
+		{"https://api.example.com:8443//v1/", "https://api.example.com:8443/v1"},
+		// scheme 大小写不敏感，落库时归一成小写；主机名的大小写不属于规整范围。
+		{"HTTPS://api.example.com/", "https://api.example.com"},
+		{"HTTPS://API.Example.COM/v1/", "https://API.Example.COM/v1"},
+		{"  Http://127.0.0.1:9000  ", "http://127.0.0.1:9000"},
+		// 查询串里的连写斜杠是值的一部分，不合并；带查询串时路径照旧去尾斜杠。
+		{"https://api.example.com/v1?next=//a//b", "https://api.example.com/v1?next=//a//b"},
+		{"https://api.example.com//v1//?a=1", "https://api.example.com/v1?a=1"},
+		// `#` 之后的内容（含 //）原样保留。
+		{"https://api.example.com/a//b#frag//z", "https://api.example.com/a/b#frag//z"},
+		// `..` 与 `.` 段原样保留：改写会把一个地址换成另一个地址。
+		{"https://api.example.com/../v1/./x/", "https://api.example.com/../v1/./x"},
+		// 用户信息与端口一起照拄，只有路径被规整。
+		{"https://user:pw@api.example.com:8443//v1//", "https://user:pw@api.example.com:8443/v1"},
 	}
 	for _, c := range ok {
 		got, err := store.NormalizeBaseURL(c.raw)
@@ -55,9 +71,21 @@ func TestNormalizeBaseURL(t *testing.T) {
 		}
 	}
 
-	for _, raw := range []string{"", "   ", "api.example.com", "ftp://api.example.com"} {
+	for _, raw := range []string{"", "   ", "api.example.com", "ftp://api.example.com", "https://api example.com"} {
 		if _, err := store.NormalizeBaseURL(raw); err == nil {
 			t.Fatalf("NormalizeBaseURL(%q) 应报错", raw)
+		}
+	}
+
+	// 只有 scheme 没有主机名的写法曾经被规整成 `https:`并落库，拼出来的地址是畸形的：
+	// 这一条必须报错，且文案要说清缺的是主机名。
+	for _, raw := range []string{"https://", "https:///", "https:///v1", "http://"} {
+		_, err := store.NormalizeBaseURL(raw)
+		if err == nil {
+			t.Fatalf("NormalizeBaseURL(%q) 应报错", raw)
+		}
+		if !strings.Contains(err.Error(), "主机名") {
+			t.Fatalf("NormalizeBaseURL(%q) 的错误 = %q，期望指出缺主机名", raw, err)
 		}
 	}
 }
