@@ -414,8 +414,10 @@ func TestProviderAddEmptyValues(t *testing.T) {
 	}
 }
 
-// TestProviderAddUsageErrors 覆盖 add 的用法错误：缺地址、地址形状不对、路径不以 / 开头、
-// 一条路由都没给。每条都要退出码 2 并给出正确用法。
+// TestProviderAddUsageErrors 覆盖 add 的用法错误：缺地址、地址形状不对、一条路由都没给、
+// 默认协议不认识。每条都要退出码 2 并给出正确用法。
+// 路由路径的写法不在这里断言：拼接改成程序规整、不报错，`v1/chat/completions`、`//v1//x`
+// 这类取值会被规整成完整地址，而不是用错误。
 func TestProviderAddUsageErrors(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
@@ -450,25 +452,6 @@ func TestProviderAddUsageErrors(t *testing.T) {
 			}
 		}
 	})
-
-	for _, c := range []struct{ flag, example string }{
-		{"--anthropic", "--anthropic /v1/messages"},
-		{"--openai", "--openai /v1/chat/completions"},
-		{"--responses", "--responses /v1/responses"},
-	} {
-		t.Run(c.flag+" 不以 / 开头", func(t *testing.T) {
-			code, out, stderr := run(t, "provider", "add", "mine",
-				"--base-url", "https://api.example.com", c.flag, "v1/messages")
-			if code != 2 || out != "" {
-				t.Fatalf("退出码 = %d，stdout = %q", code, out)
-			}
-			for _, want := range []string{c.flag, "要以 / 开头", c.example} {
-				if !strings.Contains(stderr, want) {
-					t.Fatalf("stderr 应提到 %q: %s", want, stderr)
-				}
-			}
-		})
-	}
 
 	t.Run("模型列表路径不以 / 开头", func(t *testing.T) {
 		code, _, stderr := run(t, "provider", "add", "mine", "--base-url", "https://api.example.com",
@@ -663,12 +646,7 @@ func TestProviderSetErrors(t *testing.T) {
 		}
 	})
 
-	t.Run("路径不以 / 开头", func(t *testing.T) {
-		code, _, stderr := run(t, "provider", "set", "mine", "--anthropic", "v1/messages")
-		if code != 2 || !strings.Contains(stderr, "--anthropic /v1/messages") {
-			t.Fatalf("退出码 = %d，stderr = %s", code, stderr)
-		}
-	})
+	// 路由路径的写法不在这里断言：拼接改成程序规整、不报错（同上）。
 
 	t.Run("厂商不存在", func(t *testing.T) {
 		code, _, stderr := run(t, "provider", "set", "nope", "--note", "x")
@@ -1082,4 +1060,286 @@ func TestProviderRmForceKeepsAccountForwarding(t *testing.T) {
 	if calls[0].bearer != "Bearer sk-test" {
 		t.Fatalf("凭据头 = %q，期望 Bearer sk-test", calls[0].bearer)
 	}
+}
+
+// TestProviderUnsetMultiFieldKeepsOneRoute 覆盖「一次删多条、删到只剩一条仍成功」：
+// 三条路由里一次给两个字段，剩下一条；再删一条也放行，最后一条才被拒。
+func TestProviderUnsetMultiFieldKeepsOneRoute(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	if code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", "https://api.example.com",
+		"--anthropic", "/v1/messages",
+		"--openai", "/v1/chat/completions",
+		"--responses", "/v1/responses",
+		"--default-protocol", "openai"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	// 一次删两条：3 → 1，退出码 0，剩的是默认协议那条。
+	code, out, stderr := run(t, "provider", "unset", "mine", "anthropic", "responses")
+	if code != 0 {
+		t.Fatalf("多字段 unset 的退出码 = %d，stderr = %s", code, stderr)
+	}
+	for _, want := range []string{"mine 已清掉 anthropic 路由", "mine 已清掉 openai-responses 路由", "现有 1 条路由，默认协议 openai-chat"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("unset 输出缺 %q: %s", want, out)
+		}
+	}
+	got := mustProviderLs(t)["mine"]
+	if len(got.Protocols) != 1 || got.Protocols[0].Protocol != "openai-chat" {
+		t.Fatalf("一次删两条后应只剩 openai-chat: %+v", got.Protocols)
+	}
+
+	// 补回两条，再逐条删到只剩一条：每一步都必须成功，最后一步才被拒。
+	if code, _, stderr := run(t, "provider", "set", "mine",
+		"--anthropic", "/v1/messages", "--responses", "/v1/responses"); code != 0 {
+		t.Fatalf("provider set 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := run(t, "provider", "unset", "mine", "anthropic"); code != 0 {
+		t.Fatalf("删到剩两条的退出码 = %d，stderr = %s", code, stderr)
+	}
+	code, out, stderr = run(t, "provider", "unset", "mine", "responses")
+	if code != 0 {
+		t.Fatalf("删到只剩一条的退出码 = %d，stderr = %s", code, stderr)
+	}
+	if !strings.Contains(out, "现有 1 条路由") {
+		t.Fatalf("删到只剩一条时应该成功，输出了 %s", out)
+	}
+	if got := mustProviderLs(t)["mine"]; len(got.Protocols) != 1 {
+		t.Fatalf("删到只剩一条后不该再动路由: %+v", got.Protocols)
+	}
+}
+
+// TestProviderUnsetSameFieldTwice 钉住幂等：同一个字段第二次 unset 输出「本来就没有」、
+// 退出码 0，库里的值不变。
+func TestProviderUnsetSameFieldTwice(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	if code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", "https://api.example.com",
+		"--anthropic", "/v1/messages",
+		"--openai", "/v1/chat/completions",
+		"--default-protocol", "anthropic",
+		"--note", "自建"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	// 第一次：确实清掉了备注。
+	code, out, stderr := run(t, "provider", "unset", "mine", "note")
+	if code != 0 || !strings.Contains(out, "mine 已清掉 备注") {
+		t.Fatalf("第一次 unset note 的退出码 = %d，输出 %s，stderr = %s", code, out, stderr)
+	}
+
+	// 第二次：同一字段不再有值，说明一句、退出码 0。
+	code, out, stderr = run(t, "provider", "unset", "mine", "note")
+	if code != 0 {
+		t.Fatalf("第二次 unset note 的退出码 = %d，期望 0，stderr = %s", code, stderr)
+	}
+	if out != "mine 本来就没有 备注\n现有 2 条路由，默认协议 anthropic\n" {
+		t.Fatalf("第二次 unset note 的输出 = %q，期望只说一句本来就没有", out)
+	}
+
+	// 显式默认协议同样幂等：第二次清掉时已经不存在。
+	if code, _, stderr := run(t, "provider", "unset", "mine", "default-protocol"); code != 0 {
+		t.Fatalf("第一次 unset default-protocol 的退出码 = %d，stderr = %s", code, stderr)
+	}
+	code, out, stderr = run(t, "provider", "unset", "mine", "default-protocol")
+	if code != 0 {
+		t.Fatalf("第二次 unset default-protocol 的退出码 = %d，期望 0，stderr = %s", code, stderr)
+	}
+	if !strings.Contains(out, "mine 本来就没有 显式默认协议") {
+		t.Fatalf("第二次 unset default-protocol 的输出 = %q", out)
+	}
+}
+
+// TestProviderUnsetRepeatedFieldAppliedOnce 钉住重复字段只处理一次：
+// 有值可删时也只删一次、只输出一行，库里的结果与只给一个字段一样。
+func TestProviderUnsetRepeatedFieldAppliedOnce(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	if code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", "https://api.example.com",
+		"--anthropic", "/v1/messages",
+		"--openai", "/v1/chat/completions"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	code, out, stderr := run(t, "provider", "unset", "mine", "openai", "openai")
+	if code != 0 {
+		t.Fatalf("重复字段的退出码 = %d，stderr = %s", code, stderr)
+	}
+	if got := strings.Count(out, "mine 已清掉 openai 路由"); got != 1 {
+		t.Fatalf("重复字段应只输出一行「已清掉」，实际 %d 行: %s", got, out)
+	}
+	if strings.Contains(out, "本来就没有") {
+		t.Fatalf("有值可删时不该出现「本来就没有」: %s", out)
+	}
+	if got := mustProviderLs(t)["mine"]; len(got.Protocols) != 1 {
+		t.Fatalf("重复字段不该多删路由: %+v", got.Protocols)
+	}
+}
+
+// TestProviderSetEmptyValueWritesNothing 覆盖 set 里传空值（--openai ""、--note ""）：
+// 退出码 2、文案指向 provider unset，且同一条命令里其它合法字段也不落库——
+// 不留「地址改了、路由没删」这种半截写入。
+func TestProviderSetEmptyValueWritesNothing(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	if code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", "https://api.example.com",
+		"--anthropic", "/v1/messages",
+		"--openai", "/v1/chat/completions",
+		"--models-path", "/v9/models",
+		"--default-protocol", "openai",
+		"--note", "原备注"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	before := mustProviderLs(t)["mine"]
+
+	cases := []struct {
+		name string
+		flag string
+		args []string
+	}{
+		{"协议路径空值在前", "--openai", []string{"--openai", "", "--anthropic", "/v2/messages"}},
+		{"协议路径空值在后", "--openai", []string{"--anthropic", "/v2/messages", "--openai", ""}},
+		{"备注空值在前", "--note", []string{"--note", "", "--base-url", "https://api.other.com"}},
+		{"备注空值在后", "--note", []string{"--base-url", "https://api.other.com", "--note", ""}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			code, out, stderr := run(t, append([]string{"provider", "set", "mine"}, c.args...)...)
+			if code != 2 {
+				t.Fatalf("空值的退出码 = %d，期望 2（用法错误）", code)
+			}
+			if out != "" {
+				t.Fatalf("用法错误不该写 stdout: %s", out)
+			}
+			for _, want := range []string{c.flag, "传了空值", "switchboard provider unset"} {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+				}
+			}
+			after := mustProviderLs(t)["mine"]
+			if after.BaseURL != before.BaseURL || after.Note != before.Note ||
+				after.ModelsPath != before.ModelsPath || after.DefaultProtocol != before.DefaultProtocol {
+				t.Fatalf("空值被拒后不该改动任何设置:\n前 %+v\n后 %+v", before, after)
+			}
+			if got, want := routeMap(after), routeMap(before); len(got) != len(want) {
+				t.Fatalf("空值被拒后路由数变了: %d → %d", len(want), len(got))
+			}
+			if after := routeMap(mustProviderLs(t)["mine"]); after["anthropic"].Path != "/v1/messages" {
+				t.Fatalf("同一条命令里合法的 --anthropic 也不该落库，实际 %+v", after["anthropic"])
+			}
+		})
+	}
+}
+
+// TestDefaultProtocolSpellings 覆盖 --default-protocol 的两种写法在 add 与 set 上等价：
+// openai / openai-chat 都落到 openai-chat，responses / openai-responses 都落到
+// openai-responses，anthropic 两边同形。
+func TestDefaultProtocolSpellings(t *testing.T) {
+	cases := []struct{ spelling, wire string }{
+		{"openai", "openai-chat"},
+		{"openai-chat", "openai-chat"},
+		{"responses", "openai-responses"},
+		{"openai-responses", "openai-responses"},
+		{"anthropic", "anthropic"},
+	}
+	for _, c := range cases {
+		t.Run("add "+c.spelling, func(t *testing.T) {
+			sandbox(t)
+			mustInit(t)
+
+			code, _, stderr := run(t, "provider", "add", "spelled",
+				"--base-url", "https://api.example.com",
+				"--anthropic", "/v1/messages",
+				"--openai", "/v1/chat/completions",
+				"--responses", "/v1/responses",
+				"--default-protocol", c.spelling)
+			if code != 0 {
+				t.Fatalf("provider add --default-protocol %s 退出码 = %d，stderr = %s", c.spelling, code, stderr)
+			}
+			if got := mustProviderLs(t)["spelled"].DefaultProtocol; got != c.wire {
+				t.Fatalf("provider add --default-protocol %s 落库 = %q，期望 %q", c.spelling, got, c.wire)
+			}
+		})
+
+		t.Run("set "+c.spelling, func(t *testing.T) {
+			sandbox(t)
+			mustInit(t)
+
+			if code, _, stderr := run(t, "provider", "add", "spelled",
+				"--base-url", "https://api.example.com",
+				"--anthropic", "/v1/messages",
+				"--openai", "/v1/chat/completions",
+				"--responses", "/v1/responses"); code != 0 {
+				t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+			}
+			code, _, stderr := run(t, "provider", "set", "spelled", "--default-protocol", c.spelling)
+			if code != 0 {
+				t.Fatalf("provider set --default-protocol %s 退出码 = %d，stderr = %s", c.spelling, code, stderr)
+			}
+			if got := mustProviderLs(t)["spelled"].DefaultProtocol; got != c.wire {
+				t.Fatalf("provider set --default-protocol %s 落库 = %q，期望 %q", c.spelling, got, c.wire)
+			}
+		})
+	}
+}
+
+// TestDefaultProtocolOutsideRoutesRejected 钉住「指不到路由就整笔拒绝、不落库」：
+// add 时厂商行与路由都不写，set 时原有行一个字段都不动，两处都退出码 1。
+func TestDefaultProtocolOutsideRoutesRejected(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	t.Run("add", func(t *testing.T) {
+		code, out, stderr := run(t, "provider", "add", "nope",
+			"--base-url", "https://api.example.com",
+			"--openai", "/v1/chat/completions",
+			"--default-protocol", "responses")
+		if code != 1 {
+			t.Fatalf("退出码 = %d，期望 1", code)
+		}
+		if out != "" {
+			t.Fatalf("拒绝写库时不该往 stdout 写结果: %s", out)
+		}
+		if !strings.Contains(stderr, "openai-responses") {
+			t.Fatalf("stderr 应说明缺 responses 路由: %s", stderr)
+		}
+		if _, ok := mustProviderLs(t)["nope"]; ok {
+			t.Fatal("整笔拒绝后不该留下厂商行")
+		}
+	})
+
+	t.Run("set", func(t *testing.T) {
+		if code, _, stderr := run(t, "provider", "add", "mine",
+			"--base-url", "https://api.example.com",
+			"--openai", "/v1/chat/completions"); code != 0 {
+			t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+		}
+		before := mustProviderLs(t)["mine"]
+
+		code, out, stderr := run(t, "provider", "set", "mine", "--default-protocol", "anthropic")
+		if code != 1 {
+			t.Fatalf("退出码 = %d，期望 1", code)
+		}
+		if out != "" {
+			t.Fatalf("拒绝写库时不该往 stdout 写结果: %s", out)
+		}
+		for _, want := range []string{"anthropic", "openai-chat"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+			}
+		}
+		after := mustProviderLs(t)["mine"]
+		if after.DefaultProtocol != before.DefaultProtocol || len(after.Protocols) != 1 {
+			t.Fatalf("整笔拒绝后不该改动厂商: %+v", after)
+		}
+	})
 }

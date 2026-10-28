@@ -156,7 +156,9 @@ func mustModelRows(t *testing.T, out string) map[string]modelRow {
 
 // TestModelSyncEndpointOverride 覆盖 model sync --endpoint：
 // 只影响这一次调用，地址取该厂商 base_url 拼上它，压过厂商级覆盖与路由里的 models_path；
-// 下一次不带 --endpoint 时回到路由推导出来的地址；不以 / 开头是用法错误。
+// 下一次不带 --endpoint 时回到路由推导出来的地址。
+// 路径写法不在断言之列：拼接改成程序规整，`custom/models`、`//custom//models` 都会被规整成
+// 完整地址，不是用法错误。
 func TestModelSyncEndpointOverride(t *testing.T) {
 	sandbox(t)
 	up := newRecorderUpstream(t, map[string]fakeResponse{
@@ -204,20 +206,6 @@ func TestModelSyncEndpointOverride(t *testing.T) {
 	calls = up.all()
 	if len(calls) != 1 || calls[0].path != "/v1/models" {
 		t.Fatalf("不带 --endpoint 的调用 = %+v，期望回到 /v1/models", calls)
-	}
-
-	// 不以 / 开头是用法错误，文案说清它是相对 base_url 的完整路径。
-	code, out, stderr = run(t, "model", "sync", "--account", "mine1", "--endpoint", "custom/models")
-	if code != 2 {
-		t.Fatalf("--endpoint 不以 / 开头的退出码 = %d，期望 2", code)
-	}
-	if out != "" {
-		t.Fatalf("用法错误不该写 stdout: %s", out)
-	}
-	for _, want := range []string{"--endpoint", "要以 / 开头", "/v1/models"} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
-		}
 	}
 }
 
@@ -1262,5 +1250,97 @@ func TestModelProbeRefreshStartsFromDiscoveredProtocol(t *testing.T) {
 	}
 	if row := st.ModelRow(t, "ds1", "m1"); row.Protocol != "anthropic" {
 		t.Fatalf("重探后的协议 = %q，期望仍是 anthropic", row.Protocol)
+	}
+}
+
+// TestModelSyncEndpointOnlyHitsSelectedProvider 覆盖 model sync --endpoint 与 --provider 一起用：
+// 只同步被选中的账号，地址取指定路径，库里的 models_path（厂商级与路由级）一个字段都不改，
+// 没被选中的账号连一次上游都不打。
+func TestModelSyncEndpointOnlyHitsSelectedProvider(t *testing.T) {
+	sandbox(t)
+	up := newRecorderUpstream(t, map[string]fakeResponse{
+		"GET /custom/models": {status: http.StatusOK, body: `{"data":[{"id":"m1"},{"id":"m2"}]}`},
+		"GET /v1/models":     {status: http.StatusOK, body: modelsListM1},
+	})
+	mustInit(t)
+
+	for _, name := range []string{"alpha", "beta"} {
+		if code, _, stderr := run(t, "provider", "add", name,
+			"--base-url", "https://api.example.invalid",
+			"--openai", "/v1/chat/completions"); code != 0 {
+			t.Fatalf("provider add %s 退出码 = %d，stderr = %s", name, code, stderr)
+		}
+	}
+	for _, c := range []struct{ account, provider string }{{"alpha1", "alpha"}, {"beta1", "beta"}} {
+		if code, _, stderr := run(t, "account", "add", c.account,
+			"--provider", c.provider, "--base-url", up.srv.URL, "--key", "sk-test"); code != 0 {
+			t.Fatalf("account add %s 退出码 = %d，stderr = %s", c.account, code, stderr)
+		}
+	}
+
+	code, out, stderr := run(t, "model", "sync", "--provider", "alpha", "--endpoint", "/custom/models", "--json")
+	if code != 0 {
+		t.Fatalf("model sync --provider alpha --endpoint 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var synced []struct {
+		Account  string `json:"account"`
+		Provider string `json:"provider"`
+		Models   int    `json:"models"`
+		Added    int    `json:"added"`
+	}
+	mustJSON(t, out, &synced)
+	if len(synced) != 1 || synced[0].Account != "alpha1" || synced[0].Provider != "alpha" {
+		t.Fatalf("--provider alpha 只该处理 alpha1，实际 %+v", synced)
+	}
+	if synced[0].Models != 2 || synced[0].Added != 2 {
+		t.Fatalf("--endpoint 应拉到 2 个模型，实际 %+v", synced[0])
+	}
+
+	// 只有被选中的账号发了一次请求，且打的是 --endpoint 给的路径。
+	calls := up.all()
+	if len(calls) != 1 || calls[0].path != "/custom/models" {
+		t.Fatalf("上游调用 = %+v，期望只打一次 GET /custom/models", calls)
+	}
+
+	// 库里的 models_path 不变：厂商级仍是空串，路由仍是推导值。
+	providers := mustProviderLs(t)
+	if got := providers["alpha"].ModelsPath; got != "" {
+		t.Fatalf("--endpoint 不该写进厂商级 models_path，实际 %q", got)
+	}
+	if got := routeMap(providers["alpha"])["openai-chat"].ModelsPath; got != "/v1/models" {
+		t.Fatalf("--endpoint 不该改路由的 models_path，实际 %q", got)
+	}
+	if got := routeMap(providers["beta"])["openai-chat"].ModelsPath; got != "/v1/models" {
+		t.Fatalf("没被选中的厂商也不该被改动，实际 %q", got)
+	}
+
+	// beta1 一行模型都没同步到：model ls 里只有 alpha1 的两个模型。
+	code, out, stderr = run(t, "model", "ls", "--json")
+	if code != 0 {
+		t.Fatalf("model ls 退出码 = %d，stderr = %s", code, stderr)
+	}
+	rows := mustModelRows(t, out)
+	if len(rows) != 2 {
+		t.Fatalf("model ls 应只有 alpha1 的两个模型，实际 %+v", rows)
+	}
+	for _, model := range []string{"m1", "m2"} {
+		if rows[model].Accounts[0].Name != "alpha1" {
+			t.Fatalf("%s 的账号 = %+v，期望只有 alpha1", model, rows[model].Accounts)
+		}
+	}
+
+	// 下一次不带 --endpoint 的同步回到路由推导出来的 /v1/models，beta1 也照常处理。
+	up.reset()
+	if code, _, stderr := run(t, "model", "sync"); code != 0 {
+		t.Fatalf("不带 --endpoint 的 model sync 退出码 = %d，stderr = %s", code, stderr)
+	}
+	calls = up.all()
+	if len(calls) != 2 {
+		t.Fatalf("两个账号各同步一次，期望 2 次调用，实际 %+v", calls)
+	}
+	for _, c := range calls {
+		if c.path != "/v1/models" {
+			t.Fatalf("不带 --endpoint 时应回到 /v1/models，实际 %+v", calls)
+		}
 	}
 }

@@ -258,7 +258,7 @@ func TestGroupHelp(t *testing.T) {
 	}{
 		{"account", []string{"add", "ls", "rm", "test", "enable", "disable"}},
 		{"model", []string{"ls", "sync", "probe"}},
-		{"provider", []string{"ls", "add", "rm"}},
+		{"provider", []string{"ls", "add", "set", "unset", "rm"}},
 		{"log", []string{"tail"}},
 	}
 	for _, g := range groups {

@@ -157,7 +157,9 @@ func TestSyncModelsOverrideAppliesWithoutRoutes(t *testing.T) {
 }
 
 // TestSyncModelsWithEndpointOverride 钉住 `model sync --endpoint <路径>`：
-// 只影响这一次调用，压过厂商覆盖与路由；相对路径是用法错误，一次请求都不发，错误里不含凭据。
+// 只影响这一次调用，压过厂商覆盖与路由。
+// 路径写法不在断言之列：拼接改成程序规整、不报错，`v1/model`、`//v1//model` 都会被规整成
+// 完整地址，不再是用法错误。
 func TestSyncModelsWithEndpointOverride(t *testing.T) {
 	f := newFixture(t)
 	up := newModelsServer(t)
@@ -195,22 +197,6 @@ func TestSyncModelsWithEndpointOverride(t *testing.T) {
 	}
 	if up.path != "/v3/models" {
 		t.Fatalf("不带 --endpoint 时路径 = %q，期望厂商覆盖的 /v3/models", up.path)
-	}
-
-	// 相对路径：报错、不发请求、不泄漏凭据。
-	before := up.hits
-	_, err = gs.SyncModelsWithEndpoint(context.Background(), acc, "v1/model")
-	if err == nil {
-		t.Fatal("相对路径应报错")
-	}
-	if !strings.Contains(err.Error(), "要以 / 开头") {
-		t.Fatalf("错误文案应说明路径要以 / 开头: %v", err)
-	}
-	if up.hits != before {
-		t.Fatalf("路径不合法时不该发请求，实际多打了 %d 次", up.hits-before)
-	}
-	if strings.Contains(err.Error(), key) {
-		t.Fatalf("错误文本泄漏了凭据: %v", err)
 	}
 }
 
