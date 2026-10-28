@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -218,20 +219,31 @@ func (s *Store) GetAccount(name string) (Account, error) {
 	return a, nil
 }
 
-// DeleteAccount 按名称删除账号。
+// DeleteAccount 按名称删除账号，连带删除它的模型行。
+// SQLite 的 rowid 会被复用，不删子行会让新账号继承旧账号的探活状态。
 func (s *Store) DeleteAccount(name string) error {
-	res, err := s.db.Exec(`DELETE FROM accounts WHERE name = ?`, name)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
+	defer func() { _ = tx.Rollback() }()
+
+	var id int64
+	err = tx.QueryRow(`SELECT id FROM accounts WHERE name = ?`, name).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("账号 %q 不存在", name)
 	}
-	return nil
+	if err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(`DELETE FROM account_models WHERE account_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM accounts WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // SetCooldown 记录冷却截止时间与最近一次错误。
@@ -332,6 +344,124 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 		out = append(out, u)
 	}
 	return out, rows.Err()
+}
+
+// 模型在某个账号上的状态。
+const (
+	// ModelSynced 表示刚从上游列表里拉下来，还没探活。
+	ModelSynced = "synced"
+	// ModelUsable 表示探活通过，账号能用这个模型。
+	ModelUsable = "usable"
+	// ModelForbidden 表示上游拒绝：套餐不含或无权使用。
+	ModelForbidden = "forbidden"
+	// ModelNotFound 表示上游不认识这个模型名。
+	ModelNotFound = "notfound"
+	// ModelAuthFailed 表示凭据在这个账号上不成立。
+	ModelAuthFailed = "auth"
+	// ModelError 表示其他临时错误，结论不可用。
+	ModelError = "error"
+)
+
+// AccountModel 是一个账号上一个模型的探活状态。
+type AccountModel struct {
+	AccountID  int64
+	Model      string
+	Status     string
+	HTTPStatus int
+	Error      string
+	CheckedAt  int64
+}
+
+// ReplaceModels 用上游列表刷新账号的模型集合。已有的探活状态保留，消失的行删除，
+// 新出现的行记为 synced。返回新增的行数。
+func (s *Store) ReplaceModels(accountID int64, models []string) (int, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if len(models) == 0 {
+		if _, err := tx.Exec(`DELETE FROM account_models WHERE account_id = ?`, accountID); err != nil {
+			return 0, err
+		}
+	} else {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(models)), ",")
+		args := make([]any, 0, len(models)+1)
+		args = append(args, accountID)
+		for _, m := range models {
+			args = append(args, m)
+		}
+		q := `DELETE FROM account_models WHERE account_id = ? AND model NOT IN (` + placeholders + `)`
+		if _, err := tx.Exec(q, args...); err != nil {
+			return 0, err
+		}
+	}
+
+	added := 0
+	for _, m := range models {
+		res, err := tx.Exec(`INSERT INTO account_models (account_id, model, status, http_status, error, checked_at)
+			VALUES (?, ?, 'synced', 0, '', 0)
+			ON CONFLICT(account_id, model) DO NOTHING`, accountID, m)
+		if err != nil {
+			return 0, err
+		}
+		if n, err := res.RowsAffected(); err == nil && n > 0 {
+			added++
+		}
+	}
+	return added, tx.Commit()
+}
+
+// SetModelStatus 记录一个模型的探活结果。
+func (s *Store) SetModelStatus(accountID int64, model, status string, httpStatus int, msg string) error {
+	_, err := s.db.Exec(`INSERT INTO account_models (account_id, model, status, http_status, error, checked_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(account_id, model) DO UPDATE SET
+			status = excluded.status, http_status = excluded.http_status,
+			error = excluded.error, checked_at = excluded.checked_at`,
+		accountID, model, status, httpStatus, msg, time.Now().Unix())
+	return err
+}
+
+// AccountModels 返回一个账号的模型与状态，按模型名排序。
+func (s *Store) AccountModels(accountID int64) ([]AccountModel, error) {
+	rows, err := s.db.Query(`SELECT account_id, model, status, http_status, error, checked_at
+		FROM account_models WHERE account_id = ? ORDER BY model`, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAccountModels(rows)
+}
+
+// AllAccountModels 返回全部账号的模型状态。
+func (s *Store) AllAccountModels() ([]AccountModel, error) {
+	rows, err := s.db.Query(`SELECT account_id, model, status, http_status, error, checked_at
+		FROM account_models ORDER BY model`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAccountModels(rows)
+}
+
+func scanAccountModels(rows *sql.Rows) ([]AccountModel, error) {
+	var out []AccountModel
+	for rows.Next() {
+		var m AccountModel
+		if err := rows.Scan(&m.AccountID, &m.Model, &m.Status, &m.HTTPStatus, &m.Error, &m.CheckedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// SetModels 改写账号自身声明的模型列表，选号用它。
+func (s *Store) SetModels(accountID int64, models []string) error {
+	_, err := s.db.Exec(`UPDATE accounts SET models = ? WHERE id = ?`, encodeModels(models), accountID)
+	return err
 }
 
 func boolInt(b bool) int {

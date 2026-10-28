@@ -309,13 +309,18 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, raw []byte,
 	if req.Stream {
 		httpReq.Header.Set("Accept", "text/event-stream")
 	}
-	if a.Protocol == ProtocolAnthropic {
-		httpReq.Header.Set("x-api-key", key)
-		httpReq.Header.Set("anthropic-version", "2023-06-01")
-	} else {
-		httpReq.Header.Set("Authorization", "Bearer "+key)
-	}
+	setAuth(httpReq, a.Protocol, key)
 	return httpReq, nil
+}
+
+// setAuth 按协议给上游请求配好凭据头。
+func setAuth(req *http.Request, protocol, key string) {
+	if protocol == ProtocolAnthropic {
+		req.Header.Set("x-api-key", key)
+		req.Header.Set("anthropic-version", "2023-06-01")
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
 }
 
 // patchModel 只替换 model 字段，其余字节按原样保留。
@@ -476,23 +481,47 @@ func Endpoint(base, protocol string) string {
 
 func readErrorBody(r io.Reader) string {
 	b, _ := io.ReadAll(io.LimitReader(r, 8<<10))
-	trimmed := bytes.TrimSpace(b)
-	if len(trimmed) == 0 {
+	return errorMessageFromBody(b)
+}
+
+// errorMessageFromBody 从上游错误体里取出真正的人话。
+// 有的网关把上游错误再包一层 JSON 塞进 error.message，这里解开最多三层。
+func errorMessageFromBody(b []byte) string {
+	raw := bytes.TrimSpace(b)
+	if len(raw) == 0 {
 		return "上游没有返回响应体"
 	}
-	var env struct {
-		Error struct {
+
+	msg := raw
+	for depth := 0; depth < 3; depth++ {
+		var env struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
 			Message string `json:"message"`
-			Type    string `json:"type"`
-		} `json:"error"`
+		}
+		if err := json.Unmarshal(msg, &env); err != nil {
+			break
+		}
+		inner := env.Error.Message
+		if inner == "" {
+			inner = env.Message
+		}
+		inner = strings.TrimSpace(inner)
+		if inner == "" {
+			break
+		}
+		msg = []byte(inner)
+		if !strings.HasPrefix(inner, "{") {
+			break
+		}
 	}
-	if err := json.Unmarshal(trimmed, &env); err == nil && env.Error.Message != "" {
-		return env.Error.Message
+
+	out := string(bytes.TrimSpace(msg))
+	if len(out) > 300 {
+		out = out[:300]
 	}
-	if len(trimmed) > 300 {
-		return string(trimmed[:300])
-	}
-	return string(trimmed)
+	return out
 }
 
 func errorKind(status int) string {

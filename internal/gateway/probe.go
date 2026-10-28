@@ -75,7 +75,8 @@ func (s *Server) Probe(ctx context.Context, a store.Account) (ProbeResult, error
 
 	res.Message = readErrorBody(resp.Body)
 	switch {
-	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+	case resp.StatusCode == http.StatusUnauthorized:
+		// 401 才是凭据问题。403 多为套餐或模型权限，凭据本身可用，不停用账号。
 		err = s.store.SetEnabled(a.ID, false, res.Message)
 	case account.Retryable(resp.StatusCode):
 		until := s.now().Add(account.Cooldown(resp.StatusCode, 0)).Unix()
