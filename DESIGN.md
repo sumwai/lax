@@ -2,7 +2,9 @@
 
 ## 1 这是什么
 
-本机上的模型总机。手上有几家模型的账号，客户端只连 `http://127.0.0.1:4567`，由 switchboard 挑账号、翻协议、记用量。
+本机上的模型总机。手上有几家模型的账号，客户端只连 `http://127.0.0.1:4567`，由 switchboard 挑账号、转协议、记用量。
+
+入站收三种线协议，按路径区分：`POST /v1/messages` 是 anthropic，`POST /v1/chat/completions` 是 openai-chat，`POST /v1/responses` 是 openai-responses。出站协议由账号的 `protocol` 字段决定，取值同样是这三种。入站与出站相同则直通，不同则经中间表示转换，九种组合全部可用。
 
 与同类产品的差别：
 
@@ -17,21 +19,21 @@
 | 使用范围 | 单人单机 | 单进程加本地文件就够，省掉鉴权与租户隔离 |
 | 账号类型 | 只支持粘贴 API key | 订阅账号要走浏览器登录与 token 刷新，受上游条款约束，风险和工作量都不适合放进第一版 |
 | 客户端配置改写 | 不做 | 程序只管网关与账号，各客户端里把 base URL 与 key 填成本机地址即可；改写别人家的配置文件不属于这里的职责 |
-| 入站协议 | Anthropic Messages 一个入口 | agent 类客户端主要说这个协议；其余协议在架构上留位置，不在第一版实现 |
+| 入站协议 | anthropic、openai-chat、openai-responses 三个入口，按路径区分 | 客户端说什么协议就应当能接什么：Claude Code 说 anthropic，Codex 说 responses，普通 OpenAI SDK 说 chat。只做一个入口等于把其余客户端挡在门外 |
 | 存储 | SQLite 单文件 | 不装数据库服务，事务与查询都够用 |
 | 界面 | 纯命令行 | 用量由 `usage` 与 `log` 子命令查看 |
 | 计费 | 不做 | 没有第三方付款方，只记录 token 与估算花费 |
 
-协议矩阵。行列都按线协议算，第一版只填一条入站：
+协议矩阵。行列都按线协议算，当前实现的是三种协议之间的九种组合：
 
-| 入站 | 出站 anthropic | 出站 openai-chat | 出站 openai-responses | 出站 gemini |
+| 入站 ＼ 出站 | anthropic | openai-chat | openai-responses | gemini |
 | --- | --- | --- | --- | --- |
-| anthropic | 直通 | 翻译（M2–M3） | 未实现 | 未实现 |
-| openai-chat | 未实现 | 未实现 | 未实现 | 未实现 |
-| openai-responses | 未实现 | 未实现 | 未实现 | 未实现 |
+| anthropic | 直通 | 转换 | 转换 | 未实现 |
+| openai-chat | 转换 | 直通 | 转换 | 未实现 |
+| openai-responses | 转换 | 转换 | 直通 | 未实现 |
 | gemini | 未实现 | 未实现 | 未实现 | 未实现 |
 
-“直通”指不改报文，只换上游地址与凭据；仍要解析用量字段。
+同行同列是“直通”，其余是“转换”。“直通”只需重写请求体里的 `model` 字段，其余字段与值原样带到上游，响应与流式帧按字节原样返回，用量另由该协议的 scanner 读出。“转换”走中间表示：请求与响应都只搬映射表里定义过的字段（见 5.4）。gemini 既没有入站路径，也没有可在账号上选的出站协议。
 
 ## 3 用起来是这样
 
@@ -81,9 +83,9 @@ $ switchboard serve
 
 # 8 观察
 $ switchboard log tail -n 5
-时间     入站        模型              账号        状态  输入  输出  耗时
-14:02:11 anthropic  deepseek-v4-pro  deepseek-1  200   1831   402   1.8s
-14:01:52 anthropic  deepseek-v4-pro  deepseek-1  429   0      0     0.2s  冷却 60s
+时间           协议                    模型              账号        状态   输入  输出  耗时   错误
+01-02 14:02:11 anthropic→anthropic     deepseek-v4-pro  deepseek-1  200    1831  402   1800ms
+01-02 14:01:52 anthropic→openai-chat  deepseek-v4-pro  deepseek-1  429 ✗  0     0     200ms  冷却 60s
 
 $ switchboard usage --since 7d --by account
 账号        请求   输入 token  输出 token  估算花费
@@ -94,6 +96,22 @@ $ switchboard call "hi" --model deepseek-v4-pro --debug
 选中 deepseek-1（priority 100，无冷却）
 → POST https://api.deepseek.com/v1/chat/completions
 ← 200 text/event-stream
+
+# 10 三条入站路径并存，同一个账号都能打到。
+#    账号协议是 openai-chat 时，第二条直通，第一、三条经中间表示转换。
+$ curl -s http://127.0.0.1:4567/v1/messages \
+    -H 'content-type: application/json' \
+    -d '{"model":"deepseek-v4-pro","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}'
+
+$ curl -s http://127.0.0.1:4567/v1/chat/completions \
+    -H 'content-type: application/json' \
+    -d '{"model":"deepseek-v4-pro","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}'
+
+$ curl -s http://127.0.0.1:4567/v1/responses \
+    -H 'content-type: application/json' \
+    -d '{"model":"deepseek-v4-pro","max_output_tokens":64,"input":"hi"}'
+
+# 三条都返回 200，响应各自是入站协议的形状；未知路径返回 404，请求体解析失败返回 400。
 ```
 
 ## 4 命令表
@@ -105,7 +123,7 @@ $ switchboard call "hi" --model deepseek-v4-pro --debug
 | 命令 | 参数 | 行为 | 输出 |
 | --- | --- | --- | --- |
 | `init` | `--force` | 建配置目录与数据目录，写默认配置；`--force` 覆盖 | 两个路径 |
-| `serve` | `--addr`、`--log-level` | 前台起网关，注册入站路由；启动只统计账号与模型数，不发上游请求 | 启动摘要，之后按请求打日志 |
+| `serve` | `--addr`、`--log-level` | 前台起网关，注册三条入站路由与 `/healthz`；启动只统计账号与模型数，不发上游请求 | 启动摘要，之后按请求打日志 |
 | `account add` | `<名称> --provider --key [--protocol] [--base-url] [--models] [--priority]` | 加密存 key，按厂商补默认 base-url 与协议 | 新账号名称 |
 | `account ls` | `--json` | 列账号、模型数、是否处在冷却；`account_models` 有数据时模型列显示「N 可用 / M 同步」，`--json` 每行多了 `models_usable` 与 `models_synced` 两个计数 | 表格 |
 | `account rm` | `<名称>` | 删账号，同时删掉它的 `account_models` 行；关联的请求记录保留 | 确认一行 |
@@ -117,12 +135,14 @@ $ switchboard call "hi" --model deepseek-v4-pro --debug
 | `model probe` | `[--provider 厂商]` `[--account 账号]` `[--sync]` `[--model 模型]` `[--limit N]` `[--concurrency N]` | 逐账号对每个模型发一条 `max_tokens=1` 的请求判定可用性，结果写 `account_models`；该账号库里出现 `usable` 时，把库里**全部** `usable` 写成该账号的 `accounts.models`（不只是本次探到的），选号从此按该列表。没有模型行或带 `--sync` 时先同步；`--model` 只探一个模型名，`--limit` 是每个账号的上限，`--concurrency` 默认 4 且不超过待探模型数；任一账号出现 401 即停止后续账号并返回错误；所有账号都没探出可用模型时退出码 1 且不改任何 `accounts.models` | 表格（账号 / 模型 / 状态 / HTTP / 耗时 / 备注）与该账号的可用 / 无权 / 不存在 / 失败计数；`--json` 是数组，每项 `account`、`model`、`status`、`http_status`、`latency_ms`、`message`，计数只出现在人读输出里 |
 | `usage` | `--since`、`--by account\|model\|day` | 汇总请求数、token、估算花费 | 表格 |
 | `log tail` | `-n`、`--follow` | 最近的请求记录；`--follow` 跟随 | 表格 |
-| `call` | `[提示词] --model [--protocol] [--debug] [--json]` | 绕过客户端直连本进程，打印选号过程 | 响应，或 debug 轨迹 |
+| `call` | `[提示词] --model [--protocol] [--debug] [--json]` | 绕过客户端直连本进程，打印选号过程；默认发 anthropic 入站，`--protocol` 可在 anthropic、chat、responses 之间切换 | 响应，或 debug 轨迹 |
 | `doctor` | 无 | 检查配置文件、数据目录、数据库、端口 | 逐项 ok / fail |
 | `version` | 无 | 版本号 | 一行 |
 
 退出码：`0` 成功；`1` 运行失败（含 `doctor` 有检查未通过、`call` 非 2xx）；`2` 用法错误。
 错误信息写 stderr，`--json` 时结果写 stdout，两者不混在一起。
+
+`serve` 同时暴露三条入站路径：`/v1/messages`（anthropic）、`/v1/chat/completions`（openai-chat）、`/v1/responses`（openai-responses），路径决定入站协议（见 5.2）；未知路径返回 404。`/healthz` 的响应里带 `inbound` 与 `outbound` 两份协议清单。
 
 ## 5 程序内部做什么
 
@@ -138,10 +158,10 @@ $ switchboard call "hi" --model deepseek-v4-pro --debug
 
 ### 5.2 请求生命周期
 
-1. 收到入站请求，记下协议、模型名、开始时间。
+1. 收到入站请求，按路径定入站协议：`/v1/messages` 是 anthropic，`/v1/chat/completions` 是 openai-chat，`/v1/responses` 是 openai-responses，其余路径返回 404。请求体解析失败返回 400，错误消息前缀协议名。定好协议后记下模型名与开始时间。
 2. 按模型名取候选账号：`enabled=1`、模型列表包含该模型、冷却已过。
 3. 按 `priority` 升序，同一会话（见 5.3）优先沿用上次的账号。
-4. 解密凭据，按出站协议构造上游请求。同协议直通，跨协议走翻译层。
+4. 解密凭据，按出站协议构造上游请求：入站协议与账号协议相同则直通，否则经中间表示转换（见 5.4）。
 5. 发上游请求，读响应头。上游返回 429、5xx 或超时，且尚未向客户端写出任何字节时，把该账号打入冷却，换下一个候选。
 6. 已开始向客户端输出后不再换号；上游中断则向客户端发一个错误事件并结束本次请求。
 7. 解析响应里的用量字段，写一行请求记录。
@@ -155,7 +175,43 @@ $ switchboard call "hi" --model deepseek-v4-pro --debug
 - 401 说明凭据本身不行：把账号标为 `enabled=0` 并把错误返回客户端，避免同一条错误把整个候选池刷成不可用。`account test` 成功或 `account enable` 可恢复，两者都会清冷却。
 - 403 多为套餐或模型权限不对，凭据还能用：不停用账号，也不再换号，直接把上游原话返回。commandcode 对不在套餐内的模型就是返回 403。
 
-### 5.4 翻译规则：anthropic 入 → openai-chat 出
+### 5.4 中间表示与转换规则
+
+入站协议三条，出站协议三条，两边相同时直通，不同时经中间表示互转。中间表示不绑任何一家上游的字段名，协议差异全部在编解码器里吸收。
+
+中间表示在 `internal/translate/ir.go`：
+
+| 类型 | 字段 |
+| --- | --- |
+| `Request` | `Model`、`System`、`Messages`、`Tools`、`ToolChoice`、`ParallelToolCalls`、`MaxTokens`、`Temperature`、`TopP`、`Stop`、`Stream` |
+| `Message` | `Role` + `Blocks` |
+| `Block` | `text`、`image`、`tool_use`、`tool_result` |
+| `Response` | `ID`、`Model`、`Blocks`、`StopReason`、`Usage` |
+| `Usage` | `In`、`Out`、`CacheRead`、`CacheWrite` |
+
+按协议名分发的入口都在 `ir.go`：`DecodeRequest`、`EncodeRequest`、`DecodeResponse`、`EncodeResponse`、`NewStreamDecoder`、`NewStreamEncoder`、`NewUsageScanner`、`PathProtocol`。三套编解码器分别在 `anthropic.go`、`chat.go`、`responses.go`。
+
+同一个概念在三条协议里落的位置不同：
+
+| 概念 | anthropic | openai-chat | openai-responses |
+| --- | --- | --- | --- |
+| system | 顶层 `system` 字段 | 首条 `role=system` 消息 | 顶层 `instructions` |
+| tool_use | assistant 消息里的 `tool_use` 块 | `tool_calls[]` | `function_call` item |
+| tool_result | user 消息里的 `tool_result` 块 | 独立 `role=tool` 消息 | `function_call_output` item |
+| 结束原因 | `end_turn` / `max_tokens` / `tool_use` / `stop_sequence` | `stop` / `length` / `tool_calls` | `completed` / `incomplete`（`max_output_tokens`） |
+| 流式事件 | 具名事件 `message_start`、`content_block_delta`、`message_stop` | 只有 `data` 帧，末尾 `[DONE]` | 具名事件 `response.created`、`response.output_text.delta`、`response.completed` |
+| 用量字段 | `input_tokens`、`output_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens` | `prompt_tokens`、`completion_tokens`、`prompt_tokens_details.cached_tokens` | `input_tokens`、`output_tokens`、`input_tokens_details.cached_tokens` |
+
+结束原因在中间表示里只留四种：`end_turn`、`max_tokens`、`tool_use`、`stop_sequence`；编码时再翻回各协议自己的说法。
+
+两条分界与各自的代价：
+
+- 直通（入站协议 = 出站协议）：请求体只改 `model` 字段，其余字段与值原样保留，包括文档里没列出的陌生字段；响应体与流式帧按字节原样转发。读用量不改变转发内容，由该协议的 usage scanner 从响应体或流式帧里读，缓存字段也能读到。代价是只对同协议账号成立，好处是上游新加的字段与参数可以直接用。
+- 转换（入站协议 ≠ 出站协议）：解码成中间表示，再按目标协议编码，请求与响应都只搬表里定义过的字段。表里没有的字段丢弃，这是有意的：陌生字段跨协议搬过去只会变成语义错位。代价是改协议就意味着表外字段消失，新增映射必须同时补用例。
+
+流式在转换路径上走增量：上游帧先解码成 `text`、`tool_start`、`tool_args`、`stop`、`error` 增量，再由入站协议的编码器编成客户端事件。上游中途中断时先发一个错误事件，再补齐收尾事件，客户端总能拿到合法结尾。同协议直通时逐行转发原始字节，只用 scanner 记账。
+
+两个协议之间的常见映射示例（anthropic 入 → openai-chat 出）。完整规则在编解码器与 `internal/translate` 的用例里，这里只列常看到的几行：
 
 | anthropic | openai-chat |
 | --- | --- |
@@ -175,7 +231,7 @@ $ switchboard call "hi" --model deepseek-v4-pro --debug
 | `stop_reason=max_tokens` | `finish_reason=length` |
 | `usage.input_tokens` / `output_tokens` | `usage.prompt_tokens` / `completion_tokens` |
 
-流式映射（SSE）：
+同一对协议间的流式映射（SSE）：
 
 | 上游 chat.completion.chunk | 下发给客户端 anthropic 事件 |
 | --- | --- |
@@ -187,11 +243,11 @@ $ switchboard call "hi" --model deepseek-v4-pro --debug
 | `finish_reason` | 关闭所有 block，发 `message_delta`（含 usage），再发 `message_stop` |
 | 上游错误帧 | `event: error`，带映射后的 type 与 message |
 
-未在表内的字段一律丢弃，不猜。新增映射必须同时补一条对拍用例。
-
 ### 5.5 请求记录
 
 每次尝试写一行，包括失败与换号前的尝试。字段：时间、入站协议、出站协议、请求模型名、实际模型名、账号 id、HTTP 状态、是否成功、输入 token、输出 token、缓存读、缓存写、耗时、错误摘要。
+
+`inbound` 与 `outbound` 两列记的是这一行实际用到的协议对，转换时两列不同，直通时两列相同。除输入与输出 token，`cache_read` 与 `cache_write` 也会写入：anthropic 的缓存读与缓存写分别取自 `cache_read_input_tokens` 与 `cache_creation_input_tokens`；chat 与 responses 只带缓存读（`cached_tokens`），这两家的缓存写记为 0。直通与转换两条路径都会填这几个字段。
 
 估算花费需要价格表；价格表第一版放在账号上（`--price-in / --price-out`，单位每百万 token），缺省则花费记为 null，不猜价格。
 
@@ -299,12 +355,13 @@ CREATE TABLE account_models (
 | --- | --- | --- |
 | M0 | 骨架：`init`、SQLite 迁移、`serve` 起 `/healthz`、`doctor` 完整 | `make check` 通过，`doctor` 全 ok |
 | M1 | 非流式直通：anthropic → anthropic，`account` 的增删查与探活、`call`、`log tail` | `call` 打真实账号拿到回复，`log tail` 有记录 |
-| M2 | 翻译：anthropic → openai-chat，非流式，含工具调用 | 对拍用例覆盖 5.4 表里每一行 |
-| M3 | 流式：SSE 双向翻译 | 客户端能流式拿到 token 与工具调用 |
+| M2 | 转换：anthropic → openai-chat，非流式，含工具调用 | 对拍用例覆盖 5.4 的映射示例里每一行 |
+| M3 | 流式：SSE 双向转换 | 客户端能流式拿到 token 与工具调用 |
 | M4 | 多账号：冷却、失败转移、`usage` | 两个账号时杀掉一个，请求自动落到另一个 |
 | M5 | 模型同步与探活：`model sync`、`model probe`、`model ls` 按模型列账号状态 | 对真实上游 `model sync` 能拉出模型数；`model probe` 能区分 `usable` 与 `forbidden`；零可用模型时不改 `accounts.models` |
+| M6 | 协议矩阵：三入站 × 三出站 + 同协议直通，中间表示与三个编解码器，流式增量 | 9 种组合的非流式与流式用例通过；对真实上游三种入站各打一条能拿到回复 |
 
-M0 到 M4 已实现，`make check` 与 `go test -race` 通过，端到端由 `internal/cli` 的 `TestWalkingSkeleton` 用假上游验证：初始化、加账号、`call`、`log tail`、`usage`、`doctor` 全链路走通。上游是 `httptest` 假服务，真实厂商的连通性需要拿到 key 后自行 `account test` 验证。M5 的代码已落地，验收涉及真实上游的模型清单与套餐权限，需要手工执行。
+M0 到 M6 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkeleton` 用假上游验证：初始化、加账号、`call`、`log tail`、`usage`、`doctor` 全链路走通。协议矩阵由 `internal/gateway/matrix_test.go` 与 `matrix_stream_test.go` 验证：9 种组合的非流式与流式各跑一遍，同协议直通的「不改字节」「保留陌生字段」与跨协议的「丢弃陌生字段」单独有用例。上游是 `httptest` 假服务，M5 与 M6 里涉及真实厂商的那部分需要拿到 key 后手工验收。
 
 已知未做，按已知行为处理：
 
@@ -315,8 +372,13 @@ M0 到 M4 已实现，`make check` 与 `go test -race` 通过，端到端由 `in
 - 探活不做增量跳过：`model probe` 不看 `checked_at`，每次都重探目标模型，只靠 `--limit` 截断。
 - 探活不记花费：这些 `max_tokens=1` 的调用不进 `requests`，`usage` 里也看不到。
 - 探活并发默认 4，`--concurrency` 可以改，只是默认值，不会根据上游限速自适应。
+- gemini 协议进出都没有实现：既没有入站路径，也不在账号的 `protocol` 可选值里。
+- 思考与推理内容在转换时丢弃：anthropic 的 `thinking` 块、chat 的 `reasoning_content`、responses 的 `reasoning` item 都不进中间表示。
+- 音频与文件类内容丢弃，只搬运文本、图片、工具调用与工具结果四类块。
+- responses 的内置工具（`web_search` 等）丢弃，工具定义只认 function。
+- 跨协议只做图片地址的搬运，没有图片转写以外的多模态变换。
 
-之后（不在第一版）：openai-chat / responses / gemini 入站，订阅账号登录，隐私遮蔽，配置档案（profiles），价格表内置。
+之后（不在第一版）：gemini 入站与出站，订阅账号登录，隐私遮蔽，配置档案（profiles），价格表内置。
 
 ## 8 代码结构
 
@@ -328,7 +390,7 @@ internal/store/         SQLite 连接、迁移、账号与请求记录的读写
 internal/secret/        凭据加解密
 internal/account/       账号池、冷却、选号
 internal/gateway/       HTTP 入站处理、上游转发、错误映射
-internal/translate/     各协议编解码与互转（不碰网络，纯函数）
+internal/translate/     中间表示（ir.go）与三个协议的编解码（anthropic.go、chat.go、responses.go）
 internal/usage/         用量汇总与花费估算
 ```
 

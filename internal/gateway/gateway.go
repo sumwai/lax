@@ -1,4 +1,4 @@
-// Package gateway 是唯一发上游请求的地方：收 anthropic 入站请求，挑账号，转发，记账。
+// Package gateway 是唯一发上游请求的地方：收任意入站协议，挑账号，转成账号的协议，记账。
 package gateway
 
 import (
@@ -20,11 +20,14 @@ import (
 	"switchboard/internal/translate"
 )
 
-// 协议常量。第一版只实现 anthropic 入站。
+// 协议常量。入站按路径区分，出站按账号的 protocol 字段区分。
 const (
-	ProtocolAnthropic = "anthropic"
-	ProtocolChat      = "openai-chat"
-	InboundAnthropic  = "anthropic"
+	ProtocolAnthropic = translate.ProtocolAnthropic
+	ProtocolChat      = translate.ProtocolChat
+	ProtocolResponses = translate.ProtocolResponses
+
+	// InboundAnthropic 保留给旧调用方，等价于 ProtocolAnthropic。
+	InboundAnthropic = translate.ProtocolAnthropic
 )
 
 // Options 是构造网关需要的依赖。
@@ -34,15 +37,18 @@ type Options struct {
 	Client *http.Client
 	Logf   func(format string, args ...any)
 	Now    func() time.Time
+	// DumpBodies 为真时把发往上游的请求体也打出来，供排障用。
+	DumpBodies bool
 }
 
 // Server 是网关。
 type Server struct {
-	store  *store.Store
-	key    []byte
-	client *http.Client
-	logf   func(format string, args ...any)
-	now    func() time.Time
+	store      *store.Store
+	key        []byte
+	client     *http.Client
+	logf       func(format string, args ...any)
+	now        func() time.Time
+	dumpBodies bool
 }
 
 // New 构造网关。
@@ -53,7 +59,7 @@ func New(o Options) (*Server, error) {
 	if len(o.Key) == 0 {
 		return nil, errors.New("缺少解密密钥")
 	}
-	s := &Server{store: o.Store, key: o.Key, client: o.Client, logf: o.Logf, now: o.Now}
+	s := &Server{store: o.Store, key: o.Key, client: o.Client, logf: o.Logf, now: o.Now, dumpBodies: o.DumpBodies}
 	if s.client == nil {
 		s.client = &http.Client{Timeout: 0}
 	}
@@ -70,7 +76,9 @@ func New(o Options) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
-	mux.HandleFunc("/v1/messages", s.handleMessages)
+	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
+		mux.HandleFunc(path, s.handleInbound)
+	}
 	return mux
 }
 
@@ -119,43 +127,54 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"accounts": len(accounts),
 		"enabled":  enabled,
 		"models":   len(models),
+		"inbound":  []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses},
+		"outbound": []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses},
+		"passthru": "同协议直通，跨协议经中间表示转换",
 	})
 }
 
 // attempt 是一次上游尝试的结果。
 type attempt struct {
-	status  int
-	inTok   int64
-	outTok  int64
-	wrote   bool
-	message string
-	err     error
+	status     int
+	inTok      int64
+	outTok     int64
+	cacheRead  int64
+	cacheWrite int64
+	wrote      bool
+	message    string
+	err        error
 }
 
-func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
+	inbound, ok := translate.PathProtocol(r.URL.Path)
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found_error", "未知路径 "+r.URL.Path)
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "只接受 POST")
 		return
 	}
+
 	raw, err := io.ReadAll(io.LimitReader(r.Body, 32<<20))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "读取请求体失败: "+err.Error())
 		return
 	}
 
-	var req translate.AnthropicRequest
-	if err := json.Unmarshal(raw, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "请求体不是合法 JSON: "+err.Error())
+	req, err := translate.DecodeRequest(inbound, raw)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", inbound+": "+err.Error())
 		return
 	}
-	if req.Model == "" {
+	if strings.TrimSpace(req.Model) == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "缺少 model 字段")
 		return
 	}
 
 	session := r.Header.Get("x-switchboard-session")
 	if session == "" {
-		session = sessionFromMetadata(req.Metadata)
+		session = sessionFromBody(raw)
 	}
 
 	accounts, err := s.store.ListAccounts()
@@ -166,7 +185,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	candidates := account.Candidates(accounts, req.Model, s.now(), session)
 	if len(candidates) == 0 {
 		writeError(w, http.StatusServiceUnavailable, "api_error",
-			fmt.Sprintf("没有可用于模型 %s 的账号，先运行 switchboard account add", req.Model))
+			fmt.Sprintf("没有可用于模型 %s 的账号，先运行 switchboard account add 与 model probe", req.Model))
 		return
 	}
 
@@ -177,12 +196,12 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 
 		attemptStart := s.now()
-		res := s.tryUpstream(r.Context(), w, cand, raw, &req)
+		res := s.tryUpstream(r.Context(), w, cand, inbound, raw, req)
 		latency := s.now().Sub(attemptStart)
 
 		rec := &store.RequestRecord{
 			TS:             attemptStart.Unix(),
-			Inbound:        InboundAnthropic,
+			Inbound:        inbound,
 			Outbound:       cand.Protocol,
 			ModelRequested: req.Model,
 			ModelUsed:      req.Model,
@@ -191,6 +210,8 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			OK:             res.err == nil && res.status >= 200 && res.status < 300,
 			InTokens:       res.inTok,
 			OutTokens:      res.outTok,
+			CacheRead:      res.cacheRead,
+			CacheWrite:     res.cacheWrite,
 			LatencyMS:      latency.Milliseconds(),
 			Error:          res.message,
 		}
@@ -198,7 +219,7 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 			s.logf("写请求记录失败: %v", err)
 		}
 		s.logf("%s %s→%s %s %s %d/%d %s%s",
-			cand.Name, InboundAnthropic, cand.Protocol, req.Model,
+			cand.Name, inbound, cand.Protocol, req.Model,
 			fmt.Sprintf("%d", res.status), res.inTok, res.outTok,
 			latency.Round(time.Millisecond), errorSuffix(res.message))
 
@@ -238,28 +259,37 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	writeError(w, http.StatusServiceUnavailable, "api_error", "所有候选账号都失败："+lastErr)
 }
 
-func sessionFromMetadata(raw json.RawMessage) string {
-	if len(raw) == 0 {
+// sessionFromBody 从请求体里取会话标识，用于粘同一个账号。
+func sessionFromBody(raw []byte) string {
+	var env struct {
+		Metadata struct {
+			UserID string `json:"user_id"`
+		} `json:"metadata"`
+		User           string `json:"user"`
+		ConversationID string `json:"conversation_id"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
 		return ""
 	}
-	var meta struct {
-		UserID string `json:"user_id"`
+	switch {
+	case env.Metadata.UserID != "":
+		return env.Metadata.UserID
+	case env.User != "":
+		return env.User
+	default:
+		return env.ConversationID
 	}
-	if err := json.Unmarshal(raw, &meta); err != nil {
-		return ""
-	}
-	return meta.UserID
 }
 
 func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store.Account,
-	raw []byte, req *translate.AnthropicRequest) attempt {
+	inbound string, raw []byte, req *translate.Request) attempt {
 
 	key, err := secret.Decrypt(s.key, a.KeyCipher)
 	if err != nil {
 		return attempt{status: http.StatusInternalServerError, message: "解密账号凭据失败"}
 	}
 
-	upReq, err := s.buildRequest(ctx, a, raw, req, string(key))
+	upReq, err := s.buildRequest(ctx, a, inbound, raw, req, string(key))
 	if err != nil {
 		return attempt{status: http.StatusBadGateway, message: err.Error(), err: err}
 	}
@@ -276,26 +306,23 @@ func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store
 	}
 
 	if req.Stream {
-		return s.streamSuccess(w, resp, req, a)
+		return s.streamSuccess(w, resp, inbound, a.Protocol, req)
 	}
-	return s.jsonSuccess(w, resp, req, a)
+	return s.jsonSuccess(w, resp, inbound, a.Protocol, req)
 }
 
-func (s *Server) buildRequest(ctx context.Context, a store.Account, raw []byte,
-	req *translate.AnthropicRequest, key string) (*http.Request, error) {
+func (s *Server) buildRequest(ctx context.Context, a store.Account, inbound string, raw []byte,
+	req *translate.Request, key string) (*http.Request, error) {
 
 	endpoint := Endpoint(a.BaseURL, a.Protocol)
 
 	var body []byte
 	var err error
-	if a.Protocol == ProtocolAnthropic {
+	if inbound == a.Protocol {
+		// 同协议直通：只替换 model，其余字节原样保留。
 		body, err = patchModel(raw, req.Model)
 	} else {
-		var chatReq *translate.ChatRequest
-		chatReq, err = translate.ToChat(req, req.Model)
-		if err == nil {
-			body, err = json.Marshal(chatReq)
-		}
+		body, err = translate.EncodeRequest(a.Protocol, req, req.Model)
 	}
 	if err != nil {
 		return nil, err
@@ -310,17 +337,19 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, raw []byte,
 		httpReq.Header.Set("Accept", "text/event-stream")
 	}
 	setAuth(httpReq, a.Protocol, key)
+	if s.dumpBodies {
+		s.logf("→ 上游 %s 请求体: %s", endpoint, truncateForLog(string(body)))
+	}
 	return httpReq, nil
 }
 
-// setAuth 按协议给上游请求配好凭据头。
-func setAuth(req *http.Request, protocol, key string) {
-	if protocol == ProtocolAnthropic {
-		req.Header.Set("x-api-key", key)
-		req.Header.Set("anthropic-version", "2023-06-01")
-		return
+// truncateForLog 截断过长的报文，避免调试输出刷屏。
+func truncateForLog(s string) string {
+	const max = 800
+	if len(s) <= max {
+		return s
 	}
-	req.Header.Set("Authorization", "Bearer "+key)
+	return s[:max] + "…"
 }
 
 // patchModel 只替换 model 字段，其余字节按原样保留。
@@ -338,33 +367,31 @@ func patchModel(raw []byte, model string) ([]byte, error) {
 }
 
 func (s *Server) jsonSuccess(w http.ResponseWriter, resp *http.Response,
-	req *translate.AnthropicRequest, a store.Account) attempt {
+	inbound, outbound string, req *translate.Request) attempt {
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
 		return attempt{status: http.StatusBadGateway, message: "读取上游响应失败: " + err.Error(), err: err}
 	}
 
-	if a.Protocol == ProtocolAnthropic {
-		var out translate.AnthropicResponse
-		if err := json.Unmarshal(body, &out); err == nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(body)
-			return attempt{status: http.StatusOK, wrote: true, inTok: out.Usage.InputTokens, outTok: out.Usage.OutputTokens}
+	// 直通：字节原样返回，只用对应协议解析一次用量。
+	if inbound == outbound {
+		res := attempt{status: http.StatusOK, wrote: true}
+		if parsed, err := translate.DecodeResponse(outbound, body, req.Model); err == nil {
+			res.inTok, res.outTok = parsed.Usage.In, parsed.Usage.Out
+			res.cacheRead, res.cacheWrite = parsed.Usage.CacheRead, parsed.Usage.CacheWrite
 		}
-		return attempt{status: http.StatusBadGateway, message: "上游响应不是合法 JSON"}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(body)
+		return res
 	}
 
-	var chatResp translate.ChatResponse
-	if err := json.Unmarshal(body, &chatResp); err != nil {
-		return attempt{status: http.StatusBadGateway, message: "上游响应不是合法 JSON: " + err.Error(), err: err}
-	}
-	out, err := translate.FromChat(&chatResp, req.Model)
+	parsed, err := translate.DecodeResponse(outbound, body, req.Model)
 	if err != nil {
 		return attempt{status: http.StatusBadGateway, message: err.Error(), err: err}
 	}
-	payload, err := json.Marshal(out)
+	payload, err := translate.EncodeResponse(inbound, parsed)
 	if err != nil {
 		return attempt{status: http.StatusInternalServerError, message: err.Error(), err: err}
 	}
@@ -372,11 +399,15 @@ func (s *Server) jsonSuccess(w http.ResponseWriter, resp *http.Response,
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(payload)
-	return attempt{status: http.StatusOK, wrote: true, inTok: out.Usage.InputTokens, outTok: out.Usage.OutputTokens}
+	return attempt{
+		status: http.StatusOK, wrote: true,
+		inTok: parsed.Usage.In, outTok: parsed.Usage.Out,
+		cacheRead: parsed.Usage.CacheRead, cacheWrite: parsed.Usage.CacheWrite,
+	}
 }
 
 func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
-	req *translate.AnthropicRequest, a store.Account) attempt {
+	inbound, outbound string, req *translate.Request) attempt {
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -389,19 +420,20 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 		}
 	}
 
-	if a.Protocol == ProtocolAnthropic {
-		return s.passthroughStream(w, resp, flush)
+	if inbound == outbound {
+		return s.passthroughStream(w, resp, outbound, flush)
 	}
 
-	state := translate.NewChatStream(req.Model)
-	scanErr := translate.ScanSSE(resp.Body, func(event string, data []byte) error {
-		if string(bytes.TrimSpace(data)) == "[DONE]" {
-			return nil
-		}
-		events, err := state.Translate(data)
-		if err != nil {
-			return err
-		}
+	dec, err := translate.NewStreamDecoder(outbound)
+	if err != nil {
+		return attempt{status: http.StatusBadGateway, message: err.Error(), err: err, wrote: true}
+	}
+	enc, err := translate.NewStreamEncoder(inbound, req.Model)
+	if err != nil {
+		return attempt{status: http.StatusBadGateway, message: err.Error(), err: err, wrote: true}
+	}
+
+	write := func(events []translate.SSEEvent) error {
 		for _, e := range events {
 			if _, err := w.Write(e.Bytes()); err != nil {
 				return err
@@ -409,21 +441,44 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 		}
 		flush()
 		return nil
+	}
+
+	var usage translate.Usage
+	emit := func(deltas []translate.Delta) error {
+		for _, d := range deltas {
+			if d.Usage != nil {
+				usage = *d.Usage
+			}
+			if err := write(enc.Emit(d)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if err := write(enc.Start()); err != nil {
+		return attempt{status: http.StatusOK, wrote: true, message: "客户端断开", err: err}
+	}
+
+	scanErr := translate.ScanSSE(resp.Body, func(event string, data []byte) error {
+		if string(bytes.TrimSpace(data)) == "[DONE]" {
+			return nil
+		}
+		deltas, err := dec.Decode(data)
+		if err != nil {
+			return err
+		}
+		return emit(deltas)
 	})
 
 	if scanErr != nil {
-		_, _ = w.Write(translate.ErrorEvent("api_error", scanErr.Error()).Bytes())
-		flush()
+		_ = write([]translate.SSEEvent{translate.ErrorEvent("api_error", scanErr.Error())})
 	}
-	for _, e := range state.Finish() {
-		if _, err := w.Write(e.Bytes()); err != nil {
-			break
-		}
-	}
-	flush()
+	_ = emit(dec.Close())
+	_ = write(enc.Finish())
 
-	in, out := state.Usage()
-	res := attempt{status: http.StatusOK, wrote: true, inTok: in, outTok: out}
+	res := attempt{status: http.StatusOK, wrote: true, inTok: usage.In, outTok: usage.Out,
+		cacheRead: usage.CacheRead, cacheWrite: usage.CacheWrite}
 	if scanErr != nil {
 		res.message = "上游流式响应中断: " + scanErr.Error()
 		res.err = scanErr
@@ -432,9 +487,13 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 }
 
 // passthroughStream 原样转发同协议上游的字节，同时读出用量。
-func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, flush func()) attempt {
+func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, protocol string, flush func()) attempt {
+	scanner, err := translate.NewUsageScanner(protocol)
+	if err != nil {
+		return attempt{status: http.StatusBadGateway, message: err.Error(), err: err, wrote: true}
+	}
+
 	buf := bufio.NewReaderSize(resp.Body, 32*1024)
-	var sc translate.AnthropicUsageScanner
 	var readErr error
 
 	for {
@@ -445,7 +504,7 @@ func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, f
 			}
 			trimmed := bytes.TrimRight(line, "\r\n")
 			if bytes.HasPrefix(trimmed, []byte("data:")) {
-				sc.Feed(bytes.TrimSpace(trimmed[len("data:"):]))
+				scanner.Feed(bytes.TrimSpace(trimmed[len("data:"):]))
 			}
 			flush()
 		}
@@ -457,8 +516,9 @@ func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, f
 		}
 	}
 
-	in, out := sc.Usage()
-	res := attempt{status: http.StatusOK, wrote: true, inTok: in, outTok: out}
+	in, out, cacheRead, cacheWrite := scanner.Usage()
+	res := attempt{status: http.StatusOK, wrote: true, inTok: in, outTok: out,
+		cacheRead: cacheRead, cacheWrite: cacheWrite}
 	if readErr != nil {
 		res.message = "上游流式响应中断: " + readErr.Error()
 		res.err = readErr
@@ -470,13 +530,26 @@ func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, f
 func Endpoint(base, protocol string) string {
 	base = strings.TrimRight(base, "/")
 	suffix := "/chat/completions"
-	if protocol == ProtocolAnthropic {
+	switch protocol {
+	case ProtocolAnthropic:
 		suffix = "/messages"
+	case ProtocolResponses:
+		suffix = "/responses"
 	}
 	if strings.HasSuffix(base, "/v1") {
 		return base + suffix
 	}
 	return base + "/v1" + suffix
+}
+
+// setAuth 按协议给上游请求配好凭据头。
+func setAuth(req *http.Request, protocol, key string) {
+	if protocol == ProtocolAnthropic {
+		req.Header.Set("x-api-key", key)
+		req.Header.Set("anthropic-version", "2023-06-01")
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
 }
 
 func readErrorBody(r io.Reader) string {

@@ -100,17 +100,19 @@ func (s *Server) ProbeModel(ctx context.Context, a store.Account, model string) 
 		return res, err
 	}
 
-	ping := "ping"
-	req := &translate.AnthropicRequest{
+	ir := &translate.Request{
 		Model:     model,
 		MaxTokens: 1,
-		Messages:  []translate.AnthropicMessage{{Role: "user", Content: translate.Content{Text: &ping}}},
+		Messages: []translate.Message{{
+			Role:   translate.RoleUser,
+			Blocks: []translate.Block{{Kind: translate.BlockText, Text: "ping"}},
+		}},
 	}
-	raw, err := json.Marshal(req)
+	raw, err := translate.EncodeRequest(a.Protocol, ir, model)
 	if err != nil {
 		return res, err
 	}
-	upReq, err := s.buildRequest(ctx, a, raw, req, string(key))
+	upReq, err := s.buildRequest(ctx, a, a.Protocol, raw, ir, string(key))
 	if err != nil {
 		return res, err
 	}

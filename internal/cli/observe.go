@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -97,6 +96,20 @@ func cmdUsage(e *Env, args []string) error {
 		fmt.Fprintln(e.Stdout, "花费为 0：账号没定价，加账号时给 --price-in 与 --price-out")
 	}
 	return nil
+}
+
+// resolveInboundProtocol 把命令行上的简写换回协议名。
+func resolveInboundProtocol(name string) (string, bool) {
+	switch name {
+	case "", translate.ProtocolAnthropic:
+		return translate.ProtocolAnthropic, true
+	case "chat", translate.ProtocolChat:
+		return translate.ProtocolChat, true
+	case "responses", translate.ProtocolResponses:
+		return translate.ProtocolResponses, true
+	default:
+		return "", false
+	}
 }
 
 func cmdLog(e *Env, args []string) error {
@@ -240,7 +253,7 @@ func printRecords(e *Env, records []store.RequestRecord, names map[int64]string)
 func cmdCall(e *Env, args []string) error {
 	fs := newFlagSet(e, "call", "手工打一条请求，打印选号过程")
 	model := fs.String("model", "", "模型名，留空取第一个账号的第一个模型")
-	protocol := fs.String("protocol", "anthropic", "入站协议，第一版只支持 anthropic")
+	protocol := fs.String("protocol", "anthropic", "入站协议：anthropic | chat | responses")
 	stream := fs.Bool("stream", false, "流式请求")
 	maxTokens := fs.Int("max-tokens", 256, "最大输出 token")
 	debug := fs.Bool("debug", false, "打印选号过程")
@@ -248,8 +261,9 @@ func cmdCall(e *Env, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *protocol != gateway.InboundAnthropic {
-		return usagef("第一版只支持 anthropic 入站，收到 %q", *protocol)
+	inbound, ok := resolveInboundProtocol(*protocol)
+	if !ok {
+		return usagef("不支持的入站协议 %q，可用 anthropic、chat、responses", *protocol)
 	}
 	prompt := strings.Join(fs.Args(), " ")
 	if prompt == "" {
@@ -286,7 +300,7 @@ func cmdCall(e *Env, args []string) error {
 		}
 	}
 
-	gs, err := gateway.New(gateway.Options{Store: a.st, Key: a.key, Logf: logf})
+	gs, err := gateway.New(gateway.Options{Store: a.st, Key: a.key, Logf: logf, DumpBodies: *debug})
 	if err != nil {
 		return err
 	}
@@ -299,29 +313,31 @@ func cmdCall(e *Env, args []string) error {
 	defer cancel()
 	go func() { _ = gs.Serve(ctx, ln) }()
 
-	text := prompt
-	req := translate.AnthropicRequest{
+	ir := &translate.Request{
 		Model:     usedModel,
 		MaxTokens: *maxTokens,
 		Stream:    *stream,
-		Messages: []translate.AnthropicMessage{
-			{Role: "user", Content: translate.Content{Text: &text}},
-		},
+		Messages: []translate.Message{{
+			Role:   translate.RoleUser,
+			Blocks: []translate.Block{{Kind: translate.BlockText, Text: prompt}},
+		}},
 	}
 	if *system != "" {
-		sysRaw, err := json.Marshal(*system)
-		if err != nil {
-			return err
-		}
-		req.System = sysRaw
+		ir.System = []translate.Block{{Kind: translate.BlockText, Text: *system}}
 	}
-	body, err := json.Marshal(req)
+	body, err := translate.EncodeRequest(inbound, ir, usedModel)
 	if err != nil {
 		return err
 	}
 
+	path := map[string]string{
+		translate.ProtocolAnthropic: "/v1/messages",
+		translate.ProtocolChat:      "/v1/chat/completions",
+		translate.ProtocolResponses: "/v1/responses",
+	}[inbound]
+
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"http://"+ln.Addr().String()+"/v1/messages", bytes.NewReader(body))
+		"http://"+ln.Addr().String()+path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -355,21 +371,23 @@ func cmdCall(e *Env, args []string) error {
 		return nil
 	}
 
-	var out translate.AnthropicResponse
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return fmt.Errorf("响应不是合法 JSON: %w", err)
+	res, err := translate.DecodeResponse(inbound, raw, usedModel)
+	if err != nil {
+		return fmt.Errorf("响应不是合法 %s 报文: %w", inbound, err)
 	}
-	for _, block := range out.Content {
-		switch block.Type {
-		case "text":
+	for _, block := range res.Blocks {
+		switch block.Kind {
+		case translate.BlockText:
 			fmt.Fprintln(e.Stdout, block.Text)
-		case "tool_use":
-			fmt.Fprintf(e.Stdout, "[tool_use] %s %s\n", block.Name, string(block.Input))
+		case translate.BlockToolUse:
+			if block.ToolUse != nil {
+				fmt.Fprintf(e.Stdout, "[tool_use] %s %s\n", block.ToolUse.Name, string(block.ToolUse.Input))
+			}
 		}
 	}
 	if *debug {
-		fmt.Fprintf(e.Stderr, "· 用量 输入 %d / 输出 %d，结束原因 %s，模型 %s\n",
-			out.Usage.InputTokens, out.Usage.OutputTokens, out.StopReason, out.Model)
+		fmt.Fprintf(e.Stderr, "· 用量 输入 %d / 输出 %d（缓存 %d），结束原因 %s，模型 %s\n",
+			res.Usage.In, res.Usage.Out, res.Usage.CacheRead, res.StopReason, res.Model)
 	}
 	return nil
 }

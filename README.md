@@ -11,7 +11,7 @@ switchboard serve                                           # 起网关，127.0.
 switchboard log tail                                        # 看请求记录
 ```
 
-入站 `/v1/messages`（Anthropic Messages），出站支持同协议直通与 OpenAI Chat 互转，含流式与工具调用。字段映射、选号规则、数据模型、里程碑见 [DESIGN.md](DESIGN.md)。
+三种线协议都能进也能出。入站按路径分 anthropic、openai-chat、openai-responses，出站按账号的 `protocol` 字段；入站与出站相同则直通，不同则经中间表示转换，九种组合都可用，流式与工具调用包含在内。中间表示、映射规则、选号规则、数据模型、里程碑见 [DESIGN.md](DESIGN.md)。
 
 ## 命令
 
@@ -25,10 +25,22 @@ switchboard log tail                                        # 看请求记录
 | `model probe` | 逐个模型探活，把能用的写进账号，可按厂商与账号筛选 |
 | `usage` | 按账号、模型或日期汇总用量 |
 | `log tail` | 最近的请求记录 |
-| `call` | 手工打一条请求，打印选号过程 |
+| `call` | 手工打一条请求，打印选号过程；默认 anthropic 入站，`--protocol` 可切换三种入站 |
 | `doctor` | 自检配置、目录、密钥、端口、数据库 |
 
 每个命令都支持 `--json`，结果走 stdout，错误走 stderr。退出码：0 成功、1 运行失败、2 用法错误。
+
+## 入站协议
+
+路径决定入站协议，三条路径同时可用，一个网关可以同时接三种客户端：
+
+| 入站路径 | 入站协议 | 常见客户端 |
+| --- | --- | --- |
+| `POST /v1/messages` | anthropic | Claude Code |
+| `POST /v1/chat/completions` | openai-chat | 普通 OpenAI SDK 客户端 |
+| `POST /v1/responses` | openai-responses | Codex |
+
+出站协议由账号决定：`account add --protocol` 取值 `anthropic`、`openai-chat`、`openai-responses`。入站协议与出站协议相同时直通，请求体只改 `model` 字段，其余字段与值原样带到上游，响应按字节原样返回；不同时经中间表示转换，请求与响应都只搬映射表里定义的字段，表外字段丢弃。未知路径返回 404，请求体解析失败返回 400，错误消息带协议名前缀。
 
 ## 模型从上游拉，再探活
 
@@ -46,13 +58,15 @@ switchboard serve
 
 ## 客户端怎么接
 
-客户端里把三样填成本机地址即可，程序不改任何客户端配置：
+客户端里把地址填成本机网关即可，程序不改任何客户端配置。Claude Code 一例：
 
 ```
 ANTHROPIC_BASE_URL=http://127.0.0.1:4567
 ANTHROPIC_AUTH_TOKEN=switchboard-local    # 本机网关不校验，填个非空值即可
 ANTHROPIC_MODEL=deepseek-v4-pro           # 必须是探活出来的可用模型名
 ```
+
+说 openai-chat 与 openai-responses 的客户端把 base URL 填成 `http://127.0.0.1:4567/v1`，模型名同样取探活出来的可用值；凭据值本机不校验，填一个非空值即可。
 
 ## 构建
 
@@ -75,4 +89,4 @@ make check        # go vet + go test + go build
 
 ## 已知边界
 
-只支持 Anthropic Messages 入站；不改写任何客户端配置文件；冷却时长按单次失败计算；探活调用不计入用量汇总；估算花费需要给账号填 `--price-in` 与 `--price-out`。
+gemini 协议进出都没有实现。转换时丢弃思考与推理内容（anthropic 的 `thinking` 块、chat 的 `reasoning_content`、responses 的 `reasoning` item）、音频与文件类内容、responses 的内置工具（`web_search` 等）；跨协议只搬运图片地址，没有其它多模态变换。不改写任何客户端配置文件；冷却时长按单次失败计算；探活调用不计入用量汇总；估算花费需要给账号填 `--price-in` 与 `--price-out`。

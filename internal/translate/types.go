@@ -78,11 +78,11 @@ type AnthropicResponse struct {
 	Content      []ContentBlock `json:"content"`
 	StopReason   string         `json:"stop_reason,omitempty"`
 	StopSequence *string        `json:"stop_sequence"`
-	Usage        Usage          `json:"usage"`
+	Usage        AnthropicUsage `json:"usage"`
 }
 
-// Usage 是 anthropic 的用量字段。
-type Usage struct {
+// AnthropicUsage 是 anthropic 的用量字段。
+type AnthropicUsage struct {
 	InputTokens              int64 `json:"input_tokens"`
 	OutputTokens             int64 `json:"output_tokens"`
 	CacheReadInputTokens     int64 `json:"cache_read_input_tokens,omitempty"`

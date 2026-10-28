@@ -131,7 +131,7 @@ func cmdServe(e *Env, args []string) error {
 			return err
 		}
 	} else {
-		fmt.Fprintf(e.Stdout, "监听 %s\n入站 /v1/messages（anthropic）\n上游 %d 个账号，%d 个模型\n",
+		fmt.Fprintf(e.Stdout, "监听 %s\n入站 /v1/messages（anthropic） /v1/chat/completions（openai-chat） /v1/responses（openai-responses）\n上游 %d 个账号，%d 个模型\n",
 			ln.Addr().String(), len(accounts), len(models))
 	}
 
