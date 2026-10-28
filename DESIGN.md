@@ -120,7 +120,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 
 全局参数：`--json` 可以写在子命令前后任意位置；`--config <路径>` 与 `--db <路径>` 必须写在子命令之前。
 
-`account` 一组的子命令：`add`、`ls`、`rm`、`test`、`enable`、`disable`。`model` 一组的子命令：`ls`、`sync`、`probe`，后两个都支持 `--provider` 与 `--account` 筛选账号。`provider` 一组的子命令：`ls`、`add`、`rm`，维护厂商默认地址与它的路由（见 5.8）。`--models` 只是手填的初始值，模型列表的常规来源是 `model sync` 拉取加 `model probe` 探活（见 5.7）。
+`account` 一组的子命令：`add`、`ls`、`rm`、`test`、`enable`、`disable`。`model` 一组的子命令：`ls`、`sync`、`probe`，后两个都支持 `--provider` 与 `--account` 筛选账号。`provider` 一组的子命令：`ls`、`add`、`set`、`rm`，维护厂商默认地址、模型列表覆盖与它的路由（见 5.8）；`add` 只新建，改一家已有厂商用 `set`。`--models` 只是手填的初始值，模型列表的常规来源是 `model sync` 拉取加 `model probe` 探活（见 5.7）。
 
 `account`、`model`、`provider`、`log` 四组支持 `-h`、`--help` 与 `help`：把该组的用途与子命令清单（每个子命令一行中文说明）打到 stdout，退出码 0，不读数据库。子命令自己的 `--help` 仍打印该子命令的参数清单。未知子命令退出码 2，提示里给出 `switchboard <组> --help`。
 
@@ -128,17 +128,18 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | --- | --- | --- | --- |
 | `init` | `--force` | 建配置目录与数据目录，写默认配置；`--force` 覆盖 | 两个路径 |
 | `serve` | `--addr`、`--log-level` | 前台起网关，注册三条入站路由与 `/healthz`；启动只统计账号与模型数，不发上游请求 | 启动摘要，之后按请求打日志 |
-| `account add` | `<名称> --provider --key [--protocol] [--base-url] [--models] [--priority]` | 加密存 key；缺 `--base-url` 或 `--protocol` 时从厂商表补：地址取厂商的 `base_url`，协议取该厂商的有效默认协议（`default_protocol` 非空就用它，为空才按协议名排序取第一条路由，见 5.8），两个参数都仍能覆盖。厂商行在但一条路由都没有时算不出默认协议：没给 `--protocol` 也没给 `--base-url` 就报错，提示先 `provider add` 声明路由，或改用这两个参数；给了 `--base-url` 则按自建地址加账号、协议回退 openai-chat。厂商不在表里且没给 `--base-url` 时报错，列出已知厂商、编辑距离不超过 2 时给出最接近的名字，并说明 `--provider <自定义名> --base-url <地址>` 仍可自建；厂商表为空时只认 `--base-url`。`--protocol` 只收 anthropic、openai-chat、openai-responses（见 5.8） | 新账号名称 |
+| `account add` | `<名称> --provider --key [--protocol] [--base-url] [--models] [--priority]` | 加密存 key；缺 `--base-url` 或 `--protocol` 时从厂商表补：地址取厂商的 `base_url`，协议取该厂商的有效默认协议（显式值落在已声明路由上就用它，否则按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 取第一条，见 5.8），两个参数都仍能覆盖。厂商行在但一条路由都没有时算不出默认协议：没给 `--protocol` 也没给 `--base-url` 就报错，提示先 `provider add` 声明路由，或改用这两个参数；给了 `--base-url` 则按自建地址加账号、协议回退 openai-chat。厂商不在表里且没给 `--base-url` 时报错，列出已知厂商、编辑距离不超过 2 时给出最接近的名字，并说明 `--provider <自定义名> --base-url <地址>` 仍可自建；厂商表为空时只认 `--base-url`。`--protocol` 只收 anthropic、openai-chat、openai-responses（见 5.8） | 新账号名称 |
 | `account ls` | `--json` | 列账号、模型数、是否处在冷却；`account_models` 有数据时模型列显示「N 可用 / M 同步」，协议列显示账号默认协议，存在与它不同的已发现协议时写成「openai-chat + 另 1 种」；`--json` 每行多了 `models_usable`、`models_synced` 两个计数与 `protocols`（默认协议在前，其余是模型行上发现到的协议） | 表格 |
 | `account rm` | `<名称>` | 删账号，同时删掉它的 `account_models` 行；关联的请求记录保留 | 确认一行 |
 | `account test` | `<名称>` | 用最小请求探活，更新冷却状态 | 状态码与耗时 |
 | `account enable` | `<名称>` | 重新启用账号并清冷却 | 确认一行 |
 | `account disable` | `<名称>` | 停用账号，不再参与选号 | 确认一行 |
 | `model ls` | `[--provider 厂商]` `[--account 账号]` `--json` | 按模型名列出可用账号与计价来源；`account_models` 有数据时每个账号带状态（可用 / 待探活 / 无权 / 不存在 / 凭据被拒 / 失败），没有任何模型行时回退到 `accounts.models` 并标「手填」；另有协议列，显示该模型在这个账号上的有效出站协议，取值只经 `store.EffectiveProtocol`，行不存在或协议列为空时由它回退到账号协议；`--json` 每个账号多了 `protocol` | 表格 |
-| `provider ls` | `--json` | 列厂商、`base_url`、默认协议与各协议的路由、备注；默认协议是该厂商的有效默认协议（`default_protocol` 非空就用它，为空才按协议名排序取第一条路由，见 5.8），一条路由都没有时显示 `-`，不算错误；`--json` 每项含 `name`、`base_url`、`default_protocol`、`protocols`（每项 `protocol`、`path`、`models_path`）、`note`，没有路由时 `default_protocol` 为空串、`protocols` 为空数组 | 表格 |
-| `provider add` | `<名称> [--base-url] [--protocol] [--note] [--route <协议>=<路径>[:<模型列表路径>]]` | 写入或更新厂商行；`--route` 可重复，一次声明多条 `(厂商, 协议)` 路由，同一协议覆盖、没传入的路由保持原样，所以可以分几次把一家厂商的路由补齐；`--base-url` 新建厂商时必填，只收 `http://`、`https://` 开头，保存时去掉末尾斜杠，补已有厂商的路由或默认协议时可省略，省略则保留库里的地址；缺地址且厂商不存在时报错并说明新建厂商需要 `--base-url`；没给 `--note` 时保留原备注。`--route` 的协议名只收三种线协议、路径与模型列表路径都要以 `/` 开头，写错是用法错误并给出正确示例；`--protocol` 是这家的默认协议，不是某条路由的协议，必须落在本次或此前已声明的路由上（见 5.8），指不到时整笔拒绝、退出码 1，路由也不落库（两者同一个事务）；留空则不设置，已有厂商保留原值（见 5.8） | 确认一行（这次提交几条、现有几条、默认协议） |
+| `provider ls` | `--json` | 列厂商、`base_url`、默认协议、模型列表覆盖与各协议的路由、备注；默认协议是该厂商的有效默认协议（显式值落在已声明路由上就用它，否则按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 取第一条，见 5.8），一条路由都没有时显示 `-`，不算错误；模型列表覆盖为空时显示「按路由」，表示按各路由的 `models_path` 取；`--json` 每项含 `name`、`base_url`、`default_protocol`、`models_path`、`protocols`（每项 `protocol`、`path`、`models_path`）、`note`，没有路由时 `default_protocol` 为空串、`protocols` 为空数组 | 表格 |
+| `provider add` | `<名称> --base-url <地址> [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--default-protocol <协议>] [--note <备注>]` | 只新建：名称已在厂商表里时报错并提示改用 `provider set`，绝不顺手改已有的行。`--base-url` 必填，只收 `http://`、`https://` 开头，保存时去掉末尾斜杠。至少要给一条协议路由，一条都不给就报错（不再需要这家厂商就用 `provider rm`）。三个协议 flag 各声明 `(厂商, 协议)` 的一条路由，值是相对 `base_url` 的完整路径、必须以 `/` 开头，写错是用法错误并给出正确示例；没给模型列表路径时按规则自动填：`openai`（openai-chat）路由把尾部 `/chat/completions` 换成 `/models`（`/v1/chat/completions` → `/v1/models`、`/chat/completions` → `/models`），其余协议留空表示回退到同厂商其它协议的非空值（见 5.8）。`--default-protocol` 是这家的默认协议，必须落在这次声明的路由上，否则整笔拒绝、退出码 1、一条路由都不落库；缺省时按固定顺序 `openai` → `openai-responses` → `anthropic` 取第一条已声明的路由。没有 `--gemini`：gemini 协议尚未实现，留一条永远用不上的路由只会误导 | 确认一行（地址、默认协议、几条路由） |
+| `provider set` | `<名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--models-path <路径>] [--default-protocol <协议>] [--note <备注>]` | 改一家已有的厂商：只改传入的字段，其余一律保留。协议 flag 传空串（例如 `--openai ""`）表示删掉那条路由；删到一条都不剩时报错，整体删厂商走 `provider rm`。删掉的路由正好是默认协议时整笔拒绝，提示先加路由或改 `--default-protocol`（同一事务里一起改则放行）；`--default-protocol ""` 表示清掉显式值、回到固定顺序。`--models-path` 是厂商级的模型列表路径覆盖，以 `/` 开头，传空串表示不覆盖、回到按路由取。没给模型列表路径的路由按 `openai` 推导规则重算，手工填过的值保持不动。厂商不存在时报错并提示用 `provider add` 新建 | 确认一行（改了几项、现有几条路由、默认协议） |
 | `provider rm` | `<名称> [--force]` | 删除厂商行与它的全部路由行；仍有账号指向该厂商时列出这些账号并拒绝，加 `--force` 才删，删完说明这些账号仍保留自己的 `base_url` | 确认一行，或待确认的账号清单 |
-| `model sync` | `[--provider 厂商]` `[--account 账号]` | 对选中的账号 GET 上游模型列表：地址按账号默认协议那条路由的 `models_path` 拼出，为空时回退到同厂商第一条非空 `models_path`，没有厂商行时按 `base_url` 后缀猜（见 5.8）；解析 `{data:[{id}]}`，按名字排序去重，空列表算该账号失败。结果写 `account_models`：新行状态 `synced`，已有行保留探活状态，上游已消失的行删除。只改 `account_models`，不动 `accounts.models`。某个账号失败时其余账号照常处理完 | 表格（账号 / 厂商 / 模型 / 新增 / 备注）与下一步 `model probe` 的提示；`--json` 是数组，每项 `account`、`provider`、`models`、`added`、`error`（只有失败才有） |
+| `model sync` | `[--provider 厂商]` `[--account 账号]` `[--endpoint <路径>]` | 对选中的账号 GET 上游模型列表：地址按厂商的 `models_path` 覆盖、账号协议那条路由的 `models_path`、同厂商按协议名排序的第一条非空 `models_path` 的顺序取，都没有时按 `base_url` 后缀猜；凭据头跟「实际取到这条路径的那条路由」的协议走，不是账号协议（见 5.7）。`--endpoint` 只影响这一次调用，值是相对该厂商 `base_url` 的完整路径、必须以 `/` 开头，给了就压过厂商覆盖与路由，作用于被选中的每个账号；解析 `{data:[{id}]}`，按名字排序去重，空列表算该账号失败。结果写 `account_models`：新行状态 `synced`，已有行保留探活状态，上游已消失的行删除。只改 `account_models`，不动 `accounts.models`。某个账号失败时其余账号照常处理完 | 表格（账号 / 厂商 / 模型 / 新增 / 备注）与下一步 `model probe` 的提示；`--json` 是数组，每项 `account`、`provider`、`models`、`added`、`error`（只有失败才有） |
 | `model probe` | `[--provider 厂商]` `[--account 账号]` `[--sync]` `[--model 模型]` `[--limit N]` `[--concurrency N]` `[--max-age 时长]` `[--refresh]` | 逐账号对每个模型发一条 `max_tokens=1` 的请求判定可用性，结果写 `account_models`；每次上游调用同时写一行 `requests`（见 5.5）。`status` 为 `usable`、`forbidden`、`notfound` 之一且 `checked_at` 在 `--max-age`（默认 `24h`）以内的模型跳过，不发上游请求、不写库、不出现在输出里；`synced`、`auth`、`error` 与 `checked_at` 为 0 的照常探；`--refresh` 或 `--max-age 0` 忽略新鲜度全部重探。该账号库里出现 `usable` 时，把库里**全部** `usable` 写成该账号的 `accounts.models`（不只是本次探到的），选号从此按该列表。没有模型行或带 `--sync` 时先同步；`--model` 只探一个模型名，`--limit` 截断的是跳过之后剩下的待探模型，`--concurrency` 默认 4 且不超过待探模型数；待探模型被全部跳过时仍按库里 `usable` 回写 `accounts.models`，该账号算作已满足；任一账号出现 401 即停止后续账号并返回错误；所有账号都没探出可用模型时退出码 1 且不改任何 `accounts.models`，错误信息带本次探活数与跳过数 | 表格（账号 / 模型 / 状态 / HTTP / 耗时 / 备注）与该账号的「本次探活 N 个 / 跳过 M 个」和可用 / 无权 / 不存在 / 失败计数；`--json` 是数组，每项 `account`、`model`、`status`、`http_status`、`latency_ms`、`message`，只含本次被探的模型，计数只出现在人读输出里 |
 | `usage` | `--since`、`--by account\|model\|day` | 汇总请求数、token、估算花费 | 表格 |
 | `log tail` | `-n`、`--follow` | 最近的请求记录；`--follow` 跟随 | 表格 |
@@ -272,9 +273,11 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 
 两个命令分工明确，一个管「上游有哪些模型」，一个管「哪几个真能用」。两者都按账号处理，并支持同样的筛选：`--provider` 精确匹配账号的 `provider` 字段，`--account` 精确匹配账号名，两个都给时账号必须属于该厂商，否则报错；不带筛选参数时处理全部账号，按账号逐个进行。
 
-`model sync [--provider 厂商] [--account 账号]` 只解决前者：
+`model sync [--provider 厂商] [--account 账号] [--endpoint <路径>]` 只解决前者：
 
-- 模型列表地址按路由解析：先取账号默认协议那条路由的 `models_path`；它为空时取同一厂商里按协议名排序的第一条非空 `models_path`；厂商行存在但一个非空 `models_path` 都没有时报错，提示用 `--models` 手填；厂商行不存在时仍按 `base_url` 后缀猜（见 5.8）。
+- 模型列表地址按这个顺序取，纯规则在 `store.ResolveModelsPath`：`--endpoint` 给的路径（只作用于这一次调用，压过下面全部）→ 厂商级 `providers.models_path` 覆盖 → 账号协议那条路由的 `models_path` → 同厂商按协议名排序的第一条非空 `models_path`；厂商行存在且声明了路由、但一个非空 `models_path` 都没有时报错，提示用 `--models` 手填或 `provider set --models-path <路径>` 补上；厂商行不存在或一条路由都没声明时按 `base_url` 后缀猜（见 5.8）。
+- 凭据头与地址一起定：地址来自哪条路由，就用那条路由的协议选凭据头（anthropic 用 `x-api-key`，另两家用 `Bearer`）；厂商级覆盖与 `--endpoint` 没有自己的协议，按账号协议发。deepseek 的 anthropic 账号取到的是 chat 路由上的 `/v1/models`，所以必须发 `Bearer`——按账号协议发 `x-api-key` 只会换回 401/403，还把错误指到「凭据无效」上。
+- `model sync --endpoint <路径>` 只影响这一次调用：值是相对该厂商 `base_url` 的完整路径、必须以 `/` 开头，给了就忽略厂商覆盖、路由的 `models_path` 与 `base_url` 兜底，作用于被选中的每个账号。
 - 响应按 `{data:[{id}]}` 解析，按名字排序去重。上游返回空列表算该账号失败。
 - 结果写进 `account_models`：新出现的模型行状态为 `synced`，已存在的行保留既有探活状态，上游已消失的行删除。
 - 协议发现结果不被同步清掉：写入走 `INSERT … ON CONFLICT(account_id, model) DO NOTHING`，已存在的行一个字段都不动，`status`、`checked_at` 与 `protocol` 原样保留，只有新出现的行拿默认值。一次同步不会把探活与协议发现的结论推倒重来。
@@ -332,13 +335,19 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 
 出站地址不由代码里的厂商表决定，也不靠 `base_url` 末尾有没有 `/v1` 猜后缀：同一个 `base_url` 上不同协议的路径并不一样，猜出来的地址对其中一种协议一定是错的。deepseek 的 chat 在 `/v1/chat/completions`，anthropic 在 `/anthropic/v1/messages`；commandcode 的 base 是 `https://api.commandcode.ai/provider/v1`，chat 在 `/chat/completions`、anthropic 在 `/messages`，模型列表在 `/models`。
 
-- `providers` 一行提供 `base_url`、备注与一列默认协议；协议的路径细节一律在 `provider_routes` 上，厂商行不存路径。
+- `providers` 一行提供 `base_url`、备注、一列默认协议与一列模型列表路径覆盖；协议的路径细节一律在 `provider_routes` 上，厂商行不存转发路径。
 - `provider_routes` 按 `(厂商, 协议)` 存完整路径 `path` 与模型列表路径 `models_path`。完整地址是 `base_url` 去掉末尾斜杠后直接拼 `path`，不做任何猜测与补全。
+- 协议由三个 flag 声明：`--anthropic`、`--openai`（openai-chat）、`--responses`（openai-responses）。没有 `--gemini`：gemini 协议进出都没实现，留一条永远用不上的路由只会误导。`provider add` 用它们新建，`provider set` 用它们覆盖或（传空串）删掉一条路由。
+- `models_path` 的推导只发生在写入侧，读取侧不拿它重算。写入时没给模型列表路径的路由按规则补默认值（`store.DeriveModelsPath`）：openai-chat 路由把尾部 `/chat/completions` 换成 `/models`（`/v1/chat/completions` → `/v1/models`、`/chat/completions` → `/models`），其它协议留空，表示这条协议没有自己的列表接口、读取时回退到同厂商其它协议的非空值。推导值跟着路径走：改路径时只有「空」或「原本就是旧路径的推导值」才换成新推导值，手工填过的值不动。内置 `anthropic` 厂商只有 anthropic 一条路由，没有 openai 路由可以推导，它的 `/v1/models` 因此不会因为重写那条路由而消失——读取侧推导会让 anthropic 型账号彻底失去模型列表来源。
+- `providers.models_path` 是厂商级覆盖：非空时 `model sync` 直接用它，不看路由；空串表示不覆盖、按路由取。要改一家上游的列表地址又不想逐条写 `models_path` 时用它。
+- 模型列表的凭据头跟取到路径的那条路由的协议走（见 5.7），不是账号协议：deepseek 的 anthropic 账号用的是 chat 路由上的 `/v1/models`，就得发 `Bearer`。
 - 账号行仍固化自己的 `base_url`（`account add` 时写入厂商默认值）。改厂商表只影响之后新加的账号，已有账号的地址不变。
 - 厂商行存在但没有该协议的路由，以及账号的 `provider` 在表里根本不存在（用户显式 `--base-url` 的自建地址），都退回原来的后缀猜测：末尾是 `/v1` 就补 `/chat/completions`、`/messages` 或 `/responses`，否则补 `/v1` 再接同样的后缀；模型列表同理补 `/models` 或 `/v1/models`。自建地址因此仍然可用。
-- 探活的候选协议跟着路由收紧：只用该厂商在 `provider_routes` 里声明过的协议，不去打这家没有声明的路径；没有厂商行的账号仍三种全试。顺序（已发现的协议、账号协议在前，其余按协议名排序）见 5.7。
-- 默认协议：显式列优先，空则按协议名排序兜底。`providers.default_protocol` 非空就用它；为空（自建厂商没填）才取该厂商在 `provider_routes` 里按协议名排序的第一条。`account add` 用它补账号的 `protocol`，`provider ls` 也显示它，两处同一个规则。规则是纯函数 `store.ResolveDefaultProtocol`，读库入口是 `store.EffectiveProviderProtocol`：厂商不存在返回 `ErrProviderNotFound`，厂商在但一条路由都没有时返回空串与 `ErrProviderNoRoutes`，提示文案由调用方写，`cli` 不再自己算这条回退。**不能一律靠排序猜**：deepseek 与 commandcode 都同时声明了 `openai-chat` 与 `anthropic` 两条路由，协议名排序把 `anthropic` 排在前面，默认协议就会从升级前的 `openai-chat` 变成 `anthropic`，这两个厂商的账号在升级前后默认协议不一致。所以升级前的默认值由迁移 `0007` 逐家显式种进 `default_protocol`：`anthropic` 自己是 `anthropic`，其余 7 家是 `openai-chat`。默认协议只能指向这家已声明的路由，指不到时 `AddProvider` 整笔拒绝并说明先补路由还是改默认协议。厂商行存在但一条路由都没有时，`account add` 仍回退到 openai-chat。
-- `provider add` 只覆盖传入的那几条 `(厂商, 协议)`：同一家厂商可以分几次补路由，后加的一次不会删掉先前加过的路由；`base_url` 每次都以传入值为准并去掉末尾斜杠，没给 `--note` 时备注保持原样。`provider rm` 删厂商行与它的全部路由，仍有账号指过来时先列出这些账号并拒绝，`--force` 才删；账号行只存 `provider` 字符串，删厂商不影响已有账号的 `base_url`。
+- 探活的候选协议跟着路由收紧：只用该厂商在 `provider_routes` 里声明过的协议，不去打这家没有声明的路径；没有厂商行的账号仍三种全试。顺序（已发现的协议、账号协议在前，其余按协议名排序）见 5.7。读库失败时报错，不放宽成三种全试——放宽等于去打这家没声明的路径，把一次读库故障变成对错误地址的上游调用。
+- 默认协议：显式值优先，但必须落在这家已声明的路由上；否则按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 取第一条已声明的路由，一条路由都没有时为空。`account add` 用它补账号的 `protocol`，`provider ls` 也显示它，两处同一个规则。规则是纯函数 `store.ResolveDefaultProtocol`，读库入口是 `store.EffectiveProviderProtocol`：厂商不存在返回 `ErrProviderNotFound`，厂商在但一条路由都没有时返回空串与 `ErrProviderNoRoutes`，提示文案由调用方写，`cli` 不再自己算这条回退。**不能靠协议名字典序兜底**：deepseek 与 commandcode 都同时声明了 `openai-chat` 与 `anthropic` 两条路由，字典序把 `anthropic` 排在前面，默认协议就会从升级前的 `openai-chat` 变成 `anthropic`，这两个厂商的账号在升级前后默认协议不一致。升级前的默认值因此由迁移 `0007` 逐家显式种进 `default_protocol`：`anthropic` 自己是 `anthropic`，其余 7 家是 `openai-chat`。
+- 默认协议的写入侧与读取侧分工：`provider add` 的 `--default-protocol` 必须落在这次声明的路由上，`provider set` 改完之后必须仍然指向一条存在的路由（删掉它的那条路由又不动默认协议时整笔拒绝，提示先加路由或改默认协议），两处都是同一个事务，指不到就一条都不落库。读取侧对历史脏数据（旧版本删路由时没清默认协议）按固定顺序回退到仍然存在的路由，不静默交给后缀猜测。
+- `base_url` 的 `http://`、`https://` 前缀与「去掉末尾斜杠」在 `store` 的三个写入口（`CreateProvider`、`SetProvider`、`AddProvider`）里校验，`cli` 那层不再是唯一防线：脏地址一旦落库，转发与模型同步都会拿它拼路径。
+- `provider add` 只新建，`provider set` 只改传入的字段；两者都在一个事务里写厂商行与路由，失败时不留半条记录。`provider rm` 删厂商行与它的全部路由，仍有账号指过来时先列出这些账号并拒绝，`--force` 才删；账号行只存 `provider` 字符串，删厂商不影响已有账号的 `base_url`。
 - 凭据头仍按协议而不是按厂商：anthropic 用 `x-api-key` 加 `anthropic-version`，另两种用 `Bearer`。
 
 `base_url` 与 `path` 拼出来的完整地址，几行示例：
@@ -350,7 +359,7 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 | commandcode | openai-chat | `https://api.commandcode.ai/provider/v1/chat/completions` |
 | commandcode | anthropic | `https://api.commandcode.ai/provider/v1/messages` |
 
-种子数据在迁移 `0006` 里，默认协议在迁移 `0007` 里，不在代码里。`providers` 表为空不算错误：用户可以把种子厂商删光，此时所有账号走兜底。维护用 `provider` 子命令（见 4）。
+种子数据在迁移 `0006` 里，默认协议在迁移 `0007` 里，厂商级模型列表覆盖那一列在迁移 `0008` 里，都不在代码里。`providers` 表为空不算错误：用户可以把种子厂商删光，此时所有账号走兜底。维护用 `provider` 子命令（见 4）。
 
 ## 6 数据模型
 
@@ -408,7 +417,8 @@ CREATE TABLE providers (
   name             TEXT PRIMARY KEY,
   base_url         TEXT NOT NULL,
   note             TEXT NOT NULL DEFAULT '',
-  default_protocol TEXT NOT NULL DEFAULT ''
+  default_protocol TEXT NOT NULL DEFAULT '',
+  models_path      TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE provider_routes (
@@ -426,11 +436,17 @@ CREATE TABLE provider_routes (
 
 这个列只有一个写入口 `SetModelProtocol`，由探活发现协议后调用（见 5.7）。`SetModelStatus` 只改 `status`、`http_status`、`error`、`checked_at`，不动 `protocol`；`ReplaceModels` 的 `ON CONFLICT DO NOTHING` 也只给新行写默认值，同步不会覆盖已发现的协议。旧库升上来时整列默认空串，也就是全部回退到账号协议，行为与 M7 一致。
 
-`providers` 与 `provider_routes` 由迁移 `0006` 建立并种入已知厂商，`providers.default_protocol` 由迁移 `0007` 加入并显式种入升级前的默认协议，行里没有凭据，只有地址与路径。`providers` 一行只提供 `base_url`、备注与默认协议，协议细节全在 `provider_routes` 的 `(厂商, 协议)` 上；两者之间没有外键，所以删厂商行时必须连带删它的路由行，`DeleteProvider` 在一个事务里一起做。`providers` 表为空不算错误：种子行可以被用户删光，此时所有账号回退到后缀猜测。账号行仍固化自己的 `base_url`，改厂商表只影响之后新加的账号。`AddProvider` 在一个事务里写厂商行并按 `(厂商, 协议)` 覆盖或新增路由，没传入的路由不动，所以同一个厂商可以分几次补齐路由。读路由只有 `LookupProviderRoute` 一个入口，转发、模型同步与探活都经过它。
+`providers` 与 `provider_routes` 由迁移 `0006` 建立并种入已知厂商，`providers.default_protocol` 由迁移 `0007` 加入并显式种入升级前的默认协议，`providers.models_path` 由迁移 `0008` 加入（老行一律空串，表示不覆盖），行里没有凭据，只有地址与路径。`providers` 一行只提供 `base_url`、备注、默认协议与模型列表覆盖，协议细节全在 `provider_routes` 的 `(厂商, 协议)` 上；两者之间没有外键，所以删厂商行时必须连带删它的路由行，`DeleteProvider` 在一个事务里一起做。`providers` 表为空不算错误：种子行可以被用户删光，此时所有账号回退到后缀猜测。账号行仍固化自己的 `base_url`，改厂商表只影响之后新加的账号。写入口是 `CreateProvider`（`provider add`，名称已存在时报 `ErrProviderExists`，不隐式更新）与 `SetProvider`（`provider set`，patch 里为 nil 的字段不动，协议路由传空串即删）：两者都在一个事务里写厂商行与路由，`CreateProvider` 至少要一条路由，`SetProvider` 删到一条不剩时报错，另有一个过渡用的 `AddProvider`（upsert，允许零路由，留给还没改造的 `provider add`）。读路由只有 `LookupProviderRoute` 一个入口，转发、模型同步与探活都经过它。
 
-`providers.default_protocol` **空字符串表示这家没有显式默认协议**：有效默认协议回退到按协议名排序的第一条路由（用户自建的厂商通常不填）。纯规则在 `store.ResolveDefaultProtocol`，读库入口是 `store.EffectiveProviderProtocol(provider)`：厂商不存在返回 `ErrProviderNotFound`，厂商在但一条路由都没有时返回空串与 `ErrProviderNoRoutes`，文案留给调用方。这个列只由 `AddProvider` 写：传入非空时必须是这家「这次传入」或「此前已声明」的路由之一，否则整笔事务拒绝；传入空串表示不改这一列，新建的行即空串，已存在的行保留原值。旧库升上来时 8 家种子厂商由 `0007` 拿到显式默认协议，用户自建的厂商保持空串。
+`provider_routes.models_path` 是写入侧的默认值，不是读取侧的唯一来源：`CreateProvider`/`SetProvider` 写一条没有模型列表路径的路由时按 `DeriveModelsPath` 补（只给 openai-chat 补，尾部 `/chat/completions` 换成 `/models`），其它协议留空表示「这条协议没有自己的列表接口」。空串在读取时回退到同厂商其它协议的非空值，纯规则在 `store.ResolveModelsPath`：厂商级覆盖 → 账号协议那条路由 → 协议名排序的第一条非空值，返回路径时一并返回这条路径所属的协议，模型同步按它选凭据头。推导不放在读取侧，因为内置 `anthropic` 厂商只有 anthropic 一条路由，读时推导会让 anthropic 型账号彻底失去模型列表来源。
 
-迁移用 `internal/store/migrations/*.sql`，按文件顺序执行，`PRAGMA user_version` 记录已执行版本。
+`providers.default_protocol` **空字符串表示这家没有显式默认协议**：有效默认协议按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 回退到第一条已声明的路由（用户自建的厂商通常不填）。纯规则在 `store.ResolveDefaultProtocol`：显式值必须落在已声明的路由上才用它，指不到时同样按固定顺序回退——历史脏数据因此不会静默交给后缀猜测。读库入口是 `store.EffectiveProviderProtocol(provider)`：厂商不存在返回 `ErrProviderNotFound`，厂商在但一条路由都没有时返回空串与 `ErrProviderNoRoutes`，文案留给调用方。写入侧保证不产生悬空值：`CreateProvider` 的默认协议必须落在这次声明的路由上，`SetProvider` 改完之后必须仍指向一条存在的路由，否则整笔事务拒绝；`SetProvider` 传空串表示清掉显式值、回到固定顺序。旧库升上来时 8 家种子厂商由 `0007` 拿到显式默认协议，用户自建的厂商保持空串。
+
+`providers` 的三个写入口（`CreateProvider`、`SetProvider`、`AddProvider`）都在 `store` 里校验 `base_url` 的 `http://`、`https://` 前缀并去掉末尾斜杠，`cli` 那层不再是唯一防线。
+
+一次尝试的账与它的结论在同一个事务里落库：`RecordAttempt` 先写 `requests` 一行，再按 `AttemptState` 记冷却（`fail_streak` 加一）、清冷却（清零）或停用账号，中途失败整笔回滚。冷却、清零与停用的 SQL 只在 `recordFailureTx`、`clearFailureTx`、`setEnabledTx` 里，`RecordFailure`、`ClearFailure`、`SetEnabled` 与 `RecordAttempt` 都调它们，写入口仍然只有一处。
+
+迁移用 `internal/store/migrations/*.sql`，按文件名前缀解析出的版本号升序执行，`PRAGMA user_version` 记录已执行版本；版本号来自文件名而不是文件在排序结果里的下标，改名或删文件不会让老库的升级整体错位。
 
 ## 7 里程碑
 
@@ -445,9 +461,10 @@ CREATE TABLE provider_routes (
 | M6 | 协议矩阵：三入站 × 三出站 + 同协议直通，中间表示与三个编解码器，流式增量 | 9 种组合的非流式与流式用例通过；对真实上游三种入站各打一条能拿到回复 |
 | M7 | 模型探活跳过与记账：`model probe` 按 `--max-age` 跳过有定论且新鲜的结论、`--refresh` 强制重探，每次探活的上游调用写一行 `requests` 并带缓存读写 | `TestModelProbe*` 覆盖跳过、刷新、`--limit`、记账、零可用的跳过计数，`TestProbeModel*` 覆盖各状态判定、401 停用与探活请求行；`log tail` 能看到探活行，零可用时 `accounts.models` 不变 |
 | M8 | 协议归属从账号降到模型：`account_models.protocol`（迁移 `0005`）覆盖账号的 `protocol`，探活顺手发现协议，选号与转发按有效协议算，同步不覆盖发现结果 | 同一账号下两个模型可以分别走 anthropic 与 openai-chat：各自打到正确的路径与凭据头，「入站 == 出站」按模型协议算；协议发现用例覆盖 `404`、`403`、`400 指向端点` 三种失败换协议、账号协议直接成功只花一次调用、`401` 不换协议并停用账号；`EffectiveProtocol` 在行不存在或列为空时回退账号；旧库升上来 `protocol` 默认为空串，`ReplaceModels` 不动已发现的协议 |
-| M9 | 厂商与路由进库：`providers` 与 `provider_routes`（迁移 `0006`），出站地址按 `(厂商, 协议)` 的 `path` 拼，模型列表按 `models_path` 取，探活候选协议按厂商声明过的路由收紧；没有厂商行的账号保留后缀猜测 | 空库跑到最新版本后种子逐行对上，11 条路由拼出的完整地址与 `models_path` 全部正确；deepseek 账号下 anthropic 模型打到 `/anthropic/v1/messages` 并带 `x-api-key`，chat 模型打到 `/v1/chat/completions` 并带 `Bearer`；只有一条路由的厂商探活失败时上游只收到一次请求，deepseek 试两条；`models_path` 为空时回退到同厂商第一条非空路径，全空时报错文案带「用 --models 手填」；自定义 `base_url` 且 `provider` 不在表里时仍按后缀猜测；空库跑到最新版本与从 `0006` 升级两条路径下，8 家的 `default_protocol` 逐行对上，显式默认优先于排序兜底，deepseek 与 commandcode 的默认协议仍是 `openai-chat`（单靠排序会给 `anthropic`） |
+| M9 | 厂商与路由进库：`providers` 与 `provider_routes`（迁移 `0006`），出站地址按 `(厂商, 协议)` 的 `path` 拼，模型列表按 `models_path` 取，探活候选协议按厂商声明过的路由收紧；没有厂商行的账号保留后缀猜测 | 空库跑到最新版本后种子逐行对上，11 条路由拼出的完整地址与 `models_path` 全部正确；deepseek 账号下 anthropic 模型打到 `/anthropic/v1/messages` 并带 `x-api-key`，chat 模型打到 `/v1/chat/completions` 并带 `Bearer`；只有一条路由的厂商探活失败时上游只收到一次请求，deepseek 试两条；`models_path` 为空时回退到同厂商第一条非空路径，全空时报错文案带「用 --models 手填」；自定义 `base_url` 且 `provider` 不在表里时仍按后缀猜测；空库跑到最新版本与从 `0006` 升级两条路径下，8 家的 `default_protocol` 逐行对上，显式默认优先于固定顺序兜底，deepseek 与 commandcode 的默认协议仍是 `openai-chat`（单靠协议名字典序会给 `anthropic`） |
+| M10 | 厂商命令面与模型列表路径：`provider add` 只新建、`provider set` 增量改（协议 flag 传空串即删路由）、默认协议按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 兜底，`models_path` 的写入默认值与厂商级覆盖（迁移 `0008`），模型列表的凭据头跟着取到路径的那条路由走，`model sync --endpoint`，`base_url` 校验下沉到 store，探活读库失败报错而不放宽候选协议 | 空库与从 `0007` 升级两条路径都到最新版本：升级后 `provider_routes.models_path` 还在、路由数据一个字段不动、`providers.models_path` 全场空串；`provider add` 重名报 `ErrProviderExists` 并提示 `provider set`，一条路由都不给报错；`provider set` 只改传入的字段，协议 flag 传空串删路由，删到一条不剩报错，默认协议悬空整笔拒绝（同一次里一起改则放行）；`/v1/chat/completions` → `/v1/models`、`/chat/completions` → `/models`、anthropic 路由留空，重写内置 `anthropic` 厂商的 `/v1/messages` 之后它的 `/v1/models` 仍在；deepseek 的 anthropic 账号同步模型列表打到 `/v1/models` 并带 `Bearer`（不是 `x-api-key`）；`--endpoint /v1/model` 压过厂商覆盖与路由，相对路径报错且不发请求；默认协议显式优先、缺省按固定顺序、指不到路由拒绝、悬空的历史值按固定顺序回退 |
 
-M0 到 M9 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkeleton` 用假上游验证：初始化、加账号、`call`、`log tail`、`usage`、`doctor` 全链路走通。协议矩阵由 `internal/gateway/matrix_test.go` 与 `matrix_stream_test.go` 验证：9 种组合的非流式与流式各跑一遍，同协议直通的「不改字节」「保留陌生字段」与跨协议的「丢弃陌生字段」单独有用例。协议降级到模型的那部分由 `internal/gateway` 的 `TestProbeModel*` 与 `TestForwardUsesModelProtocol` 验证，迁移兼容由 `internal/store` 的 `TestMigration0005*`、`TestMigration0006*`、`TestMigration0007*` 与 `TestMigrationsRunToLatestFromEmptyDB` 验证；厂商路由的解析、探活收紧与模型列表回退由 `internal/store` 的 `TestProvider*` 与 `internal/gateway` 的 `TestForwardUsesProviderRoute`、`TestEndpointFallsBackWithoutProviderRoute`、`TestProbeModelNarrowsCandidatesByProvider`、`TestProbeModelStartsFromDiscoveredProtocol`、`TestSyncModelsUsesProviderModelsPath`、`TestSyncModelsWithoutModelsPath` 验证。上游是 `httptest` 假服务，M5、M6、M7、M8 与 M9 里涉及真实厂商的那部分需要拿到 key 后手工验收。
+M0 到 M10 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkeleton` 用假上游验证：初始化、加账号、`call`、`log tail`、`usage`、`doctor` 全链路走通。协议矩阵由 `internal/gateway/matrix_test.go` 与 `matrix_stream_test.go` 验证：9 种组合的非流式与流式各跑一遍，同协议直通的「不改字节」「保留陌生字段」与跨协议的「丢弃陌生字段」单独有用例。协议降级到模型的那部分由 `internal/gateway` 的 `TestProbeModel*` 与 `TestForwardUsesModelProtocol` 验证，迁移兼容由 `internal/store` 的 `TestMigration0005*`、`TestMigration0006*`、`TestMigration0007*` 与 `TestMigrationsRunToLatestFromEmptyDB` 验证；厂商路由的解析、探活收紧与模型列表回退由 `internal/store` 的 `TestProvider*` 与 `internal/gateway` 的 `TestForwardUsesProviderRoute`、`TestEndpointFallsBackWithoutProviderRoute`、`TestProbeModelNarrowsCandidatesByProvider`、`TestProbeModelStartsFromDiscoveredProtocol`、`TestSyncModelsUsesProviderModelsPath`、`TestSyncModelsWithoutModelsPath` 验证。厂商写入口与模型列表路径由 `internal/store` 的 `TestCreateProvider*`、`TestSetProvider*`、`TestDeriveModelsPath`、`TestResolveModelsPath`、`TestRouteModelsPathDerivedOnWrite`、`TestStoreWritePathsValidateBaseURL`、`TestMigration0008*` 与 `internal/gateway` 的 `TestSyncModelsAuthFollowsModelsPathRoute`、`TestSyncModelsProviderModelsPathOverride`、`TestSyncModelsWithEndpointOverride`、`TestSyncModelsNoModelsPathAnywhere` 验证；一次尝试的账与结论一起提交由 `internal/store` 的 `TestRecordAttemptWritesRowAndStateTogether` 验证。上游是 `httptest` 假服务，M5、M6、M7、M8、M9 与 M10 里涉及真实厂商的那部分需要拿到 key 后手工验收。
 
 已知未做，按已知行为处理：
 
@@ -455,7 +472,7 @@ M0 到 M9 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkele
 - 模型名不做别名归一，请求里的 `model` 必须与账号 `--models` 里的名字完全一致。
 - 不带任何客户端配置改写：客户端里的 base URL、token、模型名都靠自己填。
 - 探活并发默认 4，`--concurrency` 可以改，只是默认值，不会根据上游限速自适应。
-- gemini 协议进出都没有实现：既没有入站路径，也不在账号的 `protocol` 可选值里。
+- gemini 协议进出都没有实现：既没有入站路径，也不在账号的 `protocol` 可选值里，`provider add/set` 也没有 `--gemini`——留一条永远用不上的路由只会误导。
 - 思考与推理内容在转换时丢弃：anthropic 的 `thinking` 块、chat 的 `reasoning_content`、responses 的 `reasoning` item 都不进中间表示。
 - 音频与文件类内容丢弃，只搬运文本、图片、工具调用与工具结果四类块。
 - responses 的内置工具（`web_search` 等）丢弃，工具定义只认 function。
@@ -492,6 +509,6 @@ internal/usage/         用量汇总与花费估算
 
 ## 10 需要外部信息才能定的点
 
-- 各家上游的默认 base-url 与各协议的路径不再需要外部信息：迁移 `0006` 把已知厂商种进 `providers` 与 `provider_routes`，以后用 `provider ls|add|rm` 维护，新增厂商不必改代码重编译。新厂商的 `path` 与 `models_path` 要以它的文档为准：两者都是完整路径，程序只在 `base_url` 去掉末尾斜杠后直接拼接，不做补全。
+- 各家上游的默认 base-url 与各协议的路径不再需要外部信息：迁移 `0006` 把已知厂商种进 `providers` 与 `provider_routes`，以后用 `provider ls|add|set|rm` 维护，新增厂商不必改代码重编译。新厂商的 `path` 要以它的文档为准：它是完整路径，程序只在 `base_url` 去掉末尾斜杠后直接拼接，不做补全；模型列表路径没给时只给 openai-chat 路由按 `/chat/completions` → `/models` 推导，别的上游文档写法不同就显式给 `models_path`（厂商级覆盖或那条路由的值）。
 - 各家模型名清单，以及某家是否兼容 `openai-chat`。
 - 各家价格，用于估算花费。缺价格就记 null。

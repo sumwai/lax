@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,8 +16,8 @@ import (
 	"switchboard/internal/translate"
 )
 
-// ModelsEndpoint 是 base_url 加协议的后缀猜测，作为没有厂商路由时的兜底：末尾带不带 /v1 都行。
-// 正常路径上的地址走 Server.modelsEndpoint（按 provider_routes.models_path 取）。
+// ModelsEndpoint 是 base_url 加 /v1/models 的兜底：账号没有厂商行、或厂商一条路由都没声明时用它，
+// 末尾带不带 /v1 都行。正常路径上的地址走 Server.modelsEndpoint（按厂商覆盖与路由的 models_path 取）。
 func ModelsEndpoint(base string) string {
 	base = strings.TrimRight(base, "/")
 	if strings.HasSuffix(base, "/v1") {
@@ -25,68 +26,86 @@ func ModelsEndpoint(base string) string {
 	return base + "/v1/models"
 }
 
-// modelsEndpoint 解析账号的模型列表地址（见 DESIGN 5.8）：
-//  1. 先看账号默认协议那条路由的 models_path；
-//  2. 它为空时退到同一厂商里按协议名排序的第一条非空 models_path
-//     （deepseek 的 anthropic 账号因此仍能拿 openai-chat 那份列表）；
-//  3. 厂商行存在但一个非空 models_path 都没有时报错，提示手填；
-//  4. 厂商行不存在（自建地址）时按 base_url 后缀猜，与升级前一致。
-func (s *Server) modelsEndpoint(a store.Account) (string, error) {
+// modelsEndpoint 解析账号的模型列表地址，同时返回这条地址该用哪种协议发凭据头（见 DESIGN 5.7）：
+//
+//  1. override 非空（`model sync --endpoint`）时用它，压过下面全部，协议取账号协议；
+//  2. 厂商行不存在（自建地址）、或厂商行在但既没有路由也没有 models_path 覆盖时，按 base_url 后缀猜，
+//     与升级前一致；
+//  3. 厂商级 models_path 非空时用它，协议取账号协议（覆盖是厂商级设置，没有自己的协议）；
+//  4. 否则从路由取：账号协议那条的 models_path，为空再退到同厂商按协议名排序的第一条非空值；
+//  5. 厂商声明了路由但一个非空 models_path 都没有时报错，提示手填或 `provider set --models-path`。
+//
+// 协议必须与路径一起回去：凭据头按协议选（anthropic 用 x-api-key，另两家用 Bearer），
+// 地址来自哪条路由就用哪条路由的协议。deepseek 的 anthropic 账号取到的是 chat 的 /v1/models，
+// 用账号协议发 x-api-key 上去只会换回一个 401/403，却把错误指到「凭据无效」上。
+func (s *Server) modelsEndpoint(a store.Account, override string) (endpoint, protocol string, err error) {
+	if override != "" {
+		path := strings.TrimSpace(override)
+		if !strings.HasPrefix(path, "/") {
+			return "", "", fmt.Errorf("模型列表路径 %q 要以 / 开头，完整地址是厂商 base_url 拼上它，例如 /v1/models", override)
+		}
+		return joinEndpoint(a.BaseURL, path), a.Protocol, nil
+	}
+
+	p, err := s.store.GetProvider(a.Provider)
+	if errors.Is(err, store.ErrProviderNotFound) {
+		return ModelsEndpoint(a.BaseURL), a.Protocol, nil
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("读厂商 %s 失败: %w", a.Provider, err)
+	}
 	routes, err := s.store.ProviderRoutes(a.Provider)
 	if err != nil {
-		return "", fmt.Errorf("读厂商 %s 的路由失败: %w", a.Provider, err)
+		return "", "", fmt.Errorf("读厂商 %s 的路由失败: %w", a.Provider, err)
 	}
-	if len(routes) == 0 {
-		return ModelsEndpoint(a.BaseURL), nil
+	// 厂商行在、但一条路由都没声明，也没有厂商级覆盖：按 base_url 兜底，与升级前一致。
+	if len(routes) == 0 && strings.TrimSpace(p.ModelsPath) == "" {
+		return ModelsEndpoint(a.BaseURL), a.Protocol, nil
 	}
 
-	fallback := ""
-	for _, r := range routes {
-		path := strings.TrimSpace(r.ModelsPath)
-		if path == "" {
-			continue
-		}
-		if r.Protocol == a.Protocol {
-			return joinEndpoint(a.BaseURL, path), nil
-		}
-		if fallback == "" {
-			fallback = path
-		}
+	path, routeProtocol := store.ResolveModelsPath(p.ModelsPath, routes, a.Protocol)
+	if path == "" {
+		return "", "", fmt.Errorf("厂商 %s 没有模型列表接口，用 --models 手填，或用 switchboard provider set %s --models-path <路径> 补上模型列表路径",
+			a.Provider, a.Provider)
 	}
-	if fallback != "" {
-		return joinEndpoint(a.BaseURL, fallback), nil
-	}
-	return "", fmt.Errorf("厂商 %s 没有模型列表接口，用 --models 手填", a.Provider)
+	return joinEndpoint(a.BaseURL, path), routeProtocol, nil
 }
 
-// SyncModels 拉取上游的模型列表，按名字排序去重。
+// SyncModels 按厂商覆盖与路由的 models_path 拉取上游的模型列表，按名字排序去重。
 func (s *Server) SyncModels(ctx context.Context, a store.Account) ([]string, error) {
+	return s.SyncModelsWithEndpoint(ctx, a, "")
+}
+
+// SyncModelsWithEndpoint 是 `model sync --endpoint <路径>` 的入口：endpoint 非空时只影响这一次调用，
+// 地址取厂商 base_url 拼上它，忽略厂商的 models_path 覆盖与路由里的值。
+func (s *Server) SyncModelsWithEndpoint(ctx context.Context, a store.Account, endpoint string) ([]string, error) {
 	key, err := secret.Decrypt(s.key, a.KeyCipher)
 	if err != nil {
 		return nil, err
 	}
 
-	endpoint, err := s.modelsEndpoint(a)
+	target, protocol, err := s.modelsEndpoint(a, endpoint)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
-		return nil, fmt.Errorf("模型列表地址 %q 不合法，检查账号 %s 的 base-url: %w", endpoint, a.Name, err)
+		return nil, fmt.Errorf("模型列表地址 %q 不合法，检查账号 %s 的 base-url: %w", target, a.Name, err)
 	}
 	req.Header.Set("Accept", "application/json")
-	setAuth(req, a.Protocol, string(key))
+	// 凭据头跟着取到这条路径的协议走，不是账号协议。
+	setAuth(req, protocol, string(key))
 
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("拉取模型列表失败（GET %s）：%s", endpoint,
+		return nil, fmt.Errorf("拉取模型列表失败（GET %s）：%s", target,
 			scrubSecret(err.Error(), string(key)))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("上游返回 %d（GET %s）：%s；检查该账号的 base-url 与凭据",
-			resp.StatusCode, endpoint, scrubSecret(readErrorBody(resp.Body), string(key)))
+		return nil, fmt.Errorf("上游返回 %d（GET %s，按 %s 发凭据）：%s；检查该账号的 base-url 与凭据",
+			resp.StatusCode, target, protocol, scrubSecret(readErrorBody(resp.Body), string(key)))
 	}
 
 	var payload struct {
@@ -193,7 +212,11 @@ func (s *Server) routeProtocolOrder(a store.Account, model string, override []st
 
 	candidates := override
 	if candidates == nil {
-		candidates = s.providerProtocols(a, model)
+		injected, err := s.providerProtocols(a, model)
+		if err != nil {
+			return nil, err
+		}
+		candidates = injected
 	}
 	if len(candidates) == 0 {
 		candidates = defaultProbeProtocols
@@ -207,17 +230,18 @@ func (s *Server) routeProtocolOrder(a store.Account, model string, override []st
 }
 
 // providerProtocols 是 resolver 的默认实现：该厂商在 provider_routes 里声明过的协议。
-// 注入 Options.RouteProtocols 时以注入的为准；读库失败时返回 nil，也就是按三种全试。
-func (s *Server) providerProtocols(a store.Account, model string) []string {
+// 注入 Options.RouteProtocols 时以注入的为准。读库失败时报错而不是返回 nil：返回 nil 会让
+// 探活放宽成三种协议全试，等于去打这家没声明的路径，把一次读库故障变成对错误地址的上游调用。
+func (s *Server) providerProtocols(a store.Account, model string) ([]string, error) {
 	if s.routeProtocols != nil {
-		return s.routeProtocols(a.Provider, model)
+		return s.routeProtocols(a.Provider, model), nil
 	}
 	protocols, err := s.store.ProviderProtocols(a.Provider)
 	if err != nil {
-		s.logf("读厂商 %s 的协议路由失败，按三种协议全试: %v", a.Provider, err)
-		return nil
+		return nil, fmt.Errorf("读厂商 %s 的协议路由失败，探活不知道该试哪些协议（不放宽成三种全试，那会打到这家没声明的路径）: %w",
+			a.Provider, err)
 	}
-	return protocols
+	return protocols, nil
 }
 
 // retryOtherProtocol 判断这次失败是否可能只是协议（路径）不对，值得换一种协议再试。

@@ -436,13 +436,7 @@ func TestDeleteAccountClearsModelRows(t *testing.T) {
 func TestMigrationsRunToLatestFromEmptyDB(t *testing.T) {
 	st := openTemp(t)
 
-	var version int
-	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		t.Fatalf("读 user_version: %v", err)
-	}
-	if version != 7 {
-		t.Fatalf("user_version = %d，期望 7（0001..0007 全部执行过）", version)
-	}
+	assertLatestVersion(t, st)
 
 	acc := newAccount(t, st, "ds1", nil)
 	if _, err := st.ReplaceModels(acc.ID, []string{"m1"}); err != nil {
@@ -508,13 +502,7 @@ func TestMigration0005UpgradesOldDatabase(t *testing.T) {
 	}
 	defer st.Close()
 
-	var version int
-	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		t.Fatalf("读 user_version: %v", err)
-	}
-	if version != 7 {
-		t.Fatalf("user_version = %d，期望 7（0005、0006 与 0007 都在升级时跑过）", version)
-	}
+	assertLatestVersion(t, st)
 
 	rows, err := st.AccountModels(1)
 	if err != nil {

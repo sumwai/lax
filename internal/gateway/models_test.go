@@ -665,9 +665,11 @@ func TestProbeModelUnauthorizedKeepsAuthWhenDisableFails(t *testing.T) {
 	acc := f.add(t, "ds1", gateway.ProtocolChat, up.URL, key, []string{"m1"}, 100)
 	gs := newGateway(t, f)
 
-	// 关掉数据库连接，让 SetEnabled 必然失败。
-	if err := f.st.DB().Close(); err != nil {
-		t.Fatalf("关闭数据库: %v", err)
+	// 把连接设成只读：读库照常（探活的候选协议与转发地址都要读库），写必然失败，
+	// 于是能单独验「停用失败」这一条。直接关连接不行，那会让前面的读也失败，
+	// 探活会因为读不出厂商路由而改判成 error。
+	if _, err := f.st.DB().Exec("PRAGMA query_only = 1"); err != nil {
+		t.Fatalf("把库设成只读: %v", err)
 	}
 
 	res, err := gs.ProbeModel(context.Background(), acc, "m1")

@@ -87,13 +87,7 @@ func assertSeedDefaults(t *testing.T, st *store.Store) {
 func TestProvidersSeededByMigration(t *testing.T) {
 	st := openTemp(t)
 
-	var version int
-	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		t.Fatalf("读 user_version: %v", err)
-	}
-	if version != 7 {
-		t.Fatalf("user_version = %d，期望 7", version)
-	}
+	assertLatestVersion(t, st)
 
 	var nProviders, nRoutes int
 	if err := st.DB().QueryRow("SELECT COUNT(*) FROM providers").Scan(&nProviders); err != nil {
@@ -210,13 +204,7 @@ func TestMigration0006UpgradesOldDatabase(t *testing.T) {
 	}
 	defer st.Close()
 
-	var version int
-	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		t.Fatalf("读 user_version: %v", err)
-	}
-	if version != 7 {
-		t.Fatalf("user_version = %d，期望 7", version)
-	}
+	assertLatestVersion(t, st)
 
 	providers, err := st.ListProviders()
 	if err != nil {
@@ -293,13 +281,7 @@ func TestMigration0007UpgradesOldDatabase(t *testing.T) {
 	}
 	defer st.Close()
 
-	var version int
-	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		t.Fatalf("读 user_version: %v", err)
-	}
-	if version != 7 {
-		t.Fatalf("user_version = %d，期望 7", version)
-	}
+	assertLatestVersion(t, st)
 
 	// 种子 8 家逐行断言。升级路径与空库路径必须得出同一份默认协议。
 	for _, want := range seedDefaults {
@@ -475,7 +457,8 @@ func TestEffectiveProviderProtocol(t *testing.T) {
 		}
 	}
 
-	// 没声明默认协议的自建厂商按排序回退：anthropic 在 openai-chat 前。
+	// 没声明默认协议的自建厂商按固定顺序回退：openai-chat 在 anthropic 前，
+	// 与协议名字典序相反（字典序会给 anthropic，同一家上游的默认协议就从中变成 anthropic）。
 	if err := st.AddProvider(store.Provider{Name: "myco", BaseURL: "https://my.example.com"},
 		[]store.ProviderRoute{
 			{Protocol: "openai-chat", Path: "/v1/chat/completions"},
@@ -483,8 +466,8 @@ func TestEffectiveProviderProtocol(t *testing.T) {
 		}); err != nil {
 		t.Fatalf("新增厂商: %v", err)
 	}
-	if got, err := st.EffectiveProviderProtocol("myco"); err != nil || got != "anthropic" {
-		t.Fatalf("空默认协议应回退到排序第一条，实际 %q err=%v", got, err)
+	if got, err := st.EffectiveProviderProtocol("myco"); err != nil || got != "openai-chat" {
+		t.Fatalf("空默认协议应回退到固定顺序第一条 openai-chat，实际 %q err=%v", got, err)
 	}
 
 	// 没有路由：空串加明确错误，由调用方决定文案。
@@ -505,16 +488,26 @@ func TestEffectiveProviderProtocol(t *testing.T) {
 	}
 }
 
-// TestResolveDefaultProtocol 固定纯规则本身：显式值直接赢（不看路由声明与否），
-// 空值取排序第一条，空路由返回空串。
+// TestResolveDefaultProtocol 固定纯规则本身：显式值落在已声明路由上才赢，
+// 指不到路由与空值都按固定顺序 openai-chat → openai-responses → anthropic 回退，空路由返回空串。
 func TestResolveDefaultProtocol(t *testing.T) {
 	routes := []store.ProviderRoute{{Protocol: "anthropic"}, {Protocol: "openai-chat"}}
 
 	if got := store.ResolveDefaultProtocol("openai-chat", routes); got != "openai-chat" {
-		t.Fatalf("显式值应优先，实际 %q", got)
+		t.Fatalf("显式值落在路由上应优先，实际 %q（排序兜底会给 openai-chat，这里要看显式值本身）", got)
 	}
-	if got := store.ResolveDefaultProtocol("", routes); got != "anthropic" {
-		t.Fatalf("空值应取排序第一条，实际 %q", got)
+	if got := store.ResolveDefaultProtocol("", routes); got != "openai-chat" {
+		t.Fatalf("空值应取固定顺序第一条 openai-chat，实际 %q", got)
+	}
+	if got := store.ResolveDefaultProtocol("", []store.ProviderRoute{{Protocol: "anthropic"}, {Protocol: "openai-responses"}}); got != "openai-responses" {
+		t.Fatalf("没有 chat 路由时应取 openai-responses，实际 %q", got)
+	}
+	if got := store.ResolveDefaultProtocol("", []store.ProviderRoute{{Protocol: "anthropic"}}); got != "anthropic" {
+		t.Fatalf("只有 anthropic 路由时应取 anthropic，实际 %q", got)
+	}
+	// 历史脏数据：默认协议指向一条已经不存在的路由，按固定顺序回退到还在的那条。
+	if got := store.ResolveDefaultProtocol("openai-responses", routes); got != "openai-chat" {
+		t.Fatalf("显式值不在路由里应回退到 openai-chat，实际 %q", got)
 	}
 	if got := store.ResolveDefaultProtocol("", nil); got != "" {
 		t.Fatalf("无路由应返回空串，实际 %q", got)
@@ -700,6 +693,19 @@ func latestMigrationVersion(t *testing.T) int {
 		t.Fatal("迁移目录里没有文件")
 	}
 	return latest
+}
+
+// assertLatestVersion 确认库的 user_version 已经推到迁移目录里的最大版本。
+// 不写死数字：新增一个迁移不该让每条升级用例都来改一遍，它们要钉的是「升到最新」。
+func assertLatestVersion(t *testing.T, st *store.Store) {
+	t.Helper()
+	var version int
+	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("读 user_version: %v", err)
+	}
+	if want := latestMigrationVersion(t); version != want {
+		t.Fatalf("user_version = %d，期望 %d（迁移链要走到最新）", version, want)
+	}
 }
 
 // TestMigrationChainFrom0001ToLatest 确认一个停在 0001 的老库能沿迁移链一路升到最新：

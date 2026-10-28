@@ -423,8 +423,10 @@ func TestSyncModelsUsesProviderModelsPath(t *testing.T) {
 func TestSyncModelsWithoutModelsPath(t *testing.T) {
 	t.Run("全部为空", func(t *testing.T) {
 		f := newFixture(t)
+		// 只有 anthropic 一条路由：写入侧的推导只给 openai-chat 补 models_path，
+		// 所以这条路由的 models_path 仍是空串，同步时没有列表地址可用。
 		if err := f.st.AddProvider(store.Provider{Name: "nollm", BaseURL: "https://nollm.example.com"},
-			[]store.ProviderRoute{{Protocol: "openai-chat", Path: "/v1/chat/completions"}}); err != nil {
+			[]store.ProviderRoute{{Protocol: "anthropic", Path: "/v1/messages"}}); err != nil {
 			t.Fatalf("加厂商: %v", err)
 		}
 		var hits int

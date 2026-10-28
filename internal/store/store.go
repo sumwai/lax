@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -102,22 +103,60 @@ func (s *Store) migrate() error {
 	if err != nil {
 		return err
 	}
-	sort.Strings(names)
 
-	for i, name := range names {
-		v := i + 1
-		if v <= version {
-			continue
-		}
-		b, err := migrationsFS.ReadFile(name)
+	files := make([]migrationFile, 0, len(names))
+	for _, name := range names {
+		v, err := migrationVersion(name)
 		if err != nil {
 			return err
 		}
-		if err := s.execScript(string(b), v); err != nil {
-			return fmt.Errorf("%s: %w", name, err)
+		files = append(files, migrationFile{version: v, name: name})
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].version != files[j].version {
+			return files[i].version < files[j].version
+		}
+		return files[i].name < files[j].name
+	})
+
+	for i, f := range files {
+		if i > 0 && f.version == files[i-1].version {
+			return fmt.Errorf("迁移版本 %d 重复：%s 与 %s", f.version, files[i-1].name, f.name)
+		}
+		if f.version <= version {
+			continue
+		}
+		b, err := migrationsFS.ReadFile(f.name)
+		if err != nil {
+			return err
+		}
+		if err := s.execScript(string(b), f.version); err != nil {
+			return fmt.Errorf("%s: %w", f.name, err)
 		}
 	}
 	return nil
+}
+
+// migrationFile 是一个待执行的迁移：版本号从文件名前缀解析，不再用它在下标里的位置。
+// 早先按下标当版本号，改个文件名或删掉一个文件就会让后面的版本整体错位，老库升级时
+// 会被静默跳过——那些迁移的 SQL 一条都不会执行，却已经把 user_version 推到了「最新」。
+type migrationFile struct {
+	version int
+	name    string
+}
+
+// migrationVersion 从 <序号>_<名字>.sql 里取出版本号。
+func migrationVersion(name string) (int, error) {
+	base := strings.TrimSuffix(filepath.Base(name), ".sql")
+	prefix, _, ok := strings.Cut(base, "_")
+	if !ok {
+		return 0, fmt.Errorf("迁移文件名 %q 不是 <序号>_<名字>.sql", name)
+	}
+	v, err := strconv.Atoi(prefix)
+	if err != nil || v <= 0 {
+		return 0, fmt.Errorf("迁移文件名 %q 的序号 %q 不是正整数", name, prefix)
+	}
+	return v, nil
 }
 
 func (s *Store) execScript(script string, version int) error {
@@ -252,31 +291,96 @@ func (s *Store) DeleteAccount(name string) error {
 	return tx.Commit()
 }
 
+// withTx 跑一个事务：状态写入只有这一个形状，中途失败一律回滚。
+func (s *Store) withTx(fn func(*sql.Tx) error) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // RecordFailure 记录一次失败：冷却截止时间、最近一次错误，并把连续失败次数加一。
 func (s *Store) RecordFailure(id int64, until int64, lastErr string) error {
-	_, err := s.db.Exec(`UPDATE accounts
+	return s.withTx(func(tx *sql.Tx) error { return recordFailureTx(tx, id, until, lastErr) })
+}
+
+// ClearFailure 清掉冷却、最近一次错误与连续失败次数。
+func (s *Store) ClearFailure(id int64) error {
+	return s.withTx(func(tx *sql.Tx) error { return clearFailureTx(tx, id) })
+}
+
+// SetEnabled 启用或停用账号。
+func (s *Store) SetEnabled(id int64, enabled bool, lastErr string) error {
+	return s.withTx(func(tx *sql.Tx) error { return setEnabledTx(tx, id, enabled, lastErr) })
+}
+
+// recordFailureTx 是冷却的写入口（加一），只给事务内部用。
+func recordFailureTx(tx *sql.Tx, id int64, until int64, lastErr string) error {
+	_, err := tx.Exec(`UPDATE accounts
 		SET cooldown_until = ?, last_error = ?, fail_streak = fail_streak + 1
 		WHERE id = ?`, until, lastErr, id)
 	return err
 }
 
-// ClearFailure 清掉冷却、最近一次错误与连续失败次数。
-func (s *Store) ClearFailure(id int64) error {
-	_, err := s.db.Exec(`UPDATE accounts
+// clearFailureTx 是清冷却的写入口，只给事务内部用。
+func clearFailureTx(tx *sql.Tx, id int64) error {
+	_, err := tx.Exec(`UPDATE accounts
 		SET cooldown_until = NULL, last_error = '', fail_streak = 0
 		WHERE id = ?`, id)
 	return err
 }
 
-// SetEnabled 启用或停用账号。
-func (s *Store) SetEnabled(id int64, enabled bool, lastErr string) error {
-	_, err := s.db.Exec(`UPDATE accounts SET enabled = ?, last_error = ? WHERE id = ?`, boolInt(enabled), lastErr, id)
+// setEnabledTx 是启停的写入口，只给事务内部用。
+func setEnabledTx(tx *sql.Tx, id int64, enabled bool, lastErr string) error {
+	_, err := tx.Exec(`UPDATE accounts SET enabled = ?, last_error = ? WHERE id = ?`, boolInt(enabled), lastErr, id)
 	return err
 }
 
-// InsertRequest 写一行请求记录。
+// AttemptState 是一次上游尝试对账号状态的改动。三者互斥，零值表示什么都不改。
+type AttemptState struct {
+	// Failure 为真：写入 CooldownUntil 与 LastError，并把 fail_streak 加一。
+	Failure bool
+	// Clear 为真：清掉冷却、最近错误与 fail_streak。
+	Clear bool
+	// Disable 为真：停用账号并记下 LastError。
+	Disable       bool
+	CooldownUntil int64
+	LastError     string
+}
+
+// RecordAttempt 在同一个事务里写一行请求记录并更新账号状态：要么一起提交，要么都不提交。
+// 一次尝试的账（requests 一行）与它的结论（冷却、清零、停用）本来就是同一件事，
+// 分开写在中途失败时会留下「有请求行但没设冷却」或者反过来，事后对不上账。
+// 冷却、清零与停用的 SQL 只在 recordFailureTx、clearFailureTx、setEnabledTx 里，这里不另拼。
+func (s *Store) RecordAttempt(rec *RequestRecord, state AttemptState) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		if err := insertRequestTx(tx, rec); err != nil {
+			return err
+		}
+		switch {
+		case state.Clear:
+			return clearFailureTx(tx, rec.AccountID)
+		case state.Disable:
+			return setEnabledTx(tx, rec.AccountID, false, state.LastError)
+		case state.Failure:
+			return recordFailureTx(tx, rec.AccountID, state.CooldownUntil, state.LastError)
+		}
+		return nil
+	})
+}
+
+// InsertRequest 写一行请求记录。与账号状态一起写的场合用 RecordAttempt。
 func (s *Store) InsertRequest(r *RequestRecord) error {
-	res, err := s.db.Exec(`INSERT INTO requests
+	return s.withTx(func(tx *sql.Tx) error { return insertRequestTx(tx, r) })
+}
+
+func insertRequestTx(tx *sql.Tx, r *RequestRecord) error {
+	res, err := tx.Exec(`INSERT INTO requests
 		(ts, inbound, outbound, model_requested, model_used, account_id, http_status, ok,
 		 in_tokens, out_tokens, cache_read, cache_write, latency_ms, error)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,

@@ -233,7 +233,23 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			LatencyMS:      latency.Milliseconds(),
 			Error:          res.message,
 		}
-		if err := s.store.InsertRequest(rec); err != nil {
+		// 一次尝试的账（requests 一行）与它的结论（冷却、清零、停用）在同一个事务里落库，
+		// 要么都写、要么都不写（见 store.RecordAttempt）。
+		state := store.AttemptState{}
+		switch {
+		case rec.OK:
+			// 成功一次就把连续失败次数清零，冷却时长下次从头算。
+			state.Clear = true
+		case res.status == http.StatusUnauthorized:
+			// 401 说明凭据本身不行，停用账号，避免同一条错误把整个候选池刷成不可用。
+			state.Disable = true
+			state.LastError = res.message
+		case account.Retryable(res.status) && !res.wrote:
+			state.Failure = true
+			state.CooldownUntil = s.now().Add(account.Cooldown(res.status, cand.FailStreak)).Unix()
+			state.LastError = res.message
+		}
+		if err := s.store.RecordAttempt(rec, state); err != nil {
 			s.logf("写请求记录失败: %v", err)
 		}
 		s.logf("%s %s→%s %s %s %d/%d %s%s",
@@ -242,19 +258,11 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			latency.Round(time.Millisecond), errorSuffix(res.message))
 
 		if rec.OK {
-			// 成功一次就把连续失败次数清零，冷却时长下次从头算。
-			if err := s.store.ClearFailure(cand.ID); err != nil {
-				s.logf("清冷却失败: %v", err)
-			}
 			return
 		}
 
 		switch {
 		case res.status == http.StatusUnauthorized:
-			// 401 说明凭据本身不行，停用账号，避免同一条错误把整个候选池刷成不可用。
-			if err := s.store.SetEnabled(cand.ID, false, res.message); err != nil {
-				s.logf("停用账号 %s 失败: %v", cand.Name, err)
-			}
 			writeError(w, http.StatusUnauthorized, "authentication_error",
 				fmt.Sprintf("账号 %s 的凭据被上游拒绝，已停用。%s", cand.Name, res.message))
 			return
@@ -263,11 +271,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "permission_error",
 				fmt.Sprintf("账号 %s 无权使用该模型：%s", cand.Name, res.message))
 			return
-		case account.Retryable(res.status) && !res.wrote:
-			until := s.now().Add(account.Cooldown(res.status, cand.FailStreak)).Unix()
-			if err := s.store.RecordFailure(cand.ID, until, res.message); err != nil {
-				s.logf("设置冷却失败: %v", err)
-			}
+		case state.Failure:
 			lastErr = fmt.Sprintf("%s: %s", cand.Name, res.message)
 			continue
 		case res.wrote:
