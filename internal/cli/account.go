@@ -37,9 +37,23 @@ var providers = map[string]providerDefault{
 	},
 }
 
+// accountSubs 是 account 一组的子命令清单，组级帮助与错误提示都读它。
+var accountSubs = []groupItem{
+	{"add", "新增一个上游账号，key 加密后入库"},
+	{"ls", "列出账号、模型数与当前状态"},
+	{"rm", "删除账号，历史请求记录保留"},
+	{"test", "用最小请求探活一个账号"},
+	{"enable", "启用账号并清掉冷却"},
+	{"disable", "停用账号，不再参与选号"},
+}
+
 func cmdAccount(e *Env, args []string) error {
+	if isHelpRequest(args) {
+		printGroupHelp(e.Stdout, "account", "管理上游账号", accountSubs)
+		return nil
+	}
 	if len(args) == 0 {
-		return usagef("需要子命令：add | ls | rm | test | enable | disable")
+		return usagef("需要子命令：add | ls | rm | test | enable | disable\n用 switchboard account --help 查看子命令")
 	}
 	switch args[0] {
 	case "add":
@@ -55,7 +69,7 @@ func cmdAccount(e *Env, args []string) error {
 	case "disable":
 		return cmdAccountSetEnabled(e, args[1:], "disable", false)
 	default:
-		return usagef("未知子命令 %q，可用：add | ls | rm | test | enable | disable", args[0])
+		return usagef("未知子命令 %q，可用：add | ls | rm | test | enable | disable\n用 switchboard account --help 查看子命令", args[0])
 	}
 }
 
@@ -398,7 +412,7 @@ func cmdAccountTest(e *Env, args []string) error {
 		return fmt.Errorf("账号 %q 不存在", name)
 	}
 
-	gs, err := gateway.New(gateway.Options{Store: a.st, Key: a.key})
+	gs, err := gateway.New(gateway.Options{Store: a.st, Key: a.key, Logf: e.gatewayLogf()})
 	if err != nil {
 		return err
 	}
@@ -434,10 +448,21 @@ func cmdAccountTest(e *Env, args []string) error {
 	return nil
 }
 
+// modelSubs 是 model 一组的子命令清单。
+var modelSubs = []groupItem{
+	{"ls", "列出网关可提供的模型与该模型下的账号状态"},
+	{"sync", "从上游拉取模型列表，写入 account_models"},
+	{"probe", "逐个模型发 max_tokens=1 的请求探活，把可用模型写进账号"},
+}
+
 // cmdModel 是 model 这一组子命令的入口。
 func cmdModel(e *Env, args []string) error {
+	if isHelpRequest(args) {
+		printGroupHelp(e.Stdout, "model", "模型同步与探活", modelSubs)
+		return nil
+	}
 	if len(args) == 0 {
-		return usagef("需要子命令：ls | sync | probe")
+		return usagef("需要子命令：ls | sync | probe\n用 switchboard model --help 查看子命令")
 	}
 	switch args[0] {
 	case "ls":
@@ -447,7 +472,7 @@ func cmdModel(e *Env, args []string) error {
 	case "probe":
 		return cmdModelProbe(e, args[1:])
 	default:
-		return usagef("未知子命令 %q，可用：ls | sync | probe", args[0])
+		return usagef("未知子命令 %q，可用：ls | sync | probe\n用 switchboard model --help 查看子命令", args[0])
 	}
 }
 
@@ -600,7 +625,7 @@ func cmdModelSync(e *Env, args []string) error {
 	if err != nil {
 		return err
 	}
-	gs, err := gateway.New(gateway.Options{Store: a.st, Key: a.key})
+	gs, err := gateway.New(gateway.Options{Store: a.st, Key: a.key, Logf: e.gatewayLogf()})
 	if err != nil {
 		return err
 	}
@@ -680,7 +705,7 @@ func cmdModelProbe(e *Env, args []string) error {
 	if err != nil {
 		return err
 	}
-	gs, err := gateway.New(gateway.Options{Store: a.st, Key: a.key})
+	gs, err := gateway.New(gateway.Options{Store: a.st, Key: a.key, Logf: e.gatewayLogf()})
 	if err != nil {
 		return err
 	}
@@ -702,6 +727,9 @@ func cmdModelProbe(e *Env, args []string) error {
 	usableByAccount := map[string]int{}
 	authFailed := ""
 	syncFailed := 0
+	// 零可用时的错误文案要能分清「全被跳过」与「探了都不行」，
+	// 所以整轮累加探活数与跳过数，不只是当前账号的。
+	totalProbed, totalSkipped := 0, 0
 
 	for _, acc := range accounts {
 		if ctx.Err() != nil {
@@ -773,6 +801,8 @@ func cmdModelProbe(e *Env, args []string) error {
 				Message:    res.Message,
 			})
 		}
+		totalProbed += len(results)
+		totalSkipped += skipped
 
 		if counts[store.ModelAuthFailed] > 0 {
 			// 凭据不行了，后续账号接着探只会重复同一条错误：停下，
@@ -837,12 +867,31 @@ func cmdModelProbe(e *Env, args []string) error {
 		return fmt.Errorf("账号 %s 的凭据被上游拒绝，账号已停用，其余结论不作数", authFailed)
 	}
 	if len(usableByAccount) == 0 {
-		return fmt.Errorf("没有账号探出可用模型，账号模型列表未改动")
+		return fmt.Errorf("%s，账号模型列表未改动", zeroUsableReason(totalProbed, totalSkipped, syncFailed))
 	}
 	if syncFailed > 0 {
 		return fmt.Errorf("%d 个账号同步失败", syncFailed)
 	}
 	return nil
+}
+
+// zeroUsableReason 说清零可用的原因：是跳过、是真探了都不行，还是连模型列表都没拉到。
+// 三种情况下一步差很多：强制重探、换凭据或换模型、先修同步。
+func zeroUsableReason(probed, skipped, syncFailed int) string {
+	if probed == 0 && skipped == 0 {
+		if syncFailed > 0 {
+			return fmt.Sprintf("没有账号探出可用模型：%d 个账号同步失败，一个模型都没拉到", syncFailed)
+		}
+		return "没有可探的模型，先运行 switchboard model sync --account <名称>"
+	}
+	msg := fmt.Sprintf("没有账号探出可用模型：本次探活 %d 个、跳过 %d 个", probed, skipped)
+	if skipped > 0 {
+		msg += "（跳过的结论仍在 --max-age 窗口内，用 --refresh 强制重探）"
+	}
+	if syncFailed > 0 {
+		msg += fmt.Sprintf("；另有 %d 个账号同步失败", syncFailed)
+	}
+	return msg
 }
 
 // probeCandidate 是一个待判定的模型。status 与 checkedAt 取库里已有结论，

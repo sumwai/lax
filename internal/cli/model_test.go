@@ -816,3 +816,74 @@ func TestModelProbeNeverPrintsKey(t *testing.T) {
 		}
 	}
 }
+
+// TestModelProbeZeroUsableTellsSkipCount 确认零可用时的错误文案带探活数与跳过数，
+// 让「全被跳过」与「探了都不行」分得清。
+func TestModelProbeZeroUsableTellsSkipCount(t *testing.T) {
+	sandbox(t)
+	// 两个模型都返回 403：结论有定论但都不算可用。
+	up := newProbeUpstream(t, []string{"m1", "m2"}, map[string]int{
+		"m1": http.StatusForbidden,
+		"m2": http.StatusForbidden,
+	})
+	addProbeAccount(t, up, "ds1")
+
+	code, _, errOut := run(t, "model", "probe", "--account", "ds1")
+	if code != 1 {
+		t.Fatalf("零可用时退出码 = %d，期望 1", code)
+	}
+	if !strings.Contains(errOut, "本次探活 2 个") || !strings.Contains(errOut, "跳过 0 个") {
+		t.Fatalf("首次探活的错误文案应带探活数与跳过数: %s", errOut)
+	}
+	if strings.Contains(errOut, "--refresh") {
+		t.Fatalf("没有跳过时不该提示 --refresh: %s", errOut)
+	}
+
+	code, out, errOut := run(t, "model", "probe", "--account", "ds1", "--json")
+	if code != 1 {
+		t.Fatalf("全部跳过且零可用时退出码 = %d，期望 1", code)
+	}
+	if strings.TrimSpace(out) != "[]" {
+		t.Fatalf("全部跳过时 --json 仍是空数组，实际 %s", out)
+	}
+	for _, want := range []string{"本次探活 0 个", "跳过 2 个", "--max-age", "--refresh"} {
+		if !strings.Contains(errOut, want) {
+			t.Fatalf("全部跳过时的错误文案缺 %q: %s", want, errOut)
+		}
+	}
+
+	// 连模型列表都没拉到的账号：真实原因不能被「没有账号探出可用模型」盖住。
+	if code, _, stderr := run(t, "account", "add", "ds9", "--provider", "custom",
+		"--base-url", "http://127.0.0.1:1", "--key", "sk-test"); code != 0 {
+		t.Fatalf("加不可达账号失败: %s", stderr)
+	}
+	code, _, errOut = run(t, "model", "probe", "--account", "ds9")
+	if code != 1 {
+		t.Fatalf("同步失败时退出码 = %d，期望 1", code)
+	}
+	if !strings.Contains(errOut, "同步失败") {
+		t.Fatalf("同步失败时的错误文案应点出同步失败: %s", errOut)
+	}
+}
+
+// TestModelProbeKeepsStderrClean 确认正常探活不往 stderr 写日志，--json 的 stdout 只有 JSON。
+func TestModelProbeKeepsStderrClean(t *testing.T) {
+	sandbox(t)
+	up := newProbeUpstream(t, []string{"m1"}, nil)
+	addProbeAccount(t, up, "ds1")
+
+	code, out, errOut := run(t, "model", "probe", "--account", "ds1", "--json")
+	if code != 0 {
+		t.Fatalf("探活退出码 = %d，stderr = %s", code, errOut)
+	}
+	if errOut != "" {
+		t.Fatalf("正常探活不该往 stderr 写日志: %s", errOut)
+	}
+	var rows []probeRow
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("--json 的 stdout 应只有 JSON: %v，%s", err, out)
+	}
+	if len(rows) != 1 || rows[0].Status != "usable" {
+		t.Fatalf("探活结果 = %+v", rows)
+	}
+}

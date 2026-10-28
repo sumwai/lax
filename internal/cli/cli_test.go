@@ -247,3 +247,62 @@ func TestAccountAddRejectsMissingKey(t *testing.T) {
 		t.Fatalf("stderr 应提示补 --base-url: %s", errOut)
 	}
 }
+
+// TestGroupHelp 确认三个有子命令的组都支持 -h、--help 与 help：
+// 清单打到 stdout，退出码 0，且不需要先 init。
+func TestGroupHelp(t *testing.T) {
+	sandbox(t)
+	groups := []struct {
+		name string
+		subs []string
+	}{
+		{"account", []string{"add", "ls", "rm", "test", "enable", "disable"}},
+		{"model", []string{"ls", "sync", "probe"}},
+		{"log", []string{"tail"}},
+	}
+	for _, g := range groups {
+		for _, want := range []string{"-h", "--help", "help"} {
+			code, out, errOut := run(t, g.name, want)
+			if code != 0 {
+				t.Fatalf("%s %s 的退出码 = %d，期望 0", g.name, want, code)
+			}
+			if errOut != "" {
+				t.Fatalf("%s %s 的帮助不该写 stderr: %s", g.name, want, errOut)
+			}
+			if !strings.Contains(out, "用法：") || !strings.Contains(out, "子命令：") {
+				t.Fatalf("%s %s 的输出缺少用法或子命令清单: %s", g.name, want, out)
+			}
+			for _, sub := range g.subs {
+				if !strings.Contains(out, sub) {
+					t.Fatalf("%s %s 的清单缺少 %s: %s", g.name, want, sub, out)
+				}
+			}
+		}
+	}
+}
+
+// TestGroupUnknownSubcommandHints 确认未知子命令仍退出码 2，并提示去看组级帮助；
+// 子命令自己的 --help 保持原样，退出码 0。
+func TestGroupUnknownSubcommandHints(t *testing.T) {
+	sandbox(t)
+	for _, group := range []string{"account", "model", "log"} {
+		code, out, errOut := run(t, group, "nope")
+		if code != 2 {
+			t.Fatalf("%s nope 的退出码 = %d，期望 2", group, code)
+		}
+		if out != "" {
+			t.Fatalf("用法错误不该写 stdout: %s", out)
+		}
+		if !strings.Contains(errOut, "switchboard "+group+" --help") {
+			t.Fatalf("%s nope 的提示应给出组级帮助命令: %s", group, errOut)
+		}
+	}
+
+	code, _, errOut := run(t, "model", "probe", "--help")
+	if code != 0 {
+		t.Fatalf("model probe --help 的退出码 = %d，期望 0", code)
+	}
+	if !strings.Contains(errOut, "--max-age") {
+		t.Fatalf("子命令帮助应列出自己的参数: %s", errOut)
+	}
+}

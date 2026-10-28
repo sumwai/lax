@@ -122,7 +122,29 @@ func printUsage(w io.Writer) {
 		}
 		fmt.Fprintf(w, "  %-9s %s\n", c.name, c.summary)
 	}
+	fmt.Fprintf(w, "\n分组子命令的清单：%s <组> --help\n", appName)
 	fmt.Fprint(w, "\n全局参数：\n  --json     以 JSON 输出\n  --config   指定配置文件路径\n  --db       指定数据库路径\n")
+}
+
+// groupItem 描述一个组里的子命令，供组级帮助使用。
+type groupItem struct {
+	name    string
+	summary string
+}
+
+// isHelpRequest 判断组级参数是不是在求帮助：-h、--help、help 三种写法等价。
+// 子命令自己的帮助仍走 newFlagSet 那条路径，不受影响。
+func isHelpRequest(args []string) bool {
+	return len(args) > 0 && (args[0] == "-h" || args[0] == "--help" || args[0] == "help")
+}
+
+// printGroupHelp 把组的用途与子命令清单打到 stdout：这是用户要看的结果，不是错误。
+func printGroupHelp(w io.Writer, name, purpose string, items []groupItem) {
+	fmt.Fprintf(w, "%s %s — %s\n\n用法：\n  %s %s <子命令> [参数]\n\n子命令：\n", appName, name, purpose, appName, name)
+	for _, it := range items {
+		fmt.Fprintf(w, "  %-9s %s\n", it.name, it.summary)
+	}
+	fmt.Fprintf(w, "\n查看某个子命令的参数：%s %s <子命令> --help\n", appName, name)
 }
 
 func newFlagSet(e *Env, name, summary string) *flagSet {

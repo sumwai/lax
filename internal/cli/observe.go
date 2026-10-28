@@ -112,9 +112,21 @@ func resolveInboundProtocol(name string) (string, bool) {
 	}
 }
 
+// logSubs 是 log 一组的子命令清单。
+var logSubs = []groupItem{
+	{"tail", "查看最近的请求记录，-n 改条数，--follow 跟随新记录"},
+}
+
 func cmdLog(e *Env, args []string) error {
-	if len(args) == 0 || args[0] != "tail" {
-		return usagef("需要子命令：tail")
+	if isHelpRequest(args) {
+		printGroupHelp(e.Stdout, "log", "查看请求记录", logSubs)
+		return nil
+	}
+	if len(args) == 0 {
+		return usagef("需要子命令：tail\n用 switchboard log --help 查看子命令")
+	}
+	if args[0] != "tail" {
+		return usagef("未知子命令 %q，可用：tail\n用 switchboard log --help 查看子命令", args[0])
 	}
 	fs := newFlagSet(e, "log tail", "查看最近的请求记录")
 	n := fs.Int("n", 20, "条数")

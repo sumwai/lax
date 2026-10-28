@@ -60,6 +60,15 @@ func (a *app) keyPath() string {
 	return filepath.Join(filepath.Dir(a.paths.DB), "secret.key")
 }
 
+// gatewayLogf 返回给 gateway 用的日志函数，写 stderr。gateway 只在真失败时调用它
+// （写请求记录失败、停用账号失败、清冷却失败等），正常路径一行都不出，
+// 所以既不会碍着人读，也不会污染 stdout 与 --json 的结果。
+func (e *Env) gatewayLogf() func(format string, args ...any) {
+	return func(format string, args ...any) {
+		fmt.Fprintf(e.Stderr, "警告：%s\n", fmt.Sprintf(format, args...))
+	}
+}
+
 func lookupEnv(name string) string { return os.Getenv(name) }
 
 // isWide 判断字符在终端里占两列。
