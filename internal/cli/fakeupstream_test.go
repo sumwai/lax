@@ -8,9 +8,13 @@ import (
 	"testing"
 )
 
-// recorderCall 是一次打到假上游的请求：方法、路径与两种凭据头。
+// recorderCall 是一次打到假上游的请求：方法、完整地址、路径与两种凭据头。
+// url 是「scheme://host + 路径」的完整地址，取值与 httptest 的 srv.URL 同形：
+// 只看 path 看不出 base_url 那一半拼得对不对（多一个斜杠、前缀被吃掉都藏在前面），
+// 规整相关的断言要比的是整条地址。
 type recorderCall struct {
 	method string
+	url    string
 	path   string
 	apiKey string
 	bearer string
@@ -40,6 +44,7 @@ func newRecorderUpstream(t *testing.T, routes map[string]fakeResponse) *recorder
 		up.mu.Lock()
 		up.calls = append(up.calls, recorderCall{
 			method: r.Method,
+			url:    "http://" + r.Host + r.URL.Path,
 			path:   r.URL.Path,
 			apiKey: r.Header.Get("x-api-key"),
 			bearer: r.Header.Get("Authorization"),
@@ -89,6 +94,17 @@ func (u *recorderUpstream) postPaths() []string {
 		out = append(out, c.path)
 	}
 	return out
+}
+
+// mustSingleCall 取这次唯一的一次上游调用：用例一次只发一条命令，多打或没打都是错。
+// 断言顺序是「正好一次」而不是「至少一次」：多打一次就是把同一笔钱记了两次。
+func (u *recorderUpstream) mustSingleCall(t *testing.T) recorderCall {
+	t.Helper()
+	calls := u.all()
+	if len(calls) != 1 {
+		t.Fatalf("上游调用 = %+v，期望正好一次", calls)
+	}
+	return calls[0]
 }
 
 // reset 清空记录，用来把「首轮」与「重探」的调用分开断言。

@@ -240,6 +240,11 @@ func TestStreamCutMidEventEndsWithErrorAndStop(t *testing.T) {
 	if !strings.Contains(recs[0].Error, "上游流式响应中断") {
 		t.Fatalf("请求记录的 error = %q，期望写明上游中断", recs[0].Error)
 	}
+	// 用量取 0/0：转换路径的用量只来自解码出的 usage 增量，chat 的 usage 在最后一帧里，
+	// 这次断流一帧 usage 都没转发过去，scanner 无东西可读。
+	if recs[0].InTokens != 0 || recs[0].OutTokens != 0 {
+		t.Fatalf("请求记录的用量 = %d/%d，期望 0/0（断流前没有 usage 帧）", recs[0].InTokens, recs[0].OutTokens)
+	}
 }
 
 // TestStreamCutInsideMultibyteRuneKeepsValidUTF8 覆盖切点在 UTF-8 三字节字符中间：
@@ -292,6 +297,10 @@ func TestStreamCutInsideMultibyteRuneKeepsValidUTF8(t *testing.T) {
 	if len(recs) != 1 || recs[0].OK || !strings.Contains(recs[0].Error, "上游流式响应中断") {
 		t.Fatalf("请求记录 = %+v，期望一行 ok=0 且写明上游中断", recs)
 	}
+	// 同上：断点前只有正文帧，没有 usage，记账就是 0/0。
+	if recs[0].InTokens != 0 || recs[0].OutTokens != 0 {
+		t.Fatalf("请求记录的用量 = %d/%d，期望 0/0", recs[0].InTokens, recs[0].OutTokens)
+	}
 }
 
 // TestStreamDisconnectBeforeFinishFrameKeepsLegalEnding 覆盖上游把正文都发完、只差收尾帧
@@ -333,6 +342,11 @@ func TestStreamDisconnectBeforeFinishFrameKeepsLegalEnding(t *testing.T) {
 	if recs[0].HTTPStatus != http.StatusOK {
 		t.Fatalf("这条记录的 http_status = %d，期望 200（响应头已经发出）", recs[0].HTTPStatus)
 	}
+	// chat 的 usage 只写在最后一帧（stream_options.include_usage），这次就是那一帧没到，
+	// 所以记账是 0/0；写非零就是把没读到的用量当成真数字。
+	if recs[0].InTokens != 0 || recs[0].OutTokens != 0 {
+		t.Fatalf("请求记录的用量 = %d/%d，期望 0/0（usage 帧没到）", recs[0].InTokens, recs[0].OutTokens)
+	}
 }
 
 // TestPassthroughStreamDisconnectKeepsLegalEnding 覆盖同协议直通时上游掉线，三种协议各一条：
@@ -360,10 +374,15 @@ func TestPassthroughStreamDisconnectKeepsLegalEnding(t *testing.T) {
 		body func(t *testing.T) string
 		// check 断言追加的收尾帧。
 		check func(t *testing.T, body string)
+		// wantIn / wantOut 是这次断流在 requests 行里的用量，依据逐条写在各用例里。
+		wantIn, wantOut int64
 	}{
 		{
 			name:     "anthropic",
 			protocol: gateway.ProtocolAnthropic,
+			// 用量来自已转发的 message_start（input_tokens=3）与 message_delta（output_tokens=2）：
+			// anthropic 把用量分在这两帧里，断在 message_stop 之前时两帧都已经读到了。
+			wantIn: 3, wantOut: 2,
 			body: func(t *testing.T) string {
 				return cutBefore(streamBodies[translate.ProtocolAnthropic], "event: message_stop")
 			},
@@ -393,11 +412,19 @@ func TestPassthroughStreamDisconnectKeepsLegalEnding(t *testing.T) {
 				if want := "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"; !strings.HasSuffix(body, want) {
 					t.Fatalf("流应以 message_stop 结尾，实际结尾 %q", tail(body, 80))
 				}
+				// 顺序：错误帧在收尾事件之前，客户端先看到出了什么事，再看到流合法结束。
+				events := anthropicEvents(t, body)
+				if got := strings.Join(events, ","); !strings.HasSuffix(got, "error,message_delta,message_stop") {
+					t.Fatalf("事件序列的结尾 = %q，期望 error 之后紧跟 message_delta、message_stop", got)
+				}
 			},
 		},
 		{
 			name:     "openai-chat",
 			protocol: gateway.ProtocolChat,
+			// chat 的 usage 只在最后一帧里（stream_options.include_usage），切在正文中间时
+			// 一帧 usage 都没转发过去，scanner 读不到，用量就是 0/0。
+			wantIn: 0, wantOut: 0,
 			body: func(t *testing.T) string {
 				// 切在第二条 data 的 JSON 中间：连换行都没有，追加之前必须先补空行。
 				first := "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好\"}}]}\n\n"
@@ -410,11 +437,36 @@ func TestPassthroughStreamDisconnectKeepsLegalEnding(t *testing.T) {
 				if !strings.HasSuffix(body, "\n\ndata: [DONE]\n\n") {
 					t.Fatalf("流应以 data: [DONE] 结尾，实际结尾 %q", tail(body, 80))
 				}
+				// 错误帧在 [DONE] 之前，内容是 chat 形状的错误体而不是空帧。
+				errIdx := strings.Index(body, "data: {\"error\":")
+				doneIdx := strings.LastIndex(body, "data: [DONE]")
+				if errIdx < 0 || doneIdx < 0 || errIdx > doneIdx {
+					t.Fatalf("错误帧应在 [DONE] 之前（error 位置 %d，[DONE] 位置 %d）", errIdx, doneIdx)
+				}
+				line := body[errIdx+len("data: "):]
+				if end := strings.Index(line, "\n"); end >= 0 {
+					line = line[:end]
+				}
+				var frame struct {
+					Error struct {
+						Type    string `json:"type"`
+						Message string `json:"message"`
+					} `json:"error"`
+				}
+				if err := json.Unmarshal([]byte(line), &frame); err != nil {
+					t.Fatalf("错误帧的 data 不是合法 JSON: %v，%q", err, line)
+				}
+				if frame.Error.Type != "api_error" || !strings.Contains(frame.Error.Message, "上游流式响应中断") {
+					t.Fatalf("错误帧 = %+v，期望 type=api_error 且说明上游中断", frame.Error)
+				}
 			},
 		},
 		{
 			name:     "openai-responses",
 			protocol: gateway.ProtocolResponses,
+			// responses 的用量只写在 response.completed / response.incomplete 里，
+			// 断流时那一帧从未到过，所以记账是 0/0。
+			wantIn: 0, wantOut: 0,
 			body: func(t *testing.T) string {
 				return cutBefore(streamBodies[translate.ProtocolResponses], "data: {\"type\":\"response.completed\"")
 			},
@@ -441,6 +493,12 @@ func TestPassthroughStreamDisconnectKeepsLegalEnding(t *testing.T) {
 				}
 				if !strings.Contains(failed.Response.Error.Message, "上游流式响应中断") {
 					t.Fatalf("response.failed 的 message = %q，期望写明上游中断", failed.Response.Error.Message)
+				}
+				// 事件序列以设计约定的两个收尾事件结束：error 再 response.failed，
+				// responses 没有 [DONE]，客户端认的是终态事件。
+				events := responsesEvents(t, body)
+				if got := strings.Join(events, ","); !strings.HasSuffix(got, "error,response.failed") {
+					t.Fatalf("事件序列的结尾 = %q，期望以 error,response.failed 收束", got)
 				}
 			},
 		},
@@ -479,6 +537,10 @@ func TestPassthroughStreamDisconnectKeepsLegalEnding(t *testing.T) {
 			if !strings.Contains(recs[0].Error, "上游流式响应中断") {
 				t.Fatalf("请求记录的 error = %q，期望写明上游中断", recs[0].Error)
 			}
+			if recs[0].InTokens != c.wantIn || recs[0].OutTokens != c.wantOut {
+				t.Fatalf("请求记录的用量 = %d/%d，期望 %d/%d（依据见该用例的 wantIn/wantOut 注释）",
+					recs[0].InTokens, recs[0].OutTokens, c.wantIn, c.wantOut)
+			}
 
 			// 凭据只以密文入库：日志、客户端收到的字节、请求记录里都不该出现 key 明文。
 			if leaked := logs(); strings.Contains(leaked, key) {
@@ -489,6 +551,40 @@ func TestPassthroughStreamDisconnectKeepsLegalEnding(t *testing.T) {
 			}
 		})
 	}
+}
+
+// responsesEvents 按出现顺序取出每一帧 data 里的 type，返回事件序列。
+// responses 的上游帧可以只有 data 行、不写 event 行，所以这里不看 event 行。
+// 只用于帧边界完整的流：半截帧的 data 解不出 JSON，那种情况由用例自己的断言处理。
+func responsesEvents(t *testing.T, body string) []string {
+	t.Helper()
+	var out []string
+	for _, chunk := range strings.Split(body, "\n\n") {
+		line := ""
+		for _, l := range strings.Split(chunk, "\n") {
+			if strings.HasPrefix(l, "data: ") {
+				line = strings.TrimPrefix(l, "data: ")
+				break
+			}
+		}
+		if line == "" {
+			continue
+		}
+		var payload struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal([]byte(line), &payload); err != nil {
+			t.Fatalf("这一帧的 data 不是合法 JSON: %v，%q", err, line)
+		}
+		if payload.Type == "" {
+			t.Fatalf("这一帧没有 type: %q", line)
+		}
+		out = append(out, payload.Type)
+	}
+	if len(out) == 0 {
+		t.Fatalf("流里一帧都没有:\n%s", body)
+	}
+	return out
 }
 
 // lastEventData 取出某个具名事件最后一次出现时的 data 行内容。

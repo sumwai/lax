@@ -3,6 +3,7 @@ package cli_test
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -406,6 +407,195 @@ func TestProviderPathWritesAreNormalized(t *testing.T) {
 	calls = up.all()
 	if len(calls) != 1 || calls[0].method != http.MethodPost || calls[0].path != "/v2/chat/completions" {
 		t.Fatalf("上游调用 = %+v，期望一次 POST /v2/chat/completions", calls)
+	}
+}
+
+// TestProviderAddNormalizedPathsHitFullURL 把规整钉在地址层：provider add 收下
+// `//v1//chat/completions/`、`v1/messages` 与 `v1//models` 之后，真实打到上游的是
+// <base_url>/v1/chat/completions、<base_url>/v1/messages 与 <base_url>/v1/models。
+// 断言完整 URL 而不只是库里的列值，是因为拼地址的两侧都可能出错：库里存的是 /v1/chat/completions，
+// 拼的时候把 base_url 的末尾斜杠留下来就变成 //v1//chat/completions，只看列值发现不了。
+func TestProviderAddNormalizedPathsHitFullURL(t *testing.T) {
+	sandbox(t)
+	up := newRecorderUpstream(t, map[string]fakeResponse{
+		"POST /v1/chat/completions": {status: http.StatusOK, body: chatCompletionOK},
+		"POST /v1/messages":         {status: http.StatusOK, body: anthropicMessageOK},
+		"GET /v1/models":            {status: http.StatusOK, body: modelsListM1},
+	})
+	mustInit(t)
+
+	if code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", up.srv.URL,
+		"--openai", "//v1//chat/completions/",
+		"--anthropic", "v1/messages",
+		"--models-path", "v1//models"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	// 库里存的必须是规整形态：读取侧虽然再过一遍，但脏值落库会让 provider ls 与手改库的人看不懂。
+	added := mustProviderLs(t)["mine"]
+	if routes := routeMap(added); routes["openai-chat"].Path != "/v1/chat/completions" || routes["anthropic"].Path != "/v1/messages" {
+		t.Fatalf("路由应落成规整形态: %+v", added.Protocols)
+	}
+	if added.ModelsPath != "/v1/models" {
+		t.Fatalf("厂商级模型列表路径 = %q，期望 /v1/models", added.ModelsPath)
+	}
+
+	// 两个账号各用一种协议，都用厂商的 base_url（不给 --base-url）。
+	if code, _, stderr := run(t, "account", "add", "a-chat",
+		"--provider", "mine", "--protocol", "openai-chat", "--key", "sk-test", "--models", "m1"); code != 0 {
+		t.Fatalf("account add a-chat 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := run(t, "account", "add", "a-anth",
+		"--provider", "mine", "--protocol", "anthropic", "--key", "sk-test", "--models", "m1"); code != 0 {
+		t.Fatalf("account add a-anth 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	// account test 按账号协议打一条最小请求，看的是 --openai 那条路由拼出来的完整地址。
+	up.reset()
+	if code, _, stderr := run(t, "account", "test", "a-chat"); code != 0 {
+		t.Fatalf("account test a-chat 退出码 = %d，stderr = %s", code, stderr)
+	}
+	call := up.mustSingleCall(t)
+	if call.method != http.MethodPost {
+		t.Fatalf("上游方法 = %s，期望 POST", call.method)
+	}
+	if want := up.srv.URL + "/v1/chat/completions"; call.url != want {
+		t.Fatalf("chat 请求地址 = %q，期望 %q", call.url, want)
+	}
+
+	// --anthropic v1/messages 同样只规整不报错，拼出来是 /v1/messages。
+	up.reset()
+	if code, _, stderr := run(t, "account", "test", "a-anth"); code != 0 {
+		t.Fatalf("account test a-anth 退出码 = %d，stderr = %s", code, stderr)
+	}
+	call = up.mustSingleCall(t)
+	if want := up.srv.URL + "/v1/messages"; call.url != want {
+		t.Fatalf("anthropic 请求地址 = %q，期望 %q", call.url, want)
+	}
+
+	// --models-path v1//models 是厂商级覆盖，model sync 打到 <base_url>/v1/models。
+	up.reset()
+	if code, _, stderr := run(t, "model", "sync", "--account", "a-chat"); code != 0 {
+		t.Fatalf("model sync 退出码 = %d，stderr = %s", code, stderr)
+	}
+	call = up.mustSingleCall(t)
+	if call.method != http.MethodGet {
+		t.Fatalf("模型列表的上游方法 = %s，期望 GET", call.method)
+	}
+	if want := up.srv.URL + "/v1/models"; call.url != want {
+		t.Fatalf("模型列表地址 = %q，期望 %q", call.url, want)
+	}
+}
+
+// TestModelSyncEndpointNormalizedPathIsTemporary 钉住 --endpoint `//v1//model` 的两件事：
+// 规整之后拼出的完整地址是 <base_url>/v1/model，并且只影响这一次调用——
+// 下一次同步回到厂商级覆盖的 /v1/models，--endpoint 不会落库。
+func TestModelSyncEndpointNormalizedPathIsTemporary(t *testing.T) {
+	sandbox(t)
+	up := newRecorderUpstream(t, map[string]fakeResponse{
+		"GET /v1/model":  {status: http.StatusOK, body: `{"data":[{"id":"m1"},{"id":"m2"}]}`},
+		"GET /v1/models": {status: http.StatusOK, body: modelsListM1},
+	})
+	mustInit(t)
+
+	if code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", up.srv.URL,
+		"--openai", "v1/chat/completions",
+		"--models-path", "v1//models"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := run(t, "account", "add", "mine1",
+		"--provider", "mine", "--protocol", "openai-chat", "--key", "sk-test"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	up.reset()
+	code, out, stderr := run(t, "model", "sync", "--account", "mine1", "--endpoint", "//v1//model", "--json")
+	if code != 0 {
+		t.Fatalf("model sync --endpoint 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var synced []struct {
+		Account string `json:"account"`
+		Models  int    `json:"models"`
+	}
+	mustJSON(t, out, &synced)
+	if len(synced) != 1 || synced[0].Models != 2 {
+		t.Fatalf("model sync --endpoint = %+v，期望从 /v1/model 拉到 2 个模型", synced)
+	}
+	call := up.mustSingleCall(t)
+	if want := up.srv.URL + "/v1/model"; call.url != want {
+		t.Fatalf("--endpoint 的请求地址 = %q，期望 %q", call.url, want)
+	}
+
+	// 只影响这一次调用：不带 --endpoint 时回到厂商级覆盖的 /v1/models。
+	up.reset()
+	if code, _, stderr := run(t, "model", "sync", "--account", "mine1"); code != 0 {
+		t.Fatalf("不带 --endpoint 的 model sync 退出码 = %d，stderr = %s", code, stderr)
+	}
+	call = up.mustSingleCall(t)
+	if want := up.srv.URL + "/v1/models"; call.url != want {
+		t.Fatalf("不带 --endpoint 的请求地址 = %q，期望 %q（--endpoint 不该落库）", call.url, want)
+	}
+}
+
+// TestProviderBaseURLVariantsHitSameAddress 钉住 base_url 的规整落在地址上：
+// 只差末尾斜杠的两条 base_url 拼出同一个完整地址；重复斜杠被合并而真实存在的前缀
+// （/api/paas/v4）原样保留；带端口的地址一个字节都不改写。
+func TestProviderBaseURLVariantsHitSameAddress(t *testing.T) {
+	sandbox(t)
+	up := newRecorderUpstream(t, map[string]fakeResponse{
+		"POST /api/v1/chat/completions":      {status: http.StatusOK, body: chatCompletionOK},
+		"POST /api/paas/v4/chat/completions": {status: http.StatusOK, body: chatCompletionOK},
+	})
+	mustInit(t)
+
+	// 两条命令只差 base_url 末尾那个斜杠，provider add 各建一家厂商。route 是相对 base_url 的路径。
+	addWith := func(provider, base, route string) string {
+		t.Helper()
+		if code, _, stderr := run(t, "provider", "add", provider,
+			"--base-url", base, "--openai", route); code != 0 {
+			t.Fatalf("provider add %s 退出码 = %d，stderr = %s", provider, code, stderr)
+		}
+		if code, _, stderr := run(t, "account", "add", provider+"-1",
+			"--provider", provider, "--protocol", "openai-chat", "--key", "sk-test", "--models", "m1"); code != 0 {
+			t.Fatalf("account add %s-1 退出码 = %d，stderr = %s", provider, code, stderr)
+		}
+		up.reset()
+		if code, _, stderr := run(t, "account", "test", provider+"-1"); code != 0 {
+			t.Fatalf("account test %s-1 退出码 = %d，stderr = %s", provider, code, stderr)
+		}
+		return up.mustSingleCall(t).url
+	}
+
+	withSlash := addWith("slash", up.srv.URL+"/api/", "v1/chat/completions")
+	withoutSlash := addWith("noslash", up.srv.URL+"/api", "v1/chat/completions")
+	if want := up.srv.URL + "/api/v1/chat/completions"; withSlash != want {
+		t.Fatalf("末尾带斜杠的 base_url 拼出 %q，期望 %q", withSlash, want)
+	}
+	if withSlash != withoutSlash {
+		t.Fatalf("末尾带不带斜杠拼出了两个地址: %q 与 %q", withSlash, withoutSlash)
+	}
+
+	// 重复斜杠合并，真实存在的前缀原样保留。
+	prefixed := addWith("prefixed", up.srv.URL+"//api//paas//v4/", "chat/completions")
+	if want := up.srv.URL + "/api/paas/v4/chat/completions"; prefixed != want {
+		t.Fatalf("带前缀的 base_url 拼出 %q，期望 %q", prefixed, want)
+	}
+
+	// 带端口的地址不被改写：host:port 与假上游给出的完全一致，scheme 之后也没有多出斜杠。
+	parsed, err := url.Parse(prefixed)
+	if err != nil {
+		t.Fatalf("拼出的地址不是合法 URL: %v，%q", err, prefixed)
+	}
+	wantHost, err := url.Parse(up.srv.URL)
+	if err != nil {
+		t.Fatalf("假上游地址解析失败: %v", err)
+	}
+	if parsed.Host != wantHost.Host {
+		t.Fatalf("地址的 host:port = %q，期望 %q", parsed.Host, wantHost.Host)
+	}
+	if strings.Contains(prefixed[len(parsed.Scheme)+3:], "//") {
+		t.Fatalf("完整地址在 scheme 之后出现了重复斜杠: %q", prefixed)
 	}
 }
 
