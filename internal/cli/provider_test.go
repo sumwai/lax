@@ -343,6 +343,72 @@ func TestProviderAddCreates(t *testing.T) {
 	}
 }
 
+// TestProviderPathWritesAreNormalized 钉住「路径只规整、不拒绝输入」：provider add 与
+// provider set 收到的 `v1/chat/completions`、`//v2//chat//completions/`、`v1/models` 这些写法
+// 一律退出码 0、落库成规整形态；转发与模型同步打的是规整后的完整地址（见 DESIGN 5.8）。
+func TestProviderPathWritesAreNormalized(t *testing.T) {
+	sandbox(t)
+	up := newRecorderUpstream(t, map[string]fakeResponse{
+		"GET /v2/models":            {status: http.StatusOK, body: modelsListM1},
+		"POST /v2/chat/completions": {status: http.StatusOK, body: chatCompletionOK},
+	})
+	mustInit(t)
+
+	// add：少写前导斜杠、多写重复与末尾斜杠都不报错。
+	code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", up.srv.URL,
+		"--openai", "v1/chat/completions",
+		"--anthropic", "//v1//messages/",
+		"--models-path", "v1/models")
+	if code != 0 {
+		t.Fatalf("不规范的路径写法应被规整而不是报错，退出码 = %d，stderr = %s", code, stderr)
+	}
+	added := mustProviderLs(t)["mine"]
+	if got := routeMap(added); got["openai-chat"].Path != "/v1/chat/completions" || got["anthropic"].Path != "/v1/messages" {
+		t.Fatalf("路由应落成规整形态: %+v", added.Protocols)
+	}
+	if added.ModelsPath != "/v1/models" {
+		t.Fatalf("厂商级模型列表路径应落成 /v1/models，实际 %q", added.ModelsPath)
+	}
+
+	// 账号地址指到假上游，下面两条命令各自打一次上游，看的是规整后的完整地址。
+	if code, _, stderr := run(t, "account", "add", "mine1",
+		"--provider", "mine", "--base-url", up.srv.URL, "--key", "sk-test", "--models", "m1"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	// set --models-path：重复与末尾斜杠都规整，model sync 打到 /v2/models。
+	if code, _, stderr := run(t, "provider", "set", "mine", "--models-path", "//v2//models/"); code != 0 {
+		t.Fatalf("provider set --models-path 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if got := mustProviderLs(t)["mine"]; got.ModelsPath != "/v2/models" {
+		t.Fatalf("provider set 后的厂商级模型列表路径 = %q，期望 /v2/models", got.ModelsPath)
+	}
+	if code, _, stderr := run(t, "model", "sync", "--account", "mine1"); code != 0 {
+		t.Fatalf("model sync 退出码 = %d，stderr = %s", code, stderr)
+	}
+	calls := up.all()
+	if len(calls) != 1 || calls[0].method != http.MethodGet || calls[0].path != "/v2/models" {
+		t.Fatalf("上游调用 = %+v，期望一次 GET /v2/models", calls)
+	}
+
+	// set --openai：改路径同样只规整不拒绝，转发打到 /v2/chat/completions。
+	up.reset()
+	if code, _, stderr := run(t, "provider", "set", "mine", "--openai", "//v2//chat//completions/"); code != 0 {
+		t.Fatalf("provider set --openai 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if got := routeMap(mustProviderLs(t)["mine"])["openai-chat"]; got.Path != "/v2/chat/completions" {
+		t.Fatalf("provider set 后的 openai 路由 = %+v，期望 /v2/chat/completions", got)
+	}
+	if code, _, stderr := run(t, "call", "hi", "--model", "m1"); code != 0 {
+		t.Fatalf("call 退出码 = %d，stderr = %s", code, stderr)
+	}
+	calls = up.all()
+	if len(calls) != 1 || calls[0].method != http.MethodPost || calls[0].path != "/v2/chat/completions" {
+		t.Fatalf("上游调用 = %+v，期望一次 POST /v2/chat/completions", calls)
+	}
+}
+
 // TestProviderAddDuplicate 钉住「add 只新建」：重名时报错并把用户指到 provider set，
 // 已有的行一个字段都不动。
 func TestProviderAddDuplicate(t *testing.T) {
@@ -387,8 +453,10 @@ func TestProviderAddEmptyValues(t *testing.T) {
 		flag string
 	}{
 		{"协议路径", []string{"--openai", ""}, "--openai"},
+		{"协议路径只有斜杠", []string{"--openai", "//"}, "--openai"},
 		{"默认协议", []string{"--default-protocol", ""}, "--default-protocol"},
 		{"模型列表路径", []string{"--models-path", ""}, "--models-path"},
+		{"模型列表路径只有斜杠", []string{"--models-path", "/"}, "--models-path"},
 		{"备注", []string{"--note", ""}, "--note"},
 	}
 	for _, c := range cases {
@@ -416,8 +484,8 @@ func TestProviderAddEmptyValues(t *testing.T) {
 
 // TestProviderAddUsageErrors 覆盖 add 的用法错误：缺地址、地址形状不对、一条路由都没给、
 // 默认协议不认识。每条都要退出码 2 并给出正确用法。
-// 路由路径的写法不在这里断言：拼接改成程序规整、不报错，`v1/chat/completions`、`//v1//x`
-// 这类取值会被规整成完整地址，而不是用错误。
+// 路径写法不在这里断言：拼接改成程序规整、不报错，`v1/chat/completions`、`//v1//x`、
+// `v1/models` 这类取值会被规整成完整地址（见 TestProviderPathWritesAreNormalized），而不是用错误。
 func TestProviderAddUsageErrors(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
@@ -450,14 +518,6 @@ func TestProviderAddUsageErrors(t *testing.T) {
 			if !strings.Contains(stderr, want) {
 				t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 			}
-		}
-	})
-
-	t.Run("模型列表路径不以 / 开头", func(t *testing.T) {
-		code, _, stderr := run(t, "provider", "add", "mine", "--base-url", "https://api.example.com",
-			"--openai", "/v1/chat/completions", "--models-path", "v1/models")
-		if code != 2 || !strings.Contains(stderr, "--models-path") {
-			t.Fatalf("退出码 = %d，stderr = %s", code, stderr)
 		}
 	})
 
@@ -619,6 +679,7 @@ func TestProviderSetErrors(t *testing.T) {
 		args []string
 	}{
 		{"协议路径空值", []string{"--openai", ""}},
+		{"协议路径只有斜杠", []string{"--openai", "//"}},
 		{"备注空值", []string{"--note", ""}},
 		{"默认协议空值", []string{"--default-protocol", ""}},
 		{"模型列表空值", []string{"--models-path", ""}},
@@ -709,7 +770,7 @@ func TestProviderUnsetRoutesAndSettings(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("provider unset 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"mine 已清掉 模型列表覆盖", "mine 已清掉 备注", "现有 1 条路由", "默认协议 openai-chat"} {
+	for _, want := range []string{"mine 已清掉模型列表覆盖", "mine 已清掉备注", "现有 1 条路由", "默认协议 openai-chat"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("unset 输出缺 %q: %s", want, out)
 		}
@@ -767,7 +828,7 @@ func TestProviderUnsetIdempotent(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("重复字段的退出码 = %d，stderr = %s", code, stderr)
 	}
-	if strings.Count(out, "本来就没有 备注") != 1 {
+	if strings.Count(out, "本来就没有备注") != 1 {
 		t.Fatalf("重复字段应只说明一次: %s", out)
 	}
 }
@@ -817,8 +878,8 @@ func TestProviderUnsetErrors(t *testing.T) {
 }
 
 // TestProviderUnsetDefaultRouteRefused 钉住「删掉的路由正好是默认协议」：
-// 整笔拒绝，文案给出两条能执行的下一步（换默认协议，或先 unset default-protocol），
-// 不留 store 里那句已经作废的「传空串」。
+// 整笔拒绝，文案由 store 给，列出仍然存在的协议并给出两条能执行的下一步
+// （换成已声明的协议，或先 unset default-protocol）；cli 不再自己算一份回退规则。
 func TestProviderUnsetDefaultRouteRefused(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
@@ -831,7 +892,8 @@ func TestProviderUnsetDefaultRouteRefused(t *testing.T) {
 	if out != "" {
 		t.Fatalf("拒绝写库时不该往 stdout 写结果: %s", out)
 	}
-	for _, want := range []string{"默认协议是 openai-chat", "switchboard provider set deepseek --default-protocol anthropic", "switchboard provider unset deepseek default-protocol"} {
+	for _, want := range []string{"对应的路由不存在", `"openai-chat"`, "现有：anthropic",
+		"switchboard provider set deepseek --default-protocol", "switchboard provider unset deepseek default-protocol"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 		}
@@ -1129,7 +1191,7 @@ func TestProviderUnsetSameFieldTwice(t *testing.T) {
 
 	// 第一次：确实清掉了备注。
 	code, out, stderr := run(t, "provider", "unset", "mine", "note")
-	if code != 0 || !strings.Contains(out, "mine 已清掉 备注") {
+	if code != 0 || !strings.Contains(out, "mine 已清掉备注") {
 		t.Fatalf("第一次 unset note 的退出码 = %d，输出 %s，stderr = %s", code, out, stderr)
 	}
 
@@ -1138,7 +1200,7 @@ func TestProviderUnsetSameFieldTwice(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("第二次 unset note 的退出码 = %d，期望 0，stderr = %s", code, stderr)
 	}
-	if out != "mine 本来就没有 备注\n现有 2 条路由，默认协议 anthropic\n" {
+	if out != "mine 本来就没有备注\n现有 2 条路由，默认协议 anthropic\n" {
 		t.Fatalf("第二次 unset note 的输出 = %q，期望只说一句本来就没有", out)
 	}
 
@@ -1150,7 +1212,7 @@ func TestProviderUnsetSameFieldTwice(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("第二次 unset default-protocol 的退出码 = %d，期望 0，stderr = %s", code, stderr)
 	}
-	if !strings.Contains(out, "mine 本来就没有 显式默认协议") {
+	if !strings.Contains(out, "mine 本来就没有显式默认协议") {
 		t.Fatalf("第二次 unset default-protocol 的输出 = %q", out)
 	}
 }

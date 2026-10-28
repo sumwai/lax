@@ -141,7 +141,7 @@ func TestREADMEProviderExamples(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("README 示例 provider unset myco models-path 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if want := "myco 本来就没有 模型列表覆盖"; !strings.Contains(out, want) {
+	if want := "myco 本来就没有模型列表覆盖"; !strings.Contains(out, want) {
 		t.Fatalf("幂等 unset 的输出与 README 描述不符：\n得到 %s\n期望包含 %q", out, want)
 	}
 

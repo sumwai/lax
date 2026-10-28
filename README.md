@@ -44,7 +44,7 @@ switchboard log tail                                        # 看请求记录
 
 出站协议由账号决定：`account add --protocol` 取值 `anthropic`、`openai-chat`、`openai-responses`，留空则取该厂商的默认协议（`provider add --default-protocol` 显式存的优先，没显式存则按 `openai-chat` → `openai-responses` → `anthropic` 取第一条路由）。厂商与各协议的路径在数据库里，`switchboard provider ls` 能看到，`provider add` / `set` / `unset` 可以增删改，不必重编译。入站协议与出站协议相同时直通，请求体只改 `model` 字段，其余字段与值原样带到上游，响应按字节原样返回；不同时经中间表示转换，请求与响应都只搬映射表里定义的字段，表外字段丢弃。未知路径返回 404，请求体解析失败返回 400，错误消息带协议名前缀。
 
-自己加一家厂商时，每个协议一条 flag（`--anthropic`、`--openai`、`--responses`，目前支持这三种），值是相对 `--base-url` 的完整路径、必须以 `/` 开头。`--default-protocol` 定下这家的默认协议，取值写 `anthropic`、`openai`、`responses`（也认线协议全名 `openai-chat`、`openai-responses`），必须落在已声明的路由上：
+自己加一家厂商时，每个协议一条 flag（`--anthropic`、`--openai`、`--responses`，目前支持这三种），值是相对 `--base-url` 的完整路径。路径写法不用纠结：`v1/chat/completions`、`//v1//chat/completions`、`/v1/chat/completions/` 由程序规整成同一个地址，不报错；`--models-path` 与 `model sync --endpoint` 同理，`v1/models`、`//v1//models/` 都落到 `/v1/models`。只有规整之后为空的取值（`--openai ""`，或只有斜杠）算用法错误，删一条路由、清一项设置用 `provider unset`。`--default-protocol` 定下这家的默认协议，取值写 `anthropic`、`openai`、`responses`（也认线协议全名 `openai-chat`、`openai-responses`），必须落在已声明的路由上：
 
 ```bash
 # 新建厂商：--base-url 必填，至少一条协议路由

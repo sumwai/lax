@@ -674,12 +674,14 @@ func cmdModelSync(e *Env, args []string) error {
 	fs := newFlagSet(e, "model sync", "从上游拉取模型列表")
 	provider := fs.String("provider", "", "只同步这个厂商的账号")
 	accountName := fs.String("account", "", "只同步这个账号")
-	endpoint := fs.String("endpoint", "", "临时覆盖模型列表路径，只影响这一次调用：相对厂商 base_url 的完整路径，必须以 / 开头，例如 /v1/models")
+	endpoint := fs.String("endpoint", "", "临时覆盖模型列表路径，只影响这一次调用：相对厂商 base_url 的完整路径，例如 /v1/models（写法由程序规整）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if path := strings.TrimSpace(*endpoint); path != "" && !strings.HasPrefix(path, "/") {
-		return usagef("--endpoint %q 要以 / 开头：它是相对该厂商 base_url 的完整路径，例如 switchboard model sync --endpoint /v1/models", *endpoint)
+	// 取值原样往下走：写法（前导斜杠、重复斜杠、末尾斜杠）由 store.NormalizePath 规整，
+	// cli 只判「规整之后为空」——那是给了参数却没给路径，去掉这个参数再试（见 DESIGN 4、5.8）。
+	if flagWasSet(fs, "endpoint") && !pathGiven(*endpoint) {
+		return usagef("--endpoint %q 里没有路径：它是相对该厂商 base_url 的完整路径，例如 switchboard model sync --endpoint /v1/models；不想临时覆盖就整个去掉这个参数", *endpoint)
 	}
 
 	a, err := openApp(e, true)

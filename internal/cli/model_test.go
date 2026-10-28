@@ -209,6 +209,53 @@ func TestModelSyncEndpointOverride(t *testing.T) {
 	}
 }
 
+// TestModelSyncEndpointNormalized 钉住 --endpoint 的写法只规整、不报错：
+// `custom/models`、`//custom//models/`、`/custom/models/` 都打到同一个完整地址，退出码 0；
+// 规整之后为空的取值（""、"//"）仍是用法错误，文案让人去掉这个参数。
+func TestModelSyncEndpointNormalized(t *testing.T) {
+	sandbox(t)
+	up := newRecorderUpstream(t, map[string]fakeResponse{
+		"GET /custom/models": {status: http.StatusOK, body: modelsListM1},
+	})
+	mustInit(t)
+	if code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", "https://api.example.invalid",
+		"--openai", "/v1/chat/completions"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := run(t, "account", "add", "mine1",
+		"--provider", "mine", "--base-url", up.srv.URL, "--key", "sk-test"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	for _, endpoint := range []string{"custom/models", "//custom//models/", "/custom/models/"} {
+		up.reset()
+		code, _, stderr := run(t, "model", "sync", "--account", "mine1", "--endpoint", endpoint)
+		if code != 0 {
+			t.Fatalf("--endpoint %q 应被规整而不是报错，退出码 = %d，stderr = %s", endpoint, code, stderr)
+		}
+		calls := up.all()
+		if len(calls) != 1 || calls[0].method != http.MethodGet || calls[0].path != "/custom/models" {
+			t.Fatalf("--endpoint %q 的上游调用 = %+v，期望一次 GET /custom/models", endpoint, calls)
+		}
+	}
+
+	for _, empty := range []string{"", "  ", "//"} {
+		code, out, stderr := run(t, "model", "sync", "--account", "mine1", "--endpoint", empty)
+		if code != 2 {
+			t.Fatalf("--endpoint %q 的退出码 = %d，期望 2（用法错误）", empty, code)
+		}
+		if out != "" {
+			t.Fatalf("用法错误不该写 stdout: %s", out)
+		}
+		for _, want := range []string{"--endpoint", "没有路径", "去掉这个参数"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+			}
+		}
+	}
+}
+
 // TestAccountSyncProbeFlow 覆盖 sync → probe → accounts.models → model ls 整条链路。
 func TestAccountSyncProbeFlow(t *testing.T) {
 	sandbox(t)
