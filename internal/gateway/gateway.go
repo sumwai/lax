@@ -224,6 +224,10 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			latency.Round(time.Millisecond), errorSuffix(res.message))
 
 		if rec.OK {
+			// 成功一次就把连续失败次数清零，冷却时长下次从头算。
+			if err := s.store.ClearFailure(cand.ID); err != nil {
+				s.logf("清冷却失败: %v", err)
+			}
 			return
 		}
 
@@ -242,8 +246,8 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("账号 %s 无权使用该模型：%s", cand.Name, res.message))
 			return
 		case account.Retryable(res.status) && !res.wrote:
-			until := s.now().Add(account.Cooldown(res.status, 0)).Unix()
-			if err := s.store.SetCooldown(cand.ID, until, res.message); err != nil {
+			until := s.now().Add(account.Cooldown(res.status, cand.FailStreak)).Unix()
+			if err := s.store.RecordFailure(cand.ID, until, res.message); err != nil {
 				s.logf("设置冷却失败: %v", err)
 			}
 			lastErr = fmt.Sprintf("%s: %s", cand.Name, res.message)

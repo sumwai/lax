@@ -70,7 +70,7 @@ func (s *Server) Probe(ctx context.Context, a store.Account) (ProbeResult, error
 		if err := s.store.SetEnabled(a.ID, true, ""); err != nil {
 			return res, err
 		}
-		if err := s.store.SetCooldown(a.ID, 0, ""); err != nil {
+		if err := s.store.ClearFailure(a.ID); err != nil {
 			return res, err
 		}
 		return res, nil
@@ -82,8 +82,8 @@ func (s *Server) Probe(ctx context.Context, a store.Account) (ProbeResult, error
 		// 401 才是凭据问题。403 多为套餐或模型权限，凭据本身可用，不停用账号。
 		err = s.store.SetEnabled(a.ID, false, res.Message)
 	case account.Retryable(resp.StatusCode):
-		until := s.now().Add(account.Cooldown(resp.StatusCode, 0)).Unix()
-		err = s.store.SetCooldown(a.ID, until, res.Message)
+		until := s.now().Add(account.Cooldown(resp.StatusCode, a.FailStreak)).Unix()
+		err = s.store.RecordFailure(a.ID, until, res.Message)
 	}
 	return res, err
 }

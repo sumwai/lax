@@ -40,7 +40,9 @@ type Account struct {
 	Enabled       bool
 	CooldownUntil int64
 	LastError     string
-	CreatedAt     int64
+	// FailStreak 是连续失败次数，跨请求累计，用于冷却翻倍。成功一次即清零。
+	FailStreak int
+	CreatedAt  int64
 }
 
 // RequestRecord 是一次上游尝试。
@@ -179,7 +181,7 @@ func (s *Store) CreateAccount(a *Account) error {
 // ListAccounts 按 priority、id 升序返回全部账号。
 func (s *Store) ListAccounts() ([]Account, error) {
 	rows, err := s.db.Query(`SELECT id, name, provider, protocol, base_url, key_cipher, models,
-		price_in, price_out, priority, enabled, COALESCE(cooldown_until, 0), COALESCE(last_error, ''), created_at
+		price_in, price_out, priority, enabled, COALESCE(cooldown_until, 0), COALESCE(last_error, ''), fail_streak, created_at
 		FROM accounts ORDER BY priority ASC, id ASC`)
 	if err != nil {
 		return nil, err
@@ -192,7 +194,7 @@ func (s *Store) ListAccounts() ([]Account, error) {
 		var models string
 		var enabled int
 		if err := rows.Scan(&a.ID, &a.Name, &a.Provider, &a.Protocol, &a.BaseURL, &a.KeyCipher,
-			&models, &a.PriceIn, &a.PriceOut, &a.Priority, &enabled, &a.CooldownUntil, &a.LastError, &a.CreatedAt); err != nil {
+			&models, &a.PriceIn, &a.PriceOut, &a.Priority, &enabled, &a.CooldownUntil, &a.LastError, &a.FailStreak, &a.CreatedAt); err != nil {
 			return nil, err
 		}
 		a.Models = decodeModels(models)
@@ -208,9 +210,9 @@ func (s *Store) GetAccount(name string) (Account, error) {
 	var models string
 	var enabled int
 	err := s.db.QueryRow(`SELECT id, name, provider, protocol, base_url, key_cipher, models,
-		price_in, price_out, priority, enabled, COALESCE(cooldown_until, 0), COALESCE(last_error, ''), created_at
+		price_in, price_out, priority, enabled, COALESCE(cooldown_until, 0), COALESCE(last_error, ''), fail_streak, created_at
 		FROM accounts WHERE name = ?`, name).Scan(&a.ID, &a.Name, &a.Provider, &a.Protocol, &a.BaseURL,
-		&a.KeyCipher, &models, &a.PriceIn, &a.PriceOut, &a.Priority, &enabled, &a.CooldownUntil, &a.LastError, &a.CreatedAt)
+		&a.KeyCipher, &models, &a.PriceIn, &a.PriceOut, &a.Priority, &enabled, &a.CooldownUntil, &a.LastError, &a.FailStreak, &a.CreatedAt)
 	if err != nil {
 		return a, err
 	}
@@ -246,9 +248,19 @@ func (s *Store) DeleteAccount(name string) error {
 	return tx.Commit()
 }
 
-// SetCooldown 记录冷却截止时间与最近一次错误。
-func (s *Store) SetCooldown(id int64, until int64, lastErr string) error {
-	_, err := s.db.Exec(`UPDATE accounts SET cooldown_until = ?, last_error = ? WHERE id = ?`, until, lastErr, id)
+// RecordFailure 记录一次失败：冷却截止时间、最近一次错误，并把连续失败次数加一。
+func (s *Store) RecordFailure(id int64, until int64, lastErr string) error {
+	_, err := s.db.Exec(`UPDATE accounts
+		SET cooldown_until = ?, last_error = ?, fail_streak = fail_streak + 1
+		WHERE id = ?`, until, lastErr, id)
+	return err
+}
+
+// ClearFailure 清掉冷却、最近一次错误与连续失败次数。
+func (s *Store) ClearFailure(id int64) error {
+	_, err := s.db.Exec(`UPDATE accounts
+		SET cooldown_until = NULL, last_error = '', fail_streak = 0
+		WHERE id = ?`, id)
 	return err
 }
 

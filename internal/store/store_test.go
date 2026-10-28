@@ -57,8 +57,8 @@ func TestAccountLifecycle(t *testing.T) {
 		t.Fatal("重名应报错")
 	}
 
-	if err := st.SetCooldown(acc.ID, time.Now().Add(time.Minute).Unix(), "限流"); err != nil {
-		t.Fatalf("设冷却: %v", err)
+	if err := st.RecordFailure(acc.ID, time.Now().Add(time.Minute).Unix(), "限流"); err != nil {
+		t.Fatalf("记失败: %v", err)
 	}
 	if err := st.SetEnabled(acc.ID, false, "key 无效"); err != nil {
 		t.Fatalf("停用: %v", err)
@@ -69,6 +69,31 @@ func TestAccountLifecycle(t *testing.T) {
 	}
 	if got.CooldownUntil == 0 || got.Enabled || got.LastError != "key 无效" {
 		t.Fatalf("状态 = %+v", got)
+	}
+	if got.FailStreak != 1 {
+		t.Fatalf("连续失败次数 = %d，期望 1", got.FailStreak)
+	}
+
+	if err := st.RecordFailure(acc.ID, time.Now().Add(2*time.Minute).Unix(), "还是限流"); err != nil {
+		t.Fatalf("再记失败: %v", err)
+	}
+	got, err = st.GetAccount("ds1")
+	if err != nil {
+		t.Fatalf("第三次取: %v", err)
+	}
+	if got.FailStreak != 2 {
+		t.Fatalf("连续失败次数 = %d，期望 2", got.FailStreak)
+	}
+
+	if err := st.ClearFailure(acc.ID); err != nil {
+		t.Fatalf("清失败: %v", err)
+	}
+	got, err = st.GetAccount("ds1")
+	if err != nil {
+		t.Fatalf("第四次取: %v", err)
+	}
+	if got.FailStreak != 0 || got.CooldownUntil != 0 || got.LastError != "" {
+		t.Fatalf("清失败后状态 = %+v", got)
 	}
 
 	if err := st.DeleteAccount("ds1"); err != nil {

@@ -170,7 +170,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 ### 5.3 选号与失败转移
 
 - 候选集合由模型名决定。模型名用请求里的 `model` 字段原文匹配，不做别名归一（第一版）。`model sync` 只刷新 `account_models`，不改变选号依据；`model probe` 探出可用模型后才把列表写进 `accounts.models`，选号此后按新列表走。
-- 冷却：429 起始 60 秒，5xx 起始 10 秒，连续失败翻倍，上限 30 分钟；`account test` 成功或 `account enable` 都会清除。
+- 冷却：429 起始 60 秒，5xx 起始 10 秒，连续失败翻倍，上限 30 分钟；连续失败次数记在账号的 `fail_streak` 列，跨请求累计。任意一次成功、`account test` 成功或 `account enable` 都会把冷却、`last_error` 与 `fail_streak` 一起清零。
 - 会话粘性：请求头带 `x-switchboard-session` 或 `metadata.user_id` 时，同一个值在一小时内粘同一个账号；否则按 `priority` 轮转。
 - 401 说明凭据本身不行：把账号标为 `enabled=0` 并把错误返回客户端，避免同一条错误把整个候选池刷成不可用。`account test` 成功或 `account enable` 可恢复，两者都会清冷却。
 - 403 多为套餐或模型权限不对，凭据还能用：不停用账号，也不再换号，直接把上游原话返回。commandcode 对不在套餐内的模型就是返回 403。
@@ -311,6 +311,7 @@ CREATE TABLE accounts (
   enabled        INTEGER NOT NULL DEFAULT 1,
   cooldown_until INTEGER,
   last_error     TEXT,
+  fail_streak    INTEGER NOT NULL DEFAULT 0,
   created_at     INTEGER NOT NULL
 );
 
@@ -345,7 +346,7 @@ CREATE TABLE account_models (
 );
 ```
 
-`account_models` 由迁移 `0003` 建立，`status` 取值就是 `synced`、`usable`、`forbidden`、`notfound`、`auth`、`error`（见 5.7）。`accounts.models` 仍是选号实际读的那份列表。删除账号时 `DeleteAccount` 在同一个事务里删掉它的 `account_models` 行：SQLite 的 rowid 会被复用，遗留子行会让新账号继承旧账号的探活状态。
+`account_models` 由迁移 `0003` 建立，`status` 取值就是 `synced`、`usable`、`forbidden`、`notfound`、`auth`、`error`（见 5.7）。`accounts.fail_streak` 由迁移 `0004` 加入，只用于冷却翻倍，写入口只有 `RecordFailure`（加一）与 `ClearFailure`（清零）。`accounts.models` 仍是选号实际读的那份列表。删除账号时 `DeleteAccount` 在同一个事务里删掉它的 `account_models` 行：SQLite 的 rowid 会被复用，遗留子行会让新账号继承旧账号的探活状态。
 
 迁移用 `internal/store/migrations/*.sql`，按文件顺序执行，`PRAGMA user_version` 记录已执行版本。
 
@@ -365,7 +366,6 @@ M0 到 M6 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkele
 
 已知未做，按已知行为处理：
 
-- 冷却时长按单次失败计算，不跨请求累计连续失败次数。
 - 估算花费依赖账号上的 `--price-in` 与 `--price-out`，没有价格时记为 0 并在 `usage` 末尾提示。
 - 模型名不做别名归一，请求里的 `model` 必须与账号 `--models` 里的名字完全一致。
 - 不带任何客户端配置改写：客户端里的 base URL、token、模型名都靠自己填。

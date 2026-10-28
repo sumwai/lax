@@ -259,6 +259,17 @@ func TestFailoverOnRateLimit(t *testing.T) {
 	if acc.CooldownUntil == 0 {
 		t.Fatalf("被限流的账号没有进冷却: %+v", acc)
 	}
+	if acc.FailStreak != 1 {
+		t.Fatalf("连续失败次数 = %d，期望 1", acc.FailStreak)
+	}
+
+	healthyAcc, err := f.st.GetAccount("healthy")
+	if err != nil {
+		t.Fatalf("读账号: %v", err)
+	}
+	if healthyAcc.FailStreak != 0 || healthyAcc.CooldownUntil != 0 {
+		t.Fatalf("成功的账号不应留下失败计数: %+v", healthyAcc)
+	}
 
 	recs, err := f.st.RecentRequests(10)
 	if err != nil {
