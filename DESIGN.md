@@ -44,7 +44,7 @@ $ switchboard init
 数据库 /home/someone/.local/share/switchboard/switchboard.db
 
 # 2 加账号。key 加密后入库，不进配置文件。厂商的默认地址与默认协议来自厂商表
-#   （默认协议是按协议名排序的第一条路由，deepseek 是 anthropic，这里显式选 chat）
+#   （默认协议显式存在厂商表里，deepseek 是 openai-chat；这里显式写一遍也一样）
 $ switchboard account add deepseek-1 \
     --provider deepseek \
     --protocol openai-chat \
@@ -136,7 +136,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | `account disable` | `<名称>` | 停用账号，不再参与选号 | 确认一行 |
 | `model ls` | `[--provider 厂商]` `[--account 账号]` `--json` | 按模型名列出可用账号与计价来源；`account_models` 有数据时每个账号带状态（可用 / 待探活 / 无权 / 不存在 / 凭据被拒 / 失败），没有任何模型行时回退到 `accounts.models` 并标「手填」；另有协议列，显示该模型在这个账号上的有效出站协议，取值只经 `store.EffectiveProtocol`，行不存在或协议列为空时由它回退到账号协议；`--json` 每个账号多了 `protocol` | 表格 |
 | `provider ls` | `--json` | 列厂商、`base_url`、默认协议与各协议的路由、备注；默认协议是该厂商按协议名排序的第一条路由，一条路由都没有时显示 `-`；`--json` 每项含 `name`、`base_url`、`protocols`（每项 `protocol`、`path`、`models_path`）、`note`，`protocols` 恒为数组 | 表格 |
-| `provider add` | `<名称> --base-url [--note] [--route <协议>=<路径>[:<模型列表路径>]]` | 写入或更新厂商行；`--route` 可重复，一次声明多条 `(厂商, 协议)` 路由，同一协议覆盖、没传入的路由保持原样，所以可以分几次把一家厂商的路由补齐；`--base-url` 必填且只收 `http://`、`https://` 开头，保存时去掉末尾斜杠；没给 `--note` 时保留原备注。`--route` 的协议名只收三种线协议、路径与模型列表路径都要以 `/` 开头，写错是用法错误并给出正确示例 | 确认一行（这次提交几条、现有几条） |
+| `provider add` | `<名称> --base-url [--note] [--route <协议>=<路径>[:<模型列表路径>]]` | 写入或更新厂商行；`--route` 可重复，一次声明多条 `(厂商, 协议)` 路由，同一协议覆盖、没传入的路由保持原样，所以可以分几次把一家厂商的路由补齐；`--base-url` 必填且只收 `http://`、`https://` 开头，保存时去掉末尾斜杠；没给 `--note` 时保留原备注。`--route` 的协议名只收三种线协议、路径与模型列表路径都要以 `/` 开头，写错是用法错误并给出正确示例；`--protocol` 是这家的默认协议，不是某条路由的协议，必须落在本次或此前已声明的路由上（见 5.8） | 确认一行（这次提交几条、现有几条） |
 | `provider rm` | `<名称> [--force]` | 删除厂商行与它的全部路由行；仍有账号指向该厂商时列出这些账号并拒绝，加 `--force` 才删，删完说明这些账号仍保留自己的 `base_url` | 确认一行，或待确认的账号清单 |
 | `model sync` | `[--provider 厂商]` `[--account 账号]` | 对选中的账号 GET 上游模型列表：地址按账号默认协议那条路由的 `models_path` 拼出，为空时回退到同厂商第一条非空 `models_path`，没有厂商行时按 `base_url` 后缀猜（见 5.8）；解析 `{data:[{id}]}`，按名字排序去重，空列表算该账号失败。结果写 `account_models`：新行状态 `synced`，已有行保留探活状态，上游已消失的行删除。只改 `account_models`，不动 `accounts.models`。某个账号失败时其余账号照常处理完 | 表格（账号 / 厂商 / 模型 / 新增 / 备注）与下一步 `model probe` 的提示；`--json` 是数组，每项 `account`、`provider`、`models`、`added`、`error`（只有失败才有） |
 | `model probe` | `[--provider 厂商]` `[--account 账号]` `[--sync]` `[--model 模型]` `[--limit N]` `[--concurrency N]` `[--max-age 时长]` `[--refresh]` | 逐账号对每个模型发一条 `max_tokens=1` 的请求判定可用性，结果写 `account_models`；每次上游调用同时写一行 `requests`（见 5.5）。`status` 为 `usable`、`forbidden`、`notfound` 之一且 `checked_at` 在 `--max-age`（默认 `24h`）以内的模型跳过，不发上游请求、不写库、不出现在输出里；`synced`、`auth`、`error` 与 `checked_at` 为 0 的照常探；`--refresh` 或 `--max-age 0` 忽略新鲜度全部重探。该账号库里出现 `usable` 时，把库里**全部** `usable` 写成该账号的 `accounts.models`（不只是本次探到的），选号从此按该列表。没有模型行或带 `--sync` 时先同步；`--model` 只探一个模型名，`--limit` 截断的是跳过之后剩下的待探模型，`--concurrency` 默认 4 且不超过待探模型数；待探模型被全部跳过时仍按库里 `usable` 回写 `accounts.models`，该账号算作已满足；任一账号出现 401 即停止后续账号并返回错误；所有账号都没探出可用模型时退出码 1 且不改任何 `accounts.models`，错误信息带本次探活数与跳过数 | 表格（账号 / 模型 / 状态 / HTTP / 耗时 / 备注）与该账号的「本次探活 N 个 / 跳过 M 个」和可用 / 无权 / 不存在 / 失败计数；`--json` 是数组，每项 `account`、`model`、`status`、`http_status`、`latency_ms`、`message`，只含本次被探的模型，计数只出现在人读输出里 |
@@ -332,12 +332,12 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 
 出站地址不由代码里的厂商表决定，也不靠 `base_url` 末尾有没有 `/v1` 猜后缀：同一个 `base_url` 上不同协议的路径并不一样，猜出来的地址对其中一种协议一定是错的。deepseek 的 chat 在 `/v1/chat/completions`，anthropic 在 `/anthropic/v1/messages`；commandcode 的 base 是 `https://api.commandcode.ai/provider/v1`，chat 在 `/chat/completions`、anthropic 在 `/messages`，模型列表在 `/models`。
 
-- `providers` 一行只提供 `base_url` 与备注，本身没有协议概念。
+- `providers` 一行提供 `base_url`、备注与一列默认协议；协议的路径细节一律在 `provider_routes` 上，厂商行不存路径。
 - `provider_routes` 按 `(厂商, 协议)` 存完整路径 `path` 与模型列表路径 `models_path`。完整地址是 `base_url` 去掉末尾斜杠后直接拼 `path`，不做任何猜测与补全。
 - 账号行仍固化自己的 `base_url`（`account add` 时写入厂商默认值）。改厂商表只影响之后新加的账号，已有账号的地址不变。
 - 厂商行存在但没有该协议的路由，以及账号的 `provider` 在表里根本不存在（用户显式 `--base-url` 的自建地址），都退回原来的后缀猜测：末尾是 `/v1` 就补 `/chat/completions`、`/messages` 或 `/responses`，否则补 `/v1` 再接同样的后缀；模型列表同理补 `/models` 或 `/v1/models`。自建地址因此仍然可用。
 - 探活的候选协议跟着路由收紧：只用该厂商在 `provider_routes` 里声明过的协议，不去打这家没有声明的路径；没有厂商行的账号仍三种全试。顺序（已发现的协议、账号协议在前，其余按协议名排序）见 5.7。
-- 默认协议：该厂商在 `provider_routes` 里按协议名排序的第一条。`account add` 用它补账号的 `protocol`，`provider ls` 也显示它，两处同一个规则。deepseek 同时声明了 anthropic 与 openai-chat，anthropic 排在前面，所以 `account add --provider deepseek` 不带 `--protocol` 时账号协议是 anthropic，想要 chat 就显式给 `--protocol openai-chat`。厂商行存在但一条路由都没有时回退到 openai-chat。
+- 默认协议：显式列优先，空则按协议名排序兜底。`providers.default_protocol` 非空就用它；为空（自建厂商没填）才取该厂商在 `provider_routes` 里按协议名排序的第一条。`account add` 用它补账号的 `protocol`，`provider ls` 也显示它，两处同一个规则。规则是纯函数 `store.ResolveDefaultProtocol`，读库入口是 `store.EffectiveProviderProtocol`：厂商不存在返回 `ErrProviderNotFound`，厂商在但一条路由都没有时返回空串与 `ErrProviderNoRoutes`，提示文案由调用方写，`cli` 不再自己算这条回退。**不能一律靠排序猜**：deepseek 与 commandcode 都同时声明了 `openai-chat` 与 `anthropic` 两条路由，协议名排序把 `anthropic` 排在前面，默认协议就会从升级前的 `openai-chat` 变成 `anthropic`，这两个厂商的账号在升级前后默认协议不一致。所以升级前的默认值由迁移 `0007` 逐家显式种进 `default_protocol`：`anthropic` 自己是 `anthropic`，其余 7 家是 `openai-chat`。默认协议只能指向这家已声明的路由，指不到时 `AddProvider` 整笔拒绝并说明先补路由还是改默认协议。厂商行存在但一条路由都没有时，`account add` 仍回退到 openai-chat。
 - `provider add` 只覆盖传入的那几条 `(厂商, 协议)`：同一家厂商可以分几次补路由，后加的一次不会删掉先前加过的路由；`base_url` 每次都以传入值为准并去掉末尾斜杠，没给 `--note` 时备注保持原样。`provider rm` 删厂商行与它的全部路由，仍有账号指过来时先列出这些账号并拒绝，`--force` 才删；账号行只存 `provider` 字符串，删厂商不影响已有账号的 `base_url`。
 - 凭据头仍按协议而不是按厂商：anthropic 用 `x-api-key` 加 `anthropic-version`，另两种用 `Bearer`。
 
@@ -350,7 +350,7 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 | commandcode | openai-chat | `https://api.commandcode.ai/provider/v1/chat/completions` |
 | commandcode | anthropic | `https://api.commandcode.ai/provider/v1/messages` |
 
-种子数据在迁移 `0006` 里，不在代码里。`providers` 表为空不算错误：用户可以把种子厂商删光，此时所有账号走兜底。维护用 `provider` 子命令（见 4）。
+种子数据在迁移 `0006` 里，默认协议在迁移 `0007` 里，不在代码里。`providers` 表为空不算错误：用户可以把种子厂商删光，此时所有账号走兜底。维护用 `provider` 子命令（见 4）。
 
 ## 6 数据模型
 
@@ -405,9 +405,10 @@ CREATE TABLE account_models (
 );
 
 CREATE TABLE providers (
-  name     TEXT PRIMARY KEY,
-  base_url TEXT NOT NULL,
-  note     TEXT NOT NULL DEFAULT ''
+  name             TEXT PRIMARY KEY,
+  base_url         TEXT NOT NULL,
+  note             TEXT NOT NULL DEFAULT '',
+  default_protocol TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE provider_routes (
@@ -425,7 +426,9 @@ CREATE TABLE provider_routes (
 
 这个列只有一个写入口 `SetModelProtocol`，由探活发现协议后调用（见 5.7）。`SetModelStatus` 只改 `status`、`http_status`、`error`、`checked_at`，不动 `protocol`；`ReplaceModels` 的 `ON CONFLICT DO NOTHING` 也只给新行写默认值，同步不会覆盖已发现的协议。旧库升上来时整列默认空串，也就是全部回退到账号协议，行为与 M7 一致。
 
-`providers` 与 `provider_routes` 由迁移 `0006` 建立并种入已知厂商，行里没有凭据，只有地址与路径。`providers` 一行只提供 `base_url` 与备注，协议细节全在 `provider_routes` 的 `(厂商, 协议)` 上；两者之间没有外键，所以删厂商行时必须连带删它的路由行，`DeleteProvider` 在一个事务里一起做。`providers` 表为空不算错误：种子行可以被用户删光，此时所有账号回退到后缀猜测。账号行仍固化自己的 `base_url`，改厂商表只影响之后新加的账号。`AddProvider` 在一个事务里写厂商行并按 `(厂商, 协议)` 覆盖或新增路由，没传入的路由不动，所以同一个厂商可以分几次补齐路由。读路由只有 `LookupProviderRoute` 一个入口，转发、模型同步与探活都经过它。
+`providers` 与 `provider_routes` 由迁移 `0006` 建立并种入已知厂商，`providers.default_protocol` 由迁移 `0007` 加入并显式种入升级前的默认协议，行里没有凭据，只有地址与路径。`providers` 一行只提供 `base_url`、备注与默认协议，协议细节全在 `provider_routes` 的 `(厂商, 协议)` 上；两者之间没有外键，所以删厂商行时必须连带删它的路由行，`DeleteProvider` 在一个事务里一起做。`providers` 表为空不算错误：种子行可以被用户删光，此时所有账号回退到后缀猜测。账号行仍固化自己的 `base_url`，改厂商表只影响之后新加的账号。`AddProvider` 在一个事务里写厂商行并按 `(厂商, 协议)` 覆盖或新增路由，没传入的路由不动，所以同一个厂商可以分几次补齐路由。读路由只有 `LookupProviderRoute` 一个入口，转发、模型同步与探活都经过它。
+
+`providers.default_protocol` **空字符串表示这家没有显式默认协议**：有效默认协议回退到按协议名排序的第一条路由（用户自建的厂商通常不填）。纯规则在 `store.ResolveDefaultProtocol`，读库入口是 `store.EffectiveProviderProtocol(provider)`：厂商不存在返回 `ErrProviderNotFound`，厂商在但一条路由都没有时返回空串与 `ErrProviderNoRoutes`，文案留给调用方。这个列只由 `AddProvider` 写：传入非空时必须是这家「这次传入」或「此前已声明」的路由之一，否则整笔事务拒绝；传入空串表示不改这一列，新建的行即空串，已存在的行保留原值。旧库升上来时 8 家种子厂商由 `0007` 拿到显式默认协议，用户自建的厂商保持空串。
 
 迁移用 `internal/store/migrations/*.sql`，按文件顺序执行，`PRAGMA user_version` 记录已执行版本。
 
@@ -442,9 +445,9 @@ CREATE TABLE provider_routes (
 | M6 | 协议矩阵：三入站 × 三出站 + 同协议直通，中间表示与三个编解码器，流式增量 | 9 种组合的非流式与流式用例通过；对真实上游三种入站各打一条能拿到回复 |
 | M7 | 模型探活跳过与记账：`model probe` 按 `--max-age` 跳过有定论且新鲜的结论、`--refresh` 强制重探，每次探活的上游调用写一行 `requests` 并带缓存读写 | `TestModelProbe*` 覆盖跳过、刷新、`--limit`、记账、零可用的跳过计数，`TestProbeModel*` 覆盖各状态判定、401 停用与探活请求行；`log tail` 能看到探活行，零可用时 `accounts.models` 不变 |
 | M8 | 协议归属从账号降到模型：`account_models.protocol`（迁移 `0005`）覆盖账号的 `protocol`，探活顺手发现协议，选号与转发按有效协议算，同步不覆盖发现结果 | 同一账号下两个模型可以分别走 anthropic 与 openai-chat：各自打到正确的路径与凭据头，「入站 == 出站」按模型协议算；协议发现用例覆盖 `404`、`403`、`400 指向端点` 三种失败换协议、账号协议直接成功只花一次调用、`401` 不换协议并停用账号；`EffectiveProtocol` 在行不存在或列为空时回退账号；旧库升上来 `protocol` 默认为空串，`ReplaceModels` 不动已发现的协议 |
-| M9 | 厂商与路由进库：`providers` 与 `provider_routes`（迁移 `0006`），出站地址按 `(厂商, 协议)` 的 `path` 拼，模型列表按 `models_path` 取，探活候选协议按厂商声明过的路由收紧；没有厂商行的账号保留后缀猜测 | 空库跑到最新版本后种子逐行对上，11 条路由拼出的完整地址与 `models_path` 全部正确；deepseek 账号下 anthropic 模型打到 `/anthropic/v1/messages` 并带 `x-api-key`，chat 模型打到 `/v1/chat/completions` 并带 `Bearer`；只有一条路由的厂商探活失败时上游只收到一次请求，deepseek 试两条；`models_path` 为空时回退到同厂商第一条非空路径，全空时报错文案带「用 --models 手填」；自定义 `base_url` 且 `provider` 不在表里时仍按后缀猜测 |
+| M9 | 厂商与路由进库：`providers` 与 `provider_routes`（迁移 `0006`），出站地址按 `(厂商, 协议)` 的 `path` 拼，模型列表按 `models_path` 取，探活候选协议按厂商声明过的路由收紧；没有厂商行的账号保留后缀猜测 | 空库跑到最新版本后种子逐行对上，11 条路由拼出的完整地址与 `models_path` 全部正确；deepseek 账号下 anthropic 模型打到 `/anthropic/v1/messages` 并带 `x-api-key`，chat 模型打到 `/v1/chat/completions` 并带 `Bearer`；只有一条路由的厂商探活失败时上游只收到一次请求，deepseek 试两条；`models_path` 为空时回退到同厂商第一条非空路径，全空时报错文案带「用 --models 手填」；自定义 `base_url` 且 `provider` 不在表里时仍按后缀猜测；空库跑到最新版本与从 `0006` 升级两条路径下，8 家的 `default_protocol` 逐行对上，显式默认优先于排序兜底，deepseek 与 commandcode 的默认协议仍是 `openai-chat`（单靠排序会给 `anthropic`） |
 
-M0 到 M9 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkeleton` 用假上游验证：初始化、加账号、`call`、`log tail`、`usage`、`doctor` 全链路走通。协议矩阵由 `internal/gateway/matrix_test.go` 与 `matrix_stream_test.go` 验证：9 种组合的非流式与流式各跑一遍，同协议直通的「不改字节」「保留陌生字段」与跨协议的「丢弃陌生字段」单独有用例。协议降级到模型的那部分由 `internal/gateway` 的 `TestProbeModel*` 与 `TestForwardUsesModelProtocol` 验证，迁移兼容由 `internal/store` 的 `TestMigration0005*`、`TestMigration0006*` 与 `TestMigrationsRunToLatestFromEmptyDB` 验证；厂商路由的解析、探活收紧与模型列表回退由 `internal/store` 的 `TestProvider*` 与 `internal/gateway` 的 `TestForwardUsesProviderRoute`、`TestEndpointFallsBackWithoutProviderRoute`、`TestProbeModelNarrowsCandidatesByProvider`、`TestProbeModelStartsFromDiscoveredProtocol`、`TestSyncModelsUsesProviderModelsPath`、`TestSyncModelsWithoutModelsPath` 验证。上游是 `httptest` 假服务，M5、M6、M7、M8 与 M9 里涉及真实厂商的那部分需要拿到 key 后手工验收。
+M0 到 M9 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkeleton` 用假上游验证：初始化、加账号、`call`、`log tail`、`usage`、`doctor` 全链路走通。协议矩阵由 `internal/gateway/matrix_test.go` 与 `matrix_stream_test.go` 验证：9 种组合的非流式与流式各跑一遍，同协议直通的「不改字节」「保留陌生字段」与跨协议的「丢弃陌生字段」单独有用例。协议降级到模型的那部分由 `internal/gateway` 的 `TestProbeModel*` 与 `TestForwardUsesModelProtocol` 验证，迁移兼容由 `internal/store` 的 `TestMigration0005*`、`TestMigration0006*`、`TestMigration0007*` 与 `TestMigrationsRunToLatestFromEmptyDB` 验证；厂商路由的解析、探活收紧与模型列表回退由 `internal/store` 的 `TestProvider*` 与 `internal/gateway` 的 `TestForwardUsesProviderRoute`、`TestEndpointFallsBackWithoutProviderRoute`、`TestProbeModelNarrowsCandidatesByProvider`、`TestProbeModelStartsFromDiscoveredProtocol`、`TestSyncModelsUsesProviderModelsPath`、`TestSyncModelsWithoutModelsPath` 验证。上游是 `httptest` 假服务，M5、M6、M7、M8 与 M9 里涉及真实厂商的那部分需要拿到 key 后手工验收。
 
 已知未做，按已知行为处理：
 

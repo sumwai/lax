@@ -3,6 +3,7 @@ package store_test
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -34,8 +35,54 @@ var seedRoutes = []struct {
 	{"commandcode", "https://api.commandcode.ai/provider/v1", "anthropic", "/messages", ""},
 }
 
+// seedDefaults 是迁移 0007 种入的默认协议，逐行写死。
+// 升级前 deepseek 与 commandcode 的账号默认走 openai-chat；按协议名排序会得到 anthropic，
+// 所以这两家的默认协议必须显式存，不能靠排序猜。
+var seedDefaults = []struct {
+	provider string
+	protocol string
+}{
+	{"anthropic", "anthropic"},
+	{"openai", "openai-chat"},
+	{"deepseek", "openai-chat"},
+	{"moonshot", "openai-chat"},
+	{"kimi", "openai-chat"},
+	{"openrouter", "openai-chat"},
+	{"ollama", "openai-chat"},
+	{"commandcode", "openai-chat"},
+}
+
+// assertSeedDefaults 逐行比对 8 家厂商的默认协议，并确认没有多余的行。
+func assertSeedDefaults(t *testing.T, st *store.Store) {
+	t.Helper()
+
+	got := map[string]string{}
+	providers, err := st.ListProviders()
+	if err != nil {
+		t.Fatalf("列厂商: %v", err)
+	}
+	for _, p := range providers {
+		got[p.Name] = p.DefaultProtocol
+	}
+	if len(got) != len(seedDefaults) {
+		t.Fatalf("厂商数 = %d，期望 %d", len(got), len(seedDefaults))
+	}
+	for _, want := range seedDefaults {
+		one, err := st.GetProvider(want.provider)
+		if err != nil {
+			t.Fatalf("取厂商 %s: %v", want.provider, err)
+		}
+		if one.DefaultProtocol != want.protocol {
+			t.Fatalf("厂商 %s 的 default_protocol = %q，期望 %q", want.provider, one.DefaultProtocol, want.protocol)
+		}
+		if got[want.provider] != want.protocol {
+			t.Fatalf("ListProviders 里 %s 的默认协议 = %q，期望 %q", want.provider, got[want.provider], want.protocol)
+		}
+	}
+}
+
 // TestProvidersSeededByMigration 确认空库跑到最新版本后种子齐全：
-// 8 家厂商、11 条路由，每条拼出的完整地址与模型列表地址都逐一对上。
+// 8 家厂商、11 条路由，每条拼出的完整地址与模型列表地址都逐一对上，默认协议也逐行对上。
 func TestProvidersSeededByMigration(t *testing.T) {
 	st := openTemp(t)
 
@@ -43,8 +90,8 @@ func TestProvidersSeededByMigration(t *testing.T) {
 	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("读 user_version: %v", err)
 	}
-	if version != 6 {
-		t.Fatalf("user_version = %d，期望 6", version)
+	if version != 7 {
+		t.Fatalf("user_version = %d，期望 7", version)
 	}
 
 	var nProviders, nRoutes int
@@ -57,6 +104,7 @@ func TestProvidersSeededByMigration(t *testing.T) {
 	if nProviders != 8 || nRoutes != len(seedRoutes) {
 		t.Fatalf("种子规模 = %d 家 / %d 条，期望 8 家 / %d 条", nProviders, nRoutes, len(seedRoutes))
 	}
+	assertSeedDefaults(t, st)
 
 	providers, err := st.ListProviders()
 	if err != nil {
@@ -110,7 +158,7 @@ func TestProvidersSeededByMigration(t *testing.T) {
 }
 
 // TestMigration0006UpgradesOldDatabase 模拟一个停在 0005 的库：升上来之后两张表在、种子齐全，
-// 老账号与它的模型行一个字段都不动，user_version 推到 6。
+// 老账号与它的模型行一个字段都不动，user_version 推到 7。
 func TestMigration0006UpgradesOldDatabase(t *testing.T) {
 	path := t.TempDir() + "/old.db"
 
@@ -165,8 +213,8 @@ func TestMigration0006UpgradesOldDatabase(t *testing.T) {
 	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("读 user_version: %v", err)
 	}
-	if version != 6 {
-		t.Fatalf("user_version = %d，期望 6", version)
+	if version != 7 {
+		t.Fatalf("user_version = %d，期望 7", version)
 	}
 
 	providers, err := st.ListProviders()
@@ -176,6 +224,7 @@ func TestMigration0006UpgradesOldDatabase(t *testing.T) {
 	if len(providers) != 8 {
 		t.Fatalf("升级后的厂商数 = %d，期望 8", len(providers))
 	}
+	assertSeedDefaults(t, st)
 	var nRoutes int
 	if err := st.DB().QueryRow("SELECT COUNT(*) FROM provider_routes").Scan(&nRoutes); err != nil {
 		t.Fatalf("数路由行: %v", err)
@@ -198,6 +247,96 @@ func TestMigration0006UpgradesOldDatabase(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].Protocol != "anthropic" || rows[0].Status != store.ModelUsable {
 		t.Fatalf("老模型行被改动: %+v", rows)
+	}
+}
+
+// TestMigration0007UpgradesOldDatabase 模拟一个停在 0006 的库：升级只加 default_protocol 一列，
+// 8 家厂商逐行重新种上升级前的默认协议，用户自建的厂商保持空串，路由与地址一个都不动。
+func TestMigration0007UpgradesOldDatabase(t *testing.T) {
+	path := t.TempDir() + "/old.db"
+
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("打开老库: %v", err)
+	}
+	// 0006 之后的形状：providers 还没有 default_protocol 列。
+	ddl := []string{
+		`CREATE TABLE providers (
+			name TEXT PRIMARY KEY, base_url TEXT NOT NULL, note TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE provider_routes (
+			provider TEXT NOT NULL, protocol TEXT NOT NULL, path TEXT NOT NULL,
+			models_path TEXT NOT NULL DEFAULT '', PRIMARY KEY (provider, protocol))`,
+	}
+	// 种子行照 0006 写回，保证升级前的库与真实老库同一个形状。
+	for _, want := range seedRoutes {
+		ddl = append(ddl,
+			fmt.Sprintf(`INSERT OR IGNORE INTO providers (name, base_url) VALUES ('%s', '%s')`, want.provider, want.baseURL),
+			fmt.Sprintf(`INSERT INTO provider_routes (provider, protocol, path, models_path)
+				VALUES ('%s', '%s', '%s', '%s')`, want.provider, want.protocol, want.path, want.modelsPath))
+	}
+	ddl = append(ddl,
+		`INSERT INTO providers (name, base_url, note) VALUES ('myco', 'https://my.example.com', '自建')`,
+		`PRAGMA user_version = 6`)
+	for _, stmt := range ddl {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("建老库（%s）: %v", stmt, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("关老库: %v", err)
+	}
+
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("升级老库: %v", err)
+	}
+	defer st.Close()
+
+	var version int
+	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("读 user_version: %v", err)
+	}
+	if version != 7 {
+		t.Fatalf("user_version = %d，期望 7", version)
+	}
+
+	// 种子 8 家逐行断言。升级路径与空库路径必须得出同一份默认协议。
+	for _, want := range seedDefaults {
+		p, err := st.GetProvider(want.provider)
+		if err != nil {
+			t.Fatalf("取厂商 %s: %v", want.provider, err)
+		}
+		if p.DefaultProtocol != want.protocol {
+			t.Fatalf("升级后 %s 的 default_protocol = %q，期望 %q", want.provider, p.DefaultProtocol, want.protocol)
+		}
+	}
+
+	// 用户自建的厂商不在种子名单里，升级后仍是空串，有效默认协议退到排序规则；它没声明路由则报错。
+	myco, err := st.GetProvider("myco")
+	if err != nil {
+		t.Fatalf("取自建厂商: %v", err)
+	}
+	if myco.DefaultProtocol != "" {
+		t.Fatalf("自建厂商的默认协议 = %q，期望空串", myco.DefaultProtocol)
+	}
+	if _, err := st.EffectiveProviderProtocol("myco"); !errors.Is(err, store.ErrProviderNoRoutes) {
+		t.Fatalf("自建厂商没有路由，应报 ErrProviderNoRoutes，实际 %v", err)
+	}
+
+	// 升级只加列：路由与地址一个都不动。
+	var nRoutes int
+	if err := st.DB().QueryRow("SELECT COUNT(*) FROM provider_routes").Scan(&nRoutes); err != nil {
+		t.Fatalf("数路由行: %v", err)
+	}
+	if nRoutes != len(seedRoutes) {
+		t.Fatalf("升级后的路由数 = %d，期望 %d", nRoutes, len(seedRoutes))
+	}
+	p, err := st.GetProvider("commandcode")
+	if err != nil {
+		t.Fatalf("取厂商: %v", err)
+	}
+	if p.BaseURL != "https://api.commandcode.ai/provider/v1" {
+		t.Fatalf("升级后 base_url 被改动: %q", p.BaseURL)
 	}
 }
 
@@ -308,6 +447,152 @@ func TestAddProviderWritesProviderAndRoutes(t *testing.T) {
 	}
 	if _, err := st.GetProvider("bad"); !errors.Is(err, store.ErrProviderNotFound) {
 		t.Fatalf("失败的新增不该留下厂商行，实际 err=%v", err)
+	}
+}
+
+// TestEffectiveProviderProtocol 覆盖三种情况：显式默认优先（哪怕排序排在后面）、
+// 空值回退到按协议名排序的第一条路由、一条路由都没有时报错且返回空串。
+func TestEffectiveProviderProtocol(t *testing.T) {
+	st := openTemp(t)
+
+	// deepseek 的两条路由按协议名排序是 anthropic 在前，但升级前的默认是 openai-chat。
+	got, err := st.EffectiveProviderProtocol("deepseek")
+	if err != nil {
+		t.Fatalf("deepseek 的默认协议: %v", err)
+	}
+	if got != "openai-chat" {
+		t.Fatalf("deepseek 的默认协议 = %q，期望显式值 openai-chat（排序会给 anthropic）", got)
+	}
+	for _, name := range []string{"anthropic", "openai", "commandcode", "ollama"} {
+		want := "openai-chat"
+		if name == "anthropic" {
+			want = "anthropic"
+		}
+		got, err := st.EffectiveProviderProtocol(name)
+		if err != nil || got != want {
+			t.Fatalf("%s 的默认协议 = %q err=%v，期望 %q", name, got, err, want)
+		}
+	}
+
+	// 没声明默认协议的自建厂商按排序回退：anthropic 在 openai-chat 前。
+	if err := st.AddProvider(store.Provider{Name: "myco", BaseURL: "https://my.example.com"},
+		[]store.ProviderRoute{
+			{Protocol: "openai-chat", Path: "/v1/chat/completions"},
+			{Protocol: "anthropic", Path: "/v1/messages"},
+		}); err != nil {
+		t.Fatalf("新增厂商: %v", err)
+	}
+	if got, err := st.EffectiveProviderProtocol("myco"); err != nil || got != "anthropic" {
+		t.Fatalf("空默认协议应回退到排序第一条，实际 %q err=%v", got, err)
+	}
+
+	// 没有路由：空串加明确错误，由调用方决定文案。
+	if err := st.AddProvider(store.Provider{Name: "noroute", BaseURL: "https://nr.example.com"}, nil); err != nil {
+		t.Fatalf("新增无路由厂商: %v", err)
+	}
+	got, err = st.EffectiveProviderProtocol("noroute")
+	if !errors.Is(err, store.ErrProviderNoRoutes) {
+		t.Fatalf("无路由厂商应报 ErrProviderNoRoutes，实际 %v", err)
+	}
+	if got != "" {
+		t.Fatalf("无路由厂商的默认协议 = %q，期望空串", got)
+	}
+
+	// 厂商不存在时报 ErrProviderNotFound，与「厂商在但没路由」分开。
+	if _, err := st.EffectiveProviderProtocol("不存在的厂商"); !errors.Is(err, store.ErrProviderNotFound) {
+		t.Fatalf("未知厂商应报 ErrProviderNotFound，实际 %v", err)
+	}
+}
+
+// TestResolveDefaultProtocol 固定纯规则本身：显式值直接赢（不看路由声明与否），
+// 空值取排序第一条，空路由返回空串。
+func TestResolveDefaultProtocol(t *testing.T) {
+	routes := []store.ProviderRoute{{Protocol: "anthropic"}, {Protocol: "openai-chat"}}
+
+	if got := store.ResolveDefaultProtocol("openai-chat", routes); got != "openai-chat" {
+		t.Fatalf("显式值应优先，实际 %q", got)
+	}
+	if got := store.ResolveDefaultProtocol("", routes); got != "anthropic" {
+		t.Fatalf("空值应取排序第一条，实际 %q", got)
+	}
+	if got := store.ResolveDefaultProtocol("", nil); got != "" {
+		t.Fatalf("无路由应返回空串，实际 %q", got)
+	}
+}
+
+// TestAddProviderValidatesDefaultProtocol 确认默认协议必须落在已声明的路由上：
+// 指不到就整笔拒绝，文案里带「先加路由、或改成已有协议」两条路；传空串仍可通过。
+func TestAddProviderValidatesDefaultProtocol(t *testing.T) {
+	st := openTemp(t)
+
+	// 默认协议落在这次传入的路由上。
+	if err := st.AddProvider(store.Provider{
+		Name: "myco", BaseURL: "https://my.example.com", DefaultProtocol: "openai-chat",
+	}, []store.ProviderRoute{{Protocol: "openai-chat", Path: "/v1/chat/completions"}}); err != nil {
+		t.Fatalf("默认协议属于本次路由: %v", err)
+	}
+	if got, err := st.EffectiveProviderProtocol("myco"); err != nil || got != "openai-chat" {
+		t.Fatalf("默认协议 = %q err=%v，期望 openai-chat", got, err)
+	}
+
+	// 默认协议落在之前已经声明的路由上：这次不传路由也认。
+	if err := st.AddProvider(store.Provider{Name: "myco", BaseURL: "https://my.example.com"},
+		[]store.ProviderRoute{{Protocol: "anthropic", Path: "/v1/messages"}}); err != nil {
+		t.Fatalf("补一条 anthropic 路由: %v", err)
+	}
+	if err := st.AddProvider(store.Provider{
+		Name: "myco", BaseURL: "https://my.example.com", DefaultProtocol: "anthropic",
+	}, nil); err != nil {
+		t.Fatalf("默认协议属于之前声明的路由: %v", err)
+	}
+	if got, err := st.EffectiveProviderProtocol("myco"); err != nil || got != "anthropic" {
+		t.Fatalf("默认协议 = %q err=%v，期望 anthropic", got, err)
+	}
+
+	// 传空串不报错，也不改已存的默认协议。
+	if err := st.AddProvider(store.Provider{Name: "myco", BaseURL: "https://my2.example.com"},
+		[]store.ProviderRoute{{Protocol: "openai-chat", Path: "/v1/chat/completions"}}); err != nil {
+		t.Fatalf("空默认协议应可通过: %v", err)
+	}
+	if got, err := st.EffectiveProviderProtocol("myco"); err != nil || got != "anthropic" {
+		t.Fatalf("空默认协议不该覆盖已存值，实际 %q err=%v", got, err)
+	}
+
+	// 指向这家没有声明的协议：拒绝，且文案说清楚缺哪条、下一步两条路。
+	err := st.AddProvider(store.Provider{
+		Name: "myco", BaseURL: "https://my.example.com", DefaultProtocol: "openai-responses",
+	}, nil)
+	if err == nil {
+		t.Fatal("默认协议不在已声明路由里应报错")
+	}
+	for _, want := range []string{"openai-responses", "provider add myco", "--route openai-responses=", "已声明：anthropic、openai-chat", "把默认协议改成"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("错误文案 %q 缺少 %q", err.Error(), want)
+		}
+	}
+	// 拒绝是整笔回滚：base_url 与默认协议都不该被改。
+	p, err := st.GetProvider("myco")
+	if err != nil {
+		t.Fatalf("取厂商: %v", err)
+	}
+	if p.BaseURL != "https://my2.example.com" || p.DefaultProtocol != "anthropic" {
+		t.Fatalf("被拒的新增留下了改动: %+v", p)
+	}
+
+	// 这家一条路由都没有时也要拒绝，并提示先加路由。
+	err = st.AddProvider(store.Provider{
+		Name: "noroute", BaseURL: "https://nr.example.com", DefaultProtocol: "openai-chat",
+	}, nil)
+	if err == nil {
+		t.Fatal("没有任何路由时设默认协议应报错")
+	}
+	for _, want := range []string{"还没有任何路由", "--route openai-chat="} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("错误文案 %q 缺少 %q", err.Error(), want)
+		}
+	}
+	if _, err := st.GetProvider("noroute"); !errors.Is(err, store.ErrProviderNotFound) {
+		t.Fatalf("被拒的新增不该留下厂商行，实际 err=%v", err)
 	}
 }
 
