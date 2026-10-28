@@ -1,0 +1,5 @@
+/switchboard
+/dist/
+*.db
+*.db-journal
+*.bak
