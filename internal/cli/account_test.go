@@ -221,3 +221,32 @@ func TestAccountAddWithoutProviders(t *testing.T) {
 		t.Fatalf("厂商表为空时 --base-url 应直接用上: %+v", got)
 	}
 }
+
+// TestAccountAddBaseURLValidated 覆盖 account add --base-url 的校验：与 provider add/set 同一份
+// store.NormalizeBaseURL（见 DESIGN 5.8）。只有 scheme 的写法是用法错误、退出码 2，文案保留
+// store 的原话并附这个子命令的用法行；大写 scheme 与末尾斜杠被接受，落库存规整后的形态。
+func TestAccountAddBaseURLValidated(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	code, out, stderr := run(t, "account", "add", "mine1",
+		"--provider", "custom", "--base-url", "https://", "--key", "sk-test")
+	if code != 2 || out != "" {
+		t.Fatalf("退出码 = %d，stdout = %q", code, out)
+	}
+	for _, want := range []string{"里没有主机名", "https://api.deepseek.com", "用法：switchboard account add"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr 应包含 %q: %s", want, stderr)
+		}
+	}
+
+	// 校验失败不该留下半个账号：同名再加一次必须成功。
+	code, out, stderr = run(t, "account", "add", "mine1",
+		"--provider", "custom", "--base-url", "HTTPS://API.Example.com/", "--key", "sk-test", "--json")
+	if code != 0 {
+		t.Fatalf("大写 scheme 应被接受，退出码 = %d，stderr = %s", code, stderr)
+	}
+	if got := mustAccountAdd(t, out); got.BaseURL != "https://API.Example.com" {
+		t.Fatalf("base_url = %q，期望 https://API.Example.com", got.BaseURL)
+	}
+}

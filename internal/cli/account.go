@@ -97,13 +97,16 @@ func cmdAccountSetEnabled(e *Env, args []string, sub string, enabled bool) error
 	return nil
 }
 
+// accountAddUsage 是 account add 的用法行，用法错误与 --base-url 校验失败时都打出来。
+const accountAddUsage = "用法：switchboard account add <名称> --provider <厂商> --key <key> [--protocol <协议>] [--base-url <地址>] [--models <模型>] [--priority N]"
+
 func cmdAccountAdd(e *Env, args []string) error {
 	fs := newFlagSet(e, "account add", "新增一个上游账号")
 	provider := fs.String("provider", "", "上游厂商标识，如 deepseek")
 	key := fs.String("key", "", "上游 API key；给 - 从标准输入读，留空则读环境变量 SWITCHBOARD_KEY")
 	name := fs.String("name", "", "账号名称，也可以用位置参数给出")
 	protocol := fs.String("protocol", "", "上游线协议：anthropic | openai-chat | openai-responses，留空按厂商默认")
-	baseURL := fs.String("base-url", "", "上游地址，留空按厂商默认")
+	baseURL := fs.String("base-url", "", "上游地址，留空按厂商默认（必须是带主机名的完整地址，如 https://api.deepseek.com）")
 	models := fs.String("models", "", "该账号可提供的模型，逗号分隔")
 	priceIn := fs.Float64("price-in", 0, "输入价，每百万 token")
 	priceOut := fs.Float64("price-out", 0, "输出价，每百万 token")
@@ -117,10 +120,21 @@ func cmdAccountAdd(e *Env, args []string) error {
 		accountName = fs.Arg(0)
 	}
 	if accountName == "" {
-		return usagef("用法：switchboard account add <名称> --provider <厂商> --key <key>")
+		return usagef("%s", accountAddUsage)
 	}
 	if *provider == "" {
 		return usagef("--provider 必填，例如 --provider deepseek")
+	}
+
+	// --base-url 与 provider add/set 走同一份校验（store.NormalizeBaseURL，见 DESIGN 5.8）：
+	// 只有 scheme 没有主机名、或压根没写 scheme 的地址当场报成用法错误、退出码 2，
+	// 不落到库里再去发无效请求。空值仍是「按厂商默认」。
+	if flagWasSet(fs, "base-url") && strings.TrimSpace(*baseURL) != "" {
+		norm, err := checkBaseURL(*baseURL, accountAddUsage)
+		if err != nil {
+			return err
+		}
+		*baseURL = norm
 	}
 
 	keyValue := *key
@@ -674,14 +688,23 @@ func cmdModelSync(e *Env, args []string) error {
 	fs := newFlagSet(e, "model sync", "从上游拉取模型列表")
 	provider := fs.String("provider", "", "只同步这个厂商的账号")
 	accountName := fs.String("account", "", "只同步这个账号")
-	endpoint := fs.String("endpoint", "", "临时覆盖模型列表路径，只影响这一次调用：相对厂商 base_url 的完整路径，例如 /v1/models（写法由程序规整）")
+	endpoint := fs.String("endpoint", "", "临时覆盖模型列表路径，只影响这一次调用：相对账号 base_url 的完整路径，例如 /v1/models（写法由程序规整；整条地址写在账号的 base_url，不要写在这里）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	// 取值原样往下走：写法（前导斜杠、重复斜杠、末尾斜杠）由 store.NormalizePath 规整，
-	// cli 只判「规整之后为空」——那是给了参数却没给路径，去掉这个参数再试（见 DESIGN 4、5.8）。
-	if flagWasSet(fs, "endpoint") && !pathGiven(*endpoint) {
-		return usagef("--endpoint %q 里没有路径：它是相对该厂商 base_url 的完整路径，例如 switchboard model sync --endpoint /v1/models；不想临时覆盖就整个去掉这个参数", *endpoint)
+	// cli 只判两种用法错误：「规整之后为空」——给了参数却没给路径，去掉这个参数再试；
+	// 与「写成了整条地址」——完整地址属于账号的 base_url，写进路径会被规整成 /https:/…（见 DESIGN 4、5.8）。
+	if flagWasSet(fs, "endpoint") {
+		if !pathGiven(*endpoint) {
+			return usagef("--endpoint %q 里没有路径：它是相对该厂商 base_url 的完整路径，例如 switchboard model sync --endpoint /v1/models；不想临时覆盖就整个去掉这个参数", *endpoint)
+		}
+		if hasFullAddress(*endpoint) {
+			return pathGotFullAddress("endpoint", *endpoint,
+				"账号的 base_url（account add --base-url <地址>，或 provider set <名称> --base-url <地址>）",
+				"switchboard model sync --account ds --endpoint /v1/models",
+				"用法：switchboard model sync [--provider 厂商] [--account 账号] [--endpoint <路径>]")
+		}
 	}
 
 	a, err := openApp(e, true)

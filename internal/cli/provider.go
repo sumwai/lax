@@ -23,8 +23,8 @@ var providerSubs = []groupItem{
 
 // 三个协议 flag 的取值都是相对厂商 base_url 的完整路径，写法由 store.NormalizePath 规整、
 // 不拒绝输入：`v1/chat/completions`、`//v1//chat/completions`、`/v1/chat/completions/` 落成
-// 同一个地址（见 DESIGN 5.8）。cli 只判「规整之后为空」，那一项是用法错误，删除语义归 provider unset。
-// 没有 --gemini：gemini 协议尚未实现，留一条永远用不上的路由只会误导。
+// 同一个地址（见 DESIGN 5.8）。cli 只判两件事：「规整之后为空」与「写成了整条地址」，两者都是用法错误，
+// 删除语义归 provider unset。没有 --gemini：gemini 协议尚未实现，留一条永远用不上的路由只会误导。
 
 // 三份用法行，所有用法错误都把它打出来，不让用户看着一句「参数错误」去猜参数（见 AGENTS.md）。
 const (
@@ -273,9 +273,9 @@ type providerPathFlags struct {
 
 func newProviderPathFlags(fs *flagSet) providerPathFlags {
 	return providerPathFlags{
-		anthropic: fs.String("anthropic", "", "anthropic 协议的路由路径，相对 --base-url 的完整路径，例如 /v1/messages（写法由程序规整）"),
-		openai:    fs.String("openai", "", "openai-chat 协议的路由路径，相对 --base-url 的完整路径，例如 /v1/chat/completions（写法由程序规整）"),
-		responses: fs.String("responses", "", "openai-responses 协议的路由路径，相对 --base-url 的完整路径，例如 /v1/responses（写法由程序规整）"),
+		anthropic: fs.String("anthropic", "", "anthropic 协议的路由路径，相对 --base-url 的完整路径，例如 /v1/messages（写法由程序规整；整条地址写在 --base-url，不要写在这里）"),
+		openai:    fs.String("openai", "", "openai-chat 协议的路由路径，相对 --base-url 的完整路径，例如 /v1/chat/completions（写法由程序规整；整条地址写在 --base-url，不要写在这里）"),
+		responses: fs.String("responses", "", "openai-responses 协议的路由路径，相对 --base-url 的完整路径，例如 /v1/responses（写法由程序规整；整条地址写在 --base-url，不要写在这里）"),
 	}
 }
 
@@ -297,8 +297,49 @@ func (p providerPathFlags) pairs(fs *flagSet) []providerPathFlag {
 }
 
 // pathGiven 判断一个路径类取值算不算给了值：空串、只有空白、只有斜杠都算没给。
-// 判定走 store.NormalizePath，cli 因此只有「规整之后为空」这一条规则，不另立一套写法校验（见 DESIGN 5.8）。
+// 判定走 store.NormalizePath，cli 因此只多判「规整之后为空」与「写成了整条地址」两条，
+// 不另立一套斜杠写法校验（见 DESIGN 5.8）。
 func pathGiven(raw string) bool { return store.NormalizePath(raw) != "" }
+
+// pathExample 是一个协议路由的示例路径，只用在报错文案里。
+func pathExample(protocol string) string {
+	switch protocol {
+	case gateway.ProtocolAnthropic:
+		return "/v1/messages"
+	case gateway.ProtocolResponses:
+		return "/v1/responses"
+	}
+	return "/v1/chat/completions"
+}
+
+// checkRoutePathFlag 校验一个协议 flag 的取值。两条用法错误：空值（删除语义归 provider unset）、
+// 值里是整条地址（完整地址属于 --base-url）。其余写法——缺前导斜杠、重复斜杠、末尾斜杠——
+// 继续交给 store.NormalizePath 规整，cli 不拒绝（见 DESIGN 5.8）。
+func checkRoutePathFlag(f providerPathFlag, verb string, setCmd bool, usageLine string) error {
+	if !f.given {
+		return nil
+	}
+	if !pathGiven(f.value) {
+		return emptyValueError(setCmd, f.flagName, usageLine)
+	}
+	if hasFullAddress(f.value) {
+		example := fmt.Sprintf("%s acme --base-url https://api.example.com --%s %s", verb, f.flagName, pathExample(f.protocol))
+		return pathGotFullAddress(f.flagName, f.value, "--base-url", example, usageLine)
+	}
+	return nil
+}
+
+// checkModelsPathFlag 校验 --models-path 的取值，规则与协议 flag 相同。
+func checkModelsPathFlag(value, verb string, setCmd bool, usageLine string) error {
+	if !pathGiven(value) {
+		return emptyValueError(setCmd, "models-path", usageLine)
+	}
+	if hasFullAddress(value) {
+		example := fmt.Sprintf("%s acme --base-url https://api.example.com --openai /v1/chat/completions --models-path /v1/models", verb)
+		return pathGotFullAddress("models-path", value, "--base-url", example, usageLine)
+	}
+	return nil
+}
 
 // protocolFromCLI 把 --default-protocol 的取值换成线协议。命令行写法是 anthropic、openai、responses，
 // 线协议全名（anthropic、openai-chat、openai-responses）也认：输入 openai 就是 chat。
@@ -362,23 +403,13 @@ func lookupUnsetField(raw string) (providerUnsetField, error) {
 	return providerUnsetField{}, usagef("字段名 %q 不认识，可用：%s，例如 switchboard provider unset <名称> openai", raw, fields)
 }
 
-// baseURLFlag 校验地址的形状。store 的写入口还会再校验一遍（见 DESIGN 5.8），
-// 这里提前报成用法错误，用户不必等写库失败才知道地址写错了。判定直接调 store.NormalizeBaseURL，
-// 两边只有一条规则：首尾空白与 scheme 之后的重复斜杠不会被这里拒掉，只由 store 规整。
-func baseURLFlag(value string) error {
-	if _, err := store.NormalizeBaseURL(value); err != nil {
-		return usagef("--base-url %q 要以 http:// 或 https:// 开头，例如 --base-url https://api.example.com", value)
-	}
-	return nil
-}
-
 // cmdProviderAdd 只新建一家厂商。重名时报错并指向 provider set，不顺手改已有的行。
 func cmdProviderAdd(e *Env, args []string) error {
 	fs := newFlagSet(e, "provider add", "新建一家厂商与它的协议路由（目前支持 anthropic、openai、responses 三种协议）")
-	baseURL := fs.String("base-url", "", "厂商的默认地址，必填，如 https://api.deepseek.com")
+	baseURL := fs.String("base-url", "", "厂商的默认地址，必填，如 https://api.deepseek.com（必须是带主机名的完整地址）")
 	paths := newProviderPathFlags(fs)
 	defProtocol := fs.String("default-protocol", "", "这家的默认协议：anthropic | openai | responses，必须落在这次声明的路由上；不给按 openai → responses → anthropic 取第一条")
-	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖，相对 --base-url，如 /v1/models（写法由程序规整）；不给按各路由的 models_path 取")
+	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖，相对 --base-url，如 /v1/models（写法由程序规整；整条地址写在 --base-url，不要写在这里）；不给按各路由的 models_path 取")
 	note := fs.String("note", "", "备注")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -396,26 +427,32 @@ func cmdProviderAdd(e *Env, args []string) error {
 	if *baseURL == "" {
 		return usagef("缺少 --base-url：新建厂商必须给地址，例如 switchboard provider add %s --base-url https://api.example.com --openai /v1/chat/completions\n%s", name, providerAddUsage)
 	}
-	if err := baseURLFlag(*baseURL); err != nil {
+	// 地址交给 store.NormalizeBaseURL 判定与规整，cli 不另写一份 scheme/主机名预检；
+	// 落库用的就是它返回的形态，与 provider set、account add 同一份规则（见 DESIGN 5.8）。
+	norm, err := checkBaseURL(*baseURL, providerAddUsage)
+	if err != nil {
 		return err
 	}
+	*baseURL = norm
 	for _, f := range paths.pairs(fs) {
-		if f.given && !pathGiven(f.value) {
-			return emptyValueError(false, f.flagName, providerAddUsage)
+		if err := checkRoutePathFlag(f, "switchboard provider add", false, providerAddUsage); err != nil {
+			return err
 		}
 	}
 	if flagWasSet(fs, "default-protocol") && strings.TrimSpace(*defProtocol) == "" {
 		return emptyValueError(false, "default-protocol", providerAddUsage)
 	}
-	if flagWasSet(fs, "models-path") && !pathGiven(*modelsPath) {
-		return emptyValueError(false, "models-path", providerAddUsage)
+	if flagWasSet(fs, "models-path") {
+		if err := checkModelsPathFlag(*modelsPath, "switchboard provider add", false, providerAddUsage); err != nil {
+			return err
+		}
 	}
 	if flagWasSet(fs, "note") && strings.TrimSpace(*note) == "" {
 		return emptyValueError(false, "note", providerAddUsage)
 	}
 
 	// 路径取值原样交给 store：写法（前导斜杠、重复斜杠、末尾斜杠）由 NormalizePath 规整，
-	// cli 不提前拒绝（见 DESIGN 5.8）。上面只判过「规整之后为空」。
+	// cli 不提前拒绝（见 DESIGN 5.8）。上面只判过「规整之后为空」与「写成了整条地址」两种用法错误。
 	routes := make([]store.ProviderRoute, 0, 3)
 	for _, f := range paths.pairs(fs) {
 		if !f.given {
@@ -468,9 +505,9 @@ func cmdProviderAdd(e *Env, args []string) error {
 // 删除一条路由、清掉覆盖或备注走 `provider unset`（见 DESIGN 4）。
 func cmdProviderSet(e *Env, args []string) error {
 	fs := newFlagSet(e, "provider set", "改一家厂商的地址、路由、默认协议或备注（目前支持 anthropic、openai、responses 三种协议）")
-	baseURL := fs.String("base-url", "", "改厂商的默认地址")
+	baseURL := fs.String("base-url", "", "改厂商的默认地址（必须是带主机名的完整地址）")
 	paths := newProviderPathFlags(fs)
-	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖，如 /v1/models（写法由程序规整）")
+	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖，如 /v1/models（写法由程序规整；整条地址写在 --base-url，不要写在这里）")
 	defProtocol := fs.String("default-protocol", "", "这家的默认协议：anthropic | openai | responses，必须落在已声明的路由上")
 	note := fs.String("note", "", "改备注")
 	if err := fs.Parse(args); err != nil {
@@ -489,15 +526,18 @@ func cmdProviderSet(e *Env, args []string) error {
 		if strings.TrimSpace(*baseURL) == "" {
 			return usagef("--base-url 传了空值：地址是必填项，给完整地址，例如 --base-url https://api.example.com")
 		}
-		if err := baseURLFlag(*baseURL); err != nil {
+		// 与 provider add、account add 同一份校验与规整（见 DESIGN 5.8）。
+		norm, err := checkBaseURL(*baseURL, providerSetUsage)
+		if err != nil {
 			return err
 		}
+		*baseURL = norm
 		patch.BaseURL = baseURL
 		changed = append(changed, "base-url")
 	}
 	if flagWasSet(fs, "models-path") {
-		if !pathGiven(*modelsPath) {
-			return emptyValueError(true, "models-path", providerSetUsage)
+		if err := checkModelsPathFlag(*modelsPath, "switchboard provider set", true, providerSetUsage); err != nil {
+			return err
 		}
 		patch.ModelsPath = modelsPath
 		changed = append(changed, "models-path")
@@ -524,8 +564,8 @@ func cmdProviderSet(e *Env, args []string) error {
 		if !f.given {
 			continue
 		}
-		if !pathGiven(f.value) {
-			return emptyValueError(true, f.flagName, providerSetUsage)
+		if err := checkRoutePathFlag(f, "switchboard provider set", true, providerSetUsage); err != nil {
+			return err
 		}
 		// 写法交给 store 规整，不再要求以 / 开头（见 DESIGN 5.8）。
 		patch.Routes[f.protocol] = f.value

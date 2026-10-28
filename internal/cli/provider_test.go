@@ -1595,3 +1595,148 @@ func TestDefaultProtocolOutsideRoutesRejected(t *testing.T) {
 		}
 	})
 }
+
+// TestProviderBaseURLValidation 覆盖 --base-url 的三种输入。只有 scheme 的两种写法
+// （`https://` 与 `https:///`）都是用法错误、退出码 2，文案保留 store.NormalizeBaseURL 的原话
+// —「里没有主机名」——再附这个子命令的用法行，不再报成「要以 http:// 开头」。
+// 大写 scheme 与末尾斜杠不是错误：与 store 写入口同一份规整，落库存小写、去末尾斜杠。
+// add 与 set 都走同一条路，断言两处行为一致。
+func TestProviderBaseURLValidation(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	for _, c := range []struct{ name, base string }{
+		{"只有 scheme", "https://"},
+		{"只有斜杠", "https:///"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			code, out, stderr := run(t, "provider", "add", "mine",
+				"--base-url", c.base, "--openai", "/v1/chat/completions")
+			if code != 2 || out != "" {
+				t.Fatalf("退出码 = %d，stdout = %q", code, out)
+			}
+			for _, want := range []string{"里没有主机名", "https://api.deepseek.com", "用法：switchboard provider add"} {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("stderr 应包含 %q: %s", want, stderr)
+				}
+			}
+			if strings.Contains(stderr, "要以 http://") {
+				t.Fatalf("缺少主机名时不该报成 scheme 问题: %s", stderr)
+			}
+		})
+	}
+	if _, ok := mustProviderLs(t)["mine"]; ok {
+		t.Fatal("地址校验失败时不该写入厂商")
+	}
+
+	if code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", "https://api.example.com", "--openai", "/v1/chat/completions"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	code, out, stderr := run(t, "provider", "set", "mine", "--base-url", "https://")
+	if code != 2 || out != "" {
+		t.Fatalf("provider set 退出码 = %d，stdout = %q", code, out)
+	}
+	for _, want := range []string{"里没有主机名", "用法：switchboard provider set"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr 应包含 %q: %s", want, stderr)
+		}
+	}
+	if got := mustProviderLs(t)["mine"].BaseURL; got != "https://api.example.com" {
+		t.Fatalf("校验失败不该改地址，实际 %q", got)
+	}
+
+	// 大写 scheme 与末尾斜杠都在规则之内：scheme 归一成小写，末尾斜杠去掉。
+	if code, _, stderr := run(t, "provider", "set", "mine", "--base-url", "HTTPS://API.Example.com/"); code != 0 {
+		t.Fatalf("大写 scheme 应被接受，退出码 = %d，stderr = %s", code, stderr)
+	}
+	if got := mustProviderLs(t)["mine"].BaseURL; got != "https://API.Example.com" {
+		t.Fatalf("base_url = %q，期望 https://API.Example.com", got)
+	}
+	// add 同样接受。
+	if code, _, stderr := run(t, "provider", "add", "upper",
+		"--base-url", "HTTPS://api.example.com/", "--openai", "/v1/chat/completions"); code != 0 {
+		t.Fatalf("provider add 大写 scheme 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if got := mustProviderLs(t)["upper"].BaseURL; got != "https://api.example.com" {
+		t.Fatalf("provider add 的 base_url = %q，期望 https://api.example.com", got)
+	}
+}
+
+// TestProviderPathsRejectFullAddress 钉住路径类取值的第二种用法错误：值里出现 `://`
+// 说明把整条地址抄进了路径参数，store.NormalizePath 会把它规整成 /https:/… 这种打不通的地址。
+// add 的三个协议 flag 与 --models-path、set 的两个入口一律退出码 2，文案说明这里是相对
+// base_url 的路径、完整地址写在 --base-url，并给一个正确示例；一条路由都不落库。
+func TestProviderPathsRejectFullAddress(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	full := "https://api.example.com/v1/chat/completions"
+	for _, c := range []struct {
+		name string
+		args []string
+		flag string
+	}{
+		{"add --anthropic", []string{"provider", "add", "mine", "--base-url", "https://api.example.com", "--anthropic", full}, "--anthropic"},
+		{"add --openai", []string{"provider", "add", "mine", "--base-url", "https://api.example.com", "--openai", full}, "--openai"},
+		{"add --responses", []string{"provider", "add", "mine", "--base-url", "https://api.example.com", "--responses", full}, "--responses"},
+		{"add --models-path", []string{"provider", "add", "mine", "--base-url", "https://api.example.com",
+			"--openai", "/v1/chat/completions", "--models-path", full}, "--models-path"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			code, out, stderr := run(t, c.args...)
+			if code != 2 || out != "" {
+				t.Fatalf("退出码 = %d，stdout = %q", code, out)
+			}
+			for _, want := range []string{c.flag, "整条地址", "相对 base_url", "--base-url", "例如 switchboard provider add"} {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("stderr 应包含 %q: %s", want, stderr)
+				}
+			}
+		})
+	}
+	if _, ok := mustProviderLs(t)["mine"]; ok {
+		t.Fatal("路径校验失败时不该写入厂商")
+	}
+
+	if code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", "https://api.example.com", "--openai", "/v1/chat/completions"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	for _, args := range [][]string{
+		{"provider", "set", "mine", "--openai", full},
+		{"provider", "set", "mine", "--models-path", full},
+	} {
+		code, out, stderr := run(t, args...)
+		if code != 2 || out != "" {
+			t.Fatalf("%v 退出码 = %d，stdout = %q", args, code, out)
+		}
+		for _, want := range []string{"整条地址", "例如 switchboard provider set"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("%v 的 stderr 应包含 %q: %s", args, want, stderr)
+			}
+		}
+	}
+	got := mustProviderLs(t)["mine"]
+	if got.ModelsPath != "" || routeMap(got)["openai-chat"].Path != "/v1/chat/completions" {
+		t.Fatalf("路径校验失败时不该改动厂商: %+v", got)
+	}
+}
+
+// TestModelSyncEndpointRejectsFullAddress 确认 `model sync --endpoint` 与协议 flag 同一条规则：
+// 整条地址是用法错误（退出码 2），完整地址属于账号的 base_url；缺前导斜杠、重复斜杠与末尾斜杠
+// 仍由 store.NormalizePath 规整，见 TestModelSyncEndpointNormalizedPathIsTemporary。
+func TestModelSyncEndpointRejectsFullAddress(t *testing.T) {
+	sandbox(t)
+
+	code, out, stderr := run(t, "model", "sync", "--endpoint", "https://api.example.com/v1/models")
+	if code != 2 || out != "" {
+		t.Fatalf("退出码 = %d，stdout = %q", code, out)
+	}
+	for _, want := range []string{"--endpoint", "整条地址", "base_url", "例如 switchboard model sync --account ds --endpoint /v1/models"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr 应包含 %q: %s", want, stderr)
+		}
+	}
+}
