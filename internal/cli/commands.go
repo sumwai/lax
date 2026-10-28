@@ -1,13 +1,20 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	"switchboard/internal/config"
+	"switchboard/internal/gateway"
+	"switchboard/internal/secret"
+	"switchboard/internal/store"
 )
 
 var commandTable = map[string]command{
@@ -48,10 +55,25 @@ func cmdInit(e *Env, args []string) error {
 		}
 	}
 
-	if e.JSON {
-		return e.printJSON(map[string]string{"config": paths.Config, "db": paths.DB})
+	st, err := store.Open(paths.DB)
+	if err != nil {
+		return fmt.Errorf("创建数据库失败: %w", err)
 	}
-	fmt.Fprintf(e.Stdout, "配置 %s\n数据库 %s\n", paths.Config, paths.DB)
+	_ = st.Close()
+
+	keyPath := filepath.Join(filepath.Dir(paths.DB), "secret.key")
+	if _, err := secret.LoadOrCreateKey(keyPath); err != nil {
+		return fmt.Errorf("创建密钥失败: %w", err)
+	}
+
+	if e.JSON {
+		return e.printJSON(map[string]string{
+			"config": paths.Config,
+			"db":     paths.DB,
+			"key":    keyPath,
+		})
+	}
+	fmt.Fprintf(e.Stdout, "配置 %s\n数据库 %s\n密钥 %s\n", paths.Config, paths.DB, keyPath)
 	fmt.Fprintln(e.Stdout, "下一步：switchboard account add <名称> --provider <厂商> --key <key>")
 	return nil
 }
@@ -62,76 +84,61 @@ func cmdServe(e *Env, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	_ = addr
-	return errNotImplemented
-}
 
-func cmdAccount(e *Env, args []string) error {
-	if len(args) == 0 {
-		return errors.New("需要子命令：add | ls | rm | test")
+	a, err := openApp(e, true)
+	if err != nil {
+		return err
 	}
-	switch args[0] {
-	case "add":
-		fs := newFlagSet(e, "account add", "新增一个上游账号")
-		provider := fs.String("provider", "", "上游厂商标识，如 deepseek")
-		key := fs.String("key", "", "上游 API key")
-		protocol := fs.String("protocol", "openai-chat", "上游线协议：openai-chat | anthropic")
-		baseURL := fs.String("base-url", "", "上游地址，留空用厂商默认")
-		models := fs.String("models", "", "该账号可提供的模型，逗号分隔")
-		if err := fs.Parse(args[1:]); err != nil {
+	defer a.Close()
+
+	listen := a.cfg.Addr
+	if *addr != "" {
+		listen = *addr
+	}
+
+	gs, err := gateway.New(gateway.Options{
+		Store: a.st,
+		Key:   a.key,
+		Logf: func(format string, logArgs ...any) {
+			fmt.Fprintf(e.Stdout, "%s %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, logArgs...))
+		},
+	})
+	if err != nil {
+		return err
+	}
+
+	ln, err := net.Listen("tcp", listen)
+	if err != nil {
+		return fmt.Errorf("监听 %s 失败: %w", listen, err)
+	}
+
+	accounts, err := a.st.ListAccounts()
+	if err != nil {
+		return err
+	}
+	models := map[string]bool{}
+	for _, acc := range accounts {
+		for _, m := range acc.Models {
+			models[m] = true
+		}
+	}
+
+	if e.JSON {
+		if err := e.printJSON(map[string]any{
+			"addr":     ln.Addr().String(),
+			"accounts": len(accounts),
+			"models":   len(models),
+		}); err != nil {
 			return err
 		}
-		if fs.NArg() != 1 {
-			return errors.New("用法：switchboard account add <名称> --provider <厂商> --key <key>")
-		}
-		if *provider == "" || *key == "" {
-			return errors.New("--provider 与 --key 都是必填")
-		}
-		_, _, _ = protocol, baseURL, models
-		return errNotImplemented
-	case "ls":
-		return errNotImplemented
-	case "rm":
-		return errNotImplemented
-	case "test":
-		return errNotImplemented
-	default:
-		return fmt.Errorf("未知子命令 %q，可用：add | ls | rm | test", args[0])
+	} else {
+		fmt.Fprintf(e.Stdout, "监听 %s\n入站 /v1/messages（anthropic）\n上游 %d 个账号，%d 个模型\n",
+			ln.Addr().String(), len(accounts), len(models))
 	}
-}
 
-func cmdModel(e *Env, args []string) error {
-	if len(args) == 0 || args[0] != "ls" {
-		return errors.New("需要子命令：ls")
-	}
-	return errNotImplemented
-}
-
-func cmdAgent(e *Env, args []string) error {
-	if len(args) == 0 {
-		return errors.New("需要子命令：ls | use | revert")
-	}
-	switch args[0] {
-	case "ls", "use", "revert":
-		return errNotImplemented
-	default:
-		return fmt.Errorf("未知子命令 %q，可用：ls | use | revert", args[0])
-	}
-}
-
-func cmdUsage(e *Env, args []string) error {
-	return errNotImplemented
-}
-
-func cmdLog(e *Env, args []string) error {
-	if len(args) == 0 || args[0] != "tail" {
-		return errors.New("需要子命令：tail")
-	}
-	return errNotImplemented
-}
-
-func cmdCall(e *Env, args []string) error {
-	return errNotImplemented
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return gs.Serve(ctx, ln)
 }
 
 func cmdVersion(e *Env, args []string) error {
@@ -181,27 +188,39 @@ func cmdDoctor(e *Env, args []string) error {
 		add("数据目录可写", false, err.Error())
 	} else {
 		name := f.Name()
-		f.Close()
-		os.Remove(name)
+		_ = f.Close()
+		_ = os.Remove(name)
 		add("数据目录可写", true, dataDir)
 	}
 
-	if _, statErr := os.Stat(paths.DB); statErr == nil {
-		add("数据库文件", true, paths.DB)
+	keyPath := filepath.Join(dataDir, "secret.key")
+	if _, statErr := os.Stat(keyPath); statErr == nil {
+		add("加密密钥", true, "权限 0600")
 	} else {
-		add("数据库文件", false, "尚未创建")
+		add("加密密钥", false, "不存在，先运行 switchboard init")
 	}
 
-	cfg, loadErr := config.Load(paths)
-	if loadErr != nil {
+	if cfg, loadErr := config.Load(paths); loadErr != nil {
 		add("配置解析", false, loadErr.Error())
 	} else {
 		add("配置解析", true, cfg.Addr)
 		if ln, lerr := net.Listen("tcp", cfg.Addr); lerr != nil {
 			add("端口", false, lerr.Error())
 		} else {
-			ln.Close()
+			_ = ln.Close()
 			add("端口", true, cfg.Addr)
+		}
+	}
+
+	if st, openErr := store.Open(paths.DB); openErr != nil {
+		add("数据库", false, openErr.Error())
+	} else {
+		accounts, listErr := st.ListAccounts()
+		_ = st.Close()
+		if listErr != nil {
+			add("数据库", false, listErr.Error())
+		} else {
+			add("数据库", true, fmt.Sprintf("%d 个账号", len(accounts)))
 		}
 	}
 
@@ -222,7 +241,7 @@ func cmdDoctor(e *Env, args []string) error {
 			if !c.OK {
 				mark = "fail"
 			}
-			fmt.Fprintf(e.Stdout, "%s  %-14s %s\n", mark, c.Name, c.Note)
+			fmt.Fprintf(e.Stdout, "%s  %s %s\n", mark, pad(c.Name, 12), c.Note)
 		}
 	}
 

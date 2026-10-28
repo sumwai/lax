@@ -1,0 +1,96 @@
+// Package account 实现账号池的纯逻辑：可用性判断、候选排序、冷却时长。
+package account
+
+import (
+	"hash/fnv"
+	"sort"
+	"time"
+
+	"switchboard/internal/store"
+)
+
+const (
+	// CooldownRateLimit 是首次撞上 429 后的冷却时长。
+	CooldownRateLimit = time.Minute
+	// CooldownServer 是首次撞上 5xx 或超时后的冷却时长。
+	CooldownServer = 10 * time.Second
+	// MaxCooldown 是冷却上限。
+	MaxCooldown = 30 * time.Minute
+)
+
+// Cooldown 按连续失败次数算冷却时长，失败次数从 0 开始。
+func Cooldown(status int, streak int) time.Duration {
+	base := CooldownServer
+	if status == 429 {
+		base = CooldownRateLimit
+	}
+	if streak < 0 {
+		streak = 0
+	}
+	d := base
+	for i := 0; i < streak && d < MaxCooldown; i++ {
+		d *= 2
+	}
+	if d > MaxCooldown {
+		d = MaxCooldown
+	}
+	return d
+}
+
+// Retryable 判断上游状态是否值得换账号重试。
+func Retryable(status int) bool {
+	if status == 429 || status == 408 {
+		return true
+	}
+	return status >= 500
+}
+
+// Supports 判断账号的模型列表是否覆盖请求的模型。列表为空视为不限制。
+func Supports(a store.Account, model string) bool {
+	if len(a.Models) == 0 {
+		return true
+	}
+	for _, m := range a.Models {
+		if m == model {
+			return true
+		}
+	}
+	return false
+}
+
+// Available 判断账号此刻能否接请求。
+func Available(a store.Account, now time.Time) bool {
+	if !a.Enabled {
+		return false
+	}
+	if a.CooldownUntil == 0 {
+		return true
+	}
+	return now.Unix() >= a.CooldownUntil
+}
+
+// Candidates 过滤出可用于该模型的账号，按 priority 升序排好。
+// session 非空时，把按会话哈希选中的账号提到最前，保证同一会话粘同一个账号。
+func Candidates(accounts []store.Account, model string, now time.Time, session string) []store.Account {
+	var out []store.Account
+	for _, a := range accounts {
+		if !Available(a, now) || !Supports(a, model) {
+			continue
+		}
+		out = append(out, a)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Priority != out[j].Priority {
+			return out[i].Priority < out[j].Priority
+		}
+		return out[i].ID < out[j].ID
+	})
+
+	if session != "" && len(out) > 1 {
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(session))
+		idx := int(h.Sum32() % uint32(len(out)))
+		out = append(out[idx:], out[:idx]...)
+	}
+	return out
+}

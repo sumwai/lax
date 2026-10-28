@@ -21,6 +21,16 @@ const (
 // errNotImplemented 表示子命令已在设计文档中定义，但当前里程碑尚未实现。
 var errNotImplemented = errors.New("尚未实现，见 DESIGN.md 的里程碑")
 
+// usageError 是用法错误，退出码 2。
+type usageError struct{ msg string }
+
+func (e usageError) Error() string { return e.msg }
+
+// usagef 构造一个用法错误。
+func usagef(format string, args ...any) error {
+	return usageError{msg: fmt.Sprintf(format, args...)}
+}
+
 // Env 保存一次命令执行需要的输出目标与全局选项。
 type Env struct {
 	Stdout io.Writer
@@ -66,6 +76,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 			return exitOK
 		}
 		fmt.Fprintf(stderr, "%s: %v\n", cmd.name, err)
+		var ue usageError
+		if errors.As(err, &ue) {
+			return exitUsage
+		}
 		return exitFail
 	}
 	return exitOK
@@ -110,15 +124,51 @@ func printUsage(w io.Writer) {
 	fmt.Fprint(w, "\n全局参数：\n  --json     以 JSON 输出\n  --config   指定配置文件路径\n  --db       指定数据库路径\n")
 }
 
-func newFlagSet(e *Env, name, summary string) *flag.FlagSet {
+func newFlagSet(e *Env, name, summary string) *flagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(e.Stderr)
+	fs.BoolVar(&e.JSON, "json", e.JSON, "以 JSON 输出")
 	fs.Usage = func() {
 		fmt.Fprintf(e.Stderr, "%s %s — %s\n\n用法：\n  %s %s [参数]\n\n参数：\n", appName, name, summary, appName, name)
 		fs.PrintDefaults()
 	}
-	return fs
+	return &flagSet{FlagSet: fs}
 }
+
+// flagSet 让位置参数可以出现在参数前后任意位置，与常见命令行习惯一致。
+type flagSet struct {
+	*flag.FlagSet
+	pos []string
+}
+
+// Parse 逐段解析：每遇到一个位置参数就收起来，继续解析它后面的参数。
+func (f *flagSet) Parse(args []string) error {
+	for {
+		if err := f.FlagSet.Parse(args); err != nil {
+			return err
+		}
+		rest := f.FlagSet.Args()
+		if len(rest) == 0 {
+			return nil
+		}
+		f.pos = append(f.pos, rest[0])
+		args = rest[1:]
+		if len(args) == 0 {
+			return nil
+		}
+	}
+}
+
+func (f *flagSet) NArg() int { return len(f.pos) }
+
+func (f *flagSet) Arg(i int) string {
+	if i < 0 || i >= len(f.pos) {
+		return ""
+	}
+	return f.pos[i]
+}
+
+func (f *flagSet) Args() []string { return f.pos }
 
 func (e *Env) printJSON(v any) error {
 	enc := json.NewEncoder(e.Stdout)

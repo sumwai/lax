@@ -89,7 +89,7 @@ $ switchboard call "hi" --model deepseek-v4-pro --debug
 
 ## 4 命令表
 
-全局参数必须写在子命令之前：`--json`、`--config <路径>`、`--db <路径>`。
+全局参数：`--json` 可以写在子命令前后任意位置；`--config <路径>` 与 `--db <路径>` 必须写在子命令之前。
 
 | 命令 | 参数 | 行为 | 输出 |
 | --- | --- | --- | --- |
@@ -192,7 +192,7 @@ $ switchboard call "hi" --model deepseek-v4-pro --debug
 | `ANTHROPIC_AUTH_TOKEN` | `switchboard-local`（本机网关不校验，客户端要求非空） |
 | `ANTHROPIC_MODEL` | 指定模型 |
 
-规则：默认只打印差异，`--apply` 才写；写前把原文件复制为 `<文件名>.switchboard.bak`；只动上表三个键，其它键原样保留；`agent revert` 从备份还原。其它客户端按同一份结构在后续里程碑加表项，改法与备份规则不变。
+规则：默认只打印差异，`--apply` 才写；写前把原文件复制为 `<文件名>.switchboard.bak`；只动上表三个键，其它键原样保留；`agent revert` 从备份还原，若原来没有这个配置文件，则把它删掉。其它客户端按同一份结构在后续里程碑加表项，改法与备份规则不变。
 
 ### 5.7 凭据
 
@@ -259,6 +259,15 @@ CREATE INDEX requests_ts ON requests(ts DESC);
 | M3 | 流式：SSE 双向翻译 | 客户端能流式拿到 token 与工具调用 |
 | M4 | 多账号：冷却、失败转移、`usage`、`agent use/revert` | 两个账号时杀掉一个，请求自动落到另一个 |
 
+M0 到 M4 已实现，`make check` 与 `go test -race` 通过，端到端由 `internal/cli` 的 `TestWalkingSkeleton` 用假上游验证：初始化、加账号、`call`、`log tail`、`usage`、`doctor` 全链路走通。上游是 `httptest` 假服务，真实厂商的连通性需要拿到 key 后自行 `account test` 验证。
+
+已知未做，按已知行为处理：
+
+- 冷却时长按单次失败计算，不跨请求累计连续失败次数。
+- 估算花费依赖账号上的 `--price-in` 与 `--price-out`，没有价格时记为 0 并在 `usage` 末尾提示。
+- 客户端配置改写只支持 Claude Code。
+- 模型名不做别名归一，请求里的 `model` 必须与账号 `--models` 里的名字完全一致。
+
 之后（不在第一版）：openai-chat / responses / gemini 入站，订阅账号登录，隐私遮蔽，配置档案（profiles），价格表内置。
 
 ## 8 代码结构
@@ -276,7 +285,9 @@ internal/usage/         用量汇总与花费估算
 internal/agentcfg/      客户端配置读写与备份还原
 ```
 
-约束：`translate` 只做结构体到结构体的转换，不读环境、不发请求，便于用对拍用例覆盖；`gateway` 是唯一发上游请求的地方；`cli` 不直接连数据库，只调 `store` 与 `account`。
+约束：`translate` 只做结构体到结构体的转换，不读环境、不发请求，便于用对拍用例覆盖；`gateway` 是唯一发上游请求的地方（`account test` 的探活也走 `gateway.Probe`）；`cli` 不直接连数据库，只调 `store` 与 `account`。
+
+依赖：只有 `modernc.org/sqlite`（纯 Go 实现，不需要 cgo，交叉编译不受影响），其余全部用标准库。命令行解析用 `flag`，不引入第三方 CLI 框架。
 
 ## 9 非目标
 
