@@ -21,7 +21,7 @@ switchboard log tail                                        # 看请求记录
 | `init` | 建配置目录、数据库、加密密钥 |
 | `serve` | 前台起网关 |
 | `account add\|ls\|rm\|test\|enable\|disable` | 加账号、列账号、删账号、探活、启用、停用 |
-| `provider ls\|add\|rm` | 维护厂商默认地址、默认协议与各协议的路由 |
+| `provider ls\|add\|set\|unset\|rm` | 维护厂商默认地址、默认协议与各协议的路由；`add` 只新建，`set` 只设值，删除走 `unset` |
 | `model ls` | 列出模型、可用账号与状态，可按厂商与账号筛选 |
 | `model sync` | 从上游拉模型列表，写进本地，可按厂商与账号筛选 |
 | `model probe` | 逐个模型探活，把能用的写进账号，可按厂商与账号筛选 |
@@ -42,22 +42,30 @@ switchboard log tail                                        # 看请求记录
 | `POST /v1/chat/completions` | openai-chat | 普通 OpenAI SDK 客户端 |
 | `POST /v1/responses` | openai-responses | Codex |
 
-出站协议由账号决定：`account add --protocol` 取值 `anthropic`、`openai-chat`、`openai-responses`，留空则取该厂商的默认协议（`provider add --protocol` 显式存的优先，没显式存才按协议名排序取第一条路由）。厂商与各协议的路径在数据库里，`switchboard provider ls` 能看到，`provider add` 可以补新厂商或改路径，不必重编译。入站协议与出站协议相同时直通，请求体只改 `model` 字段，其余字段与值原样带到上游，响应按字节原样返回；不同时经中间表示转换，请求与响应都只搬映射表里定义的字段，表外字段丢弃。未知路径返回 404，请求体解析失败返回 400，错误消息带协议名前缀。
+出站协议由账号决定：`account add --protocol` 取值 `anthropic`、`openai-chat`、`openai-responses`，留空则取该厂商的默认协议（`provider add --default-protocol` 显式存的优先，没显式存则按 `openai-chat` → `openai-responses` → `anthropic` 取第一条路由）。厂商与各协议的路径在数据库里，`switchboard provider ls` 能看到，`provider add` / `set` / `unset` 可以增删改，不必重编译。入站协议与出站协议相同时直通，请求体只改 `model` 字段，其余字段与值原样带到上游，响应按字节原样返回；不同时经中间表示转换，请求与响应都只搬映射表里定义的字段，表外字段丢弃。未知路径返回 404，请求体解析失败返回 400，错误消息带协议名前缀。
 
-自己加一家厂商时，`--route` 声明各协议的路径，`--protocol` 定下这家的默认协议（它必须落在声明过的路由上，留空则按协议名排序取第一条）。新建厂商时 `--base-url` 必填，补已有厂商的路由或默认协议时可以省略，地址保持库里原值：
+自己加一家厂商时，每个协议一条 flag（`--anthropic`、`--openai`、`--responses`，目前支持这三种），值是相对 `--base-url` 的完整路径、必须以 `/` 开头。`--default-protocol` 定下这家的默认协议，取值写 `anthropic`、`openai`、`responses`（也认线协议全名 `openai-chat`、`openai-responses`），必须落在已声明的路由上：
 
 ```bash
-# 新建厂商：--base-url 必填
-switchboard provider add myco --base-url https://api.example.com \
-    --route openai-chat=/v1/chat/completions:/v1/models \
-    --protocol openai-chat
-
-# 已有厂商：补一条路由、改默认协议，不用重写地址
-switchboard provider add myco --route anthropic=/v1/messages
-switchboard provider add myco --protocol anthropic
-
-switchboard provider ls          # 默认协议列能看到 openai-chat 变成 anthropic
+# 新建厂商：--base-url 必填，至少一条协议路由
+switchboard provider add myco --base-url https://api.deepseek.com \
+    --openai /v1/chat/completions \
+    --anthropic /anthropic/v1/messages \
+    --default-protocol openai
+已添加厂商 myco（https://api.deepseek.com），2 条路由，默认协议 openai-chat
 ```
+
+`provider set` 只设值：补一条路由、改默认协议或地址，没传的字段一律保留。传空值是用法错误，删除要显式声明：
+
+```bash
+# 补一条 responses 路由，并把默认协议换掉
+switchboard provider set myco --responses /v1/responses --default-protocol responses
+
+# 删一条路由；也可以一次删多个（models-path、default-protocol、note 同样可用）
+switchboard provider unset myco anthropic
+```
+
+`provider unset` 幂等：要删的项本来就不存在时不报错，只说明一句「myco 本来就没有 anthropic 路由」。删到一条路由都不剩会被拒绝，那是不想要这家厂商了，用 `provider rm`。`--models-path <路径>` 是厂商级的模型列表覆盖，`provider unset myco models-path` 清掉它、回到按各路由取。
 
 ## 模型从上游拉，再探活
 
@@ -67,6 +75,7 @@ switchboard provider ls          # 默认协议列能看到 openai-chat 变成 a
 switchboard account add ds --provider deepseek --key sk-xxx
 switchboard model sync                                     # 全部账号各拉一次模型列表
 switchboard model sync --provider deepseek --account ds   # 只处理这一个账号
+switchboard model sync --account ds --endpoint /v1/models # 临时指定列表路径，只影响这一次调用
 switchboard model probe --account ds --limit 5            # 只探这个账号的前 5 个模型
 switchboard serve
 ```

@@ -91,9 +91,8 @@ func TestAccountAddProviderWithoutRoutes(t *testing.T) {
 	if code, _, stderr := run(t, "init"); code != 0 {
 		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if code, _, stderr := run(t, "provider", "add", "noroute", "--base-url", "https://api.example.com"); code != 0 {
-		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
-	}
+	// 命令行已经造不出零路由厂商（add 至少要求一条路由），老库里可能有，用 store 直接造。
+	seedProviderWithoutRoutes(t, "noroute", "https://api.example.com")
 
 	code, out, stderr := run(t, "account", "add", "n1", "--provider", "noroute", "--key", "sk-1")
 	if code != 1 {
@@ -102,7 +101,7 @@ func TestAccountAddProviderWithoutRoutes(t *testing.T) {
 	if out != "" {
 		t.Fatalf("报错时不该写 stdout: %s", out)
 	}
-	for _, want := range []string{"switchboard provider add noroute", "--protocol", "--base-url", "--route"} {
+	for _, want := range []string{"switchboard provider set noroute", "--protocol", "--base-url", "--openai"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 		}

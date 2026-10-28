@@ -4,3 +4,4 @@
 *.db-journal
 *.bak
 .pi/tasks/
+.pi/subagents.json

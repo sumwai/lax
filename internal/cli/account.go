@@ -167,8 +167,8 @@ func cmdAccountAdd(e *Env, args []string) error {
 	// 就按自建地址加账号，协议回退 openai-chat（见 DESIGN 5.8）；否则报错让人先声明路由。
 	if proto == "" && defs.NoRoutes {
 		if *baseURL == "" {
-			return fmt.Errorf("厂商 %q 在厂商表里但一条路由都没声明，算不出默认协议（地址 %s）；先运行 switchboard provider add %s --base-url %s --route %s 声明路由，或给本命令加 --protocol <协议> 指定，或给 --base-url 按自建地址加账号",
-				*provider, defs.BaseURL, *provider, defs.BaseURL, routeExample)
+			return fmt.Errorf("厂商 %q 在厂商表里但一条路由都没声明，算不出默认协议（地址 %s）；先运行 switchboard provider set %s --openai /v1/chat/completions（或 --anthropic / --responses）声明路由，或给本命令加 --protocol <协议> 指定，或给 --base-url 按自建地址加账号",
+				*provider, defs.BaseURL, *provider)
 		}
 		proto = gateway.ProtocolChat
 	}
@@ -674,8 +674,12 @@ func cmdModelSync(e *Env, args []string) error {
 	fs := newFlagSet(e, "model sync", "从上游拉取模型列表")
 	provider := fs.String("provider", "", "只同步这个厂商的账号")
 	accountName := fs.String("account", "", "只同步这个账号")
+	endpoint := fs.String("endpoint", "", "临时覆盖模型列表路径，只影响这一次调用：相对厂商 base_url 的完整路径，必须以 / 开头，例如 /v1/models")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if path := strings.TrimSpace(*endpoint); path != "" && !strings.HasPrefix(path, "/") {
+		return usagef("--endpoint %q 要以 / 开头：它是相对该厂商 base_url 的完整路径，例如 switchboard model sync --endpoint /v1/models", *endpoint)
 	}
 
 	a, err := openApp(e, true)
@@ -708,7 +712,7 @@ func cmdModelSync(e *Env, args []string) error {
 	failed := 0
 	for _, acc := range accounts {
 		r := row{Account: acc.Name, Provider: acc.Provider}
-		models, err := gs.SyncModels(ctx, acc)
+		models, err := gs.SyncModelsWithEndpoint(ctx, acc, strings.TrimSpace(*endpoint))
 		if err != nil {
 			r.Error = err.Error()
 			failed++

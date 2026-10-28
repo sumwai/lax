@@ -5,6 +5,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"switchboard/internal/config"
+	"switchboard/internal/store"
 )
 
 // providerRouteRow 是 provider ls --json 里的一条路由。
@@ -19,6 +22,7 @@ type providerRow struct {
 	Name            string             `json:"name"`
 	BaseURL         string             `json:"base_url"`
 	DefaultProtocol string             `json:"default_protocol"`
+	ModelsPath      string             `json:"models_path"`
 	Protocols       []providerRouteRow `json:"protocols"`
 	Note            string             `json:"note"`
 }
@@ -57,29 +61,63 @@ func providerLine(t *testing.T, out, name string) []string {
 	return nil
 }
 
-// TestProviderLsSeeded 覆盖种子厂商在 provider ls 里的形状：
-// 路由按协议名排序并带完整路径与模型列表路径，默认协议取库里的有效默认协议。
-func TestProviderLsSeeded(t *testing.T) {
-	sandbox(t)
+// seedProviderWithoutRoutes 用 store 的过渡写入口造一家一条路由都没有的厂商。
+// 命令行已经造不出这种行（`provider add` 至少要求一条路由），但升级上来的老库里可能有：
+// `account add` 与 `provider ls` 在这种行上的行为仍要钉住（见 DESIGN 5.8）。
+func seedProviderWithoutRoutes(t *testing.T, name, baseURL string) {
+	t.Helper()
+	paths, err := config.Resolve("", "")
+	if err != nil {
+		t.Fatalf("解析路径失败: %v", err)
+	}
+	st, err := store.Open(paths.DB)
+	if err != nil {
+		t.Fatalf("打开数据库失败: %v", err)
+	}
+	defer func() { _ = st.Close() }()
+	if err := st.AddProvider(store.Provider{Name: name, BaseURL: baseURL}, nil); err != nil {
+		t.Fatalf("造零路由厂商失败: %v", err)
+	}
+}
+
+// mustInit 建库，失败即停。
+func mustInit(t *testing.T) {
+	t.Helper()
 	if code, _, stderr := run(t, "init"); code != 0 {
 		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
 	}
+}
 
+// mustProviderLs 读 provider ls --json。
+func mustProviderLs(t *testing.T) map[string]providerRow {
+	t.Helper()
 	code, out, stderr := run(t, "provider", "ls", "--json")
 	if code != 0 {
 		t.Fatalf("provider ls 退出码 = %d，stderr = %s", code, stderr)
 	}
-	byName := mustProviderRows(t, out)
+	return mustProviderRows(t, out)
+}
+
+// TestProviderLsSeeded 覆盖种子厂商在 provider ls 里的形状：
+// 路由按协议名排序并带完整路径与模型列表路径，默认协议取库里的有效默认协议。
+func TestProviderLsSeeded(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	byName := mustProviderLs(t)
 	if len(byName) != 8 {
-		t.Fatalf("种子厂商应有 8 家，实际 %d 家: %s", len(byName), out)
+		t.Fatalf("种子厂商应有 8 家，实际 %d 家", len(byName))
 	}
 
 	ds, ok := byName["deepseek"]
 	if !ok {
-		t.Fatalf("provider ls 缺 deepseek: %s", out)
+		t.Fatalf("provider ls 缺 deepseek")
 	}
 	if ds.BaseURL != "https://api.deepseek.com" {
 		t.Fatalf("deepseek 的 base_url = %q", ds.BaseURL)
+	}
+	if ds.ModelsPath != "" {
+		t.Fatalf("deepseek 不该有厂商级模型列表覆盖，实际 %q", ds.ModelsPath)
 	}
 	if len(ds.Protocols) != 2 || ds.Protocols[0].Protocol != "anthropic" {
 		t.Fatalf("deepseek 的路由应按协议名排序且有两条: %+v", ds.Protocols)
@@ -94,7 +132,7 @@ func TestProviderLsSeeded(t *testing.T) {
 
 	cc, ok := byName["commandcode"]
 	if !ok {
-		t.Fatalf("provider ls 缺 commandcode: %s", out)
+		t.Fatalf("provider ls 缺 commandcode")
 	}
 	if cc.BaseURL != "https://api.commandcode.ai/provider/v1" {
 		t.Fatalf("commandcode 的 base_url = %q", cc.BaseURL)
@@ -107,12 +145,12 @@ func TestProviderLsSeeded(t *testing.T) {
 		t.Fatalf("commandcode 的 anthropic 路由 = %+v", got)
 	}
 
-	// 人读的表格要带上默认协议与路径两列。
-	code, out, stderr = run(t, "provider", "ls")
+	// 人读的表格要带上默认协议、路由与模型列表三列。
+	code, out, stderr := run(t, "provider", "ls")
 	if code != 0 {
 		t.Fatalf("provider ls 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"默认协议", "路由与路径", "deepseek", "/anthropic/v1/messages"} {
+	for _, want := range []string{"默认协议", "路由与路径", "模型列表", "deepseek", "/anthropic/v1/messages"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("provider ls 文本输出缺 %q: %s", want, out)
 		}
@@ -124,15 +162,9 @@ func TestProviderLsSeeded(t *testing.T) {
 // 排在前面，库里的显式默认是 openai-chat（迁移 0007），两处必须一致。
 func TestProviderLsDefaultProtocolFromStore(t *testing.T) {
 	sandbox(t)
-	if code, _, stderr := run(t, "init"); code != 0 {
-		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
-	}
+	mustInit(t)
 
-	code, out, stderr := run(t, "provider", "ls", "--json")
-	if code != 0 {
-		t.Fatalf("provider ls 退出码 = %d，stderr = %s", code, stderr)
-	}
-	rows := mustProviderRows(t, out)
+	rows := mustProviderLs(t)
 	want := map[string]string{
 		"deepseek":    "openai-chat",
 		"commandcode": "openai-chat",
@@ -142,15 +174,15 @@ func TestProviderLsDefaultProtocolFromStore(t *testing.T) {
 	for name, w := range want {
 		row, ok := rows[name]
 		if !ok {
-			t.Fatalf("provider ls 缺 %s: %s", name, out)
+			t.Fatalf("provider ls 缺 %s", name)
 		}
 		if row.DefaultProtocol != w {
 			t.Fatalf("%s 的 default_protocol = %q，期望 %q", name, row.DefaultProtocol, w)
 		}
 	}
 
-	// 人读表格的默认协议列与 --json 同一个值，且路由列表里 anthropic 确实排在前面。
-	code, out, stderr = run(t, "provider", "ls")
+	// 人读表格的默认协议列与 --json 同一个值，且 deepseek 的路由列列出两条路由。
+	code, out, stderr := run(t, "provider", "ls")
 	if code != 0 {
 		t.Fatalf("provider ls 退出码 = %d，stderr = %s", code, stderr)
 	}
@@ -160,22 +192,17 @@ func TestProviderLsDefaultProtocolFromStore(t *testing.T) {
 			t.Fatalf("%s 的默认协议列 = %v，期望 %q", name, fields, w)
 		}
 	}
-	ds := providerLine(t, out, "deepseek")
-	if !strings.Contains(strings.Join(ds, " "), "/anthropic/v1/messages") {
+	if ds := providerLine(t, out, "deepseek"); !strings.Contains(strings.Join(ds, " "), "/anthropic/v1/messages") {
 		t.Fatalf("deepseek 的路由列应列出两条路由: %v", ds)
 	}
 }
 
-// TestProviderLsWithoutRoutes 钉住一条路由都没有的厂商：默认协议显示 -，
-// --json 里是空串与空数组，整条命令仍然退出码 0。
+// TestProviderLsWithoutRoutes 钉住一条路由都没有的厂商（老库里的过渡形状）：
+// 默认协议显示 -，--json 里是空串与空数组，模型列表没有可显示的值时是 -，整条命令仍退出码 0。
 func TestProviderLsWithoutRoutes(t *testing.T) {
 	sandbox(t)
-	if code, _, stderr := run(t, "init"); code != 0 {
-		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
-	}
-	if code, _, stderr := run(t, "provider", "add", "noroute", "--base-url", "https://api.example.com"); code != 0 {
-		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
-	}
+	mustInit(t)
+	seedProviderWithoutRoutes(t, "noroute", "https://api.example.com")
 
 	code, out, stderr := run(t, "provider", "ls", "--json")
 	if code != 0 {
@@ -198,6 +225,9 @@ func TestProviderLsWithoutRoutes(t *testing.T) {
 		if got := string(item["protocols"]); got != "[]" {
 			t.Fatalf("无路由厂商的 protocols = %s，期望 []", got)
 		}
+		if got := string(item["models_path"]); got != `""` {
+			t.Fatalf("无路由厂商的 models_path = %s，期望空串", got)
+		}
 	}
 	if !found {
 		t.Fatalf("provider ls 缺 noroute: %s", out)
@@ -207,295 +237,705 @@ func TestProviderLsWithoutRoutes(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("provider ls 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if fields := providerLine(t, out, "noroute"); len(fields) < 3 || fields[2] != "-" {
+	fields := providerLine(t, out, "noroute")
+	if len(fields) < 3 || fields[2] != "-" {
 		t.Fatalf("无路由厂商的默认协议列 = %v，期望 -", fields)
+	}
+	if fields[len(fields)-1] != "-" {
+		t.Fatalf("无路由厂商的模型列表列 = %v，期望 -", fields)
 	}
 }
 
-// TestProviderAddDefaultProtocol 覆盖 --protocol 的写入与回显：
-// 同一调用里先声明路由再设默认协议能过，只给 --protocol 也能落在上一轮声明过的路由上，
-// 指不到路由时退出码 1 且路由不落库。
-func TestProviderAddDefaultProtocol(t *testing.T) {
+// TestProviderLsModelsColumn 覆盖「模型列表」列的三种来源：
+// 厂商级覆盖优先，没有覆盖时显示各路由的 models_path，都没有时是 -。
+func TestProviderLsModelsColumn(t *testing.T) {
 	sandbox(t)
-	if code, _, stderr := run(t, "init"); code != 0 {
-		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
+	mustInit(t)
+
+	if code, _, stderr := run(t, "provider", "add", "override",
+		"--base-url", "https://api.example.com",
+		"--openai", "/v1/chat/completions",
+		"--models-path", "/v9/models"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := run(t, "provider", "add", "routeonly",
+		"--base-url", "https://api.example.org",
+		"--openai", "/v1/chat/completions"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := run(t, "provider", "add", "nomodels",
+		"--base-url", "https://api.example.net",
+		"--anthropic", "/v1/messages"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	// 同一调用里写两条路由并把排序靠后的 openai-chat 定成默认协议。
+	rows := mustProviderLs(t)
+	if got := rows["override"].ModelsPath; got != "/v9/models" {
+		t.Fatalf("override 的 models_path = %q", got)
+	}
+	if got := rows["routeonly"].ModelsPath; got != "" {
+		t.Fatalf("routeonly 不该有厂商级覆盖，实际 %q", got)
+	}
+	if got := routeMap(rows["routeonly"])["openai-chat"].ModelsPath; got != "/v1/models" {
+		t.Fatalf("openai 路由的 models_path 应按路径推导成 /v1/models，实际 %q", got)
+	}
+
+	code, out, stderr := run(t, "provider", "ls")
+	if code != 0 {
+		t.Fatalf("provider ls 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if line := strings.Join(providerLine(t, out, "override"), " "); !strings.Contains(line, "/v9/models") {
+		t.Fatalf("override 的模型列表列应显示厂商级覆盖: %s", line)
+	}
+	if line := strings.Join(providerLine(t, out, "routeonly"), " "); !strings.Contains(line, "/v1/models") {
+		t.Fatalf("routeonly 的模型列表列应显示路由推导出来的 /v1/models: %s", line)
+	}
+	if fields := providerLine(t, out, "nomodels"); fields[len(fields)-1] != "-" {
+		t.Fatalf("nomodels 的模型列表列 = %v，期望 -", fields)
+	}
+}
+
+// TestProviderAddCreates 覆盖 add 新建一家厂商：三条协议 flag、默认协议与备注一次写进去，
+// openai 路由的模型列表路径按路径推导，地址末尾斜杠去掉。
+func TestProviderAddCreates(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
 	code, out, stderr := run(t, "provider", "add", "mine",
-		"--base-url", "https://api.example.com",
-		"--route", "anthropic=/v1/messages",
-		"--route", "openai-chat=/v1/chat/completions:/v1/models",
-		"--protocol", "openai-chat", "--json")
+		"--base-url", "https://api.example.com/",
+		"--anthropic", "/v1/messages",
+		"--openai", "/v1/chat/completions",
+		"--responses", "/v1/responses",
+		"--note", "自建", "--json")
 	if code != 0 {
 		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
 	}
 	var added providerRow
 	mustJSON(t, out, &added)
-	if added.DefaultProtocol != "openai-chat" || len(added.Protocols) != 2 {
+	if added.Name != "mine" || added.BaseURL != "https://api.example.com" || added.Note != "自建" {
 		t.Fatalf("provider add --json = %+v", added)
 	}
+	if added.DefaultProtocol != "openai-chat" {
+		t.Fatalf("默认协议应回退到 openai-chat，实际 %q", added.DefaultProtocol)
+	}
+	if len(added.Protocols) != 3 {
+		t.Fatalf("应写进三条路由: %+v", added.Protocols)
+	}
+	routes := routeMap(added)
+	if got := routes["openai-chat"]; got.Path != "/v1/chat/completions" || got.ModelsPath != "/v1/models" {
+		t.Fatalf("openai 路由 = %+v", got)
+	}
+	if got := routes["anthropic"]; got.Path != "/v1/messages" || got.ModelsPath != "" {
+		t.Fatalf("anthropic 路由 = %+v", got)
+	}
 
-	// 人读输出要回显默认协议。
-	code, out, stderr = run(t, "provider", "add", "echoed",
+	// 人读输出回显地址、路由条数、默认协议与下一步。
+	code, out, stderr = run(t, "provider", "add", "human",
 		"--base-url", "https://api.example.com",
-		"--route", "anthropic=/v1/messages", "--protocol", "anthropic")
+		"--anthropic", "/v1/messages", "--default-protocol", "anthropic")
 	if code != 0 {
 		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if !strings.Contains(out, "默认协议 anthropic") {
-		t.Fatalf("provider add 的输出应回显默认协议: %s", out)
+	for _, want := range []string{"已添加厂商 human", "1 条路由", "默认协议 anthropic", "switchboard account add"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("provider add 输出缺 %q: %s", want, out)
+		}
+	}
+}
+
+// TestProviderAddDuplicate 钉住「add 只新建」：重名时报错并把用户指到 provider set，
+// 已有的行一个字段都不动。
+func TestProviderAddDuplicate(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	if code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", "https://api.example.com", "--openai", "/v1/chat/completions",
+		"--note", "原备注"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	// 不传 --protocol 的重复 add 保留已有默认协议；只给 --protocol 也能指向上一轮的路由。
-	if code, _, stderr := run(t, "provider", "add", "mine", "--base-url", "https://api.example.com"); code != 0 {
-		t.Fatalf("不带 --protocol 的重复 add 退出码 = %d，stderr = %s", code, stderr)
+	code, out, stderr := run(t, "provider", "add", "mine",
+		"--base-url", "https://other.example.com", "--anthropic", "/v1/messages")
+	if code != 1 {
+		t.Fatalf("重名 add 的退出码 = %d，期望 1", code)
 	}
-	code, out, stderr = run(t, "provider", "ls", "--json")
-	if code != 0 {
-		t.Fatalf("provider ls 退出码 = %d，stderr = %s", code, stderr)
+	if out != "" {
+		t.Fatalf("重名 add 不该往 stdout 写结果: %s", out)
 	}
-	if got := mustProviderRows(t, out)["mine"]; got.DefaultProtocol != "openai-chat" || len(got.Protocols) != 2 {
-		t.Fatalf("不带 --protocol 的 add 应保留默认协议与路由: %+v", got)
-	}
-	code, out, stderr = run(t, "provider", "add", "mine",
-		"--base-url", "https://api.example.com", "--protocol", "anthropic", "--json")
-	if code != 0 {
-		t.Fatalf("只给 --protocol 的退出码 = %d，stderr = %s", code, stderr)
-	}
-	var updated providerRow
-	mustJSON(t, out, &updated)
-	if updated.DefaultProtocol != "anthropic" || len(updated.Protocols) != 2 {
-		t.Fatalf("只给 --protocol 时 = %+v", updated)
+	for _, want := range []string{"厂商 mine 已存在", "switchboard provider set mine"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+		}
 	}
 
-	// 默认协议不在路由里：退出码 1，一条路由都不落库。
+	mine := mustProviderLs(t)["mine"]
+	if mine.BaseURL != "https://api.example.com" || mine.Note != "原备注" || len(mine.Protocols) != 1 {
+		t.Fatalf("重名 add 不该改动已有的行: %+v", mine)
+	}
+}
+
+// TestProviderAddEmptyValues 钉住「空串不再表示删除」：add 里任何一项传空值都是用法错误，
+// 文案把用户指到 provider unset。
+func TestProviderAddEmptyValues(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	cases := []struct {
+		name string
+		args []string
+		flag string
+	}{
+		{"协议路径", []string{"--openai", ""}, "--openai"},
+		{"默认协议", []string{"--default-protocol", ""}, "--default-protocol"},
+		{"模型列表路径", []string{"--models-path", ""}, "--models-path"},
+		{"备注", []string{"--note", ""}, "--note"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			args := append([]string{"provider", "add", "mine", "--base-url", "https://api.example.com",
+				"--anthropic", "/v1/messages"}, c.args...)
+			code, out, stderr := run(t, args...)
+			if code != 2 {
+				t.Fatalf("空值的退出码 = %d，期望 2（用法错误）", code)
+			}
+			if out != "" {
+				t.Fatalf("用法错误不该写 stdout: %s", out)
+			}
+			for _, want := range []string{c.flag, "传了空值", "switchboard provider unset"} {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+				}
+			}
+		})
+	}
+	if _, ok := mustProviderLs(t)["mine"]; ok {
+		t.Fatal("空值被拒时不该写入厂商")
+	}
+}
+
+// TestProviderAddUsageErrors 覆盖 add 的用法错误：缺地址、地址形状不对、路径不以 / 开头、
+// 一条路由都没给。每条都要退出码 2 并给出正确用法。
+func TestProviderAddUsageErrors(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	t.Run("缺地址", func(t *testing.T) {
+		code, out, stderr := run(t, "provider", "add", "mine", "--openai", "/v1/chat/completions")
+		if code != 2 || out != "" {
+			t.Fatalf("退出码 = %d，stdout = %q", code, out)
+		}
+		for _, want := range []string{"--base-url", "switchboard provider add <名称>"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+			}
+		}
+	})
+
+	t.Run("地址不带协议头", func(t *testing.T) {
+		code, _, stderr := run(t, "provider", "add", "mine", "--base-url", "api.example.com", "--openai", "/v1/chat/completions")
+		if code != 2 || !strings.Contains(stderr, "http://") {
+			t.Fatalf("退出码 = %d，stderr = %s", code, stderr)
+		}
+	})
+
+	t.Run("没有协议路由", func(t *testing.T) {
+		code, _, stderr := run(t, "provider", "add", "mine", "--base-url", "https://api.example.com")
+		if code != 2 {
+			t.Fatalf("退出码 = %d，期望 2", code)
+		}
+		for _, want := range []string{"至少给一条", "--anthropic", "--openai", "--responses"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+			}
+		}
+	})
+
+	for _, c := range []struct{ flag, example string }{
+		{"--anthropic", "--anthropic /v1/messages"},
+		{"--openai", "--openai /v1/chat/completions"},
+		{"--responses", "--responses /v1/responses"},
+	} {
+		t.Run(c.flag+" 不以 / 开头", func(t *testing.T) {
+			code, out, stderr := run(t, "provider", "add", "mine",
+				"--base-url", "https://api.example.com", c.flag, "v1/messages")
+			if code != 2 || out != "" {
+				t.Fatalf("退出码 = %d，stdout = %q", code, out)
+			}
+			for _, want := range []string{c.flag, "要以 / 开头", c.example} {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+				}
+			}
+		})
+	}
+
+	t.Run("模型列表路径不以 / 开头", func(t *testing.T) {
+		code, _, stderr := run(t, "provider", "add", "mine", "--base-url", "https://api.example.com",
+			"--openai", "/v1/chat/completions", "--models-path", "v1/models")
+		if code != 2 || !strings.Contains(stderr, "--models-path") {
+			t.Fatalf("退出码 = %d，stderr = %s", code, stderr)
+		}
+	})
+
+	t.Run("不认识的默认协议", func(t *testing.T) {
+		code, _, stderr := run(t, "provider", "add", "mine", "--base-url", "https://api.example.com",
+			"--openai", "/v1/chat/completions", "--default-protocol", "gemini")
+		if code != 2 {
+			t.Fatalf("退出码 = %d，期望 2", code)
+		}
+		// 错误文案给的是命令行写法，不是线协议名。
+		for _, want := range []string{"--default-protocol", "anthropic、openai、responses", "--default-protocol openai"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+			}
+		}
+	})
+
+	if _, ok := mustProviderLs(t)["mine"]; ok {
+		t.Fatal("用法错误时不该写入厂商")
+	}
+}
+
+// TestProviderAddDefaultProtocol 覆盖 --default-protocol 的两种写法：
+// 命令行写法 openai 落到 openai-chat，线协议全名 openai-responses 也认；
+// 指不到这次声明的路由时 store 整笔拒绝，一条路由都不落库。
+func TestProviderAddDefaultProtocol(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	code, out, stderr := run(t, "provider", "add", "cli-spelling",
+		"--base-url", "https://api.example.com",
+		"--anthropic", "/v1/messages", "--openai", "/v1/chat/completions",
+		"--default-protocol", "openai", "--json")
+	if code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var added providerRow
+	mustJSON(t, out, &added)
+	if added.DefaultProtocol != "openai-chat" {
+		t.Fatalf("--default-protocol openai 应落到 openai-chat，实际 %q", added.DefaultProtocol)
+	}
+
+	code, out, stderr = run(t, "provider", "add", "wire-spelling",
+		"--base-url", "https://api.example.com",
+		"--responses", "/v1/responses", "--default-protocol", "openai-responses", "--json")
+	if code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	mustJSON(t, out, &added)
+	if added.DefaultProtocol != "openai-responses" {
+		t.Fatalf("--default-protocol openai-responses 应原样落库，实际 %q", added.DefaultProtocol)
+	}
+
+	// 默认协议不在这次声明的路由里：退出码 1，厂商行与路由都不落库。
 	code, out, stderr = run(t, "provider", "add", "bad",
 		"--base-url", "https://api.example.com",
-		"--route", "openai-chat=/v1/chat/completions", "--protocol", "anthropic")
+		"--openai", "/v1/chat/completions", "--default-protocol", "responses")
 	if code != 1 {
 		t.Fatalf("默认协议指不到路由的退出码 = %d，期望 1", code)
 	}
 	if out != "" {
 		t.Fatalf("拒绝写库时不该往 stdout 写结果: %s", out)
 	}
-	for _, want := range []string{"anthropic", "openai-chat", "switchboard provider add bad"} {
+	for _, want := range []string{"默认协议", "openai-responses", "openai-chat"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 		}
 	}
-	code, out, _ = run(t, "provider", "ls", "--json")
-	if code != 0 {
-		t.Fatalf("provider ls 退出码 = %d", code)
-	}
-	if _, ok := mustProviderRows(t, out)["bad"]; ok {
-		t.Fatalf("整笔拒绝后不该留下厂商行或路由: %s", out)
-	}
-
-	// 不认识的协议值是用法错误，文案给出与 --route 的关系。
-	code, _, stderr = run(t, "provider", "add", "mine",
-		"--base-url", "https://api.example.com", "--protocol", "gemini")
-	if code != 2 {
-		t.Fatalf("不认识的 --protocol 退出码 = %d，期望 2", code)
-	}
-	for _, want := range []string{"anthropic", "openai-chat", "openai-responses", "--route"} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
-		}
+	if _, ok := mustProviderLs(t)["bad"]; ok {
+		t.Fatal("整笔拒绝后不该留下厂商行或路由")
 	}
 }
 
-// TestProviderAddOmitsBaseURL 钉住省略 --base-url 的语义：
-// 已有厂商保留库里的地址，新建厂商缺地址是用法错误并说明原因。
-func TestProviderAddOmitsBaseURL(t *testing.T) {
+// TestProviderSetUpdatesOnlyGivenFields 钉住 set 只改传入的字段：
+// 其它路由、备注、默认协议保持原样，--models-path 改成新覆盖。
+func TestProviderSetUpdatesOnlyGivenFields(t *testing.T) {
 	sandbox(t)
-	if code, _, stderr := run(t, "init"); code != 0 {
-		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
-	}
+	mustInit(t)
 
-	// 种子厂商只补一条路由：地址不变，原有两条路由也在。
-	code, out, stderr := run(t, "provider", "add", "deepseek",
-		"--route", "openai-responses=/v1/responses", "--json")
-	if code != 0 {
-		t.Fatalf("省略 --base-url 的退出码 = %d，stderr = %s", code, stderr)
-	}
-	var got providerRow
-	mustJSON(t, out, &got)
-	if got.BaseURL != "https://api.deepseek.com" {
-		t.Fatalf("省略 --base-url 应保留库里的地址，实际 %q", got.BaseURL)
-	}
-	if len(got.Protocols) != 3 || got.DefaultProtocol != "openai-chat" {
-		t.Fatalf("补路由后的厂商 = %+v", got)
-	}
-
-	// 只改默认协议，同样不用重写地址。
-	code, out, stderr = run(t, "provider", "add", "deepseek", "--protocol", "anthropic", "--json")
-	if code != 0 {
-		t.Fatalf("只给 --protocol 的退出码 = %d，stderr = %s", code, stderr)
-	}
-	mustJSON(t, out, &got)
-	if got.BaseURL != "https://api.deepseek.com" || got.DefaultProtocol != "anthropic" {
-		t.Fatalf("只改默认协议后的厂商 = %+v", got)
-	}
-
-	// 新建厂商缺地址：用法错误，文案说清「新建厂商需要 --base-url」。
-	code, out, stderr = run(t, "provider", "add", "新厂商", "--route", "anthropic=/v1/messages")
-	if code != 2 {
-		t.Fatalf("新建厂商缺 --base-url 的退出码 = %d，期望 2", code)
-	}
-	if out != "" {
-		t.Fatalf("用法错误不该写 stdout: %s", out)
-	}
-	for _, want := range []string{"新建厂商", "--base-url", "--route"} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
-		}
-	}
-	code, out, _ = run(t, "provider", "ls", "--json")
-	if code != 0 {
-		t.Fatalf("provider ls 退出码 = %d", code)
-	}
-	if _, ok := mustProviderRows(t, out)["新厂商"]; ok {
-		t.Fatalf("缺地址被拒时不该写入厂商: %s", out)
-	}
-}
-
-// TestProviderAddKeepsOtherRoutesAndNote 钉住重复 add 的语义：
-// 只覆盖传入的那几条路由，没传入的路由与备注都留着。
-func TestProviderAddKeepsOtherRoutesAndNote(t *testing.T) {
-	sandbox(t)
-	if code, _, stderr := run(t, "init"); code != 0 {
-		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
-	}
-
-	code, _, stderr := run(t, "provider", "add", "mine",
-		"--base-url", "https://api.example.com/",
-		"--note", "自建",
-		"--route", "openai-chat=/v1/chat/completions:/v1/models")
-	if code != 0 {
+	if code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", "https://api.example.com",
+		"--anthropic", "/v1/messages",
+		"--openai", "/v1/chat/completions",
+		"--note", "原备注"); code != 0 {
 		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	code, out, stderr := run(t, "provider", "ls", "--json")
+	// 只补一条 responses 路由。
+	code, out, stderr := run(t, "provider", "set", "mine",
+		"--responses", "/v1/responses", "--json")
 	if code != 0 {
-		t.Fatalf("provider ls 退出码 = %d，stderr = %s", code, stderr)
+		t.Fatalf("provider set 退出码 = %d，stderr = %s", code, stderr)
 	}
-	mine := mustProviderRows(t, out)["mine"]
-	// 末尾斜杠在写入时去掉：拼接地址时用的就是这个形式。
-	if mine.BaseURL != "https://api.example.com" {
-		t.Fatalf("base_url = %q，期望去掉末尾斜杠", mine.BaseURL)
+	var got providerRow
+	mustJSON(t, out, &got)
+	if len(got.Protocols) != 3 {
+		t.Fatalf("补一条路由后应有 3 条: %+v", got.Protocols)
 	}
-	if mine.Note != "自建" || len(mine.Protocols) != 1 {
-		t.Fatalf("首次 add 后 = %+v", mine)
+	if got.Note != "原备注" || got.DefaultProtocol != "openai-chat" || got.ModelsPath != "" {
+		t.Fatalf("没传的字段应保持原样: %+v", got)
 	}
 
-	// 第二次只加另一条协议的路由，不给 --note。
-	code, _, stderr = run(t, "provider", "add", "mine",
-		"--base-url", "https://api.example.com",
-		"--route", "anthropic=/v1/messages")
+	// 只加厂商级模型列表覆盖。
+	code, out, stderr = run(t, "provider", "set", "mine", "--models-path", "/v9/models", "--json")
 	if code != 0 {
-		t.Fatalf("第二次 provider add 退出码 = %d，stderr = %s", code, stderr)
+		t.Fatalf("provider set 退出码 = %d，stderr = %s", code, stderr)
+	}
+	mustJSON(t, out, &got)
+	if got.ModelsPath != "/v9/models" || len(got.Protocols) != 3 || got.Note != "原备注" {
+		t.Fatalf("只改 --models-path 时 = %+v", got)
 	}
 
-	code, out, stderr = run(t, "provider", "ls", "--json")
+	// 改默认协议，命令行写法与线协议全名都认。
+	code, out, stderr = run(t, "provider", "set", "mine", "--default-protocol", "anthropic", "--json")
 	if code != 0 {
-		t.Fatalf("provider ls 退出码 = %d，stderr = %s", code, stderr)
+		t.Fatalf("provider set 退出码 = %d，stderr = %s", code, stderr)
 	}
-	mine = mustProviderRows(t, out)["mine"]
-	if len(mine.Protocols) != 2 {
-		t.Fatalf("第二次 add 不应丢掉上一轮的路由: %+v", mine.Protocols)
+	mustJSON(t, out, &got)
+	if got.DefaultProtocol != "anthropic" {
+		t.Fatalf("--default-protocol anthropic 应生效，实际 %q", got.DefaultProtocol)
 	}
-	if mine.Note != "自建" {
-		t.Fatalf("没给 --note 时备注应保持原样，实际 %q", mine.Note)
+	code, out, stderr = run(t, "provider", "set", "mine", "--default-protocol", "openai-chat", "--json")
+	if code != 0 {
+		t.Fatalf("provider set 退出码 = %d，stderr = %s", code, stderr)
+	}
+	mustJSON(t, out, &got)
+	if got.DefaultProtocol != "openai-chat" {
+		t.Fatalf("--default-protocol openai-chat 应生效，实际 %q", got.DefaultProtocol)
 	}
 
-	// 第三次覆盖 chat 路由，换备注，anthropic 那条仍在。
-	code, _, stderr = run(t, "provider", "add", "mine",
-		"--base-url", "https://api.example.com",
-		"--note", "改过",
-		"--route", "openai-chat=/v2/chat")
+	// 人读输出回显改了几项、现有几条路由与默认协议。
+	code, out, stderr = run(t, "provider", "set", "mine", "--openai", "/v2/chat", "--note", "改过")
 	if code != 0 {
-		t.Fatalf("第三次 provider add 退出码 = %d，stderr = %s", code, stderr)
+		t.Fatalf("provider set 退出码 = %d，stderr = %s", code, stderr)
 	}
-	code, out, _ = run(t, "provider", "ls", "--json")
-	mine = mustProviderRows(t, out)["mine"]
-	routes := routeMap(mine)
-	if got := routes["openai-chat"]; got.Path != "/v2/chat" || got.ModelsPath != "" {
-		t.Fatalf("同一协议重复 add 应覆盖那条路由: %+v", got)
+	for _, want := range []string{"已修改厂商 mine", "改动 2 项", "3 条路由", "默认协议 openai-chat"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("provider set 输出缺 %q: %s", want, out)
+		}
 	}
-	if _, ok := routes["anthropic"]; !ok {
-		t.Fatalf("覆盖一条路由时不该删掉另一条: %+v", mine.Protocols)
-	}
-	if mine.Note != "改过" {
-		t.Fatalf("给了 --note 应更新备注，实际 %q", mine.Note)
+	if got := routeMap(mustProviderLs(t)["mine"]); got["openai-chat"].Path != "/v2/chat" {
+		t.Fatalf("覆盖后的 openai 路由 = %+v", got["openai-chat"])
 	}
 }
 
-// TestProviderAddRouteErrors 覆盖 --route 表达式写错的每一类。
-func TestProviderAddRouteErrors(t *testing.T) {
+// TestProviderSetErrors 覆盖 set 的用法错误与运行失败：
+// 空值指向 provider unset，厂商不存在指向 provider add，默认协议指不到路由时整笔拒绝。
+func TestProviderSetErrors(t *testing.T) {
 	sandbox(t)
-	if code, _, stderr := run(t, "init"); code != 0 {
-		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
+	mustInit(t)
+
+	if code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", "https://api.example.com", "--openai", "/v1/chat/completions"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
 	}
+
+	for _, c := range []struct {
+		name string
+		args []string
+	}{
+		{"协议路径空值", []string{"--openai", ""}},
+		{"备注空值", []string{"--note", ""}},
+		{"默认协议空值", []string{"--default-protocol", ""}},
+		{"模型列表空值", []string{"--models-path", ""}},
+		{"地址空值", []string{"--base-url", ""}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			args := append([]string{"provider", "set", "mine"}, c.args...)
+			code, out, stderr := run(t, args...)
+			if code != 2 || out != "" {
+				t.Fatalf("退出码 = %d，stdout = %q", code, out)
+			}
+			if !strings.Contains(stderr, "传了空值") {
+				t.Fatalf("stderr 应说明是空值: %s", stderr)
+			}
+			if c.name != "地址空值" && !strings.Contains(stderr, "switchboard provider unset") {
+				t.Fatalf("stderr 应指向 provider unset: %s", stderr)
+			}
+		})
+	}
+
+	t.Run("没有参数", func(t *testing.T) {
+		code, _, stderr := run(t, "provider", "set", "mine")
+		if code != 2 || !strings.Contains(stderr, "switchboard provider set <名称>") {
+			t.Fatalf("退出码 = %d，stderr = %s", code, stderr)
+		}
+	})
+
+	t.Run("路径不以 / 开头", func(t *testing.T) {
+		code, _, stderr := run(t, "provider", "set", "mine", "--anthropic", "v1/messages")
+		if code != 2 || !strings.Contains(stderr, "--anthropic /v1/messages") {
+			t.Fatalf("退出码 = %d，stderr = %s", code, stderr)
+		}
+	})
+
+	t.Run("厂商不存在", func(t *testing.T) {
+		code, _, stderr := run(t, "provider", "set", "nope", "--note", "x")
+		if code != 1 || !strings.Contains(stderr, "switchboard provider add") {
+			t.Fatalf("退出码 = %d，stderr = %s", code, stderr)
+		}
+	})
+
+	t.Run("默认协议指不到路由", func(t *testing.T) {
+		code, out, stderr := run(t, "provider", "set", "mine", "--default-protocol", "responses")
+		if code != 1 || out != "" {
+			t.Fatalf("退出码 = %d，stdout = %q", code, out)
+		}
+		if !strings.Contains(stderr, "openai-responses") {
+			t.Fatalf("stderr 应说明缺这条路由: %s", stderr)
+		}
+		if got := mustProviderLs(t)["mine"]; got.DefaultProtocol != "openai-chat" || len(got.Protocols) != 1 {
+			t.Fatalf("整笔拒绝后不该改动厂商: %+v", got)
+		}
+	})
+}
+
+// TestProviderUnsetRoutesAndSettings 覆盖单字段与多字段 unset：
+// 删路由、清模型列表覆盖、清显式默认协议、清备注，以及一次给多个字段。
+func TestProviderUnsetRoutesAndSettings(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	if code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", "https://api.example.com",
+		"--anthropic", "/v1/messages",
+		"--openai", "/v1/chat/completions",
+		"--models-path", "/v9/models",
+		"--default-protocol", "anthropic",
+		"--note", "自建"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	// 默认协议是 anthropic 时删它那条路由会被 store 整笔拒绝（先加路由或改默认协议），
+	// 所以先把默认协议换成 openai-chat，这正是上游用法：set 只设值，unset 只删除。
+	if code, _, stderr := run(t, "provider", "set", "mine", "--default-protocol", "openai"); code != 0 {
+		t.Fatalf("provider set 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	// 单字段：删掉 anthropic 路由，其余都不动。
+	code, out, stderr := run(t, "provider", "unset", "mine", "anthropic", "--json")
+	if code != 0 {
+		t.Fatalf("provider unset 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var got providerRow
+	mustJSON(t, out, &got)
+	if _, ok := routeMap(got)["anthropic"]; ok {
+		t.Fatalf("anthropic 路由应被删掉: %+v", got.Protocols)
+	}
+	if len(got.Protocols) != 1 || got.ModelsPath != "/v9/models" || got.Note != "自建" {
+		t.Fatalf("只该删掉那条路由: %+v", got)
+	}
+
+	// 多字段：一次清掉模型列表覆盖与备注，人读输出逐项说明。
+	code, out, stderr = run(t, "provider", "unset", "mine", "models-path", "note")
+	if code != 0 {
+		t.Fatalf("provider unset 退出码 = %d，stderr = %s", code, stderr)
+	}
+	for _, want := range []string{"mine 已清掉 模型列表覆盖", "mine 已清掉 备注", "现有 1 条路由", "默认协议 openai-chat"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("unset 输出缺 %q: %s", want, out)
+		}
+	}
+	after := mustProviderLs(t)["mine"]
+	if after.ModelsPath != "" || after.Note != "" || len(after.Protocols) != 1 {
+		t.Fatalf("清掉的两项应回到空值: %+v", after)
+	}
+
+	// 清显式默认协议：回退到固定顺序，因此这里从 anthropic 变成 openai-chat。
+	if code, _, stderr := run(t, "provider", "add", "second",
+		"--base-url", "https://api.example.org",
+		"--anthropic", "/v1/messages",
+		"--openai", "/v1/chat/completions",
+		"--default-protocol", "anthropic"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	code, out, stderr = run(t, "provider", "unset", "second", "default-protocol", "--json")
+	if code != 0 {
+		t.Fatalf("provider unset 退出码 = %d，stderr = %s", code, stderr)
+	}
+	mustJSON(t, out, &got)
+	if got.DefaultProtocol != "openai-chat" || len(got.Protocols) != 2 {
+		t.Fatalf("清掉显式默认协议后应按固定顺序回退: %+v", got)
+	}
+}
+
+// TestProviderUnsetIdempotent 钉住幂等：要清的项本来就不存在时不报错、不写库，
+// 输出一行说明，退出码仍是 0。
+func TestProviderUnsetIdempotent(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	if code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", "https://api.example.com",
+		"--openai", "/v1/chat/completions"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	code, out, stderr := run(t, "provider", "unset", "mine", "anthropic")
+	if code != 0 {
+		t.Fatalf("删除不存在的路由应退出码 0，实际 %d，stderr = %s", code, stderr)
+	}
+	for _, want := range []string{"mine 本来就没有 anthropic 路由", "现有 1 条路由"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("unset 输出缺 %q: %s", want, out)
+		}
+	}
+	if got := mustProviderLs(t)["mine"]; len(got.Protocols) != 1 {
+		t.Fatalf("幂等 unset 不该改动路由: %+v", got.Protocols)
+	}
+
+	// 重复字段只处理一次，也不因为重复而报错。
+	code, out, stderr = run(t, "provider", "unset", "mine", "note", "note")
+	if code != 0 {
+		t.Fatalf("重复字段的退出码 = %d，stderr = %s", code, stderr)
+	}
+	if strings.Count(out, "本来就没有 备注") != 1 {
+		t.Fatalf("重复字段应只说明一次: %s", out)
+	}
+}
+
+// TestProviderUnsetErrors 覆盖字段名的每一类错误：未知字段、带 -- 前缀、大小写不符、
+// 不能 unset 的 base-url 与厂商名、一个字段都没给。
+func TestProviderUnsetErrors(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
 
 	cases := []struct {
 		name string
-		expr string
-		want string
+		args []string
+		want []string
 	}{
-		{"缺 =", "openai-chat/v1/chat/completions", "缺少 ="},
-		{"协议名不认识", "gemini=/v1/chat/completions", "协议名"},
-		{"路径不以 / 开头", "openai-chat=v1/chat/completions", "路径要以 / 开头"},
-		{"模型列表路径不以 / 开头", "openai-chat=/v1/chat/completions:models", "模型列表路径要以 / 开头"},
+		{"未知字段", []string{"gemini"}, []string{"gemini", "不认识", "anthropic、openai、responses、models-path、default-protocol、note"}},
+		{"带 -- 前缀", []string{"--", "--openai"}, []string{"不要带 -- 前缀", "可用："}},
+		{"大小写不符", []string{"OpenAI"}, []string{"大小写不符", "openai"}},
+		{"base-url", []string{"base-url"}, []string{"不能 unset", "--base-url"}},
+		{"厂商名", []string{"name"}, []string{"不能 unset", "switchboard provider rm"}},
+		{"没有字段", nil, []string{"用法：switchboard provider unset <名称> <字段>"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			code, out, stderr := run(t, "provider", "add", "mine",
-				"--base-url", "https://api.example.com", "--route", c.expr)
+			args := append([]string{"provider", "unset", "deepseek"}, c.args...)
+			code, out, stderr := run(t, args...)
 			if code != 2 {
 				t.Fatalf("退出码 = %d，期望 2（用法错误）", code)
 			}
 			if out != "" {
 				t.Fatalf("用法错误不该写 stdout: %s", out)
 			}
-			if !strings.Contains(stderr, c.want) {
-				t.Fatalf("stderr 应说明 %q: %s", c.want, stderr)
-			}
-			if !strings.Contains(stderr, "openai-chat=/v1/chat/completions:/v1/models") {
-				t.Fatalf("stderr 应给出正确示例: %s", stderr)
+			for _, want := range c.want {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+				}
 			}
 		})
 	}
 
-	code, _, stderr := run(t, "provider", "add", "mine", "--route", "openai-chat=/v1/chat/completions")
-	if code != 2 || !strings.Contains(stderr, "--base-url") {
-		t.Fatalf("缺 --base-url 应是用法错误并提示补上: 退出码 %d，stderr %s", code, stderr)
+	t.Run("厂商不存在", func(t *testing.T) {
+		code, _, stderr := run(t, "provider", "unset", "nope", "openai")
+		if code != 1 || !strings.Contains(stderr, "switchboard provider ls") {
+			t.Fatalf("退出码 = %d，stderr = %s", code, stderr)
+		}
+	})
+}
+
+// TestProviderUnsetDefaultRouteRefused 钉住「删掉的路由正好是默认协议」：
+// 整笔拒绝，文案给出两条能执行的下一步（换默认协议，或先 unset default-protocol），
+// 不留 store 里那句已经作废的「传空串」。
+func TestProviderUnsetDefaultRouteRefused(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	// 种子 deepseek 的默认协议是 openai-chat。
+	code, out, stderr := run(t, "provider", "unset", "deepseek", "openai")
+	if code != 1 {
+		t.Fatalf("删默认协议那条路由的退出码 = %d，期望 1", code)
+	}
+	if out != "" {
+		t.Fatalf("拒绝写库时不该往 stdout 写结果: %s", out)
+	}
+	for _, want := range []string{"默认协议是 openai-chat", "switchboard provider set deepseek --default-protocol anthropic", "switchboard provider unset deepseek default-protocol"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+		}
+	}
+	if strings.Contains(stderr, "传空串") {
+		t.Fatalf("stderr 不该再出现「传空串」这条作废的写法: %s", stderr)
+	}
+	if got := mustProviderLs(t)["deepseek"]; len(got.Protocols) != 2 {
+		t.Fatalf("拒绝后不该删掉路由: %+v", got.Protocols)
 	}
 
-	code, _, _ = run(t, "provider", "add", "mine", "--base-url", "api.example.com")
-	if code != 2 {
-		t.Fatalf("--base-url 不带协议头的退出码 = %d，期望 2", code)
-	}
-
-	// 表达式写错时一行都不该落库。
-	code, out, _ := run(t, "provider", "ls", "--json")
+	// 同一次调用里先清默认协议，再删那条路由就放行。
+	code, _, stderr = run(t, "provider", "unset", "deepseek", "default-protocol", "openai")
 	if code != 0 {
-		t.Fatalf("provider ls 退出码 = %d", code)
+		t.Fatalf("一起清默认协议再删路由的退出码 = %d，stderr = %s", code, stderr)
 	}
-	if _, ok := mustProviderRows(t, out)["mine"]; ok {
-		t.Fatalf("--route 写错时不该写入厂商: %s", out)
+	got := mustProviderLs(t)["deepseek"]
+	if len(got.Protocols) != 1 || got.DefaultProtocol != "anthropic" {
+		t.Fatalf("删掉 chat 路由后只剩 anthropic，默认协议随之回退: %+v", got)
+	}
+}
+
+// TestProviderUnsetLastRouteRefused 钉住「删到一条路由都不剩」时整笔拒绝，
+// 并把用户指到 provider rm。
+func TestProviderUnsetLastRouteRefused(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	if code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", "https://api.example.com",
+		"--openai", "/v1/chat/completions"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	code, out, stderr := run(t, "provider", "unset", "mine", "openai")
+	if code != 1 {
+		t.Fatalf("删光路由的退出码 = %d，期望 1", code)
+	}
+	if out != "" {
+		t.Fatalf("拒绝写库时不该往 stdout 写结果: %s", out)
+	}
+	for _, want := range []string{"至少要保留一条协议路由", "switchboard provider rm mine"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+		}
+	}
+	if got := mustProviderLs(t)["mine"]; len(got.Protocols) != 1 {
+		t.Fatalf("整笔拒绝后不该删掉路由: %+v", got.Protocols)
+	}
+}
+
+// TestProviderGroupListsUnset 覆盖组级帮助与未知子命令提示都带上 unset。
+func TestProviderGroupListsUnset(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	for _, args := range [][]string{
+		{"provider", "--help"},
+		{"provider", "nope"},
+	} {
+		code, out, stderr := run(t, args...)
+		text := out + stderr
+		if !strings.Contains(text, "unset") {
+			t.Fatalf("%v 的输出应列出 unset: %s", args, text)
+		}
+		if args[1] == "--help" && code != 0 {
+			t.Fatalf("组级帮助的退出码 = %d，期望 0", code)
+		}
+		if args[1] == "nope" && code != 2 {
+			t.Fatalf("未知子命令的退出码 = %d，期望 2", code)
+		}
 	}
 }
 
 // TestProviderRmRefusesWhileAccountsUse 覆盖「还有账号在用」的拒绝与 --force 的放行。
 func TestProviderRmRefusesWhileAccountsUse(t *testing.T) {
 	sandbox(t)
-	if code, _, stderr := run(t, "init"); code != 0 {
-		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
-	}
+	mustInit(t)
+
 	if code, _, stderr := run(t, "provider", "add", "mine",
 		"--base-url", "http://127.0.0.1:9",
-		"--route", "openai-chat=/v1/chat/completions"); code != 0 {
+		"--openai", "/v1/chat/completions"); code != 0 {
 		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
 	}
 	if code, _, stderr := run(t, "account", "add", "use1",
@@ -516,9 +956,8 @@ func TestProviderRmRefusesWhileAccountsUse(t *testing.T) {
 		}
 	}
 
-	code, out, _ = run(t, "provider", "ls", "--json")
-	if _, ok := mustProviderRows(t, out)["mine"]; !ok {
-		t.Fatalf("被拒绝的 rm 不该真删: %s", out)
+	if _, ok := mustProviderLs(t)["mine"]; !ok {
+		t.Fatal("被拒绝的 rm 不该真删")
 	}
 
 	code, out, stderr = run(t, "provider", "rm", "mine", "--force")
@@ -531,18 +970,15 @@ func TestProviderRmRefusesWhileAccountsUse(t *testing.T) {
 		}
 	}
 
-	code, out, _ = run(t, "provider", "ls", "--json")
-	if _, ok := mustProviderRows(t, out)["mine"]; ok {
-		t.Fatalf("删除后 provider ls 不该再有 mine: %s", out)
+	if _, ok := mustProviderLs(t)["mine"]; ok {
+		t.Fatal("删除后 provider ls 不该再有 mine")
 	}
 }
 
 // TestProviderRmMissingAndJSON 覆盖删不存在的厂商与该命令的 JSON 形状。
 func TestProviderRmMissingAndJSON(t *testing.T) {
 	sandbox(t)
-	if code, _, stderr := run(t, "init"); code != 0 {
-		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
-	}
+	mustInit(t)
 
 	code, out, stderr := run(t, "provider", "rm", "nope")
 	if code != 1 {
@@ -557,7 +993,7 @@ func TestProviderRmMissingAndJSON(t *testing.T) {
 
 	if code, _, stderr := run(t, "provider", "add", "mine",
 		"--base-url", "https://api.example.com",
-		"--route", "openai-chat=/v1/chat/completions"); code != 0 {
+		"--openai", "/v1/chat/completions"); code != 0 {
 		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -589,9 +1025,7 @@ func TestProviderRmForceKeepsAccountForwarding(t *testing.T) {
 	up := newRecorderUpstream(t, map[string]fakeResponse{
 		"POST /v1/chat/completions": {status: http.StatusOK, body: chatCompletionOK},
 	})
-	if code, _, stderr := run(t, "init"); code != 0 {
-		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
-	}
+	mustInit(t)
 
 	// 用种子厂商 deepseek：它的默认协议是 openai-chat，地址用 --base-url 指到假上游。
 	code, out, stderr := run(t, "account", "add", "ds1",
@@ -618,9 +1052,8 @@ func TestProviderRmForceKeepsAccountForwarding(t *testing.T) {
 			t.Fatalf("--force 的输出应提到 %q: %s", want, out)
 		}
 	}
-	code, out, _ = run(t, "provider", "ls", "--json")
-	if _, ok := mustProviderRows(t, out)["deepseek"]; ok {
-		t.Fatalf("删除后 provider ls 不该再有 deepseek: %s", out)
+	if _, ok := mustProviderLs(t)["deepseek"]; ok {
+		t.Fatal("删除后 provider ls 不该再有 deepseek")
 	}
 
 	// 账号行仍固化着自己的地址：删厂商不改账号。

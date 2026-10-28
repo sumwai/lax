@@ -154,6 +154,73 @@ func mustModelRows(t *testing.T, out string) map[string]modelRow {
 	return byModel
 }
 
+// TestModelSyncEndpointOverride 覆盖 model sync --endpoint：
+// 只影响这一次调用，地址取该厂商 base_url 拼上它，压过厂商级覆盖与路由里的 models_path；
+// 下一次不带 --endpoint 时回到路由推导出来的地址；不以 / 开头是用法错误。
+func TestModelSyncEndpointOverride(t *testing.T) {
+	sandbox(t)
+	up := newRecorderUpstream(t, map[string]fakeResponse{
+		"GET /custom/models": {status: http.StatusOK, body: `{"data":[{"id":"m1"},{"id":"m2"}]}`},
+		"GET /v1/models":     {status: http.StatusOK, body: modelsListM1},
+	})
+	mustInit(t)
+	if code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", "https://api.example.invalid",
+		"--openai", "/v1/chat/completions"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	// 账号地址指到假上游，厂商路由的 models_path 是 /v1/models。
+	if code, _, stderr := run(t, "account", "add", "mine1",
+		"--provider", "mine", "--base-url", up.srv.URL, "--key", "sk-test"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	code, out, stderr := run(t, "model", "sync", "--account", "mine1", "--endpoint", "/custom/models", "--json")
+	if code != 0 {
+		t.Fatalf("model sync --endpoint 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var synced []struct {
+		Account string `json:"account"`
+		Models  int    `json:"models"`
+		Added   int    `json:"added"`
+	}
+	mustJSON(t, out, &synced)
+	if len(synced) != 1 || synced[0].Models != 2 || synced[0].Added != 2 {
+		t.Fatalf("model sync --endpoint = %+v，期望拉到 2 个模型", synced)
+	}
+	calls := up.all()
+	if len(calls) != 1 || calls[0].method != http.MethodGet || calls[0].path != "/custom/models" {
+		t.Fatalf("上游调用 = %+v，期望只打一次 GET /custom/models", calls)
+	}
+	if calls[0].bearer != "Bearer sk-test" {
+		t.Fatalf("凭据头 = %q，期望 Bearer sk-test", calls[0].bearer)
+	}
+
+	// 临时覆盖不外溢：下一次同步回到路由推导出来的 /v1/models。
+	up.reset()
+	if code, _, stderr := run(t, "model", "sync", "--account", "mine1"); code != 0 {
+		t.Fatalf("model sync 退出码 = %d，stderr = %s", code, stderr)
+	}
+	calls = up.all()
+	if len(calls) != 1 || calls[0].path != "/v1/models" {
+		t.Fatalf("不带 --endpoint 的调用 = %+v，期望回到 /v1/models", calls)
+	}
+
+	// 不以 / 开头是用法错误，文案说清它是相对 base_url 的完整路径。
+	code, out, stderr = run(t, "model", "sync", "--account", "mine1", "--endpoint", "custom/models")
+	if code != 2 {
+		t.Fatalf("--endpoint 不以 / 开头的退出码 = %d，期望 2", code)
+	}
+	if out != "" {
+		t.Fatalf("用法错误不该写 stdout: %s", out)
+	}
+	for _, want := range []string{"--endpoint", "要以 / 开头", "/v1/models"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+		}
+	}
+}
+
 // TestAccountSyncProbeFlow 覆盖 sync → probe → accounts.models → model ls 整条链路。
 func TestAccountSyncProbeFlow(t *testing.T) {
 	sandbox(t)
