@@ -471,3 +471,107 @@ func TestSyncModelsWithoutModelsPath(t *testing.T) {
 		}
 	})
 }
+
+// probeResponsesOK 是一条合法的 openai-responses 响应，探活只读状态与用量。
+const probeResponsesOK = `{"id":"resp_1","object":"response","status":"completed","output":[],
+	"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}`
+
+// TestProbeModelUsesProviderRoutesPerProtocol 确认三种协议的探活都按 (厂商, 协议) 的路由拼地址：
+// deepseek 账号下 claude 模型打到 /anthropic/v1/messages 并带 x-api-key，chat 模型打到
+// /v1/chat/completions 并带 Bearer，openai 的 responses 模型打到 /v1/responses；
+// 三者都把成功那次的协议写进 account_models.protocol。
+//
+// 没有这条断言，路由拼错只会表现为某个模型始终探不活，而「探活打的是哪个地址」正是
+// 厂商表落库之后最容易悄悄偏离的地方。
+func TestProbeModelUsesProviderRoutesPerProtocol(t *testing.T) {
+	cases := []struct {
+		name            string
+		provider        string
+		accountProtocol string
+		model           string
+		okPath          string
+		okBody          string
+		wantCalls       []string
+		wantProtocol    string
+	}{
+		{
+			name: "deepseek 的 anthropic 模型", provider: "deepseek", accountProtocol: gateway.ProtocolChat,
+			model: "claude-x", okPath: "/anthropic/v1/messages", okBody: probeAnthropicOK,
+			wantCalls:    []string{"/v1/chat/completions", "/anthropic/v1/messages"},
+			wantProtocol: gateway.ProtocolAnthropic,
+		},
+		{
+			name: "deepseek 的 chat 模型", provider: "deepseek", accountProtocol: gateway.ProtocolChat,
+			model: "gpt-y", okPath: "/v1/chat/completions",
+			okBody:       `{"id":"chatcmpl-1","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1}}`,
+			wantCalls:    []string{"/v1/chat/completions"},
+			wantProtocol: gateway.ProtocolChat,
+		},
+		{
+			name: "openai 的 responses 模型", provider: "openai", accountProtocol: gateway.ProtocolChat,
+			model: "o3-mini", okPath: "/v1/responses", okBody: probeResponsesOK,
+			wantCalls:    []string{"/v1/chat/completions", "/v1/responses"},
+			wantProtocol: gateway.ProtocolResponses,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t)
+			const key = "sk-probe-route"
+			rec := &callRecorder{}
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				rec.add(r.URL.Path, r.Header.Get("x-api-key"), r.Header.Get("Authorization"), string(body))
+				if r.URL.Path != c.okPath {
+					w.WriteHeader(http.StatusNotFound)
+					_, _ = io.WriteString(w, `{"error":{"message":"no route"}}`)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, c.okBody)
+			}))
+			defer up.Close()
+
+			// 账号的地址指向假上游，厂商与协议走真表里的路由。
+			acc := f.addAs(t, "a1", c.provider, c.accountProtocol, up.URL, key, []string{c.model})
+			gs := newGateway(t, f)
+
+			res, err := gs.ProbeModel(context.Background(), acc, c.model)
+			if err != nil {
+				t.Fatalf("探活: %v", err)
+			}
+			if res.Status != store.ModelUsable || res.Protocol != c.wantProtocol {
+				t.Fatalf("结论 = %+v，期望 usable/%s", res, c.wantProtocol)
+			}
+
+			calls := rec.all()
+			if len(calls) != len(c.wantCalls) {
+				t.Fatalf("上游调用 = %v，期望 %v", rec.paths(), c.wantCalls)
+			}
+			for i, want := range c.wantCalls {
+				if calls[i].path != want {
+					t.Fatalf("第 %d 次调用路径 = %q，期望 %q（全部调用 %v）", i+1, calls[i].path, want, rec.paths())
+				}
+			}
+
+			// 凭据头按协议走：anthropic 用 x-api-key，另两种用 Bearer，且只有那一个。
+			last := calls[len(calls)-1]
+			if c.wantProtocol == gateway.ProtocolAnthropic {
+				if last.apiKey != key || last.bearer != "" {
+					t.Fatalf("anthropic 的凭据头 = x-api-key %q / bearer %q，期望只有 x-api-key", last.apiKey, last.bearer)
+				}
+			} else if last.bearer != "Bearer "+key || last.apiKey != "" {
+				t.Fatalf("%s 的凭据头 = bearer %q / x-api-key %q，期望只有 Bearer", c.wantProtocol, last.bearer, last.apiKey)
+			}
+
+			// 发现结果落在模型行上。
+			rows, err := f.st.AccountModels(acc.ID)
+			if err != nil {
+				t.Fatalf("读模型行: %v", err)
+			}
+			if len(rows) != 1 || rows[0].Model != c.model || rows[0].Protocol != c.wantProtocol {
+				t.Fatalf("模型行 = %+v，期望 %s → %s", rows, c.model, c.wantProtocol)
+			}
+		})
+	}
+}

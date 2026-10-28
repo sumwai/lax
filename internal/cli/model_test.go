@@ -1135,3 +1135,65 @@ func TestModelProbeKeepsStderrClean(t *testing.T) {
 		t.Fatalf("探活结果 = %+v", rows)
 	}
 }
+
+// TestModelProbeRefreshStartsFromDiscoveredProtocol 确认 --refresh 重探已知模型时，
+// 库里发现的协议排在账号协议前面：账号协议 chat 只在首轮白打一次 404，
+// 之后的每次重探都直接命中 anthropic 那条路由，上游只收到一次调用。
+//
+// 顺序反了的表现是每次 --refresh 都先多一条 404，模型多、重探频繁时全是白花的调用。
+func TestModelProbeRefreshStartsFromDiscoveredProtocol(t *testing.T) {
+	sandbox(t)
+	up := newRecorderUpstream(t, map[string]fakeResponse{
+		"GET /v1/models":              {status: http.StatusOK, body: modelsListM1},
+		"POST /v1/chat/completions":   {status: http.StatusNotFound, body: `{"error":{"message":"没有这个路由"}}`},
+		"POST /anthropic/v1/messages": {status: http.StatusOK, body: anthropicMessageOK},
+	})
+	if code, _, stderr := run(t, "init"); code != 0 {
+		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
+	}
+	// 账号协议取种子厂商 deepseek 的默认值 openai-chat，地址指向假上游；
+	// 不给 --models，探活会先同步一次模型列表。
+	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "deepseek",
+		"--base-url", up.srv.URL, "--key", "sk-test"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	// 首轮：账号协议 chat 打 404，换 anthropic 成功，发现结果落库。
+	if code, _, stderr := run(t, "model", "probe", "--account", "ds1", "--json"); code != 0 {
+		t.Fatalf("首轮探活退出码 = %d，stderr = %s", code, stderr)
+	}
+	calls := up.postCalls()
+	if len(calls) != 2 || calls[0].path != "/v1/chat/completions" || calls[1].path != "/anthropic/v1/messages" {
+		t.Fatalf("首轮的上游调用 = %v，期望先账号协议 chat、再 anthropic", up.postPaths())
+	}
+	if calls[0].bearer != "Bearer sk-test" || calls[0].apiKey != "" {
+		t.Fatalf("chat 的凭据头 = bearer %q / x-api-key %q，期望只有 Bearer sk-test", calls[0].bearer, calls[0].apiKey)
+	}
+	if calls[1].apiKey != "sk-test" || calls[1].bearer != "" {
+		t.Fatalf("anthropic 的凭据头 = x-api-key %q / bearer %q，期望只有 x-api-key sk-test", calls[1].apiKey, calls[1].bearer)
+	}
+	st := storetest.Open(t)
+	if row := st.ModelRow(t, "ds1", "m1"); row.Protocol != "anthropic" || row.Status != store.ModelUsable {
+		t.Fatalf("首轮结论 = %+v，期望 usable 且协议记 anthropic", row)
+	}
+
+	// 第二轮 --refresh：已发现的协议排第一位，只打一次，也不再重新同步模型列表。
+	up.reset()
+	code, out, stderr := run(t, "model", "probe", "--account", "ds1", "--json", "--refresh")
+	if code != 0 {
+		t.Fatalf("--refresh 退出码 = %d，stderr = %s", code, stderr)
+	}
+	all := up.all()
+	if len(all) != 1 || all[0].path != "/anthropic/v1/messages" {
+		t.Fatalf("--refresh 的上游调用 = %+v，期望只打一次已发现的 anthropic 路由", all)
+	}
+	if all[0].apiKey != "sk-test" {
+		t.Fatalf("--refresh 的凭据头 = %q，期望 x-api-key sk-test", all[0].apiKey)
+	}
+	if rows := mustProbeRows(t, out); len(rows) != 1 || rows["m1"].Status != "usable" {
+		t.Fatalf("--refresh 的结论 = %s，期望 m1 仍可用", out)
+	}
+	if row := st.ModelRow(t, "ds1", "m1"); row.Protocol != "anthropic" {
+		t.Fatalf("重探后的协议 = %q，期望仍是 anthropic", row.Protocol)
+	}
+}

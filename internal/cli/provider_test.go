@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -574,5 +575,78 @@ func TestProviderRmMissingAndJSON(t *testing.T) {
 	}
 	if got.Removed != "mine" || got.Routes != 1 || len(got.Accounts) != 0 {
 		t.Fatalf("provider rm --json = %+v", got)
+	}
+}
+
+// TestProviderRmForceKeepsAccountForwarding 确认 provider rm --force 删掉厂商行与它的全部路由之后，
+// 原先用这家厂商的账号仍能转发：账号行固化了自己的 base_url，路由没了只是让出站地址回到
+// base_url 后缀猜测，请求不该 404，也不该因为读不到厂商行就失败。
+//
+// 没有这条断言，删除厂商时顺手清掉账号地址（或让转发依赖厂商行存在）不会被测出来，
+// 线上表现是删完厂商之后所有请求 404。
+func TestProviderRmForceKeepsAccountForwarding(t *testing.T) {
+	sandbox(t)
+	up := newRecorderUpstream(t, map[string]fakeResponse{
+		"POST /v1/chat/completions": {status: http.StatusOK, body: chatCompletionOK},
+	})
+	if code, _, stderr := run(t, "init"); code != 0 {
+		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	// 用种子厂商 deepseek：它的默认协议是 openai-chat，地址用 --base-url 指到假上游。
+	code, out, stderr := run(t, "account", "add", "ds1",
+		"--provider", "deepseek", "--base-url", up.srv.URL, "--key", "sk-test",
+		"--models", "m1", "--json")
+	if code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	added := mustAccountAdd(t, out)
+	if added.Provider != "deepseek" || added.Protocol != "openai-chat" || added.BaseURL != up.srv.URL {
+		t.Fatalf("账号的默认值 = %+v，期望 deepseek / openai-chat / 假上游地址", added)
+	}
+
+	// 账号还在用 deepseek：不带 --force 拒绝，带了才删。
+	if code, out, _ = run(t, "provider", "rm", "deepseek"); code != 1 {
+		t.Fatalf("有账号在用时退出码 = %d，期望 1", code)
+	}
+	code, out, stderr = run(t, "provider", "rm", "deepseek", "--force")
+	if code != 0 {
+		t.Fatalf("--force 的退出码 = %d，stderr = %s", code, stderr)
+	}
+	for _, want := range []string{"已删除厂商 deepseek", "仍保留自己的 base_url", "ds1"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("--force 的输出应提到 %q: %s", want, out)
+		}
+	}
+	code, out, _ = run(t, "provider", "ls", "--json")
+	if _, ok := mustProviderRows(t, out)["deepseek"]; ok {
+		t.Fatalf("删除后 provider ls 不该再有 deepseek: %s", out)
+	}
+
+	// 账号行仍固化着自己的地址：删厂商不改账号。
+	code, out, _ = run(t, "account", "ls", "--json")
+	if code != 0 {
+		t.Fatalf("account ls 退出码 = %d", code)
+	}
+	var accounts []map[string]any
+	mustJSON(t, out, &accounts)
+	if len(accounts) != 1 || accounts[0]["base_url"] != up.srv.URL {
+		t.Fatalf("账号的 base_url 应保持不变，实际 %+v", accounts)
+	}
+
+	// 转发照旧：厂商没了，地址按 base_url 后缀猜出 /v1/chat/completions，凭据头是 Bearer。
+	code, out, stderr = run(t, "call", "hi", "--model", "m1")
+	if code != 0 {
+		t.Fatalf("删厂商后 call 的退出码 = %d，stderr = %s", code, stderr)
+	}
+	if !strings.Contains(out, "pong") {
+		t.Fatalf("删厂商后 call 的输出 = %q，期望包含 pong", out)
+	}
+	calls := up.all()
+	if len(calls) != 1 || calls[0].path != "/v1/chat/completions" {
+		t.Fatalf("上游调用 = %+v，期望只打一次 /v1/chat/completions", calls)
+	}
+	if calls[0].bearer != "Bearer sk-test" {
+		t.Fatalf("凭据头 = %q，期望 Bearer sk-test", calls[0].bearer)
 	}
 }

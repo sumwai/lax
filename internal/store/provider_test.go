@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -674,5 +675,152 @@ func TestListAccountsByProvider(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("openai 的账号 = %+v，期望空", got)
+	}
+}
+
+// latestMigrationVersion 数出 migrations 目录里最大的迁移文件号，也就是「升到最新」的目标。
+// 直接写死数字的话，新增一个迁移就要来改这条用例，而它想钉的是「链条能走到底」。
+func latestMigrationVersion(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("migrations")
+	if err != nil {
+		t.Fatalf("读迁移目录: %v", err)
+	}
+	latest := 0
+	for _, e := range entries {
+		var v int
+		if _, err := fmt.Sscanf(e.Name(), "%04d_", &v); err != nil {
+			t.Fatalf("迁移文件名 %q 不是 <四位序号>_<名字>.sql: %v", e.Name(), err)
+		}
+		if v > latest {
+			latest = v
+		}
+	}
+	if latest == 0 {
+		t.Fatal("迁移目录里没有文件")
+	}
+	return latest
+}
+
+// TestMigrationChainFrom0001ToLatest 确认一个停在 0001 的老库能沿迁移链一路升到最新：
+// providers、provider_routes 与 account_models.protocol 三者都补上，种子厂商与路由逐条对上，
+// 只存在于 0001 的 agents 表被 0002 删掉，老账号与老请求记录一个字段都不动。
+//
+// 单步升级的用例各自只跨一两个版本，链条中间漏一环（例如某个迁移只断言过空库、
+// 在带数据的库上会失败）只有从最老的版本一次走到底才能发现。
+func TestMigrationChainFrom0001ToLatest(t *testing.T) {
+	path := t.TempDir() + "/v1.db"
+
+	// 老库用 0001 的迁移文件本身来建，不手抄 DDL：手抄的形状会随实现漂移，
+	// 而这里要验的正是真实老库升上来的结果。
+	initSQL, err := os.ReadFile("migrations/0001_init.sql")
+	if err != nil {
+		t.Fatalf("读迁移 0001: %v", err)
+	}
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("打开老库: %v", err)
+	}
+	if _, err := db.Exec(string(initSQL)); err != nil {
+		t.Fatalf("建 0001 老库: %v", err)
+	}
+	for _, stmt := range []string{
+		`INSERT INTO accounts (name, provider, protocol, base_url, key_cipher, models, enabled, created_at)
+			VALUES ('ds1', 'deepseek', 'openai-chat', 'https://api.deepseek.com', X'010203', '["m1"]', 1, 100)`,
+		`INSERT INTO requests (ts, inbound, outbound, model_requested, model_used, account_id,
+			http_status, ok, in_tokens, out_tokens, latency_ms)
+			VALUES (123, 'anthropic', 'openai-chat', 'm1', 'm1', 1, 200, 1, 7, 3, 42)`,
+		`INSERT INTO agents (name, config_path) VALUES ('claude', '/tmp/claude.json')`,
+		`PRAGMA user_version = 1`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("写入 0001 老库（%s）: %v", stmt, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("关老库: %v", err)
+	}
+
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("升级老库: %v", err)
+	}
+	defer st.Close()
+
+	want := latestMigrationVersion(t)
+	var version int
+	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("读 user_version: %v", err)
+	}
+	if version != want {
+		t.Fatalf("user_version = %d，期望 %d（从 0001 一路升到最新）", version, want)
+	}
+
+	// providers：8 家种子在，默认协议逐行对上。
+	providers, err := st.ListProviders()
+	if err != nil {
+		t.Fatalf("列厂商: %v", err)
+	}
+	if len(providers) != len(seedDefaults) {
+		t.Fatalf("升级后的厂商数 = %d，期望 %d", len(providers), len(seedDefaults))
+	}
+	assertSeedDefaults(t, st)
+
+	// provider_routes：每条 (厂商, 协议) 都在，路径与种子一致。
+	// 这里不比 models_path：模型列表路径怎么存是实现细节（见 DESIGN 5.8），
+	// 升级要保证的是「路由还在、地址没变」。
+	for _, want := range seedRoutes {
+		route, ok, err := st.LookupProviderRoute(want.provider, want.protocol)
+		if err != nil {
+			t.Fatalf("取路由 %s/%s: %v", want.provider, want.protocol, err)
+		}
+		if !ok {
+			t.Fatalf("升级后缺路由 %s/%s", want.provider, want.protocol)
+		}
+		if route.Path != want.path {
+			t.Fatalf("路由 %s/%s 的 path = %q，期望 %q", want.provider, want.protocol, route.Path, want.path)
+		}
+	}
+
+	// account_models.protocol：0005 补的列在，新行默认空串，也就是继承账号协议。
+	if _, err := st.ReplaceModels(1, []string{"m2"}); err != nil {
+		t.Fatalf("写入模型行: %v", err)
+	}
+	rows, err := st.AccountModels(1)
+	if err != nil {
+		t.Fatalf("读模型行: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Model != "m2" {
+		t.Fatalf("模型行 = %+v，期望只有 m2", rows)
+	}
+	if rows[0].Protocol != "" {
+		t.Fatalf("新行的 protocol = %q，期望空串（继承账号协议）", rows[0].Protocol)
+	}
+
+	// 0002 删掉的 agents 表不该留下。
+	var nAgents int
+	if err := st.DB().QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'agents'`).Scan(&nAgents); err != nil {
+		t.Fatalf("查 agents 表: %v", err)
+	}
+	if nAgents != 0 {
+		t.Fatalf("升级后 agents 表还在，期望被 0002 删掉")
+	}
+
+	// 老数据原样：升级只加表加列，不动账号与请求记录。
+	acc, err := st.GetAccount("ds1")
+	if err != nil {
+		t.Fatalf("读老账号: %v", err)
+	}
+	if acc.Provider != "deepseek" || acc.Protocol != "openai-chat" ||
+		acc.BaseURL != "https://api.deepseek.com" || len(acc.Models) != 1 {
+		t.Fatalf("老账号被改动: %+v", acc)
+	}
+	recs, err := st.RecentRequests(5)
+	if err != nil {
+		t.Fatalf("读老请求记录: %v", err)
+	}
+	if len(recs) != 1 || recs[0].InTokens != 7 || recs[0].OutTokens != 3 || !recs[0].OK {
+		t.Fatalf("老请求记录 = %+v，期望 token 7/3 且 ok", recs)
 	}
 }
