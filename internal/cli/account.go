@@ -16,27 +16,6 @@ import (
 	"switchboard/internal/store"
 )
 
-type providerDefault struct {
-	baseURL  string
-	protocol string
-}
-
-// providers 记录已知厂商的默认地址与线协议。表中没有的必须显式给 --base-url。
-var providers = map[string]providerDefault{
-	"anthropic":  {baseURL: "https://api.anthropic.com", protocol: gateway.ProtocolAnthropic},
-	"openai":     {baseURL: "https://api.openai.com", protocol: gateway.ProtocolChat},
-	"deepseek":   {baseURL: "https://api.deepseek.com", protocol: gateway.ProtocolChat},
-	"moonshot":   {baseURL: "https://api.moonshot.cn", protocol: gateway.ProtocolChat},
-	"kimi":       {baseURL: "https://api.moonshot.cn", protocol: gateway.ProtocolChat},
-	"openrouter": {baseURL: "https://openrouter.ai/api", protocol: gateway.ProtocolChat},
-	"ollama":     {baseURL: "http://127.0.0.1:11434", protocol: gateway.ProtocolChat},
-	// commandcode 上 claude-* 只接受 /messages，加账号时给 --protocol anthropic。
-	"commandcode": {
-		baseURL:  "https://api.commandcode.ai/provider/v1",
-		protocol: gateway.ProtocolChat,
-	},
-}
-
 // accountSubs 是 account 一组的子命令清单，组级帮助与错误提示都读它。
 var accountSubs = []groupItem{
 	{"add", "新增一个上游账号，key 加密后入库"},
@@ -123,7 +102,7 @@ func cmdAccountAdd(e *Env, args []string) error {
 	provider := fs.String("provider", "", "上游厂商标识，如 deepseek")
 	key := fs.String("key", "", "上游 API key；给 - 从标准输入读，留空则读环境变量 SWITCHBOARD_KEY")
 	name := fs.String("name", "", "账号名称，也可以用位置参数给出")
-	protocol := fs.String("protocol", "", "上游线协议：openai-chat | anthropic，留空按厂商默认")
+	protocol := fs.String("protocol", "", "上游线协议：anthropic | openai-chat | openai-responses，留空按厂商默认")
 	baseURL := fs.String("base-url", "", "上游地址，留空按厂商默认")
 	models := fs.String("models", "", "该账号可提供的模型，逗号分隔")
 	priceIn := fs.Float64("price-in", 0, "输入价，每百万 token")
@@ -159,24 +138,8 @@ func cmdAccountAdd(e *Env, args []string) error {
 		return usagef("缺少凭据：--key <key>、--key - 从标准输入读，或环境变量 SWITCHBOARD_KEY")
 	}
 
-	proto := *protocol
-	base := *baseURL
-	if def, ok := providers[*provider]; ok {
-		if proto == "" {
-			proto = def.protocol
-		}
-		if base == "" {
-			base = def.baseURL
-		}
-	}
-	if proto == "" {
-		proto = gateway.ProtocolChat
-	}
-	if base == "" {
-		return fmt.Errorf("厂商 %q 不在已知列表里，需要显式给 --base-url", *provider)
-	}
-	if proto != gateway.ProtocolChat && proto != gateway.ProtocolAnthropic {
-		return usagef("不支持的协议 %q，可用 openai-chat、anthropic", proto)
+	if *protocol != "" && !isWireProtocol(*protocol) {
+		return usagef("不支持的协议 %q，可用 anthropic、openai-chat、openai-responses", *protocol)
 	}
 
 	a, err := openApp(e, true)
@@ -184,6 +147,28 @@ func cmdAccountAdd(e *Env, args []string) error {
 		return err
 	}
 	defer a.Close()
+
+	// 厂商的默认地址与默认协议来自厂商表，不在代码里硬编码（见 DESIGN 5.8）。
+	proto := *protocol
+	base := *baseURL
+	defBase, defProto, found, err := lookupProvider(a.st, *provider)
+	if err != nil {
+		return err
+	}
+	if found {
+		if base == "" {
+			base = defBase
+		}
+		if proto == "" {
+			proto = defProto
+		}
+	}
+	if proto == "" {
+		proto = gateway.ProtocolChat
+	}
+	if base == "" {
+		return unknownProviderError(a.st, *provider)
+	}
 
 	if _, err := a.st.GetAccount(accountName); err == nil {
 		return fmt.Errorf("账号 %q 已存在，换个名称或先运行 switchboard account rm %s", accountName, accountName)
@@ -298,6 +283,8 @@ func cmdAccountLs(e *Env, args []string) error {
 				// 与文本输出的「N 可用 / M 同步」同一组计数。
 				"models_usable": c.Usable,
 				"models_synced": c.Total,
+				// 默认协议在前，其余是探活发现到的、与默认不同的协议。
+				"protocols": allProtocols(acc.Protocol, c.Protocols),
 			})
 		}
 		return e.printJSON(out)
@@ -313,7 +300,7 @@ func cmdAccountLs(e *Env, args []string) error {
 		rows = append(rows, []string{
 			acc.Name,
 			acc.Provider,
-			acc.Protocol,
+			protocolCell(acc.Protocol, counts[acc.ID].Protocols),
 			modelsCell(acc.Models, counts[acc.ID]),
 			fmt.Sprintf("%d", acc.Priority),
 			accountStatus(acc, now),
@@ -324,22 +311,60 @@ func cmdAccountLs(e *Env, args []string) error {
 }
 
 // modelCount 是一个账号在 account_models 里的汇总。
+// Protocols 是模型行上发现过的协议，升序去重，含与账号默认协议相同的那些。
 type modelCount struct {
-	Total  int
-	Usable int
+	Total     int
+	Usable    int
+	Protocols []string
 }
 
 func countModels(rows []store.AccountModel) map[int64]modelCount {
 	out := map[int64]modelCount{}
+	seen := map[int64]map[string]bool{}
 	for _, r := range rows {
 		c := out[r.AccountID]
 		c.Total++
 		if r.Status == store.ModelUsable {
 			c.Usable++
 		}
+		if r.Protocol != "" {
+			if seen[r.AccountID] == nil {
+				seen[r.AccountID] = map[string]bool{}
+			}
+			if !seen[r.AccountID][r.Protocol] {
+				seen[r.AccountID][r.Protocol] = true
+				c.Protocols = append(c.Protocols, r.Protocol)
+			}
+		}
 		out[r.AccountID] = c
 	}
+	for id, c := range out {
+		sort.Strings(c.Protocols)
+		out[id] = c
+	}
 	return out
+}
+
+// allProtocols 把默认协议排到前面，后面跟模型行上发现到的其它协议，去重后升序。
+// 默认协议自己不在发现结果里时也要出现：它是账号当前的出站协议。
+func allProtocols(accountProtocol string, discovered []string) []string {
+	out := []string{accountProtocol}
+	for _, p := range discovered {
+		if p != accountProtocol {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// protocolCell 是 account ls 的协议列：只有默认协议时就是它本身，
+// 存在与默认不同的已发现协议时标出「另 N 种」，一眼能看出这个账号不止走一种协议。
+func protocolCell(accountProtocol string, discovered []string) string {
+	all := allProtocols(accountProtocol, discovered)
+	if len(all) == 1 {
+		return accountProtocol
+	}
+	return fmt.Sprintf("%s + 另 %d 种", accountProtocol, len(all)-1)
 }
 
 func modelsCell(models []string, c modelCount) string {
@@ -505,44 +530,49 @@ func cmdModelLs(e *Env, args []string) error {
 		byID[acc.ID] = acc
 	}
 
-	type accEntry struct {
-		Name   string `json:"name"`
-		Status string `json:"status"`
-	}
 	type entry struct {
 		model    string
-		accounts []accEntry
+		accounts []modelAccountJSON
 		priceIn  *float64
 		priceOut *float64
 	}
 	byModel := map[string]*entry{}
 	var order []string
 
-	add := func(model, accountName, status string, acc store.Account) {
+	add := func(model, accountName, status, protocol string, acc store.Account) {
 		ent, ok := byModel[model]
 		if !ok {
 			ent = &entry{model: model, priceIn: acc.PriceIn, priceOut: acc.PriceOut}
 			byModel[model] = ent
 			order = append(order, model)
 		}
-		ent.accounts = append(ent.accounts, accEntry{Name: accountName, Status: status})
+		ent.accounts = append(ent.accounts, modelAccountJSON{Name: accountName, Status: status, Protocol: protocol})
 	}
 
 	modelRows, err := a.st.AllAccountModels()
 	if err != nil {
 		return err
 	}
+	// 有效协议只问 store：行不存在或协议列为空时 EffectiveProtocol 已经回退到账号协议。
 	for _, r := range modelRows {
 		acc, ok := byID[r.AccountID]
 		if !ok {
 			continue
 		}
-		add(r.Model, acc.Name, r.Status, acc)
+		proto, err := a.st.EffectiveProtocol(acc.ID, acc.Protocol, r.Model)
+		if err != nil {
+			return err
+		}
+		add(r.Model, acc.Name, r.Status, proto, acc)
 	}
 	if len(modelRows) == 0 {
 		for _, acc := range accounts {
 			for _, m := range acc.Models {
-				add(m, acc.Name, "manual", acc)
+				proto, err := a.st.EffectiveProtocol(acc.ID, acc.Protocol, m)
+				if err != nil {
+					return err
+				}
+				add(m, acc.Name, "manual", proto, acc)
 			}
 		}
 	}
@@ -578,10 +608,34 @@ func cmdModelLs(e *Env, args []string) error {
 		if ent.priceIn != nil || ent.priceOut != nil {
 			price = fmt.Sprintf("%s / %s", priceText(ent.priceIn), priceText(ent.priceOut))
 		}
-		rows = append(rows, []string{ent.model, strings.Join(names, "、"), price})
+		rows = append(rows, []string{ent.model, strings.Join(names, "、"), modelProtocolCell(ent.accounts), price})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"模型", "账号", "输入价 / 输出价（每百万 token）"}, rows))
+	fmt.Fprint(e.Stdout, renderTable([]string{"模型", "账号", "协议", "输入价 / 输出价（每百万 token）"}, rows))
 	return nil
+}
+
+// modelAccountJSON 是 model ls --json 里某个模型下的一个账号。
+// Protocol 是该账号在这个模型上的有效出站协议。
+type modelAccountJSON struct {
+	Name     string `json:"name"`
+	Status   string `json:"status"`
+	Protocol string `json:"protocol"`
+}
+
+// modelProtocolCell 是一个模型下各账号的有效协议：只有一个账号时直接写协议，
+// 多个账号时逐个写上名字，免得同一格里分不清哪个账号走哪种协议。
+func modelProtocolCell(entries []modelAccountJSON) string {
+	if len(entries) == 0 {
+		return "-"
+	}
+	if len(entries) == 1 {
+		return entries[0].Protocol
+	}
+	parts := make([]string, 0, len(entries))
+	for _, e := range entries {
+		parts = append(parts, e.Name+" "+e.Protocol)
+	}
+	return strings.Join(parts, "、")
 }
 
 // modelStatusText 把状态码换成人话。

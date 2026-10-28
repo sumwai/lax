@@ -248,7 +248,7 @@ func TestAccountAddRejectsMissingKey(t *testing.T) {
 	}
 }
 
-// TestGroupHelp 确认三个有子命令的组都支持 -h、--help 与 help：
+// TestGroupHelp 确认有子命令的组都支持 -h、--help 与 help：
 // 清单打到 stdout，退出码 0，且不需要先 init。
 func TestGroupHelp(t *testing.T) {
 	sandbox(t)
@@ -258,6 +258,7 @@ func TestGroupHelp(t *testing.T) {
 	}{
 		{"account", []string{"add", "ls", "rm", "test", "enable", "disable"}},
 		{"model", []string{"ls", "sync", "probe"}},
+		{"provider", []string{"ls", "add", "rm"}},
 		{"log", []string{"tail"}},
 	}
 	for _, g := range groups {
@@ -281,11 +282,30 @@ func TestGroupHelp(t *testing.T) {
 	}
 }
 
-// TestGroupUnknownSubcommandHints 确认未知子命令仍退出码 2，并提示去看组级帮助；
-// 子命令自己的 --help 保持原样，退出码 0。
+// TestTopLevelHelpListsProviderGroup 钉住顶层帮助里的命令清单：
+// provider 必须出现在顶层帮助里，同时 provider 一组本身要能被分发到（见 TestProviderLsSeeded）。
+func TestTopLevelHelpListsProviderGroup(t *testing.T) {
+	sandbox(t)
+	for _, arg := range []string{"-h", "--help", "help"} {
+		code, out, errOut := run(t, arg)
+		if code != 0 {
+			t.Fatalf("%s 的退出码 = %d，期望 0", arg, code)
+		}
+		if errOut != "" {
+			t.Fatalf("%s 的帮助不该写 stderr: %s", arg, errOut)
+		}
+		for _, want := range []string{"provider", "厂商与路由"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("%s 的顶层帮助缺 %q: %s", arg, want, out)
+			}
+		}
+	}
+}
+
+// TestGroupUnknownSubcommandHints 确认未知子命令仍退出码 2，并提示去看组级帮助；子命令自己的 --help 保持原样，退出码 0。
 func TestGroupUnknownSubcommandHints(t *testing.T) {
 	sandbox(t)
-	for _, group := range []string{"account", "model", "log"} {
+	for _, group := range []string{"account", "model", "provider", "log"} {
 		code, out, errOut := run(t, group, "nope")
 		if code != 2 {
 			t.Fatalf("%s nope 的退出码 = %d，期望 2", group, code)
