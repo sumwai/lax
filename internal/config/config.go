@@ -9,7 +9,7 @@ import (
 
 const (
 	// DefaultAddr 是网关默认监听地址，只绑回环，不对外。
-	DefaultAddr = "127.0.0.1:3425"
+	DefaultAddr = "127.0.0.1:4567"
 
 	dirName = "switchboard"
 )

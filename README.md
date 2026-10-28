@@ -5,6 +5,7 @@
 ```bash
 switchboard init                      # 建配置、数据库与密钥
 switchboard account add ds --provider deepseek --key sk-xxx --models deepseek-v4-pro
+switchboard account add ds --provider deepseek --key - --models deepseek-v4-pro < key.txt   # 凭据走标准输入
 switchboard serve                     # 起网关，127.0.0.1:3425
 switchboard agent use claude-code --model deepseek-v4-pro --apply
 switchboard log tail                  # 看请求记录
@@ -18,7 +19,7 @@ switchboard log tail                  # 看请求记录
 | --- | --- |
 | `init` | 建配置目录、数据库、加密密钥 |
 | `serve` | 前台起网关 |
-| `account add\|ls\|rm\|test` | 加账号、列账号、删账号、探活 |
+| `account add\|ls\|rm\|test\|enable\|disable` | 加账号、列账号、删账号、探活、启用、停用 |
 | `model ls` | 列出可提供的模型与定价 |
 | `agent ls\|use\|revert` | 把客户端指过来 / 还原 |
 | `usage` | 按账号、模型或日期汇总用量 |

@@ -174,36 +174,3 @@ func TestOpenIsIdempotent(t *testing.T) {
 		t.Fatalf("重复打开后账号数 = %d，迁移不应重跑", len(accounts))
 	}
 }
-
-func TestAgentState(t *testing.T) {
-	st := openTemp(t)
-
-	st1 := store.AgentState{Name: "claude-code", ConfigPath: "/tmp/settings.json", BackupPath: "/tmp/settings.json.bak", Model: "m1", AppliedAt: 1}
-	if err := st.PutAgent(st1); err != nil {
-		t.Fatalf("写入: %v", err)
-	}
-	st1.Model = "m2"
-	if err := st.PutAgent(st1); err != nil {
-		t.Fatalf("覆盖写入: %v", err)
-	}
-
-	got, err := st.GetAgent("claude-code")
-	if err != nil {
-		t.Fatalf("读取: %v", err)
-	}
-	if got.Model != "m2" {
-		t.Fatalf("model = %q", got.Model)
-	}
-
-	list, err := st.ListAgents()
-	if err != nil || len(list) != 1 {
-		t.Fatalf("列表 = %+v，错误 %v", list, err)
-	}
-
-	if err := st.DeleteAgent("claude-code"); err != nil {
-		t.Fatalf("删除: %v", err)
-	}
-	if _, err := st.GetAgent("claude-code"); err == nil {
-		t.Fatal("删除后应取不到")
-	}
-}

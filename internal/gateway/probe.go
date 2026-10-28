@@ -63,6 +63,10 @@ func (s *Server) Probe(ctx context.Context, a store.Account) (ProbeResult, error
 	res.OK = resp.StatusCode >= 200 && resp.StatusCode < 300
 	if res.OK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8<<10))
+		// 探活成功说明凭据可用，把之前因 401 停用的账号恢复回来。
+		if err := s.store.SetEnabled(a.ID, true, ""); err != nil {
+			return res, err
+		}
 		if err := s.store.SetCooldown(a.ID, 0, ""); err != nil {
 			return res, err
 		}

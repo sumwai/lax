@@ -61,15 +61,6 @@ type RequestRecord struct {
 	Error          string
 }
 
-// AgentState 是某个客户端配置被改写的状态。
-type AgentState struct {
-	Name       string
-	ConfigPath string
-	BackupPath string
-	Model      string
-	AppliedAt  int64
-}
-
 // Open 打开数据库，按需建目录并执行迁移。
 func Open(path string) (*Store, error) {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
@@ -341,50 +332,6 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 		out = append(out, u)
 	}
 	return out, rows.Err()
-}
-
-// PutAgent 记录客户端配置的改写状态。
-func (s *Store) PutAgent(st AgentState) error {
-	_, err := s.db.Exec(`INSERT INTO agents (name, config_path, backup_path, model, applied_at)
-		VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT(name) DO UPDATE SET config_path = excluded.config_path,
-			backup_path = excluded.backup_path, model = excluded.model, applied_at = excluded.applied_at`,
-		st.Name, st.ConfigPath, st.BackupPath, st.Model, st.AppliedAt)
-	return err
-}
-
-// GetAgent 取客户端状态。
-func (s *Store) GetAgent(name string) (AgentState, error) {
-	var st AgentState
-	err := s.db.QueryRow(`SELECT name, config_path, COALESCE(backup_path, ''), COALESCE(model, ''), COALESCE(applied_at, 0)
-		FROM agents WHERE name = ?`, name).Scan(&st.Name, &st.ConfigPath, &st.BackupPath, &st.Model, &st.AppliedAt)
-	return st, err
-}
-
-// ListAgents 列出全部客户端状态。
-func (s *Store) ListAgents() ([]AgentState, error) {
-	rows, err := s.db.Query(`SELECT name, config_path, COALESCE(backup_path, ''), COALESCE(model, ''), COALESCE(applied_at, 0)
-		FROM agents ORDER BY name`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []AgentState
-	for rows.Next() {
-		var st AgentState
-		if err := rows.Scan(&st.Name, &st.ConfigPath, &st.BackupPath, &st.Model, &st.AppliedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, st)
-	}
-	return out, rows.Err()
-}
-
-// DeleteAgent 删除客户端状态。
-func (s *Store) DeleteAgent(name string) error {
-	_, err := s.db.Exec(`DELETE FROM agents WHERE name = ?`, name)
-	return err
 }
 
 func boolInt(b bool) int {

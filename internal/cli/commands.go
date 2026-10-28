@@ -20,9 +20,8 @@ import (
 var commandTable = map[string]command{
 	"init":    {name: "init", summary: "初始化配置目录与数据库", run: cmdInit},
 	"serve":   {name: "serve", summary: "启动网关，前台运行", run: cmdServe},
-	"account": {name: "account", summary: "管理上游账号：add / ls / rm / test", run: cmdAccount},
+	"account": {name: "account", summary: "管理上游账号：add / ls / rm / test / enable / disable", run: cmdAccount},
 	"model":   {name: "model", summary: "列出网关可提供的模型", run: cmdModel},
-	"agent":   {name: "agent", summary: "把其它客户端指向本网关：ls / use / revert", run: cmdAgent},
 	"usage":   {name: "usage", summary: "按账号、模型或日期汇总用量", run: cmdUsage},
 	"log":     {name: "log", summary: "查看请求记录：tail", run: cmdLog},
 	"call":    {name: "call", summary: "手工打一条请求，打印选号过程", run: cmdCall},
@@ -30,7 +29,7 @@ var commandTable = map[string]command{
 	"version": {name: "version", summary: "打印版本", run: cmdVersion},
 }
 
-var commandOrder = []string{"init", "serve", "account", "model", "agent", "usage", "log", "call", "doctor", "version"}
+var commandOrder = []string{"init", "serve", "account", "model", "usage", "log", "call", "doctor", "version"}
 
 func cmdInit(e *Env, args []string) error {
 	fs := newFlagSet(e, "init", "初始化配置目录与数据库")

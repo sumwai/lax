@@ -207,12 +207,18 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		}
 
 		switch {
-		case res.status == http.StatusUnauthorized || res.status == http.StatusForbidden:
+		case res.status == http.StatusUnauthorized:
+			// 401 说明凭据本身不行，停用账号，避免同一条错误把整个候选池刷成不可用。
 			if err := s.store.SetEnabled(cand.ID, false, res.message); err != nil {
 				s.logf("停用账号 %s 失败: %v", cand.Name, err)
 			}
 			writeError(w, http.StatusUnauthorized, "authentication_error",
 				fmt.Sprintf("账号 %s 的凭据被上游拒绝，已停用。%s", cand.Name, res.message))
+			return
+		case res.status == http.StatusForbidden:
+			// 403 多为套餐或模型权限不对，凭据本身还能用，不停用也不再换号。
+			writeError(w, http.StatusForbidden, "permission_error",
+				fmt.Sprintf("账号 %s 无权使用该模型：%s", cand.Name, res.message))
 			return
 		case account.Retryable(res.status) && !res.wrote:
 			until := s.now().Add(account.Cooldown(res.status, 0)).Unix()

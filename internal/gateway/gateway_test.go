@@ -298,6 +298,35 @@ func TestUnauthorizedDisablesAccount(t *testing.T) {
 	}
 }
 
+func TestForbiddenDoesNotDisableAccount(t *testing.T) {
+	f := newFixture(t)
+
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = io.WriteString(w, `{"error":{"message":"MODEL_NOT_IN_PLAN"}}`)
+	}))
+	defer up.Close()
+
+	acc := f.add(t, "ds1", gateway.ProtocolChat, up.URL, "sk-test", []string{"m1"}, 100)
+	srv := f.server(t)
+
+	status, body := postMessages(t, srv, `{"model":"m1","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	if status != http.StatusForbidden {
+		t.Fatalf("状态 = %d，响应 %s", status, body)
+	}
+	if !strings.Contains(body, "无权使用该模型") {
+		t.Fatalf("错误提示应说明是权限问题: %s", body)
+	}
+
+	got, err := f.st.GetAccount(acc.Name)
+	if err != nil {
+		t.Fatalf("读账号: %v", err)
+	}
+	if !got.Enabled {
+		t.Fatal("403 不应停用账号，凭据本身还能用")
+	}
+}
+
 func TestNoCandidates(t *testing.T) {
 	f := newFixture(t)
 	f.add(t, "ds1", gateway.ProtocolChat, "http://127.0.0.1:1", "sk-1", []string{"other-model"}, 100)

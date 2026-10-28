@@ -2,7 +2,7 @@
 
 ## 1 这是什么
 
-本机上的模型总机。手上有几家模型的账号，客户端只连 `http://127.0.0.1:3425`，由 switchboard 挑账号、翻协议、记用量。
+本机上的模型总机。手上有几家模型的账号，客户端只连 `http://127.0.0.1:4567`，由 switchboard 挑账号、翻协议、记用量。
 
 与同类产品的差别：
 
@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | 使用范围 | 单人单机 | 单进程加本地文件就够，省掉鉴权与租户隔离 |
 | 账号类型 | 只支持粘贴 API key | 订阅账号要走浏览器登录与 token 刷新，受上游条款约束，风险和工作量都不适合放进第一版 |
-| 客户端配置改写 | 支持，一条命令改，留备份 | 手工改各客户端配置是最常见的出错点 |
+| 客户端配置改写 | 不做 | 程序只管网关与账号，各客户端里把 base URL 与 key 填成本机地址即可；改写别人家的配置文件不属于这里的职责 |
 | 入站协议 | Anthropic Messages 一个入口 | agent 类客户端主要说这个协议；其余协议在架构上留位置，不在第一版实现 |
 | 存储 | SQLite 单文件 | 不装数据库服务，事务与查询都够用 |
 | 界面 | 纯命令行 | 用量由 `usage` 与 `log` 子命令查看 |
@@ -55,20 +55,14 @@ deepseek-1  deepseek   openai-chat   deepseek-v4-pro,…（2）    正常
 
 # 4 起网关。前台运行，Ctrl-C 退出
 $ switchboard serve
-监听 127.0.0.1:3425
+监听 127.0.0.1:4567
 入站 /v1/messages（anthropic）
 上游 1 个账号，3 个模型
 
-# 5 让客户端指过来。第一条只打印要改的内容，--apply 才写文件
-$ switchboard agent use claude-code --model deepseek-v4-pro
-将修改 /home/someone/.claude/settings.json
-  env.ANTHROPIC_BASE_URL=http://127.0.0.1:3425
-  env.ANTHROPIC_AUTH_TOKEN=switchboard-local
-  env.ANTHROPIC_MODEL=deepseek-v4-pro
-加 --apply 写入，原文件备份为 settings.json.switchboard.bak
-
-$ switchboard agent use claude-code --model deepseek-v4-pro --apply
-已写入，备份 settings.json.switchboard.bak
+# 5 在客户端里把地址指过来，例如 Claude Code：
+#   ANTHROPIC_BASE_URL=http://127.0.0.1:4567
+#   ANTHROPIC_AUTH_TOKEN=switchboard-local（值随意，本机不校验）
+#   ANTHROPIC_MODEL=deepseek-v4-pro
 
 # 6 观察
 $ switchboard log tail -n 5
@@ -100,9 +94,6 @@ $ switchboard call "hi" --model deepseek-v4-pro --debug
 | `account rm` | `<名称>` | 删账号，关联的请求记录保留 | 确认一行 |
 | `account test` | `<名称>` | 用最小请求探活，更新冷却状态 | 状态码与耗时 |
 | `model ls` | `--json` | 按模型名汇总可用账号与计价来源 | 表格 |
-| `agent ls` | `--json` | 支持的客户端、各自的配置文件、是否已指向本网关 | 表格 |
-| `agent use` | `<客户端> [--model] [--apply] [--print]` | 默认只打印差异；`--apply` 写文件并备份 | 差异或确认 |
-| `agent revert` | `<客户端>` | 从备份还原 | 确认一行 |
 | `usage` | `--since`、`--by account\|model\|day` | 汇总请求数、token、估算花费 | 表格 |
 | `log tail` | `-n`、`--follow` | 最近的请求记录；`--follow` 跟随 | 表格 |
 | `call` | `[提示词] --model [--protocol] [--debug] [--json]` | 绕过客户端直连本进程，打印选号过程 | 响应，或 debug 轨迹 |
@@ -138,9 +129,10 @@ $ switchboard call "hi" --model deepseek-v4-pro --debug
 ### 5.3 选号与失败转移
 
 - 候选集合由模型名决定。模型名用请求里的 `model` 字段原文匹配，不做别名归一（第一版）。
-- 冷却：429 起始 60 秒，5xx 起始 10 秒，连续失败翻倍，上限 30 分钟；`account test` 成功即清除。
+- 冷却：429 起始 60 秒，5xx 起始 10 秒，连续失败翻倍，上限 30 分钟；`account test` 成功或 `account enable` 都会清除。
 - 会话粘性：请求头带 `x-switchboard-session` 或 `metadata.user_id` 时，同一个值在一小时内粘同一个账号；否则按 `priority` 轮转。
-- 凭据错误（401、403）不算临时故障，直接返回客户端，并把账号标记为 `enabled=0` 提示人工处理，避免整池被打空。
+- 401 说明凭据本身不行：把账号标为 `enabled=0` 并把错误返回客户端，避免同一条错误把整个候选池刷成不可用。`account test` 成功或 `account enable` 可恢复，两者都会清冷却。
+- 403 多为套餐或模型权限不对，凭据还能用：不停用账号，也不再换号，直接把上游原话返回。commandcode 对不在套餐内的模型就是返回 403。
 
 ### 5.4 翻译规则：anthropic 入 → openai-chat 出
 
@@ -182,19 +174,7 @@ $ switchboard call "hi" --model deepseek-v4-pro --debug
 
 估算花费需要价格表；价格表第一版放在账号上（`--price-in / --price-out`，单位每百万 token），缺省则花费记为 null，不猜价格。
 
-### 5.6 客户端配置改写
-
-第一版只处理 Claude Code，写 `~/.claude/settings.json` 的 `env` 下三个键：
-
-| 键 | 值 |
-| --- | --- |
-| `ANTHROPIC_BASE_URL` | 配置里的监听地址 |
-| `ANTHROPIC_AUTH_TOKEN` | `switchboard-local`（本机网关不校验，客户端要求非空） |
-| `ANTHROPIC_MODEL` | 指定模型 |
-
-规则：默认只打印差异，`--apply` 才写；写前把原文件复制为 `<文件名>.switchboard.bak`；只动上表三个键，其它键原样保留；`agent revert` 从备份还原，若原来没有这个配置文件，则把它删掉。其它客户端按同一份结构在后续里程碑加表项，改法与备份规则不变。
-
-### 5.7 凭据
+### 5.6 凭据
 
 AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「备份文件、误贴日志、共享磁盘快照」这类泄漏，不防同一台机器上以同一用户身份运行的程序。文档里明确写出这一点，不暗示更强保护。
 
@@ -236,14 +216,6 @@ CREATE TABLE requests (
   error           TEXT
 );
 
-CREATE TABLE agents (
-  name        TEXT PRIMARY KEY,
-  config_path TEXT NOT NULL,
-  backup_path TEXT,
-  model       TEXT,
-  applied_at  INTEGER
-);
-
 CREATE INDEX requests_ts ON requests(ts DESC);
 ```
 
@@ -257,7 +229,7 @@ CREATE INDEX requests_ts ON requests(ts DESC);
 | M1 | 非流式直通：anthropic → anthropic，`account` 四个子命令、`call`、`log tail` | `call` 打真实账号拿到回复，`log tail` 有记录 |
 | M2 | 翻译：anthropic → openai-chat，非流式，含工具调用 | 对拍用例覆盖 5.4 表里每一行 |
 | M3 | 流式：SSE 双向翻译 | 客户端能流式拿到 token 与工具调用 |
-| M4 | 多账号：冷却、失败转移、`usage`、`agent use/revert` | 两个账号时杀掉一个，请求自动落到另一个 |
+| M4 | 多账号：冷却、失败转移、`usage` | 两个账号时杀掉一个，请求自动落到另一个 |
 
 M0 到 M4 已实现，`make check` 与 `go test -race` 通过，端到端由 `internal/cli` 的 `TestWalkingSkeleton` 用假上游验证：初始化、加账号、`call`、`log tail`、`usage`、`doctor` 全链路走通。上游是 `httptest` 假服务，真实厂商的连通性需要拿到 key 后自行 `account test` 验证。
 
@@ -265,8 +237,8 @@ M0 到 M4 已实现，`make check` 与 `go test -race` 通过，端到端由 `in
 
 - 冷却时长按单次失败计算，不跨请求累计连续失败次数。
 - 估算花费依赖账号上的 `--price-in` 与 `--price-out`，没有价格时记为 0 并在 `usage` 末尾提示。
-- 客户端配置改写只支持 Claude Code。
 - 模型名不做别名归一，请求里的 `model` 必须与账号 `--models` 里的名字完全一致。
+- 不带任何客户端配置改写：客户端里的 base URL、token、模型名都靠自己填。
 
 之后（不在第一版）：openai-chat / responses / gemini 入站，订阅账号登录，隐私遮蔽，配置档案（profiles），价格表内置。
 
@@ -282,7 +254,6 @@ internal/account/       账号池、冷却、选号
 internal/gateway/       HTTP 入站处理、上游转发、错误映射
 internal/translate/     各协议编解码与互转（不碰网络，纯函数）
 internal/usage/         用量汇总与花费估算
-internal/agentcfg/      客户端配置读写与备份还原
 ```
 
 约束：`translate` 只做结构体到结构体的转换，不读环境、不发请求，便于用对拍用例覆盖；`gateway` 是唯一发上游请求的地方（`account test` 的探活也走 `gateway.Probe`）；`cli` 不直接连数据库，只调 `store` 与 `account`。
@@ -294,10 +265,10 @@ internal/agentcfg/      客户端配置读写与备份还原
 - 多租户、配额、充值、开票。
 - 网页后台与桌面菜单栏。
 - 逆向接口、把订阅网页版包装成 API。
+- 改写其它客户端的配置文件，不论带不带备份。
 - 跨机部署与集群。
 
 ## 10 需要外部信息才能定的点
 
 - 各家上游的默认 base-url、模型名清单、是否兼容 `openai-chat`。
 - 各家价格，用于估算花费。缺价格就记 null。
-- Claude Code 之外的客户端配置文件格式（Codex、Gemini CLI、OpenCode），逐个里程碑补。

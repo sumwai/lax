@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -25,11 +27,16 @@ var providers = map[string]providerDefault{
 	"kimi":       {baseURL: "https://api.moonshot.cn", protocol: gateway.ProtocolChat},
 	"openrouter": {baseURL: "https://openrouter.ai/api", protocol: gateway.ProtocolChat},
 	"ollama":     {baseURL: "http://127.0.0.1:11434", protocol: gateway.ProtocolChat},
+	// commandcode 上 claude-* 只接受 /messages，加账号时给 --protocol anthropic。
+	"commandcode": {
+		baseURL:  "https://api.commandcode.ai/provider/v1",
+		protocol: gateway.ProtocolChat,
+	},
 }
 
 func cmdAccount(e *Env, args []string) error {
 	if len(args) == 0 {
-		return usagef("需要子命令：add | ls | rm | test")
+		return usagef("需要子命令：add | ls | rm | test | enable | disable")
 	}
 	switch args[0] {
 	case "add":
@@ -40,15 +47,64 @@ func cmdAccount(e *Env, args []string) error {
 		return cmdAccountRm(e, args[1:])
 	case "test":
 		return cmdAccountTest(e, args[1:])
+	case "enable":
+		return cmdAccountSetEnabled(e, args[1:], "enable", true)
+	case "disable":
+		return cmdAccountSetEnabled(e, args[1:], "disable", false)
 	default:
-		return usagef("未知子命令 %q，可用：add | ls | rm | test", args[0])
+		return usagef("未知子命令 %q，可用：add | ls | rm | test | enable | disable", args[0])
 	}
+}
+
+func cmdAccountSetEnabled(e *Env, args []string, sub string, enabled bool) error {
+	fs := newFlagSet(e, "account "+sub, "启用或停用账号")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return usagef("用法：switchboard account %s <名称>", sub)
+	}
+	name := fs.Arg(0)
+
+	a, err := openApp(e, true)
+	if err != nil {
+		return err
+	}
+	defer a.Close()
+
+	acc, err := a.st.GetAccount(name)
+	if err != nil {
+		return fmt.Errorf("账号 %q 不存在", name)
+	}
+	reason := ""
+	if !enabled {
+		reason = "手工停用"
+	}
+	if err := a.st.SetEnabled(acc.ID, enabled, reason); err != nil {
+		return err
+	}
+	if enabled {
+		// 手工启用意味着人工确认过，顺手清掉冷却，不用再等。
+		if err := a.st.SetCooldown(acc.ID, 0, ""); err != nil {
+			return err
+		}
+	}
+
+	word := "已启用"
+	if !enabled {
+		word = "已停用"
+	}
+	if e.JSON {
+		return e.printJSON(map[string]any{"name": name, "enabled": enabled})
+	}
+	fmt.Fprintf(e.Stdout, "%s %s\n", word, name)
+	return nil
 }
 
 func cmdAccountAdd(e *Env, args []string) error {
 	fs := newFlagSet(e, "account add", "新增一个上游账号")
 	provider := fs.String("provider", "", "上游厂商标识，如 deepseek")
-	key := fs.String("key", "", "上游 API key；留空从环境变量 SWITCHBOARD_KEY 读")
+	key := fs.String("key", "", "上游 API key；给 - 从标准输入读，留空则读环境变量 SWITCHBOARD_KEY")
 	name := fs.String("name", "", "账号名称，也可以用位置参数给出")
 	protocol := fs.String("protocol", "", "上游线协议：openai-chat | anthropic，留空按厂商默认")
 	baseURL := fs.String("base-url", "", "上游地址，留空按厂商默认")
@@ -75,8 +131,15 @@ func cmdAccountAdd(e *Env, args []string) error {
 	if keyValue == "" {
 		keyValue = envKey()
 	}
+	if keyValue == "-" || keyValue == "--" {
+		v, err := readKeyFromStdin()
+		if err != nil {
+			return err
+		}
+		keyValue = v
+	}
 	if keyValue == "" {
-		return usagef("缺少凭据：--key 或环境变量 SWITCHBOARD_KEY")
+		return usagef("缺少凭据：--key <key>、--key - 从标准输入读，或环境变量 SWITCHBOARD_KEY")
 	}
 
 	proto := *protocol
@@ -157,6 +220,24 @@ func envKey() string {
 		}
 	}
 	return ""
+}
+
+// readKeyFromStdin 从标准输入读凭据，去掉首尾空白。
+// 直接在终端上运行且没有管道时报错，避免命令挂起等输入。
+func readKeyFromStdin() (string, error) {
+	info, statErr := os.Stdin.Stat()
+	if statErr == nil && info.Mode()&os.ModeCharDevice != 0 {
+		return "", usagef("--key - 需要从管道或文件读入，例如 switchboard account add x --provider p --key - < key.txt")
+	}
+	b, err := io.ReadAll(io.LimitReader(os.Stdin, 8<<10))
+	if err != nil {
+		return "", fmt.Errorf("读取标准输入失败: %w", err)
+	}
+	s := strings.TrimSpace(string(b))
+	if s == "" {
+		return "", usagef("标准输入是空的，没有读到凭据")
+	}
+	return s, nil
 }
 
 func cmdAccountLs(e *Env, args []string) error {

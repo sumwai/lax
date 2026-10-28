@@ -135,65 +135,68 @@ func TestWalkingSkeleton(t *testing.T) {
 	}
 }
 
-func TestAgentConfigCycle(t *testing.T) {
+func TestAccountAddReadsKeyFromStdin(t *testing.T) {
 	sandbox(t)
 	up := fakeUpstream(t)
 
 	if code, _, stderr := run(t, "init"); code != 0 {
 		t.Fatalf("init 失败: %s", stderr)
 	}
-	if code, _, stderr := run(t, "account", "add", "ds1",
-		"--provider", "custom", "--base-url", up.URL, "--key", "sk-test", "--models", "m1"); code != 0 {
+
+	saved := os.Stdin
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("建管道: %v", err)
+	}
+	if _, err := w.WriteString("  sk-test\n\n"); err != nil {
+		t.Fatalf("写管道: %v", err)
+	}
+	_ = w.Close()
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = saved; _ = r.Close() })
+
+	code, _, errOut := run(t, "account", "add", "ds1", "--provider", "custom",
+		"--base-url", up.URL, "--key", "-", "--models", "m1")
+	if code != 0 {
+		t.Fatalf("account add --key - 退出码 = %d，stderr = %s", code, errOut)
+	}
+
+	// 假上游只接受 Bearer sk-test，能调通就说明首尾空白被去掉、凭据可用。
+	code, out, errOut := run(t, "call", "hi", "--model", "m1")
+	if code != 0 {
+		t.Fatalf("call 退出码 = %d，stderr = %s", code, errOut)
+	}
+	if !strings.Contains(out, "pong") {
+		t.Fatalf("call 输出 = %s", out)
+	}
+}
+
+func TestAccountEnableDisable(t *testing.T) {
+	sandbox(t)
+	up := fakeUpstream(t)
+
+	if code, _, stderr := run(t, "init"); code != 0 {
+		t.Fatalf("init 失败: %s", stderr)
+	}
+	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
+		"--base-url", up.URL, "--key", "sk-test", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 失败: %s", stderr)
 	}
 
-	settingsPath := filepath.Join(os.Getenv("HOME"), ".claude", "settings.json")
-
-	code, out, _ := run(t, "agent", "ls", "--json")
-	if code != 0 {
-		t.Fatalf("agent ls 退出码 = %d", code)
+	if code, _, stderr := run(t, "account", "disable", "ds1"); code != 0 {
+		t.Fatalf("disable 失败: %s", stderr)
 	}
-	if !strings.Contains(out, "claude-code") {
-		t.Fatalf("agent ls = %s", out)
+	code, out, _ := run(t, "account", "ls", "--json")
+	if code != 0 || !strings.Contains(out, `"enabled": false`) || !strings.Contains(out, `"status": "停用"`) {
+		t.Fatalf("停用后状态不对: %s", out)
 	}
 
-	code, out, _ = run(t, "agent", "use", "claude-code", "--model", "m1")
-	if code != 0 {
-		t.Fatalf("agent use 退出码 = %d", code)
+	if code, _, stderr := run(t, "account", "enable", "ds1"); code != 0 {
+		t.Fatalf("enable 失败: %s", stderr)
 	}
-	if !strings.Contains(out, "将修改") || !strings.Contains(out, "--apply") {
-		t.Fatalf("未加 --apply 时应只打印差异: %s", out)
-	}
-	if _, err := os.Stat(settingsPath); err == nil {
-		t.Fatal("未加 --apply 时不应写文件")
-	}
-
-	code, out, errOut := run(t, "agent", "use", "claude-code", "--model", "m1", "--apply")
-	if code != 0 {
-		t.Fatalf("agent use --apply 退出码 = %d，stderr = %s", code, errOut)
-	}
-	if !strings.Contains(out, "已写入") {
-		t.Fatalf("输出 = %s", out)
-	}
-	b, err := os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatalf("配置文件未写入: %v", err)
-	}
-	if !strings.Contains(string(b), "http://127.0.0.1:3425") {
-		t.Fatalf("配置文件内容 = %s", b)
-	}
-
-	code, out, _ = run(t, "agent", "ls", "--json")
-	if code != 0 || !strings.Contains(out, `"points_at_switchboard": true`) {
-		t.Fatalf("agent ls 应显示已指向: %s", out)
-	}
-
-	code, _, errOut = run(t, "agent", "revert", "claude-code")
-	if code != 0 {
-		t.Fatalf("agent revert 退出码 = %d，stderr = %s", code, errOut)
-	}
-	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
-		t.Fatal("原来不存在的配置文件，还原后应被删掉")
+	code, out, _ = run(t, "account", "ls", "--json")
+	if code != 0 || !strings.Contains(out, `"enabled": true`) || !strings.Contains(out, `"status": "正常"`) {
+		t.Fatalf("启用后状态不对: %s", out)
 	}
 }
 
