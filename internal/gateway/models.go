@@ -123,26 +123,28 @@ func (s *Server) ProbeModel(ctx context.Context, a store.Account, model string) 
 	if err != nil {
 		res.Status = store.ModelError
 		res.Message = scrubSecret("上游请求失败: "+err.Error(), string(key))
+		s.recordProbeRequest(a, model, start, res, 0, 0)
 		return res, nil
 	}
 	defer resp.Body.Close()
 
 	res.HTTPStatus = resp.StatusCode
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8<<10))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+		in, out := probeUsage(a.Protocol, body)
 		res.Status = store.ModelUsable
+		s.recordProbeRequest(a, model, start, res, in, out)
 		return res, nil
 	}
 
 	msg := scrubSecret(readErrorBody(resp.Body), string(key))
 	res.Message = msg
 	lower := strings.ToLower(msg)
+	var storeErr error
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
 		res.Status = store.ModelAuthFailed
-		if err := s.store.SetEnabled(a.ID, false, msg); err != nil {
-			return res, err
-		}
+		storeErr = s.store.SetEnabled(a.ID, false, msg)
 	case resp.StatusCode == http.StatusForbidden:
 		res.Status = store.ModelForbidden
 	case resp.StatusCode == http.StatusNotFound:
@@ -156,5 +158,39 @@ func (s *Server) ProbeModel(ctx context.Context, a store.Account, model string) 
 	default:
 		res.Status = store.ModelError
 	}
-	return res, nil
+	s.recordProbeRequest(a, model, start, res, 0, 0)
+	return res, storeErr
+}
+
+// probeUsage 用该协议的 usage scanner 从响应体里读用量，读不到时为 0。
+func probeUsage(protocol string, body []byte) (in, out int64) {
+	scanner, err := translate.NewUsageScanner(protocol)
+	if err != nil {
+		return 0, 0
+	}
+	scanner.Feed(body)
+	in, out, _, _ = scanner.Usage()
+	return in, out
+}
+
+// recordProbeRequest 把探活的这次上游调用记进 requests。探活是真实计费的调用，
+// 不记就等于在用量里消失。记账失败只写日志，不改变探活结论。
+func (s *Server) recordProbeRequest(a store.Account, model string, start time.Time, res ModelProbe, in, out int64) {
+	rec := &store.RequestRecord{
+		TS:             start.Unix(),
+		Inbound:        a.Protocol,
+		Outbound:       a.Protocol,
+		ModelRequested: model,
+		ModelUsed:      model,
+		AccountID:      a.ID,
+		HTTPStatus:     res.HTTPStatus,
+		OK:             res.HTTPStatus >= 200 && res.HTTPStatus < 300,
+		InTokens:       in,
+		OutTokens:      out,
+		LatencyMS:      res.Latency.Milliseconds(),
+		Error:          res.Message,
+	}
+	if err := s.store.InsertRequest(rec); err != nil {
+		s.logf("写探活请求记录失败: %v", err)
+	}
 }

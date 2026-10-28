@@ -661,8 +661,10 @@ func cmdModelProbe(e *Env, args []string) error {
 	accountName := fs.String("account", "", "只处理这个账号")
 	syncFirst := fs.Bool("sync", false, "探活前先拉一次上游模型列表")
 	only := fs.String("model", "", "只探这一个模型")
-	limit := fs.Int("limit", 0, "每个账号最多探多少个模型，0 表示全部")
+	limit := fs.Int("limit", 0, "每个账号最多探多少个待探模型，0 表示全部")
 	concurrency := fs.Int("concurrency", 4, "并发数")
+	maxAge := fs.Duration("max-age", 24*time.Hour, "已探过的结论新鲜多久，超期重探；0 与 --refresh 等价")
+	refresh := fs.Bool("refresh", false, "忽略新鲜度，全部重探")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -694,7 +696,8 @@ func cmdModelProbe(e *Env, args []string) error {
 		Message    string `json:"message"`
 	}
 
-	var hits []hit
+	// 跳过的不进 hits，--json 只给被探的模型；空结果是 [] 而不是 null。
+	hits := make([]hit, 0, len(accounts))
 	usableByAccount := map[string]int{}
 	authFailed := ""
 	syncFailed := 0
@@ -729,26 +732,32 @@ func cmdModelProbe(e *Env, args []string) error {
 		}
 
 		targets := make([]string, 0, len(rows))
-		if *only != "" {
-			targets = append(targets, *only)
-		} else {
-			for _, r := range rows {
-				targets = append(targets, r.Model)
+		freshEnabled := !*refresh && *maxAge > 0
+		now := time.Now()
+		skipped := 0
+		for _, c := range probeCandidates(rows, *only) {
+			if freshEnabled && settledFresh(c.status, c.checkedAt, now, *maxAge) {
+				skipped++
+				continue
 			}
+			targets = append(targets, c.model)
 		}
-		if len(targets) == 0 {
+		if len(targets) == 0 && skipped == 0 {
 			if !e.JSON {
 				fmt.Fprintf(e.Stdout, "%s：没有可探的模型，先运行 switchboard model sync --account %s\n", acc.Name, acc.Name)
 			}
 			continue
 		}
+		// --limit 截断的是跳过之后剩下的待探模型，跳过的模型不占额度。
 		if *limit > 0 && len(targets) > *limit {
 			targets = targets[:*limit]
 		}
 
-		results, err := probeModels(ctx, gs, a.st, acc, targets, *concurrency)
-		if err != nil {
-			return err
+		var results []gateway.ModelProbe
+		if len(targets) > 0 {
+			if results, err = probeModels(ctx, gs, a.st, acc, targets, *concurrency); err != nil {
+				return err
+			}
 		}
 
 		var counts = map[string]int{}
@@ -771,6 +780,7 @@ func cmdModelProbe(e *Env, args []string) error {
 
 		// 选号列表取库里全部 usable，不是本次探出来的那几个：
 		// 用 --limit 或 --model 只探一部分时，之前探出来的可用模型不该被丢掉。
+		// 待探模型被全部跳过时也走这里：结论都还在新鲜期内，不该因为「这次什么都没探」报错。
 		after, err := a.st.AccountModels(acc.ID)
 		if err != nil {
 			return err
@@ -783,7 +793,7 @@ func cmdModelProbe(e *Env, args []string) error {
 		}
 		if len(usable) == 0 {
 			if !e.JSON {
-				fmt.Fprintf(e.Stdout, "%s：本次探活 %d 个，库里无一可用，模型列表保持原样\n", acc.Name, len(results))
+				fmt.Fprintf(e.Stdout, "%s：本次探活 %d 个，跳过 %d 个，库里无一可用，模型列表保持原样\n", acc.Name, len(results), skipped)
 			}
 			continue
 		}
@@ -792,8 +802,8 @@ func cmdModelProbe(e *Env, args []string) error {
 		}
 		usableByAccount[acc.Name] = len(usable)
 		if !e.JSON {
-			fmt.Fprintf(e.Stdout, "%s：本次探活 %d 个，可用 %d，无权 %d，不存在 %d，失败 %d；选号列表共 %d 个\n",
-				acc.Name, len(results), counts[store.ModelUsable], counts[store.ModelForbidden],
+			fmt.Fprintf(e.Stdout, "%s：本次探活 %d 个，跳过 %d 个，可用 %d，无权 %d，不存在 %d，失败 %d；选号列表共 %d 个\n",
+				acc.Name, len(results), skipped, counts[store.ModelUsable], counts[store.ModelForbidden],
 				counts[store.ModelNotFound], counts[store.ModelError], len(usable))
 		}
 	}
@@ -830,6 +840,48 @@ func cmdModelProbe(e *Env, args []string) error {
 		return fmt.Errorf("%d 个账号同步失败", syncFailed)
 	}
 	return nil
+}
+
+// probeCandidate 是一个待判定的模型。status 与 checkedAt 取库里已有结论，
+// 没有对应行时为零值，即「从未探过」。
+type probeCandidate struct {
+	model     string
+	status    string
+	checkedAt int64
+}
+
+// probeCandidates 列出这一轮要考虑的模型。给了 --model 就只算那一个（库里没行也照探），
+// 否则按库里的模型行。
+func probeCandidates(rows []store.AccountModel, only string) []probeCandidate {
+	if only != "" {
+		c := probeCandidate{model: only}
+		for _, r := range rows {
+			if r.Model == only {
+				c.status, c.checkedAt = r.Status, r.CheckedAt
+				break
+			}
+		}
+		return []probeCandidate{c}
+	}
+	out := make([]probeCandidate, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, probeCandidate{model: r.Model, status: r.Status, checkedAt: r.CheckedAt})
+	}
+	return out
+}
+
+// settledFresh 判断一个模型的结论是否还在新鲜期内：状态有定论（可用 / 无权 / 不存在），
+// checked_at 非 0 且距今不超过 maxAge。其余状态（待探活 / 凭据被拒 / 失败）没有定论，必须重探。
+func settledFresh(status string, checkedAt int64, now time.Time, maxAge time.Duration) bool {
+	switch status {
+	case store.ModelUsable, store.ModelForbidden, store.ModelNotFound:
+	default:
+		return false
+	}
+	if checkedAt <= 0 {
+		return false
+	}
+	return now.Sub(time.Unix(checkedAt, 0)) <= maxAge
 }
 
 // probeModels 用固定大小的 worker pool 并发探活一个账号的模型。

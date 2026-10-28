@@ -85,8 +85,8 @@ func ScanSSE(r io.Reader, fn func(event string, data []byte) error) error {
 	return sc.Err()
 }
 
-// AnthropicUsageScanner 从 anthropic 的流式响应里读出用量与结束原因，
-// 用于同协议直通时记账，不改动转发的内容。
+// AnthropicUsageScanner 从 anthropic 的响应里读出用量与结束原因（流式帧或非流式响应体），
+// 用于同协议直通与探活时记账，不改动转发的内容。
 type AnthropicUsageScanner struct {
 	in, out    int64
 	cacheRead  int64
@@ -132,6 +132,14 @@ func (s *AnthropicUsageScanner) Feed(data []byte) {
 		}
 		if env.Delta != nil && env.Delta.StopReason != "" {
 			s.stopReason = env.Delta.StopReason
+		}
+	case "message":
+		// 非流式响应体：整条 message 一次给全，探活就按它记账。
+		if env.Usage != nil {
+			s.in = env.Usage.InputTokens
+			s.out = env.Usage.OutputTokens
+			s.cacheRead = env.Usage.CacheReadInputTokens
+			s.cacheWrite = env.Usage.CacheCreationInputTokens
 		}
 	}
 }

@@ -1079,32 +1079,41 @@ func (e *responsesStreamEncoder) event(name string, fields map[string]any) SSEEv
 	return SSEEvent{Event: name, Data: b}
 }
 
-// responsesUsageScanner 从同协议直通的 Responses 流里读出用量，不改动转发内容。
+// responsesUsageScanner 从 Responses 的响应里读出用量，不改动转发内容。
+// 流式帧读收尾事件的嵌套 usage，非流式响应体读顶层 usage（探活走这条）。
 type responsesUsageScanner struct {
 	in, out, cacheRead int64
 }
 
-// Feed 送入一条 data 帧，只认带 usage 的收尾事件。
+// Feed 送入一条 data 帧或一份完整响应体。
 func (s *responsesUsageScanner) Feed(data []byte) {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return
 	}
 
-	var env responsesStreamEvent
+	var env struct {
+		responsesStreamEvent
+		Usage *responsesUsage `json:"usage"`
+	}
 	if err := json.Unmarshal(trimmed, &env); err != nil {
 		return
 	}
 	switch env.Type {
 	case "response.completed", "response.incomplete":
-	default:
-		return
+		if env.Response == nil || env.Response.Usage == nil {
+			return
+		}
+		s.set(env.Response.Usage)
+	case "":
+		// 非流式响应体没有事件名，usage 在顶层。
+		if env.Usage != nil {
+			s.set(env.Usage)
+		}
 	}
-	if env.Response == nil || env.Response.Usage == nil {
-		return
-	}
+}
 
-	u := env.Response.Usage
+func (s *responsesUsageScanner) set(u *responsesUsage) {
 	s.in = u.InputTokens
 	s.out = u.OutputTokens
 	s.cacheRead = 0

@@ -361,3 +361,113 @@ func TestProbeModelUnwrapsNestedErrorBody(t *testing.T) {
 		t.Fatalf("备注里不应残留嵌套报文: %s", res.Message)
 	}
 }
+
+// 探活是真实计费的调用，成功那次也要在 requests 里留一行，token 从响应体读。
+func TestProbeModelRecordsRequestRow(t *testing.T) {
+	f := newFixture(t)
+
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"msg_1","type":"message","content":[{"type":"text","text":"p"}],"usage":{"input_tokens":13,"output_tokens":1}}`)
+	}))
+	defer up.Close()
+
+	acc := f.add(t, "claude1", gateway.ProtocolAnthropic, up.URL, "sk-ant-test", []string{"claude-x"}, 100)
+	gs := newGateway(t, f)
+
+	if _, err := gs.ProbeModel(context.Background(), acc, "claude-x"); err != nil {
+		t.Fatalf("探活: %v", err)
+	}
+
+	recs, err := f.st.RecentRequests(10)
+	if err != nil {
+		t.Fatalf("读请求记录: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("探活应写 1 行请求记录，实际 %d 行", len(recs))
+	}
+	rec := recs[0]
+	if rec.Inbound != gateway.ProtocolAnthropic || rec.Outbound != gateway.ProtocolAnthropic {
+		t.Fatalf("入站与出站都应取账号协议，实际 %s→%s", rec.Inbound, rec.Outbound)
+	}
+	if rec.ModelRequested != "claude-x" || rec.ModelUsed != "claude-x" {
+		t.Fatalf("模型字段 = %q / %q", rec.ModelRequested, rec.ModelUsed)
+	}
+	if rec.AccountID != acc.ID {
+		t.Fatalf("账号 id = %d，期望 %d", rec.AccountID, acc.ID)
+	}
+	if rec.HTTPStatus != http.StatusOK || !rec.OK {
+		t.Fatalf("状态 = %d，ok = %v", rec.HTTPStatus, rec.OK)
+	}
+	if rec.InTokens != 13 || rec.OutTokens != 1 {
+		t.Fatalf("token = %d/%d，期望 13/1", rec.InTokens, rec.OutTokens)
+	}
+	if rec.TS == 0 {
+		t.Fatal("请求记录应带开始时间")
+	}
+}
+
+// 失败与网络错误同样各记一行，token 记 0，凭据不进库。
+func TestProbeModelRecordsFailedRequest(t *testing.T) {
+	t.Run("上游 403", func(t *testing.T) {
+		f := newFixture(t)
+		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = io.WriteString(w, `{"error":{"message":"套餐不含该模型"}}`)
+		}))
+		defer up.Close()
+
+		acc := f.add(t, "ds1", gateway.ProtocolChat, up.URL, "sk-test", []string{"m1"}, 100)
+		gs := newGateway(t, f)
+		if _, err := gs.ProbeModel(context.Background(), acc, "m1"); err != nil {
+			t.Fatalf("探活: %v", err)
+		}
+
+		recs, err := f.st.RecentRequests(10)
+		if err != nil {
+			t.Fatalf("读请求记录: %v", err)
+		}
+		if len(recs) != 1 {
+			t.Fatalf("应写 1 行请求记录，实际 %d 行", len(recs))
+		}
+		rec := recs[0]
+		if rec.HTTPStatus != http.StatusForbidden || rec.OK {
+			t.Fatalf("状态 = %d，ok = %v", rec.HTTPStatus, rec.OK)
+		}
+		if rec.InTokens != 0 || rec.OutTokens != 0 {
+			t.Fatalf("非 2xx 的 token 应记 0，实际 %d/%d", rec.InTokens, rec.OutTokens)
+		}
+		if !strings.Contains(rec.Error, "套餐") {
+			t.Fatalf("应记下错误摘要，实际 %q", rec.Error)
+		}
+	})
+
+	t.Run("网络错误", func(t *testing.T) {
+		f := newFixture(t)
+		acc := f.add(t, "ds1", gateway.ProtocolChat, "http://127.0.0.1:1", "sk-test", []string{"m1"}, 100)
+		gs := newGateway(t, f)
+		if _, err := gs.ProbeModel(context.Background(), acc, "m1"); err != nil {
+			t.Fatalf("探活: %v", err)
+		}
+
+		recs, err := f.st.RecentRequests(10)
+		if err != nil {
+			t.Fatalf("读请求记录: %v", err)
+		}
+		if len(recs) != 1 {
+			t.Fatalf("应写 1 行请求记录，实际 %d 行", len(recs))
+		}
+		rec := recs[0]
+		if rec.HTTPStatus != 0 || rec.OK {
+			t.Fatalf("网络错误时状态应记 0 且不 ok，实际 %d/%v", rec.HTTPStatus, rec.OK)
+		}
+		if rec.InTokens != 0 || rec.OutTokens != 0 {
+			t.Fatalf("网络错误时 token 应记 0，实际 %d/%d", rec.InTokens, rec.OutTokens)
+		}
+		if rec.Error == "" {
+			t.Fatal("网络错误也应记下摘要")
+		}
+		if strings.Contains(rec.Error, "sk-test") {
+			t.Fatalf("错误摘要泄漏了凭据: %s", rec.Error)
+		}
+	})
+}

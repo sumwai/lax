@@ -702,3 +702,13 @@ func TestResponsesUsageScanner(t *testing.T) {
 		t.Fatalf("incomplete 用量 = %d/%d/%d/%d", in, out, cacheRead, cacheWrite)
 	}
 }
+
+// TestResponsesUsageScannerNonStream 确认非流式响应体里的顶层 usage 也能读到，探活记账走这条。
+func TestResponsesUsageScannerNonStream(t *testing.T) {
+	var sc responsesUsageScanner
+	sc.Feed([]byte(`{"id":"resp_1","object":"response","status":"completed","output":[],"usage":{"input_tokens":9,"output_tokens":1,"total_tokens":10,"input_tokens_details":{"cached_tokens":4}}}`))
+	in, out, cacheRead, cacheWrite := sc.Usage()
+	if in != 9 || out != 1 || cacheRead != 4 || cacheWrite != 0 {
+		t.Fatalf("用量 = %d/%d/%d/%d，期望 9/1/4/0", in, out, cacheRead, cacheWrite)
+	}
+}

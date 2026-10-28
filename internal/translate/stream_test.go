@@ -55,6 +55,16 @@ func TestAnthropicUsageScanner(t *testing.T) {
 	}
 }
 
+func TestAnthropicUsageScannerNonStream(t *testing.T) {
+	var sc AnthropicUsageScanner
+	// 非流式响应体里 type 是 message，usage 在顶层，探活记账走这条。
+	sc.Feed([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"p"}],"usage":{"input_tokens":13,"output_tokens":1,"cache_read_input_tokens":2,"cache_creation_input_tokens":5}}`))
+	in, out, cacheRead, cacheWrite := sc.Usage()
+	if in != 13 || out != 1 || cacheRead != 2 || cacheWrite != 5 {
+		t.Fatalf("用量 = %d/%d/%d/%d，期望 13/1/2/5", in, out, cacheRead, cacheWrite)
+	}
+}
+
 func TestNormalizeStop(t *testing.T) {
 	cases := map[string]string{
 		"":                  StopEndTurn,

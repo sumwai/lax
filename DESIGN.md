@@ -55,14 +55,14 @@ $ switchboard model sync --account deepseek-1
 deepseek-1  deepseek  47    47
 下一步：switchboard model probe（每个模型发一条 max_tokens=1 的请求）
 
-# 4 逐个探活，能用的才进选号
+# 4 逐个探活，能用的才进选号。已经探过且结论还新鲜（默认 24h 内）的模型会跳过，不花钱
 $ switchboard model probe --account deepseek-1
 账号        模型              状态  HTTP  耗时   备注
 deepseek-1  deepseek-v4-pro   可用  200   412ms
 deepseek-1  deepseek-v4-fast  可用  200   388ms
 deepseek-1  deepseek-r1       无权  403   121ms  套餐不含该模型
 …（其余 44 行略）
-deepseek-1：探活 47 个，可用 2，无权 45，不存在 0，失败 0；已写入选号列表
+deepseek-1：本次探活 47 个，跳过 0 个，可用 2，无权 45，不存在 0，失败 0；选号列表共 2 个
 已把 2 个可用模型写进 deepseek-1，选号按这个列表走
 
 # 5 看一眼
@@ -132,7 +132,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | `account disable` | `<名称>` | 停用账号，不再参与选号 | 确认一行 |
 | `model ls` | `[--provider 厂商]` `[--account 账号]` `--json` | 按模型名列出可用账号与计价来源；`account_models` 有数据时每个账号带状态（可用 / 待探活 / 无权 / 不存在 / 凭据被拒 / 失败），没有任何模型行时回退到 `accounts.models` 并标「手填」 | 表格 |
 | `model sync` | `[--provider 厂商]` `[--account 账号]` | 对选中的账号 GET 上游模型列表：地址由 `base_url` 推出，末尾是 `/v1` 就补 `/models`，否则补 `/v1/models`；解析 `{data:[{id}]}`，按名字排序去重，空列表算该账号失败。结果写 `account_models`：新行状态 `synced`，已有行保留探活状态，上游已消失的行删除。只改 `account_models`，不动 `accounts.models`。某个账号失败时其余账号照常处理完 | 表格（账号 / 厂商 / 模型 / 新增 / 备注）与下一步 `model probe` 的提示；`--json` 是数组，每项 `account`、`provider`、`models`、`added`、`error`（只有失败才有） |
-| `model probe` | `[--provider 厂商]` `[--account 账号]` `[--sync]` `[--model 模型]` `[--limit N]` `[--concurrency N]` | 逐账号对每个模型发一条 `max_tokens=1` 的请求判定可用性，结果写 `account_models`；该账号库里出现 `usable` 时，把库里**全部** `usable` 写成该账号的 `accounts.models`（不只是本次探到的），选号从此按该列表。没有模型行或带 `--sync` 时先同步；`--model` 只探一个模型名，`--limit` 是每个账号的上限，`--concurrency` 默认 4 且不超过待探模型数；任一账号出现 401 即停止后续账号并返回错误；所有账号都没探出可用模型时退出码 1 且不改任何 `accounts.models` | 表格（账号 / 模型 / 状态 / HTTP / 耗时 / 备注）与该账号的可用 / 无权 / 不存在 / 失败计数；`--json` 是数组，每项 `account`、`model`、`status`、`http_status`、`latency_ms`、`message`，计数只出现在人读输出里 |
+| `model probe` | `[--provider 厂商]` `[--account 账号]` `[--sync]` `[--model 模型]` `[--limit N]` `[--concurrency N]` `[--max-age 时长]` `[--refresh]` | 逐账号对每个模型发一条 `max_tokens=1` 的请求判定可用性，结果写 `account_models`；每次上游调用同时写一行 `requests`（见 5.5）。`status` 为 `usable`、`forbidden`、`notfound` 之一且 `checked_at` 在 `--max-age`（默认 `24h`）以内的模型跳过，不发上游请求、不写库、不出现在输出里；`synced`、`auth`、`error` 与 `checked_at` 为 0 的照常探；`--refresh` 或 `--max-age 0` 忽略新鲜度全部重探。该账号库里出现 `usable` 时，把库里**全部** `usable` 写成该账号的 `accounts.models`（不只是本次探到的），选号从此按该列表。没有模型行或带 `--sync` 时先同步；`--model` 只探一个模型名，`--limit` 截断的是跳过之后剩下的待探模型，`--concurrency` 默认 4 且不超过待探模型数；待探模型被全部跳过时仍按库里 `usable` 回写 `accounts.models`，该账号算作已满足；任一账号出现 401 即停止后续账号并返回错误；所有账号都没探出可用模型时退出码 1 且不改任何 `accounts.models` | 表格（账号 / 模型 / 状态 / HTTP / 耗时 / 备注）与该账号的「本次探活 N 个 / 跳过 M 个」和可用 / 无权 / 不存在 / 失败计数；`--json` 是数组，每项 `account`、`model`、`status`、`http_status`、`latency_ms`、`message`，只含本次被探的模型，计数只出现在人读输出里 |
 | `usage` | `--since`、`--by account\|model\|day` | 汇总请求数、token、估算花费 | 表格 |
 | `log tail` | `-n`、`--follow` | 最近的请求记录；`--follow` 跟随 | 表格 |
 | `call` | `[提示词] --model [--protocol] [--debug] [--json]` | 绕过客户端直连本进程，打印选号过程；默认发 anthropic 入站，`--protocol` 可在 anthropic、chat、responses 之间切换 | 响应，或 debug 轨迹 |
@@ -249,6 +249,8 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 
 `inbound` 与 `outbound` 两列记的是这一行实际用到的协议对，转换时两列不同，直通时两列相同。除输入与输出 token，`cache_read` 与 `cache_write` 也会写入：anthropic 的缓存读与缓存写分别取自 `cache_read_input_tokens` 与 `cache_creation_input_tokens`；chat 与 responses 只带缓存读（`cached_tokens`），这两家的缓存写记为 0。直通与转换两条路径都会填这几个字段。
 
+`model probe` 的 `max_tokens=1` 调用同样写一行。这类行的取值：`ts` 是这次请求的开始时间；`inbound` 与 `outbound` 都取账号的 `protocol`，探活就是「用账号自己的协议直连上游」；`model_requested` 与 `model_used` 都取被探的模型名；`account_id` 取账号 id；`http_status` 与 `ok` 取上游响应，`ok` 表示 2xx；`in_tokens`、`out_tokens` 用该账号协议的 usage scanner 从响应体读，非 2xx 与网络错误记 0；`latency_ms` 是这次请求的耗时；`error` 是错误摘要，与探活结果一样过 `scrubSecret`，凭据不进库。这类行因此也进 `usage` 的汇总。
+
 估算花费需要价格表；价格表第一版放在账号上（`--price-in / --price-out`，单位每百万 token），缺省则花费记为 null，不猜价格。
 
 ### 5.6 凭据
@@ -269,7 +271,7 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 - 这条命令只改 `account_models`，不动 `accounts.models`，所以同步本身不改变选号结果。
 - 某个账号失败不打断其余账号：全部处理完才返回，退出码 1，失败原因写在那一个账号的备注列。
 
-`model probe [--provider 厂商] [--account 账号] [--sync] [--model 模型] [--limit N] [--concurrency N]` 只解决后者：逐账号处理，对该账号的每个模型发一条 `max_tokens=1` 的请求，按响应判定可用性。
+`model probe [--provider 厂商] [--account 账号] [--sync] [--model 模型] [--limit N] [--concurrency N] [--max-age 时长] [--refresh]` 只解决后者：逐账号处理，对该账号的每个模型发一条 `max_tokens=1` 的请求，按响应判定可用性。判定结果连同时间写进 `account_models.checked_at`，下一轮按它决定哪些模型不用再花钱。
 
 | 上游响应 | 状态 | 含义与处理 |
 | --- | --- | --- |
@@ -283,14 +285,19 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 参数与处理顺序：
 
 - 该账号没有模型行，或给了 `--sync` 时，先同步一次，不需要手工跑两遍。自动同步失败的账号跳过不探，其余账号照常处理，最终退出码 1。
+- 增量跳过：模型同时满足「`account_models.status` 是 `usable`、`forbidden`、`notfound` 之一」与「`checked_at` 距当前不超过 `--max-age`」时跳过，不发上游请求。这三种状态都有定论，重探一遍结论不会变，跳过省下的是真实计费调用。`synced`（从未探过）、`auth`、`error` 没有定论，照常探活；`checked_at` 为 0 视为不新鲜。
+- `--refresh` 忽略新鲜度全部重探，`--max-age 0` 与它等价。`--max-age` 默认 `24h`，新鲜度对 `--model` 指定的单模型同样生效，`--refresh` 可以强制重探。
+- 跳过的模型不写库、不产生输出行，`--json` 里也就没有它们。
 - `--model <模型>` 只探指定的一个模型名。
-- `--limit N` 是每个账号的上限，不是整次探活的上限：多账号时每个账号各有 N 个额度。
+- `--limit N` 截断的是跳过之后剩下的待探模型，不是库里的模型总数：多账号时每个账号各有 N 个额度，跳过的模型不占额度。
 - `--concurrency N` 改并发，默认 4，且不超过待探的模型数。
-- 一个账号探完立刻写回结果并打印该账号的「可用 / 无权 / 不存在 / 失败」计数，再处理下一个账号。
+- 一个账号探完立刻写回结果并打印该账号的「本次探活 / 跳过 / 可用 / 无权 / 不存在 / 失败」计数，再处理下一个账号。
 
-探活是要花钱的。每个模型的一次判定都是一次真实的上游调用，`max_tokens=1` 也照样计入上游账单与速率限制，所以模型多的账号用 `--limit` 控制这一次的花费。
+探活是要花钱的。每个模型的一次判定都是一次真实的上游调用，`max_tokens=1` 也照样计入上游账单与速率限制，所以模型多的账号用 `--limit` 控制这一次的花费，重复跑同一批账号靠 `--max-age` 与 `--refresh` 控制。这些调用各写一行 `requests`，`usage` 与 `log tail` 里都能看到（见 5.5）。
 
 任何一个账号碰到 401，整次探活就停下并返回错误：凭据都不行了，继续探下去只是重复同一条错误。此时该账号已被停用，后续账号不再处理，其余结论不作数，也不会写回 `accounts.models`——即使同批里已经探出了可用模型，也不写，避免把一次凭据故障当成新的事实。
+
+一个账号的待探模型被全部跳过时，这次一条上游请求都不发，但仍按库里全部 `usable` 回写该账号的 `accounts.models`，并把该账号算作已满足：退出码保持 0，不落到「没有账号探出可用模型」的错误分支上。跳过说明结论还在有效期内，没有理由因为「这次什么都没探」而报错或丢掉选号列表。
 
 探活结果反过来成为选号依据：一个账号只要库里至少一个模型是 `usable`，就把库里全部 `usable` 写成该账号的 `accounts.models`，5.2 与 5.3 的候选集合从此按这份列表算。取全库而非本次结果，是因为 `--limit` 与 `--model` 都可能只探一部分：只探两个却把另外三个之前探通的模型从选号里除掉，属于退化。某账号零个可用模型时只写 `account_models`，不改它的 `accounts.models`，账号原有列表保持不变，避免一次网络抖动就把账号清空。所有账号都没探出可用模型时退出码 1，且不改任何 `accounts.models`。
 
@@ -369,8 +376,6 @@ M0 到 M6 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkele
 - 估算花费依赖账号上的 `--price-in` 与 `--price-out`，没有价格时记为 0 并在 `usage` 末尾提示。
 - 模型名不做别名归一，请求里的 `model` 必须与账号 `--models` 里的名字完全一致。
 - 不带任何客户端配置改写：客户端里的 base URL、token、模型名都靠自己填。
-- 探活不做增量跳过：`model probe` 不看 `checked_at`，每次都重探目标模型，只靠 `--limit` 截断。
-- 探活不记花费：这些 `max_tokens=1` 的调用不进 `requests`，`usage` 里也看不到。
 - 探活并发默认 4，`--concurrency` 可以改，只是默认值，不会根据上游限速自适应。
 - gemini 协议进出都没有实现：既没有入站路径，也不在账号的 `protocol` 可选值里。
 - 思考与推理内容在转换时丢弃：anthropic 的 `thinking` 块、chat 的 `reasoning_content`、responses 的 `reasoning` item 都不进中间表示。
