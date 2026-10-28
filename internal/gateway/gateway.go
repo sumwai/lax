@@ -40,6 +40,11 @@ type Options struct {
 	Now    func() time.Time
 	// DumpBodies 为真时把发往上游的请求体也打出来，供排障用。
 	DumpBodies bool
+	// RouteProtocols 给出探活一个模型时该试哪些协议：入参是账号的厂商与模型名，返回按优先
+	// 次序排好的候选（nil 表示没有意见）。不注入时用该厂商在 provider_routes 里声明过的协议
+	// （见 DESIGN 5.8），厂商没声明就三种全试。账号协议与库里已发现的协议由网关排在候选前面
+	// （见 routeProtocolOrder），取值只认三种线协议，出现别的值直接报错，不会静默落进 chat 分支。
+	RouteProtocols func(provider, model string) []string
 }
 
 // Server 是网关。
@@ -50,6 +55,8 @@ type Server struct {
 	logf       func(format string, args ...any)
 	now        func() time.Time
 	dumpBodies bool
+	// routeProtocols 是 Options.RouteProtocols 的原样保存，nil 表示用库里的厂商路由。
+	routeProtocols func(provider, model string) []string
 }
 
 // New 构造网关。
@@ -60,7 +67,8 @@ func New(o Options) (*Server, error) {
 	if len(o.Key) == 0 {
 		return nil, errors.New("缺少解密密钥")
 	}
-	s := &Server{store: o.Store, key: o.Key, client: o.Client, logf: o.Logf, now: o.Now, dumpBodies: o.DumpBodies}
+	s := &Server{store: o.Store, key: o.Key, client: o.Client, logf: o.Logf, now: o.Now,
+		dumpBodies: o.DumpBodies, routeProtocols: o.RouteProtocols}
 	if s.client == nil {
 		s.client = &http.Client{Timeout: 0}
 	}
@@ -330,7 +338,7 @@ func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store
 func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, inbound string, raw []byte,
 	req *translate.Request, key string) (*http.Request, error) {
 
-	endpoint := Endpoint(a.BaseURL, outbound)
+	endpoint := s.endpoint(a, outbound)
 
 	var body []byte
 	var err error
@@ -542,7 +550,8 @@ func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, p
 	return res
 }
 
-// Endpoint 由 base_url 与协议推出上游地址。base_url 末尾带不带 /v1 都行。
+// Endpoint 是 base_url 加协议的后缀猜测，作为没有厂商路由时的兜底：末尾带不带 /v1 都行。
+// 正常路径上的地址走 Server.endpoint（按 (厂商, 协议) 查 provider_routes）。
 func Endpoint(base, protocol string) string {
 	base = strings.TrimRight(base, "/")
 	suffix := "/chat/completions"
@@ -556,6 +565,31 @@ func Endpoint(base, protocol string) string {
 		return base + suffix
 	}
 	return base + "/v1" + suffix
+}
+
+// endpoint 解析账号在某种协议上的上游地址：厂商在 provider_routes 里声明过这条协议就用
+// base_url 拼上它的 path；没有厂商行、或这家没有该协议的路由时退回后缀猜测（见 DESIGN 5.8）。
+// 自建地址的账号（provider 不在表里）因此仍然可用。
+func (s *Server) endpoint(a store.Account, protocol string) string {
+	route, ok, err := s.store.LookupProviderRoute(a.Provider, protocol)
+	if err != nil {
+		s.logf("读厂商 %s 的 %s 路由失败，按 base-url 猜路径: %v", a.Provider, protocol, err)
+		return Endpoint(a.BaseURL, protocol)
+	}
+	if !ok || strings.TrimSpace(route.Path) == "" {
+		return Endpoint(a.BaseURL, protocol)
+	}
+	return joinEndpoint(a.BaseURL, route.Path)
+}
+
+// joinEndpoint 把 base_url 与路由里的完整路径拼起来：只去 base_url 末尾的斜杠并补 path 开头的斜杠，
+// 其余一律照抄，不推 /v1、不猜后缀。
+func joinEndpoint(base, path string) string {
+	base = strings.TrimRight(base, "/")
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return base + path
 }
 
 // setAuth 按协议给上游请求配好凭据头。

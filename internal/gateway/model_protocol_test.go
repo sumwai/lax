@@ -53,6 +53,23 @@ func (r *callRecorder) all() []upstreamCall {
 	return out
 }
 
+// probeRetryNoteTest 是 gateway 写在「换协议前的尝试」那几行错误摘要里的前缀。
+// 这一行不是这次探活的判定，只能按它区分。
+const probeRetryNoteTest = "换协议前的尝试"
+
+// probeVerdict 从探活写下的记录里挑出判定行：错误摘要不带换协议前缀的那一行。
+// RecentRequests 按时间倒序返回，判定行未必是第一条，所以整表找。
+func probeVerdict(t *testing.T, recs []store.RequestRecord) store.RequestRecord {
+	t.Helper()
+	for _, r := range recs {
+		if !strings.Contains(r.Error, probeRetryNoteTest) {
+			return r
+		}
+	}
+	t.Fatalf("请求记录里找不到判定行: %+v", recs)
+	return store.RequestRecord{}
+}
+
 // probeAnthropicOK 是一条合法的 anthropic 响应，分开写是为了让断言能整段比对。
 const probeAnthropicOK = `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"pong"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":1}}`
 
@@ -128,19 +145,26 @@ func TestProbeModelDiscoversProtocol(t *testing.T) {
 				t.Fatalf("模型行的协议 = %+v，期望 claude-x → anthropic", rows)
 			}
 
-			// 判定那次记一行请求记录，协议对都用实际用的协议。
+			// 每次上游调用各记一行：换协议前的失败一次，成功一次。
 			recs, err := f.st.RecentRequests(10)
 			if err != nil {
 				t.Fatalf("读请求记录: %v", err)
 			}
-			if len(recs) != 1 {
-				t.Fatalf("请求记录数 = %d，期望 1（只记得出判定的那次）", len(recs))
+			if len(recs) != 2 {
+				t.Fatalf("请求记录数 = %d，期望 2（换协议前的尝试也各记一行）", len(recs))
 			}
+			// 倒序：第一条是得出判定的成功那次。
 			if recs[0].Inbound != gateway.ProtocolAnthropic || recs[0].Outbound != gateway.ProtocolAnthropic {
-				t.Fatalf("探活行的协议对 = %s→%s，期望 anthropic→anthropic", recs[0].Inbound, recs[0].Outbound)
+				t.Fatalf("判定行的协议对 = %s→%s，期望 anthropic→anthropic", recs[0].Inbound, recs[0].Outbound)
 			}
-			if recs[0].InTokens != 3 || recs[0].OutTokens != 1 {
-				t.Fatalf("token = %d/%d，期望 3/1", recs[0].InTokens, recs[0].OutTokens)
+			if recs[0].InTokens != 3 || recs[0].OutTokens != 1 || !recs[0].OK {
+				t.Fatalf("判定行 = %+v，期望 ok 且 token 3/1", recs[0])
+			}
+			if recs[1].Outbound != gateway.ProtocolChat || recs[1].OK {
+				t.Fatalf("换协议前的行 = %+v，期望出站 chat 且不 ok", recs[1])
+			}
+			if !strings.Contains(recs[1].Error, probeRetryNoteTest) {
+				t.Fatalf("换协议前的行应写明不是结论，实际 %q", recs[1].Error)
 			}
 		})
 	}
@@ -276,8 +300,17 @@ func TestProbeModelAllProtocolsFailKeepsAccountVerdict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读请求记录: %v", err)
 	}
-	if len(recs) != 1 || recs[0].HTTPStatus != http.StatusNotFound || recs[0].Outbound != gateway.ProtocolChat {
-		t.Fatalf("请求记录 = %+v，期望一行 404 且出站是 chat", recs)
+	if len(recs) != 3 {
+		t.Fatalf("请求记录数 = %d，期望 3（三种协议各一行）", len(recs))
+	}
+	verdict := probeVerdict(t, recs)
+	if verdict.HTTPStatus != http.StatusNotFound || verdict.Outbound != gateway.ProtocolChat {
+		t.Fatalf("判定行 = %+v，期望 404 且出站是 chat", verdict)
+	}
+	for _, r := range recs {
+		if r.Outbound != verdict.Outbound && !strings.Contains(r.Error, probeRetryNoteTest) {
+			t.Fatalf("换协议前的行应写明不是结论: %+v", r)
+		}
 	}
 }
 
@@ -461,11 +494,16 @@ func TestProbeNeverLeaksKeyInLogsAndRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读请求记录: %v", err)
 	}
-	if len(recs) != 1 {
-		t.Fatalf("请求记录数 = %d，期望 1", len(recs))
+	if len(recs) != 3 {
+		t.Fatalf("请求记录数 = %d，期望 3（换协议前的尝试也各记一行）", len(recs))
 	}
-	if strings.Contains(recs[0].Error, key) {
-		t.Fatalf("请求记录泄漏了凭据: %+v", recs[0])
+	for _, r := range recs {
+		if strings.Contains(r.Error, key) {
+			t.Fatalf("请求记录泄漏了凭据: %+v", r)
+		}
+		if r.TS == 0 {
+			t.Fatalf("探活行必须有开始时间，不能写成 1970: %+v", r)
+		}
 	}
 
 	// 库里只有密文：account 行解出来的字节里不该出现明文。

@@ -187,7 +187,11 @@ func (s *Store) ListAccounts() ([]Account, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanAccounts(rows)
+}
 
+// scanAccounts 把一行账号读成 Account，账号列表的几个查询共用它。
+func scanAccounts(rows *sql.Rows) ([]Account, error) {
 	var out []Account
 	for rows.Next() {
 		var a Account

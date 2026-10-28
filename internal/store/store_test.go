@@ -440,8 +440,8 @@ func TestMigrationsRunToLatestFromEmptyDB(t *testing.T) {
 	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("读 user_version: %v", err)
 	}
-	if version != 5 {
-		t.Fatalf("user_version = %d，期望 5（0001..0005 全部执行过）", version)
+	if version != 6 {
+		t.Fatalf("user_version = %d，期望 6（0001..0006 全部执行过）", version)
 	}
 
 	acc := newAccount(t, st, "ds1", nil)
@@ -512,8 +512,8 @@ func TestMigration0005UpgradesOldDatabase(t *testing.T) {
 	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("读 user_version: %v", err)
 	}
-	if version != 5 {
-		t.Fatalf("user_version = %d，期望 5", version)
+	if version != 6 {
+		t.Fatalf("user_version = %d，期望 6（0005 与 0006 都在升级时跑过）", version)
 	}
 
 	rows, err := st.AccountModels(1)

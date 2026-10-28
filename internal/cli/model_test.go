@@ -369,6 +369,19 @@ func modelRequests(t *testing.T, up *probeUpstream) map[string]int {
 	return out
 }
 
+// probeVerdictRow 从探活写下的记录里挑出某个模型的判定行：错误摘要不带换协议前缀的那一行
+// （换协议前的中间尝试也各记一行，见 gateway.recordProbeAttempts）。
+func probeVerdictRow(t *testing.T, recs []store.RequestRecord, model string) store.RequestRecord {
+	t.Helper()
+	for _, r := range recs {
+		if r.ModelUsed == model && !strings.Contains(r.Error, "换协议前的尝试") {
+			return r
+		}
+	}
+	t.Fatalf("请求记录里没有模型 %s 的判定行: %+v", model, recs)
+	return store.RequestRecord{}
+}
+
 // addProbeAccount 初始化数据库，加一个指向假上游的账号。
 func addProbeAccount(t *testing.T, up *probeUpstream, name string, extra ...string) {
 	t.Helper()
@@ -848,14 +861,11 @@ func TestModelProbeWritesRequestRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读请求记录: %v", err)
 	}
-	if len(recs) != 2 {
-		t.Fatalf("探活应写 2 行请求记录，实际 %d 行", len(recs))
+	// 每次上游调用各记一行：m1 一次成功；m2 的 403 触发换协议，三次调用三行。
+	if len(recs) != 4 {
+		t.Fatalf("探活应写 4 行请求记录（打了几次就记几行），实际 %d 行", len(recs))
 	}
-	byModel := map[string]store.RequestRecord{}
-	for _, r := range recs {
-		byModel[r.ModelUsed] = r
-	}
-	ok := byModel["m1"]
+	ok := probeVerdictRow(t, recs, "m1")
 	if ok.Inbound != "openai-chat" || ok.Outbound != "openai-chat" {
 		t.Fatalf("探活行的入站与出站都应取账号协议，实际 %s→%s", ok.Inbound, ok.Outbound)
 	}
@@ -868,7 +878,7 @@ func TestModelProbeWritesRequestRows(t *testing.T) {
 	if ok.InTokens != 7 || ok.OutTokens != 1 {
 		t.Fatalf("m1 的 token 应来自响应体 usage，实际输入 %d 输出 %d", ok.InTokens, ok.OutTokens)
 	}
-	bad := byModel["m2"]
+	bad := probeVerdictRow(t, recs, "m2")
 	if bad.HTTPStatus != http.StatusForbidden || bad.OK {
 		t.Fatalf("m2 探活行应是 403 且不 ok: %+v", bad)
 	}
@@ -887,7 +897,7 @@ func TestModelProbeWritesRequestRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读请求记录: %v", err)
 	}
-	if len(recs) != 2 {
+	if len(recs) != 4 {
 		t.Fatalf("跳过的模型不该写请求记录，累计 %d 行", len(recs))
 	}
 
@@ -906,7 +916,7 @@ func TestModelProbeWritesRequestRows(t *testing.T) {
 	if len(usageRows) != 1 || usageRows[0].Key != "ds1" {
 		t.Fatalf("usage 应有账号 ds1 一行，实际 %s", out)
 	}
-	if usageRows[0].Requests != 2 || usageRows[0].InTokens != 7 || usageRows[0].OutTokens != 1 {
+	if usageRows[0].Requests != 4 || usageRows[0].InTokens != 7 || usageRows[0].OutTokens != 1 {
 		t.Fatalf("usage 汇总未包含探活调用: %s", out)
 	}
 }

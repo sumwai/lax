@@ -1,0 +1,393 @@
+package store_test
+
+import (
+	"database/sql"
+	"errors"
+	"sort"
+	"strings"
+	"testing"
+
+	"switchboard/internal/store"
+
+	_ "modernc.org/sqlite"
+)
+
+// seedRoutes 是迁移 0006 种入的全部路由，逐行写死。
+// 完整地址 = 厂商 base_url 去掉末尾斜杠后直接拼 path / models_path，不推 /v1、不猜后缀。
+var seedRoutes = []struct {
+	provider   string
+	baseURL    string
+	protocol   string
+	path       string
+	modelsPath string
+}{
+	{"anthropic", "https://api.anthropic.com", "anthropic", "/v1/messages", "/v1/models"},
+	{"openai", "https://api.openai.com", "openai-chat", "/v1/chat/completions", "/v1/models"},
+	{"openai", "https://api.openai.com", "openai-responses", "/v1/responses", "/v1/models"},
+	{"deepseek", "https://api.deepseek.com", "openai-chat", "/v1/chat/completions", "/v1/models"},
+	{"deepseek", "https://api.deepseek.com", "anthropic", "/anthropic/v1/messages", ""},
+	{"moonshot", "https://api.moonshot.cn", "openai-chat", "/v1/chat/completions", "/v1/models"},
+	{"kimi", "https://api.moonshot.cn", "openai-chat", "/v1/chat/completions", "/v1/models"},
+	{"openrouter", "https://openrouter.ai/api", "openai-chat", "/v1/chat/completions", "/v1/models"},
+	{"ollama", "http://127.0.0.1:11434", "openai-chat", "/v1/chat/completions", "/v1/models"},
+	{"commandcode", "https://api.commandcode.ai/provider/v1", "openai-chat", "/chat/completions", "/models"},
+	{"commandcode", "https://api.commandcode.ai/provider/v1", "anthropic", "/messages", ""},
+}
+
+// TestProvidersSeededByMigration 确认空库跑到最新版本后种子齐全：
+// 8 家厂商、11 条路由，每条拼出的完整地址与模型列表地址都逐一对上。
+func TestProvidersSeededByMigration(t *testing.T) {
+	st := openTemp(t)
+
+	var version int
+	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("读 user_version: %v", err)
+	}
+	if version != 6 {
+		t.Fatalf("user_version = %d，期望 6", version)
+	}
+
+	var nProviders, nRoutes int
+	if err := st.DB().QueryRow("SELECT COUNT(*) FROM providers").Scan(&nProviders); err != nil {
+		t.Fatalf("数厂商行: %v", err)
+	}
+	if err := st.DB().QueryRow("SELECT COUNT(*) FROM provider_routes").Scan(&nRoutes); err != nil {
+		t.Fatalf("数路由行: %v", err)
+	}
+	if nProviders != 8 || nRoutes != len(seedRoutes) {
+		t.Fatalf("种子规模 = %d 家 / %d 条，期望 8 家 / %d 条", nProviders, nRoutes, len(seedRoutes))
+	}
+
+	providers, err := st.ListProviders()
+	if err != nil {
+		t.Fatalf("列厂商: %v", err)
+	}
+	names := make([]string, 0, len(providers))
+	baseByProvider := map[string]string{}
+	for _, p := range providers {
+		names = append(names, p.Name)
+		baseByProvider[p.Name] = p.BaseURL
+	}
+	if !sort.StringsAreSorted(names) {
+		t.Fatalf("厂商应按名称排序，实际 %v", names)
+	}
+
+	for _, want := range seedRoutes {
+		base, err := st.GetProvider(want.provider)
+		if err != nil {
+			t.Fatalf("取厂商 %s: %v", want.provider, err)
+		}
+		if base.BaseURL != want.baseURL {
+			t.Fatalf("厂商 %s 的 base_url = %q，期望 %q", want.provider, base.BaseURL, want.baseURL)
+		}
+
+		route, ok, err := st.LookupProviderRoute(want.provider, want.protocol)
+		if err != nil {
+			t.Fatalf("取路由 %s/%s: %v", want.provider, want.protocol, err)
+		}
+		if !ok {
+			t.Fatalf("路由 %s/%s 不存在", want.provider, want.protocol)
+		}
+		full := strings.TrimRight(want.baseURL, "/") + want.path
+		gotFull := strings.TrimRight(base.BaseURL, "/") + route.Path
+		if route.Path != want.path || gotFull != full {
+			t.Fatalf("路由 %s/%s 的地址 = %q（path %q），期望 %q（path %q）",
+				want.provider, want.protocol, gotFull, route.Path, full, want.path)
+		}
+		if route.ModelsPath != want.modelsPath {
+			t.Fatalf("路由 %s/%s 的 models_path = %q，期望 %q",
+				want.provider, want.protocol, route.ModelsPath, want.modelsPath)
+		}
+		if route.ModelsPath != "" {
+			wantModels := strings.TrimRight(want.baseURL, "/") + want.modelsPath
+			gotModels := strings.TrimRight(base.BaseURL, "/") + route.ModelsPath
+			if gotModels != wantModels {
+				t.Fatalf("路由 %s/%s 的模型列表地址 = %q，期望 %q",
+					want.provider, want.protocol, gotModels, wantModels)
+			}
+		}
+	}
+}
+
+// TestMigration0006UpgradesOldDatabase 模拟一个停在 0005 的库：升上来之后两张表在、种子齐全，
+// 老账号与它的模型行一个字段都不动，user_version 推到 6。
+func TestMigration0006UpgradesOldDatabase(t *testing.T) {
+	path := t.TempDir() + "/old.db"
+
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("打开老库: %v", err)
+	}
+	// 0005 之后的形状：account_models 已有 protocol 列，还没有 providers / provider_routes。
+	ddl := []string{
+		`CREATE TABLE accounts (
+			id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, provider TEXT NOT NULL,
+			protocol TEXT NOT NULL, base_url TEXT NOT NULL, key_cipher BLOB NOT NULL,
+			models TEXT NOT NULL DEFAULT '[]', price_in REAL, price_out REAL,
+			priority INTEGER NOT NULL DEFAULT 100, enabled INTEGER NOT NULL DEFAULT 1,
+			cooldown_until INTEGER, last_error TEXT,
+			fail_streak INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)`,
+		`CREATE TABLE requests (
+			id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, inbound TEXT NOT NULL,
+			outbound TEXT NOT NULL, model_requested TEXT NOT NULL, model_used TEXT NOT NULL,
+			account_id INTEGER, http_status INTEGER NOT NULL, ok INTEGER NOT NULL,
+			in_tokens INTEGER NOT NULL DEFAULT 0, out_tokens INTEGER NOT NULL DEFAULT 0,
+			cache_read INTEGER NOT NULL DEFAULT 0, cache_write INTEGER NOT NULL DEFAULT 0,
+			latency_ms INTEGER NOT NULL DEFAULT 0, error TEXT)`,
+		`CREATE INDEX requests_ts ON requests(ts DESC)`,
+		`CREATE TABLE account_models (
+			account_id INTEGER NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL,
+			http_status INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '',
+			checked_at INTEGER NOT NULL DEFAULT 0, protocol TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (account_id, model))`,
+		`INSERT INTO accounts (name, provider, protocol, base_url, key_cipher, models, enabled, created_at)
+			VALUES ('ds1', 'deepseek', 'openai-chat', 'https://api.deepseek.com', X'010203', '["m1"]', 1, 100)`,
+		`INSERT INTO account_models (account_id, model, status, http_status, error, checked_at, protocol)
+			VALUES (1, 'm1', 'usable', 200, '', 12345, 'anthropic')`,
+		`PRAGMA user_version = 5`,
+	}
+	for _, stmt := range ddl {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("建老库（%s）: %v", stmt, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("关老库: %v", err)
+	}
+
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("升级老库: %v", err)
+	}
+	defer st.Close()
+
+	var version int
+	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("读 user_version: %v", err)
+	}
+	if version != 6 {
+		t.Fatalf("user_version = %d，期望 6", version)
+	}
+
+	providers, err := st.ListProviders()
+	if err != nil {
+		t.Fatalf("列厂商: %v", err)
+	}
+	if len(providers) != 8 {
+		t.Fatalf("升级后的厂商数 = %d，期望 8", len(providers))
+	}
+	var nRoutes int
+	if err := st.DB().QueryRow("SELECT COUNT(*) FROM provider_routes").Scan(&nRoutes); err != nil {
+		t.Fatalf("数路由行: %v", err)
+	}
+	if nRoutes != len(seedRoutes) {
+		t.Fatalf("升级后的路由数 = %d，期望 %d", nRoutes, len(seedRoutes))
+	}
+
+	// 老数据原样保留：升级只加表，不动 accounts 与 account_models。
+	acc, err := st.GetAccount("ds1")
+	if err != nil {
+		t.Fatalf("读老账号: %v", err)
+	}
+	if acc.Provider != "deepseek" || acc.BaseURL != "https://api.deepseek.com" || len(acc.Models) != 1 {
+		t.Fatalf("老账号被改动: %+v", acc)
+	}
+	rows, err := st.AccountModels(acc.ID)
+	if err != nil {
+		t.Fatalf("读老模型行: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Protocol != "anthropic" || rows[0].Status != store.ModelUsable {
+		t.Fatalf("老模型行被改动: %+v", rows)
+	}
+}
+
+// TestLookupProviderRoute 覆盖三种情况：命中、厂商没有该协议的路由、厂商不存在。
+// 后两种情况都返回 ok=false 且不报错，调用方据此退回后缀猜测。
+func TestLookupProviderRoute(t *testing.T) {
+	st := openTemp(t)
+
+	route, ok, err := st.LookupProviderRoute("deepseek", "anthropic")
+	if err != nil || !ok {
+		t.Fatalf("deepseek/anthropic 应命中，实际 ok=%v err=%v", ok, err)
+	}
+	if route.Path != "/anthropic/v1/messages" || route.ModelsPath != "" {
+		t.Fatalf("deepseek/anthropic 路由 = %+v", route)
+	}
+
+	if _, ok, err := st.LookupProviderRoute("anthropic", "openai-chat"); err != nil || ok {
+		t.Fatalf("anthropic 没有 chat 路由，期望 ok=false 且无错误，实际 ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := st.LookupProviderRoute("不存在的厂商", "openai-chat"); err != nil || ok {
+		t.Fatalf("未知厂商，期望 ok=false 且无错误，实际 ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := st.LookupProviderRoute("", ""); err != nil || ok {
+		t.Fatalf("空厂商，期望 ok=false 且无错误，实际 ok=%v err=%v", ok, err)
+	}
+}
+
+// TestProviderProtocols 返回该厂商声明过的协议并按协议名排序；没有声明时是 nil。
+func TestProviderProtocols(t *testing.T) {
+	st := openTemp(t)
+
+	got, err := st.ProviderProtocols("deepseek")
+	if err != nil {
+		t.Fatalf("取协议: %v", err)
+	}
+	if len(got) != 2 || got[0] != "anthropic" || got[1] != "openai-chat" {
+		t.Fatalf("deepseek 的协议 = %v，期望 [anthropic openai-chat]", got)
+	}
+
+	got, err = st.ProviderProtocols("anthropic")
+	if err != nil {
+		t.Fatalf("取协议: %v", err)
+	}
+	if len(got) != 1 || got[0] != "anthropic" {
+		t.Fatalf("anthropic 的协议 = %v，期望只有 anthropic", got)
+	}
+
+	got, err = st.ProviderProtocols("不存在的厂商")
+	if err != nil {
+		t.Fatalf("未知厂商不该报错: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("未知厂商的协议 = %v，期望空", got)
+	}
+}
+
+// TestAddProviderWritesProviderAndRoutes 确认新增厂商与路由在一个事务里落库，
+// 同一 (厂商, 协议) 重复添加即覆盖，routes 为空时也能只写厂商行。
+func TestAddProviderWritesProviderAndRoutes(t *testing.T) {
+	st := openTemp(t)
+
+	if err := st.AddProvider(store.Provider{Name: "myco", BaseURL: "https://my.example.com", Note: "自建"},
+		[]store.ProviderRoute{{Protocol: "openai-chat", Path: "/v1/chat/completions", ModelsPath: "/v1/models"}}); err != nil {
+		t.Fatalf("新增厂商: %v", err)
+	}
+	p, err := st.GetProvider("myco")
+	if err != nil {
+		t.Fatalf("取厂商: %v", err)
+	}
+	if p.BaseURL != "https://my.example.com" || p.Note != "自建" {
+		t.Fatalf("厂商 = %+v", p)
+	}
+
+	// 再加一条 anthropic 路由，并覆盖 chat 那条的 models_path。
+	if err := st.AddProvider(store.Provider{Name: "myco", BaseURL: "https://my2.example.com"},
+		[]store.ProviderRoute{
+			{Protocol: "anthropic", Path: "/anthropic/v1/messages"},
+			{Protocol: "openai-chat", Path: "/v1/chat/completions", ModelsPath: "/models"},
+		}); err != nil {
+		t.Fatalf("再新增厂商: %v", err)
+	}
+
+	p, err = st.GetProvider("myco")
+	if err != nil {
+		t.Fatalf("取厂商: %v", err)
+	}
+	if p.BaseURL != "https://my2.example.com" || p.Note != "" {
+		t.Fatalf("重复添加应覆盖厂商行，实际 %+v", p)
+	}
+	routes, err := st.ProviderRoutes("myco")
+	if err != nil {
+		t.Fatalf("取路由: %v", err)
+	}
+	if len(routes) != 2 || routes[0].Protocol != "anthropic" || routes[1].Protocol != "openai-chat" {
+		t.Fatalf("路由 = %+v，期望按协议名排序的两条", routes)
+	}
+	if routes[1].ModelsPath != "/models" {
+		t.Fatalf("chat 路由的 models_path 应被覆盖，实际 %q", routes[1].ModelsPath)
+	}
+
+	// 缺 base_url 或路由缺 path 都要拒绝，且不留下半条记录。
+	if err := st.AddProvider(store.Provider{Name: "nobase"}, nil); err == nil {
+		t.Fatal("缺 base_url 应报错")
+	}
+	if err := st.AddProvider(store.Provider{Name: "bad", BaseURL: "https://bad.example.com"},
+		[]store.ProviderRoute{{Protocol: "openai-chat", Path: ""}}); err == nil {
+		t.Fatal("路由缺 path 应报错")
+	}
+	if _, err := st.GetProvider("bad"); !errors.Is(err, store.ErrProviderNotFound) {
+		t.Fatalf("失败的新增不该留下厂商行，实际 err=%v", err)
+	}
+}
+
+// TestDeleteProviderRemovesRoutes 确认删厂商连带删路由，删不存在的厂商报 ErrProviderNotFound。
+func TestDeleteProviderRemovesRoutes(t *testing.T) {
+	st := openTemp(t)
+
+	if err := st.DeleteProvider("commandcode"); err != nil {
+		t.Fatalf("删厂商: %v", err)
+	}
+	var n int
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM provider_routes WHERE provider = 'commandcode'`).Scan(&n); err != nil {
+		t.Fatalf("数路由行: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("删厂商后还剩 %d 条路由", n)
+	}
+	if _, ok, err := st.LookupProviderRoute("commandcode", "openai-chat"); err != nil || ok {
+		t.Fatalf("删掉之后路由应不存在，实际 ok=%v err=%v", ok, err)
+	}
+
+	if err := st.DeleteProvider("commandcode"); !errors.Is(err, store.ErrProviderNotFound) {
+		t.Fatalf("重复删除应报 ErrProviderNotFound，实际 %v", err)
+	}
+}
+
+// TestEmptyProvidersIsNotAnError 确认用户把种子厂商全删光之后一切照旧：
+// 列表是空切片，路由查询是 ok=false，都不报错。
+func TestEmptyProvidersIsNotAnError(t *testing.T) {
+	st := openTemp(t)
+
+	providers, err := st.ListProviders()
+	if err != nil {
+		t.Fatalf("列厂商: %v", err)
+	}
+	for _, p := range providers {
+		if err := st.DeleteProvider(p.Name); err != nil {
+			t.Fatalf("删厂商 %s: %v", p.Name, err)
+		}
+	}
+
+	providers, err = st.ListProviders()
+	if err != nil {
+		t.Fatalf("列为空也应是空列表而不是错误: %v", err)
+	}
+	if len(providers) != 0 {
+		t.Fatalf("厂商列表 = %+v，期望空", providers)
+	}
+	if got, err := st.ProviderProtocols("deepseek"); err != nil || len(got) != 0 {
+		t.Fatalf("空表的协议 = %v err=%v，期望空且无错误", got, err)
+	}
+}
+
+// TestListAccountsByProvider 给 `provider rm` 用：按厂商列出还在用它的账号。
+func TestListAccountsByProvider(t *testing.T) {
+	st := openTemp(t)
+
+	for _, c := range []struct{ name, provider string }{
+		{"ds1", "deepseek"}, {"ds2", "deepseek"}, {"cc1", "commandcode"},
+	} {
+		acc := newAccount(t, st, c.name, nil)
+		acc.Provider = c.provider
+		if _, err := st.DB().Exec(`UPDATE accounts SET provider = ? WHERE id = ?`, c.provider, acc.ID); err != nil {
+			t.Fatalf("改账号厂商: %v", err)
+		}
+	}
+
+	got, err := st.ListAccountsByProvider("deepseek")
+	if err != nil {
+		t.Fatalf("按厂商列账号: %v", err)
+	}
+	if len(got) != 2 || got[0].Name != "ds1" || got[1].Name != "ds2" {
+		t.Fatalf("deepseek 的账号 = %+v", got)
+	}
+
+	got, err = st.ListAccountsByProvider("openai")
+	if err != nil {
+		t.Fatalf("按厂商列账号: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("openai 的账号 = %+v，期望空", got)
+	}
+}

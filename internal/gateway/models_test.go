@@ -426,12 +426,16 @@ func TestProbeModelRecordsFailedRequest(t *testing.T) {
 		if err != nil {
 			t.Fatalf("读请求记录: %v", err)
 		}
-		if len(recs) != 1 {
-			t.Fatalf("应写 1 行请求记录，实际 %d 行", len(recs))
+		// 403 会触发换协议，三种协议各打一次，因此是三行：判定行加两行换协议前的尝试。
+		if len(recs) != 3 {
+			t.Fatalf("应写 3 行请求记录（打了几次就记几行），实际 %d 行", len(recs))
 		}
-		rec := recs[0]
+		rec := probeVerdict(t, recs)
 		if rec.HTTPStatus != http.StatusForbidden || rec.OK {
 			t.Fatalf("状态 = %d，ok = %v", rec.HTTPStatus, rec.OK)
+		}
+		if rec.Outbound != gateway.ProtocolChat {
+			t.Fatalf("判定行应是账号协议那次，实际出站 %q", rec.Outbound)
 		}
 		if rec.InTokens != 0 || rec.OutTokens != 0 {
 			t.Fatalf("非 2xx 的 token 应记 0，实际 %d/%d", rec.InTokens, rec.OutTokens)
