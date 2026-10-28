@@ -48,19 +48,19 @@ $ switchboard account add deepseek-1 \
 已添加 deepseek-1，模型列表待同步
 
 # 3 拉上游模型列表
-$ switchboard account sync deepseek-1
-同步 47 个模型（新增 47）
-下一步：switchboard account probe deepseek-1
+$ switchboard model sync --account deepseek-1
+账号        厂商      模型  新增  备注
+deepseek-1  deepseek  47    47
+下一步：switchboard model probe（每个模型发一条 max_tokens=1 的请求）
 
 # 4 逐个探活，能用的才进选号
-$ switchboard account probe deepseek-1
-探活 47 个模型，并发 4
-模型               状态  HTTP  耗时   备注
-deepseek-v4-pro    可用  200   412ms
-deepseek-v4-fast   可用  200   388ms
-deepseek-r1        无权  403   121ms  套餐不含该模型
+$ switchboard model probe --account deepseek-1
+账号        模型              状态  HTTP  耗时   备注
+deepseek-1  deepseek-v4-pro   可用  200   412ms
+deepseek-1  deepseek-v4-fast  可用  200   388ms
+deepseek-1  deepseek-r1       无权  403   121ms  套餐不含该模型
 …（其余 44 行略）
-可用 2，无权 45，不存在 0，失败 0，凭据被拒 0
+deepseek-1：探活 47 个，可用 2，无权 45，不存在 0，失败 0；已写入选号列表
 已把 2 个可用模型写进 deepseek-1，选号按这个列表走
 
 # 5 看一眼
@@ -100,7 +100,7 @@ $ switchboard call "hi" --model deepseek-v4-pro --debug
 
 全局参数：`--json` 可以写在子命令前后任意位置；`--config <路径>` 与 `--db <路径>` 必须写在子命令之前。
 
-`account` 一组的子命令：`add`、`ls`、`rm`、`test`、`sync`、`probe`、`enable`、`disable`。`--models` 只是手填的初始值，模型列表的常规来源是 `sync` 拉取加 `probe` 探活（见 5.7）。
+`account` 一组的子命令：`add`、`ls`、`rm`、`test`、`enable`、`disable`。`model` 一组的子命令：`ls`、`sync`、`probe`，后两个都支持 `--provider` 与 `--account` 筛选账号。`--models` 只是手填的初始值，模型列表的常规来源是 `model sync` 拉取加 `model probe` 探活（见 5.7）。
 
 | 命令 | 参数 | 行为 | 输出 |
 | --- | --- | --- | --- |
@@ -110,11 +110,11 @@ $ switchboard call "hi" --model deepseek-v4-pro --debug
 | `account ls` | `--json` | 列账号、模型数、是否处在冷却；`account_models` 有数据时模型列显示「N 可用 / M 同步」，`--json` 每行多了 `models_usable` 与 `models_synced` 两个计数 | 表格 |
 | `account rm` | `<名称>` | 删账号，同时删掉它的 `account_models` 行；关联的请求记录保留 | 确认一行 |
 | `account test` | `<名称>` | 用最小请求探活，更新冷却状态 | 状态码与耗时 |
-| `account sync` | `<名称>` | GET 上游模型列表：地址由 `base_url` 推出，末尾是 `/v1` 就补 `/models`，否则补 `/v1/models`；解析 `{data:[{id}]}`，按名字排序去重，空列表算错误。结果写 `account_models`：新行状态 `synced`，已有行保留探活状态，上游已消失的行删除。只改 `account_models`，不动 `accounts.models` | 同步数、新增数，以及下一步 `account probe` 的提示 |
-| `account probe` | `<名称>` `[--sync]` `[--model 模型]` `[--limit N]` `[--concurrency N]` | 对每个模型发一条 `max_tokens=1` 的请求判定可用性，结果写 `account_models`；至少一个可用时把可用列表写进 `accounts.models`，选号从此按该列表。`--sync` 先同步；没有模型行时自动先同步；`--limit` 限制探活个数以控成本；无可用模型时退出码 1 且不改 `accounts.models` | 每个模型一行（状态、HTTP、耗时、备注）与计数汇总；`--json` 是一维数组，每项 `model`、`status`、`http_status`、`latency_ms`、`message`，计数汇总只出现在人读输出里 |
 | `account enable` | `<名称>` | 重新启用账号并清冷却 | 确认一行 |
 | `account disable` | `<名称>` | 停用账号，不再参与选号 | 确认一行 |
-| `model ls` | `--json` | 按模型名列出可用账号与计价来源；`account_models` 有数据时每个账号带状态（可用 / 待探活 / 无权 / 不存在 / 凭据被拒 / 失败），没有任何模型行时回退到 `accounts.models` 并标「手填」 | 表格 |
+| `model ls` | `[--provider 厂商]` `[--account 账号]` `--json` | 按模型名列出可用账号与计价来源；`account_models` 有数据时每个账号带状态（可用 / 待探活 / 无权 / 不存在 / 凭据被拒 / 失败），没有任何模型行时回退到 `accounts.models` 并标「手填」 | 表格 |
+| `model sync` | `[--provider 厂商]` `[--account 账号]` | 对选中的账号 GET 上游模型列表：地址由 `base_url` 推出，末尾是 `/v1` 就补 `/models`，否则补 `/v1/models`；解析 `{data:[{id}]}`，按名字排序去重，空列表算该账号失败。结果写 `account_models`：新行状态 `synced`，已有行保留探活状态，上游已消失的行删除。只改 `account_models`，不动 `accounts.models`。某个账号失败时其余账号照常处理完 | 表格（账号 / 厂商 / 模型 / 新增 / 备注）与下一步 `model probe` 的提示；`--json` 是数组，每项 `account`、`provider`、`models`、`added`、`error`（只有失败才有） |
+| `model probe` | `[--provider 厂商]` `[--account 账号]` `[--sync]` `[--model 模型]` `[--limit N]` `[--concurrency N]` | 逐账号对每个模型发一条 `max_tokens=1` 的请求判定可用性，结果写 `account_models`；该账号库里出现 `usable` 时，把库里**全部** `usable` 写成该账号的 `accounts.models`（不只是本次探到的），选号从此按该列表。没有模型行或带 `--sync` 时先同步；`--model` 只探一个模型名，`--limit` 是每个账号的上限，`--concurrency` 默认 4 且不超过待探模型数；任一账号出现 401 即停止后续账号并返回错误；所有账号都没探出可用模型时退出码 1 且不改任何 `accounts.models` | 表格（账号 / 模型 / 状态 / HTTP / 耗时 / 备注）与该账号的可用 / 无权 / 不存在 / 失败计数；`--json` 是数组，每项 `account`、`model`、`status`、`http_status`、`latency_ms`、`message`，计数只出现在人读输出里 |
 | `usage` | `--since`、`--by account\|model\|day` | 汇总请求数、token、估算花费 | 表格 |
 | `log tail` | `-n`、`--follow` | 最近的请求记录；`--follow` 跟随 | 表格 |
 | `call` | `[提示词] --model [--protocol] [--debug] [--json]` | 绕过客户端直连本进程，打印选号过程 | 响应，或 debug 轨迹 |
@@ -149,7 +149,7 @@ $ switchboard call "hi" --model deepseek-v4-pro --debug
 
 ### 5.3 选号与失败转移
 
-- 候选集合由模型名决定。模型名用请求里的 `model` 字段原文匹配，不做别名归一（第一版）。`account sync` 只刷新 `account_models`，不改变选号依据；`account probe` 探出可用模型后才把列表写进 `accounts.models`，选号此后按新列表走。
+- 候选集合由模型名决定。模型名用请求里的 `model` 字段原文匹配，不做别名归一（第一版）。`model sync` 只刷新 `account_models`，不改变选号依据；`model probe` 探出可用模型后才把列表写进 `accounts.models`，选号此后按新列表走。
 - 冷却：429 起始 60 秒，5xx 起始 10 秒，连续失败翻倍，上限 30 分钟；`account test` 成功或 `account enable` 都会清除。
 - 会话粘性：请求头带 `x-switchboard-session` 或 `metadata.user_id` 时，同一个值在一小时内粘同一个账号；否则按 `priority` 轮转。
 - 401 说明凭据本身不行：把账号标为 `enabled=0` 并把错误返回客户端，避免同一条错误把整个候选池刷成不可用。`account test` 成功或 `account enable` 可恢复，两者都会清冷却。
@@ -203,16 +203,17 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 
 手填 `--models` 的问题在于上游一改模型名就失效：账号看上去正常，请求却全打在 404 或 403 上，只能对着上游文档猜。模型列表改成从上游拉取，再逐个探活，只保留真正能用的名字。
 
-两个命令分工明确，一个管「上游有哪些模型」，一个管「哪几个真能用」。
+两个命令分工明确，一个管「上游有哪些模型」，一个管「哪几个真能用」。两者都按账号处理，并支持同样的筛选：`--provider` 精确匹配账号的 `provider` 字段，`--account` 精确匹配账号名，两个都给时账号必须属于该厂商，否则报错；不带筛选参数时处理全部账号，按账号逐个进行。
 
-`account sync <名称>` 只解决前者：
+`model sync [--provider 厂商] [--account 账号]` 只解决前者：
 
 - 模型列表地址由 `base_url` 推出，末尾是 `/v1` 就补 `/models`，否则补 `/v1/models`。
-- 响应按 `{data:[{id}]}` 解析，按名字排序去重。上游返回空列表算错误，提示检查 `base_url`。
+- 响应按 `{data:[{id}]}` 解析，按名字排序去重。上游返回空列表算该账号失败。
 - 结果写进 `account_models`：新出现的模型行状态为 `synced`，已存在的行保留既有探活状态，上游已消失的行删除。
 - 这条命令只改 `account_models`，不动 `accounts.models`，所以同步本身不改变选号结果。
+- 某个账号失败不打断其余账号：全部处理完才返回，退出码 1，失败原因写在那一个账号的备注列。
 
-`account probe <名称>` 只解决后者：对每个模型发一条 `max_tokens=1` 的请求，按响应判定可用性。
+`model probe [--provider 厂商] [--account 账号] [--sync] [--model 模型] [--limit N] [--concurrency N]` 只解决后者：逐账号处理，对该账号的每个模型发一条 `max_tokens=1` 的请求，按响应判定可用性。
 
 | 上游响应 | 状态 | 含义与处理 |
 | --- | --- | --- |
@@ -220,16 +221,22 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 | 401 | `auth` | 凭据被拒，同时把账号停用 |
 | 403 | `forbidden` | 套餐或权限不含该模型，凭据本身还能用 |
 | 404 | `notfound` | 上游不认识这个模型名 |
-| 400 且错误文本含 `MODEL` | `notfound` | 按模型名不存在处理 |
+| 400 且错误文本明确说模型不存在 | `notfound` | 按模型名不存在处理 |
 | 其它 | `error` | 临时错误，结论为不可用 |
 
-参数：`--sync` 先同步一次列表；`--model <模型>` 只探指定的一个；`--limit N` 限制最多探多少个；`--concurrency N` 改并发，默认 4。没有模型行时自动先同步，不需要手工跑两遍。
+参数与处理顺序：
+
+- 该账号没有模型行，或给了 `--sync` 时，先同步一次，不需要手工跑两遍。自动同步失败的账号跳过不探，其余账号照常处理，最终退出码 1。
+- `--model <模型>` 只探指定的一个模型名。
+- `--limit N` 是每个账号的上限，不是整次探活的上限：多账号时每个账号各有 N 个额度。
+- `--concurrency N` 改并发，默认 4，且不超过待探的模型数。
+- 一个账号探完立刻写回结果并打印该账号的「可用 / 无权 / 不存在 / 失败」计数，再处理下一个账号。
 
 探活是要花钱的。每个模型的一次判定都是一次真实的上游调用，`max_tokens=1` 也照样计入上游账单与速率限制，所以模型多的账号用 `--limit` 控制这一次的花费。
 
-任何一个模型碰到 401，整次探活就停下并返回错误：凭据都不行了，继续探下去只是重复同一条错误。此时账号已被停用，其余模型的结果不作数，也不会写回 `accounts.models`——即使同批里已经探出了可用模型，也不写，避免把一次凭据故障当成新的事实。
+任何一个账号碰到 401，整次探活就停下并返回错误：凭据都不行了，继续探下去只是重复同一条错误。此时该账号已被停用，后续账号不再处理，其余结论不作数，也不会写回 `accounts.models`——即使同批里已经探出了可用模型，也不写，避免把一次凭据故障当成新的事实。
 
-探活结果反过来成为选号依据：只要至少一个模型是 `usable`，可用模型列表就写进 `accounts.models`，5.2 与 5.3 的候选集合从此按这份列表算；零个可用模型时不写 `accounts.models`，退出码 1，账号原有列表保持不变，避免一次网络抖动就把账号清空。
+探活结果反过来成为选号依据：一个账号只要库里至少一个模型是 `usable`，就把库里全部 `usable` 写成该账号的 `accounts.models`，5.2 与 5.3 的候选集合从此按这份列表算。取全库而非本次结果，是因为 `--limit` 与 `--model` 都可能只探一部分：只探两个却把另外三个之前探通的模型从选号里除掉，属于退化。某账号零个可用模型时只写 `account_models`，不改它的 `accounts.models`，账号原有列表保持不变，避免一次网络抖动就把账号清空。所有账号都没探出可用模型时退出码 1，且不改任何 `accounts.models`。
 
 ## 6 数据模型
 
@@ -291,11 +298,11 @@ CREATE TABLE account_models (
 | 里程碑 | 内容 | 验收 |
 | --- | --- | --- |
 | M0 | 骨架：`init`、SQLite 迁移、`serve` 起 `/healthz`、`doctor` 完整 | `make check` 通过，`doctor` 全 ok |
-| M1 | 非流式直通：anthropic → anthropic，`account` 四个子命令、`call`、`log tail` | `call` 打真实账号拿到回复，`log tail` 有记录 |
+| M1 | 非流式直通：anthropic → anthropic，`account` 的增删查与探活、`call`、`log tail` | `call` 打真实账号拿到回复，`log tail` 有记录 |
 | M2 | 翻译：anthropic → openai-chat，非流式，含工具调用 | 对拍用例覆盖 5.4 表里每一行 |
 | M3 | 流式：SSE 双向翻译 | 客户端能流式拿到 token 与工具调用 |
 | M4 | 多账号：冷却、失败转移、`usage` | 两个账号时杀掉一个，请求自动落到另一个 |
-| M5 | 模型同步与探活：`account sync`、`account probe`、`model ls` 按模型列账号状态 | 对真实上游 `account sync` 能拉出模型数；`account probe` 能区分 `usable` 与 `forbidden`；零可用模型时不改 `accounts.models` |
+| M5 | 模型同步与探活：`model sync`、`model probe`、`model ls` 按模型列账号状态 | 对真实上游 `model sync` 能拉出模型数；`model probe` 能区分 `usable` 与 `forbidden`；零可用模型时不改 `accounts.models` |
 
 M0 到 M4 已实现，`make check` 与 `go test -race` 通过，端到端由 `internal/cli` 的 `TestWalkingSkeleton` 用假上游验证：初始化、加账号、`call`、`log tail`、`usage`、`doctor` 全链路走通。上游是 `httptest` 假服务，真实厂商的连通性需要拿到 key 后自行 `account test` 验证。M5 的代码已落地，验收涉及真实上游的模型清单与套餐权限，需要手工执行。
 
@@ -305,7 +312,7 @@ M0 到 M4 已实现，`make check` 与 `go test -race` 通过，端到端由 `in
 - 估算花费依赖账号上的 `--price-in` 与 `--price-out`，没有价格时记为 0 并在 `usage` 末尾提示。
 - 模型名不做别名归一，请求里的 `model` 必须与账号 `--models` 里的名字完全一致。
 - 不带任何客户端配置改写：客户端里的 base URL、token、模型名都靠自己填。
-- 探活不做增量跳过：`account probe` 不看 `checked_at`，每次都重探目标模型，只靠 `--limit` 截断。
+- 探活不做增量跳过：`model probe` 不看 `checked_at`，每次都重探目标模型，只靠 `--limit` 截断。
 - 探活不记花费：这些 `max_tokens=1` 的调用不进 `requests`，`usage` 里也看不到。
 - 探活并发默认 4，`--concurrency` 可以改，只是默认值，不会根据上游限速自适应。
 

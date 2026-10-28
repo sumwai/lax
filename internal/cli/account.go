@@ -38,7 +38,7 @@ var providers = map[string]providerDefault{
 
 func cmdAccount(e *Env, args []string) error {
 	if len(args) == 0 {
-		return usagef("需要子命令：add | ls | rm | test | sync | probe | enable | disable")
+		return usagef("需要子命令：add | ls | rm | test | enable | disable")
 	}
 	switch args[0] {
 	case "add":
@@ -49,16 +49,12 @@ func cmdAccount(e *Env, args []string) error {
 		return cmdAccountRm(e, args[1:])
 	case "test":
 		return cmdAccountTest(e, args[1:])
-	case "sync":
-		return cmdAccountSync(e, args[1:])
-	case "probe":
-		return cmdAccountProbe(e, args[1:])
 	case "enable":
 		return cmdAccountSetEnabled(e, args[1:], "enable", true)
 	case "disable":
 		return cmdAccountSetEnabled(e, args[1:], "disable", false)
 	default:
-		return usagef("未知子命令 %q，可用：add | ls | rm | test | sync | probe | enable | disable", args[0])
+		return usagef("未知子命令 %q，可用：add | ls | rm | test | enable | disable", args[0])
 	}
 }
 
@@ -437,12 +433,28 @@ func cmdAccountTest(e *Env, args []string) error {
 	return nil
 }
 
+// cmdModel 是 model 这一组子命令的入口。
 func cmdModel(e *Env, args []string) error {
-	if len(args) == 0 || args[0] != "ls" {
-		return usagef("需要子命令：ls")
+	if len(args) == 0 {
+		return usagef("需要子命令：ls | sync | probe")
 	}
+	switch args[0] {
+	case "ls":
+		return cmdModelLs(e, args[1:])
+	case "sync":
+		return cmdModelSync(e, args[1:])
+	case "probe":
+		return cmdModelProbe(e, args[1:])
+	default:
+		return usagef("未知子命令 %q，可用：ls | sync | probe", args[0])
+	}
+}
+
+func cmdModelLs(e *Env, args []string) error {
 	fs := newFlagSet(e, "model ls", "列出网关可提供的模型")
-	if err := fs.Parse(args[1:]); err != nil {
+	provider := fs.String("provider", "", "只看这个厂商的账号")
+	accountName := fs.String("account", "", "只看这个账号")
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
@@ -455,6 +467,12 @@ func cmdModel(e *Env, args []string) error {
 	accounts, err := a.st.ListAccounts()
 	if err != nil {
 		return err
+	}
+	if *provider != "" || *accountName != "" {
+		accounts, err = selectAccounts(a.st, *provider, *accountName)
+		if err != nil {
+			return err
+		}
 	}
 	byID := make(map[int64]store.Account, len(accounts))
 	for _, acc := range accounts {
@@ -562,15 +580,14 @@ func modelStatusText(status string) string {
 	}
 }
 
-func cmdAccountSync(e *Env, args []string) error {
-	fs := newFlagSet(e, "account sync", "从上游拉取该账号的模型列表")
+// cmdModelSync 从上游拉模型列表。按 --provider / --account 选账号，不给就全选。
+func cmdModelSync(e *Env, args []string) error {
+	fs := newFlagSet(e, "model sync", "从上游拉取模型列表")
+	provider := fs.String("provider", "", "只同步这个厂商的账号")
+	accountName := fs.String("account", "", "只同步这个账号")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return usagef("用法：switchboard account sync <名称>")
-	}
-	name := fs.Arg(0)
 
 	a, err := openApp(e, true)
 	if err != nil {
@@ -578,52 +595,77 @@ func cmdAccountSync(e *Env, args []string) error {
 	}
 	defer a.Close()
 
-	acc, err := a.st.GetAccount(name)
+	accounts, err := selectAccounts(a.st, *provider, *accountName)
 	if err != nil {
-		return fmt.Errorf("账号 %q 不存在", name)
+		return err
 	}
 	gs, err := gateway.New(gateway.Options{Store: a.st, Key: a.key})
 	if err != nil {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
-	models, err := gs.SyncModels(ctx, acc)
-	if err != nil {
-		return err
+	type row struct {
+		Account  string `json:"account"`
+		Provider string `json:"provider"`
+		Models   int    `json:"models"`
+		Added    int    `json:"added"`
+		Error    string `json:"error,omitempty"`
 	}
-	added, err := a.st.ReplaceModels(acc.ID, models)
-	if err != nil {
-		return err
+
+	rows := make([]row, 0, len(accounts))
+	failed := 0
+	for _, acc := range accounts {
+		r := row{Account: acc.Name, Provider: acc.Provider}
+		models, err := gs.SyncModels(ctx, acc)
+		if err != nil {
+			r.Error = err.Error()
+			failed++
+		} else if added, err := a.st.ReplaceModels(acc.ID, models); err != nil {
+			return err
+		} else {
+			r.Models, r.Added = len(models), added
+		}
+		rows = append(rows, r)
 	}
 
 	if e.JSON {
-		return e.printJSON(map[string]any{
-			"account": name,
-			"models":  len(models),
-			"added":   added,
-		})
+		if err := e.printJSON(rows); err != nil {
+			return err
+		}
+	} else {
+		table := make([][]string, 0, len(rows))
+		for _, r := range rows {
+			table = append(table, []string{
+				r.Account, r.Provider,
+				fmt.Sprintf("%d", r.Models), fmt.Sprintf("%d", r.Added),
+				truncate(r.Error, 48),
+			})
+		}
+		fmt.Fprint(e.Stdout, renderTable([]string{"账号", "厂商", "模型", "新增", "备注"}, table))
+		fmt.Fprintln(e.Stdout, "下一步：switchboard model probe（每个模型发一条 max_tokens=1 的请求）")
 	}
-	fmt.Fprintf(e.Stdout, "%s：同步 %d 个模型（新增 %d）\n", name, len(models), added)
-	fmt.Fprintf(e.Stdout, "下一步：switchboard account probe %s（探活哪些能用，每个模型发一条 max_tokens=1 的请求）\n", name)
+
+	if failed > 0 {
+		return fmt.Errorf("%d 个账号同步失败", failed)
+	}
 	return nil
 }
 
-func cmdAccountProbe(e *Env, args []string) error {
-	fs := newFlagSet(e, "account probe", "逐个模型探活，把可用模型写入账号")
-	syncFirst := fs.Bool("sync", false, "先拉一次上游模型列表")
+// cmdModelProbe 逐个模型探活。按 --provider / --account 选账号，不给就全选。
+func cmdModelProbe(e *Env, args []string) error {
+	fs := newFlagSet(e, "model probe", "逐个模型探活，把可用模型写进账号")
+	provider := fs.String("provider", "", "只处理这个厂商的账号")
+	accountName := fs.String("account", "", "只处理这个账号")
+	syncFirst := fs.Bool("sync", false, "探活前先拉一次上游模型列表")
 	only := fs.String("model", "", "只探这一个模型")
-	limit := fs.Int("limit", 0, "最多探多少个模型，0 表示全部")
+	limit := fs.Int("limit", 0, "每个账号最多探多少个模型，0 表示全部")
 	concurrency := fs.Int("concurrency", 4, "并发数")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if fs.NArg() != 1 {
-		return usagef("用法：switchboard account probe <名称> [--sync] [--model 模型] [--limit N] [--concurrency N]")
-	}
-	name := fs.Arg(0)
 
 	a, err := openApp(e, true)
 	if err != nil {
@@ -631,64 +673,176 @@ func cmdAccountProbe(e *Env, args []string) error {
 	}
 	defer a.Close()
 
-	acc, err := a.st.GetAccount(name)
+	accounts, err := selectAccounts(a.st, *provider, *accountName)
 	if err != nil {
-		return fmt.Errorf("账号 %q 不存在", name)
+		return err
 	}
 	gs, err := gateway.New(gateway.Options{Store: a.st, Key: a.key})
 	if err != nil {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
 	defer cancel()
 
-	rows, err := a.st.AccountModels(acc.ID)
-	if err != nil {
-		return err
+	type hit struct {
+		Account    string `json:"account"`
+		Model      string `json:"model"`
+		Status     string `json:"status"`
+		HTTPStatus int    `json:"http_status"`
+		LatencyMS  int64  `json:"latency_ms"`
+		Message    string `json:"message"`
 	}
-	if *syncFirst || (len(rows) == 0 && *only == "") {
-		models, err := gs.SyncModels(ctx, acc)
+
+	var hits []hit
+	usableByAccount := map[string]int{}
+	authFailed := ""
+	syncFailed := 0
+
+	for _, acc := range accounts {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		rows, err := a.st.AccountModels(acc.ID)
 		if err != nil {
 			return err
 		}
-		if _, err := a.st.ReplaceModels(acc.ID, models); err != nil {
+		if *syncFirst || (len(rows) == 0 && *only == "") {
+			models, err := gs.SyncModels(ctx, acc)
+			if err != nil {
+				syncFailed++
+				if !e.JSON {
+					fmt.Fprintf(e.Stdout, "%s：同步失败 %v\n", acc.Name, err)
+				}
+				continue
+			}
+			if _, err := a.st.ReplaceModels(acc.ID, models); err != nil {
+				return err
+			}
+			if !e.JSON {
+				fmt.Fprintf(e.Stdout, "%s：已同步 %d 个模型\n", acc.Name, len(models))
+			}
+			if rows, err = a.st.AccountModels(acc.ID); err != nil {
+				return err
+			}
+		}
+
+		targets := make([]string, 0, len(rows))
+		if *only != "" {
+			targets = append(targets, *only)
+		} else {
+			for _, r := range rows {
+				targets = append(targets, r.Model)
+			}
+		}
+		if len(targets) == 0 {
+			if !e.JSON {
+				fmt.Fprintf(e.Stdout, "%s：没有可探的模型，先运行 switchboard model sync --account %s\n", acc.Name, acc.Name)
+			}
+			continue
+		}
+		if *limit > 0 && len(targets) > *limit {
+			targets = targets[:*limit]
+		}
+
+		results, err := probeModels(ctx, gs, a.st, acc, targets, *concurrency)
+		if err != nil {
 			return err
 		}
+
+		var counts = map[string]int{}
+		for _, res := range results {
+			counts[res.Status]++
+			hits = append(hits, hit{
+				Account:    acc.Name,
+				Model:      res.Model,
+				Status:     res.Status,
+				HTTPStatus: res.HTTPStatus,
+				LatencyMS:  res.Latency.Milliseconds(),
+				Message:    res.Message,
+			})
+		}
+
+		if counts[store.ModelAuthFailed] > 0 {
+			authFailed = acc.Name
+			continue
+		}
+
+		// 选号列表取库里全部 usable，不是本次探出来的那几个：
+		// 用 --limit 或 --model 只探一部分时，之前探出来的可用模型不该被丢掉。
+		after, err := a.st.AccountModels(acc.ID)
+		if err != nil {
+			return err
+		}
+		usable := make([]string, 0, len(after))
+		for _, r := range after {
+			if r.Status == store.ModelUsable {
+				usable = append(usable, r.Model)
+			}
+		}
+		if len(usable) == 0 {
+			if !e.JSON {
+				fmt.Fprintf(e.Stdout, "%s：本次探活 %d 个，库里无一可用，模型列表保持原样\n", acc.Name, len(results))
+			}
+			continue
+		}
+		if err := a.st.SetModels(acc.ID, usable); err != nil {
+			return err
+		}
+		usableByAccount[acc.Name] = len(usable)
 		if !e.JSON {
-			fmt.Fprintf(e.Stdout, "已同步 %d 个模型\n", len(models))
-		}
-		rows, err = a.st.AccountModels(acc.ID)
-		if err != nil {
-			return err
+			fmt.Fprintf(e.Stdout, "%s：本次探活 %d 个，可用 %d，无权 %d，不存在 %d，失败 %d；选号列表共 %d 个\n",
+				acc.Name, len(results), counts[store.ModelUsable], counts[store.ModelForbidden],
+				counts[store.ModelNotFound], counts[store.ModelError], len(usable))
 		}
 	}
 
-	targets := make([]string, 0, len(rows))
-	if *only != "" {
-		targets = append(targets, *only)
+	if e.JSON {
+		if err := e.printJSON(hits); err != nil {
+			return err
+		}
 	} else {
-		for _, r := range rows {
-			targets = append(targets, r.Model)
+		table := make([][]string, 0, len(hits))
+		for _, h := range hits {
+			table = append(table, []string{
+				h.Account,
+				h.Model,
+				modelStatusText(h.Status),
+				fmt.Sprintf("%d", h.HTTPStatus),
+				fmt.Sprintf("%dms", h.LatencyMS),
+				truncate(h.Message, 44),
+			})
+		}
+		if len(table) > 0 {
+			fmt.Fprint(e.Stdout, renderTable([]string{"账号", "模型", "状态", "HTTP", "耗时", "备注"}, table))
 		}
 	}
-	if len(targets) == 0 {
-		return fmt.Errorf("没有可探的模型，先运行 switchboard account sync %s", name)
+
+	// 先出结果再判定，保证 --json 与文本两条路径的退出码与写库行为一致。
+	if authFailed != "" {
+		return fmt.Errorf("账号 %s 的凭据被上游拒绝，账号已停用，其余结论不作数", authFailed)
 	}
-	if *limit > 0 && len(targets) > *limit {
-		targets = targets[:*limit]
+	if len(usableByAccount) == 0 {
+		return fmt.Errorf("没有账号探出可用模型，账号模型列表未改动")
 	}
-	workers := *concurrency
+	if syncFailed > 0 {
+		return fmt.Errorf("%d 个账号同步失败", syncFailed)
+	}
+	return nil
+}
+
+// probeModels 用固定大小的 worker pool 并发探活一个账号的模型。
+func probeModels(ctx context.Context, gs *gateway.Server, st *store.Store,
+	acc store.Account, targets []string, concurrency int) ([]gateway.ModelProbe, error) {
+
+	workers := concurrency
 	if workers < 1 {
 		workers = 1
 	}
 	// 并发数不超过待探模型数，避免空转的 goroutine。
 	if workers > len(targets) {
 		workers = len(targets)
-	}
-
-	if !e.JSON {
-		fmt.Fprintf(e.Stdout, "探活 %d 个模型，并发 %d\n", len(targets), workers)
 	}
 
 	results := make([]gateway.ModelProbe, len(targets))
@@ -709,80 +863,56 @@ func cmdAccountProbe(e *Env, args []string) error {
 			}
 			results[i] = res
 			// 每个 goroutine 只写自己那一行，底层连接串行，不共享事务。
-			writeErrs[i] = a.st.SetModelStatus(acc.ID, model, res.Status, res.HTTPStatus, res.Message)
+			writeErrs[i] = st.SetModelStatus(acc.ID, model, res.Status, res.HTTPStatus, res.Message)
 		}(i, model)
 	}
 	wg.Wait()
 
-	var writeErr error
 	for _, err := range writeErrs {
 		if err != nil {
-			writeErr = err
-			break
+			return results, fmt.Errorf("探活结果写库失败: %w", err)
 		}
+	}
+	return results, nil
+}
+
+// selectAccounts 按厂商与账号名筛选待处理账号，两个都不给时返回全部。
+func selectAccounts(st *store.Store, provider, name string) ([]store.Account, error) {
+	accounts, err := st.ListAccounts()
+	if err != nil {
+		return nil, err
 	}
 
-	var usable []string
-	counts := map[string]int{}
-	for _, res := range results {
-		counts[res.Status]++
-		if res.Status == store.ModelUsable {
-			usable = append(usable, res.Model)
+	if name != "" {
+		for _, acc := range accounts {
+			if acc.Name != name {
+				continue
+			}
+			if provider != "" && acc.Provider != provider {
+				return nil, fmt.Errorf("账号 %s 的厂商是 %s，与 --provider %s 不符", name, acc.Provider, provider)
+			}
+			return []store.Account{acc}, nil
 		}
+		return nil, fmt.Errorf("账号 %q 不存在", name)
 	}
 
-	if e.JSON {
-		out := make([]map[string]any, 0, len(results))
-		for _, res := range results {
-			out = append(out, map[string]any{
-				"model":       res.Model,
-				"status":      res.Status,
-				"http_status": res.HTTPStatus,
-				"latency_ms":  res.Latency.Milliseconds(),
-				"message":     res.Message,
-			})
+	if provider == "" {
+		if len(accounts) == 0 {
+			return nil, fmt.Errorf("还没有账号，先运行 switchboard account add")
 		}
-		if err := e.printJSON(out); err != nil {
-			return err
-		}
-	} else {
-		table := make([][]string, 0, len(results))
-		for _, res := range results {
-			table = append(table, []string{
-				res.Model,
-				modelStatusText(res.Status),
-				fmt.Sprintf("%d", res.HTTPStatus),
-				res.Latency.Round(time.Millisecond).String(),
-				truncate(res.Message, 48),
-			})
-		}
-		fmt.Fprint(e.Stdout, renderTable([]string{"模型", "状态", "HTTP", "耗时", "备注"}, table))
-
-		fmt.Fprintf(e.Stdout, "可用 %d，无权 %d，不存在 %d，失败 %d，凭据被拒 %d\n",
-			counts[store.ModelUsable], counts[store.ModelForbidden], counts[store.ModelNotFound],
-			counts[store.ModelError], counts[store.ModelAuthFailed])
+		return accounts, nil
 	}
 
-	// 先出结果再判定，保证 --json 与文本两条路径的退出码与写库行为一致。
-	if writeErr != nil {
-		return fmt.Errorf("探活结果写库失败: %w", writeErr)
+	var out []store.Account
+	for _, acc := range accounts {
+		if acc.Provider == provider {
+			out = append(out, acc)
+		}
 	}
-	if counts[store.ModelAuthFailed] > 0 {
-		return fmt.Errorf("账号 %s 的凭据被上游拒绝，账号已停用，其余结论不作数", name)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("没有厂商为 %q 的账号", provider)
 	}
-	if len(usable) == 0 {
-		return fmt.Errorf("账号 %s 探活后没有可用模型，账号模型列表未改动", name)
-	}
-	if err := a.st.SetModels(acc.ID, usable); err != nil {
-		return err
-	}
-	if !e.JSON {
-		fmt.Fprintf(e.Stdout, "已把 %d 个可用模型写进 %s，选号按这个列表走\n", len(usable), name)
-	}
-	if latest, err := a.st.GetAccount(name); err == nil && !latest.Enabled {
-		fmt.Fprintf(e.Stdout, "账号 %s 当前是停用状态，运行 switchboard account enable %s 之后才会接请求\n", name, name)
-	}
-	return nil
+	return out, nil
 }
 
 func priceText(v *float64) string {

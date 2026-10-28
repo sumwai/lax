@@ -164,27 +164,29 @@ func TestAccountSyncProbeFlow(t *testing.T) {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	code, out, stderr := run(t, "account", "sync", "ds1", "--json")
+	code, out, stderr := run(t, "model", "sync", "--account", "ds1", "--json")
 	if code != 0 {
-		t.Fatalf("account sync 退出码 = %d，stderr = %s", code, stderr)
+		t.Fatalf("model sync 退出码 = %d，stderr = %s", code, stderr)
 	}
-	var synced struct {
-		Account string `json:"account"`
-		Models  int    `json:"models"`
-		Added   int    `json:"added"`
+	var synced []struct {
+		Account  string `json:"account"`
+		Provider string `json:"provider"`
+		Models   int    `json:"models"`
+		Added    int    `json:"added"`
+		Error    string `json:"error"`
 	}
 	mustJSON(t, out, &synced)
-	if synced.Account != "ds1" || synced.Models != 2 || synced.Added != 2 {
-		t.Fatalf("account sync = %+v，期望 account=ds1 models=2 added=2", synced)
+	if len(synced) != 1 || synced[0].Account != "ds1" || synced[0].Models != 2 || synced[0].Added != 2 {
+		t.Fatalf("model sync = %+v，期望一个账号 ds1 models=2 added=2", synced)
 	}
 
-	code, out, stderr = run(t, "account", "probe", "ds1", "--json")
+	code, out, stderr = run(t, "model", "probe", "--account", "ds1", "--json")
 	if code != 0 {
 		t.Fatalf("account probe 退出码 = %d，stdout = %s，stderr = %s", code, out, stderr)
 	}
 	probes := mustProbeRows(t, out)
 	if len(probes) != 2 {
-		t.Fatalf("account probe 应探 2 个模型，实际 %d 个: %s", len(probes), out)
+		t.Fatalf("model probe 应探 2 个模型，实际 %d 个: %s", len(probes), out)
 	}
 	if r := probes["m1"]; r.Status != "usable" || r.HTTPStatus != http.StatusOK {
 		t.Fatalf("m1 探活结果 = %+v，期望 usable/200", r)
@@ -254,14 +256,14 @@ func TestAccountSyncProbeFlow(t *testing.T) {
 		}
 	}
 
-	// 人读输出：表格带状态列，末尾给计数与写库结果。
-	code, out, stderr = run(t, "account", "probe", "ds1")
+	// 人读输出：表格带账号与状态列，末尾给计数与写库结果。
+	code, out, stderr = run(t, "model", "probe", "--account", "ds1")
 	if code != 0 {
-		t.Fatalf("account probe 文本输出退出码 = %d，stderr = %s", code, stderr)
+		t.Fatalf("model probe 文本输出退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"模型", "可用", "无权", "可用 1，无权 1", "已把 1 个可用模型写进 ds1"} {
+	for _, want := range []string{"账号", "模型", "可用 1", "无权 1", "选号列表共 1 个"} {
 		if !strings.Contains(out, want) {
-			t.Fatalf("account probe 文本输出缺少 %q: %s", want, out)
+			t.Fatalf("model probe 文本输出缺少 %q: %s", want, out)
 		}
 	}
 }
@@ -282,11 +284,11 @@ func TestAccountProbeAllForbiddenKeepsModels(t *testing.T) {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	code, out, stderr := run(t, "account", "probe", "ds1", "--json")
+	code, out, stderr := run(t, "model", "probe", "--account", "ds1", "--json")
 	if code != 1 {
-		t.Fatalf("全部 403 时 account probe 退出码 = %d，期望 1；stdout = %s，stderr = %s", code, out, stderr)
+		t.Fatalf("全部 403 时 model probe 退出码 = %d，期望 1；stdout = %s，stderr = %s", code, out, stderr)
 	}
-	if !strings.Contains(stderr, "没有可用模型") {
+	if !strings.Contains(stderr, "探出可用模型") {
 		t.Fatalf("stderr 应说明没有可用模型: %s", stderr)
 	}
 	probes := mustProbeRows(t, out)
@@ -321,9 +323,9 @@ func TestAccountProbeAuthFailureDisablesAccount(t *testing.T) {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	code, out, stderr := run(t, "account", "probe", "ds1", "--json")
+	code, out, stderr := run(t, "model", "probe", "--account", "ds1", "--json")
 	if code != 1 {
-		t.Fatalf("凭据被拒时 account probe 退出码 = %d，期望 1；stdout = %s，stderr = %s", code, out, stderr)
+		t.Fatalf("凭据被拒时 model probe 退出码 = %d，期望 1；stdout = %s，stderr = %s", code, out, stderr)
 	}
 	if !strings.Contains(stderr, "凭据") || !strings.Contains(stderr, "已停用") {
 		t.Fatalf("stderr 应说明凭据被拒且账号已停用: %s", stderr)

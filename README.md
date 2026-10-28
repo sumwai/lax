@@ -5,8 +5,8 @@
 ```bash
 switchboard init                                            # 建配置、数据库与密钥
 switchboard account add ds --provider deepseek --key sk-xxx  # 或用 --key - 从标准输入读
-switchboard account sync ds                                 # 拉上游模型列表
-switchboard account probe ds                                # 逐个探活，能用的才进选号
+switchboard model sync --account ds                         # 拉上游模型列表
+switchboard model probe --account ds                        # 逐个探活，能用的才进选号
 switchboard serve                                           # 起网关，127.0.0.1:4567
 switchboard log tail                                        # 看请求记录
 ```
@@ -20,9 +20,9 @@ switchboard log tail                                        # 看请求记录
 | `init` | 建配置目录、数据库、加密密钥 |
 | `serve` | 前台起网关 |
 | `account add\|ls\|rm\|test\|enable\|disable` | 加账号、列账号、删账号、探活、启用、停用 |
-| `account sync` | 从上游拉模型列表，写进本地 |
-| `account probe` | 逐个模型探活，把能用的写进账号 |
-| `model ls` | 列出模型、可用账号与状态 |
+| `model ls` | 列出模型、可用账号与状态，可按厂商与账号筛选 |
+| `model sync` | 从上游拉模型列表，写进本地，可按厂商与账号筛选 |
+| `model probe` | 逐个模型探活，把能用的写进账号，可按厂商与账号筛选 |
 | `usage` | 按账号、模型或日期汇总用量 |
 | `log tail` | 最近的请求记录 |
 | `call` | 手工打一条请求，打印选号过程 |
@@ -32,16 +32,17 @@ switchboard log tail                                        # 看请求记录
 
 ## 模型从上游拉，再探活
 
-模型列表不用手填。`account sync` 拉上游的模型清单，`account probe` 逐个试一遍，能用的才进入选号：
+模型列表不用手填。`model sync` 拉上游的模型清单，`model probe` 逐个试一遍，能用的才进入选号。两条命令都接受 `--provider` 与 `--account`，不给就处理全部账号：
 
 ```bash
 switchboard account add ds --provider deepseek --key sk-xxx
-switchboard account sync ds     # 拉模型列表，地址由 base-url 推出
-switchboard account probe ds    # 每个模型发一条 max_tokens=1 的请求
+switchboard model sync                                     # 全部账号各拉一次模型列表
+switchboard model sync --provider deepseek --account ds   # 只处理这一个账号
+switchboard model probe --account ds --limit 5            # 只探这个账号的前 5 个模型
 switchboard serve
 ```
 
-探活会真实调用上游：模型多时用 `--limit 5` 控制这一次花多少，`--model deepseek-v4-pro` 只试一个。探不出可用模型时退出码 1，账号原有模型列表不变。`account ls` 与 `model ls` 会带上每个账号的模型状态（可用 / 待探活 / 无权 / 不存在 / 凭据被拒 / 失败）。
+探活会真实调用上游：`--limit 5` 限制每个账号这一次最多探几个，`--model deepseek-v4-pro` 只试一个。某个账号没探出可用模型时只写探活结果，它原有的模型列表保持不变；全部账号都没探出可用模型时退出码 1。碰到 401 时命令停下并停用该账号：凭据被拒，后面的结论不作数。同步失败的账号同样不影响其余账号，只是最终退出码为 1。`account ls` 与 `model ls` 会带上每个账号的模型状态（可用 / 待探活 / 无权 / 不存在 / 凭据被拒 / 失败）。
 
 ## 客户端怎么接
 
@@ -50,7 +51,7 @@ switchboard serve
 ```
 ANTHROPIC_BASE_URL=http://127.0.0.1:4567
 ANTHROPIC_AUTH_TOKEN=switchboard-local    # 本机网关不校验，填个非空值即可
-ANTHROPIC_MODEL=deepseek-v4-pro           # 必须是 probe 出来的可用模型名
+ANTHROPIC_MODEL=deepseek-v4-pro           # 必须是探活出来的可用模型名
 ```
 
 ## 构建

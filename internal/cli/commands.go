@@ -21,7 +21,7 @@ var commandTable = map[string]command{
 	"init":    {name: "init", summary: "初始化配置目录与数据库", run: cmdInit},
 	"serve":   {name: "serve", summary: "启动网关，前台运行", run: cmdServe},
 	"account": {name: "account", summary: "管理上游账号：add / ls / rm / test / enable / disable", run: cmdAccount},
-	"model":   {name: "model", summary: "列出网关可提供的模型", run: cmdModel},
+	"model":   {name: "model", summary: "模型：ls / sync / probe", run: cmdModel},
 	"usage":   {name: "usage", summary: "按账号、模型或日期汇总用量", run: cmdUsage},
 	"log":     {name: "log", summary: "查看请求记录：tail", run: cmdLog},
 	"call":    {name: "call", summary: "手工打一条请求，打印选号过程", run: cmdCall},
