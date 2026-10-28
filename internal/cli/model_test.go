@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"switchboard/internal/config"
 	"switchboard/internal/store"
+	"switchboard/internal/store/storetest"
 )
 
 // probeUpstream 是假 openai-chat 上游：GET /v1/models 给模型列表，
@@ -352,27 +352,21 @@ func TestAccountProbeAuthFailureDisablesAccount(t *testing.T) {
 	}
 }
 
-// openTestStore 直接打开测试沙箱里的库，用来改 checked_at、读请求记录这类子命令不对外暴露的状态。
-func openTestStore(t *testing.T) *store.Store {
+// modelRequests 数出假上游收到的探活请求里各模型各被探了几次。
+// 只看输出行会漏掉「发了请求但结果被截断丢掉」这类问题，所以要数请求。
+func modelRequests(t *testing.T, up *probeUpstream) map[string]int {
 	t.Helper()
-	paths, err := config.Resolve("", "")
-	if err != nil {
-		t.Fatalf("解析数据路径: %v", err)
+	out := map[string]int{}
+	for _, body := range up.requestBodies() {
+		var req struct {
+			Model string `json:"model"`
+		}
+		if err := json.Unmarshal([]byte(body), &req); err != nil {
+			t.Fatalf("探活请求体不是 JSON: %v，%s", err, body)
+		}
+		out[req.Model]++
 	}
-	st, err := store.Open(paths.DB)
-	if err != nil {
-		t.Fatalf("打开数据库: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-	return st
-}
-
-// backdateCheckedAt 改一个模型行的 checked_at，模拟结论已经过时。
-func backdateCheckedAt(t *testing.T, st *store.Store, model string, ts int64) {
-	t.Helper()
-	if _, err := st.DB().Exec(`UPDATE account_models SET checked_at = ? WHERE model = ?`, ts, model); err != nil {
-		t.Fatalf("改 %s 的 checked_at: %v", model, err)
-	}
+	return out
 }
 
 // addProbeAccount 初始化数据库，加一个指向假上游的账号。
@@ -480,8 +474,8 @@ func TestModelProbeMaxAgeExpiry(t *testing.T) {
 		t.Fatalf("首次探活退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	st := openTestStore(t)
-	backdateCheckedAt(t, st, "m1", time.Now().Add(-2*time.Hour).Unix())
+	st := storetest.Open(t)
+	st.BackdateModel(t, "ds1", "m1", time.Now().Add(-2*time.Hour).Unix())
 
 	code, out, stderr := run(t, "model", "probe", "--account", "ds1", "--json", "--max-age", "1h")
 	if code != 0 {
@@ -493,6 +487,147 @@ func TestModelProbeMaxAgeExpiry(t *testing.T) {
 	}
 	if got := len(up.requestBodies()); got != 3 {
 		t.Fatalf("请求数 = %d，期望 3（首次 2 加超期重探 1）", got)
+	}
+}
+
+// TestModelProbeSkipDoesNotTouchCheckedAt 确认跳过那一轮真的不写库：
+// 被跳过的行，checked_at 与 status 与跳过前完全一致。
+// 没有这条断言，跳过路径若误调 SetModelStatus，结论会被刷新成「刚探过」，
+// 下一轮接着跳过，一条本来该重探的结论就永远停在旧值上。
+func TestModelProbeSkipDoesNotTouchCheckedAt(t *testing.T) {
+	sandbox(t)
+	up := newProbeUpstream(t, []string{"m1", "m2"}, nil)
+	addProbeAccount(t, up, "ds1")
+
+	if code, _, stderr := run(t, "model", "probe", "--account", "ds1", "--json"); code != 0 {
+		t.Fatalf("首次探活退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	// 把两条结论拨到一个可辨认的过去时间点，仍在 24h 窗口内。
+	// 这样「没写库」是可验证的：写库会把它改成当前时间。
+	st := storetest.Open(t)
+	pinned := time.Now().Add(-time.Hour).Unix()
+	st.BackdateModel(t, "ds1", "m1", pinned)
+	st.BackdateModel(t, "ds1", "m2", pinned)
+
+	code, out, stderr := run(t, "model", "probe", "--account", "ds1", "--json")
+	if code != 0 {
+		t.Fatalf("跳过轮次退出码 = %d，期望 0；stdout = %s，stderr = %s", code, out, stderr)
+	}
+	if got := strings.TrimSpace(out); got != "[]" {
+		t.Fatalf("两个结论都新鲜，本轮应全部跳过，实际 %s", got)
+	}
+
+	for _, model := range []string{"m1", "m2"} {
+		row := st.ModelRow(t, "ds1", model)
+		if row.CheckedAt != pinned {
+			t.Fatalf("%s 被跳过了，checked_at 却变了：%d，期望保持 %d", model, row.CheckedAt, pinned)
+		}
+		if row.Status != store.ModelUsable {
+			t.Fatalf("%s 被跳过了，status 却变了：%q，期望保持 %q", model, row.Status, store.ModelUsable)
+		}
+	}
+	if got := modelRequests(t, up); got["m1"] != 1 || got["m2"] != 1 || len(got) != 2 {
+		t.Fatalf("跳过的模型不该发上游请求，本轮统计 %v，期望 m1、m2 各 1 次", got)
+	}
+}
+
+// TestModelProbeReprobesUsableWithZeroCheckedAt 确认「有定论但没记时间」不算新鲜。
+// checked_at 为 0 的行可能来自手工导入或旧库升级，没有时间就无法判断结论是不是
+// 一天前的，必须照常重探。
+func TestModelProbeReprobesUsableWithZeroCheckedAt(t *testing.T) {
+	sandbox(t)
+	up := newProbeUpstream(t, []string{"m1", "m2"}, nil)
+	addProbeAccount(t, up, "ds1")
+
+	if code, _, stderr := run(t, "model", "probe", "--account", "ds1", "--json"); code != 0 {
+		t.Fatalf("首次探活退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	// 只把 m1 的时间戳归零，status 仍是 usable；m2 保持新鲜做对照。
+	st := storetest.Open(t)
+	st.BackdateModel(t, "ds1", "m1", 0)
+	if row := st.ModelRow(t, "ds1", "m1"); row.Status != store.ModelUsable || row.CheckedAt != 0 {
+		t.Fatalf("前置条件不对：%+v", row)
+	}
+
+	code, out, stderr := run(t, "model", "probe", "--account", "ds1", "--json")
+	if code != 0 {
+		t.Fatalf("退出码 = %d，stdout = %s，stderr = %s", code, out, stderr)
+	}
+	rows := mustProbeRows(t, out)
+	if len(rows) != 1 || rows["m1"].Status != "usable" {
+		t.Fatalf("checked_at 为 0 的 m1 必须重探，m2 仍新鲜应跳过，实际 %s", out)
+	}
+	if got := modelRequests(t, up); got["m1"] != 2 || got["m2"] != 1 || len(got) != 2 {
+		t.Fatalf("上游请求统计 = %v，期望 m1 探 2 次、m2 探 1 次", got)
+	}
+	if row := st.ModelRow(t, "ds1", "m1"); row.CheckedAt == 0 {
+		t.Fatal("重探之后应写回当前时间戳")
+	}
+}
+
+// TestModelProbeDefaultMaxAgeWindow 确认默认 --max-age 24h 的两侧：
+// 25 小时前的结论必须重探，23 小时前的必须跳过。只断言「默认值大于 0」
+// 挡不住窗口被改成 1h 或 30 天这类回归。
+func TestModelProbeDefaultMaxAgeWindow(t *testing.T) {
+	sandbox(t)
+	up := newProbeUpstream(t, []string{"m-23h", "m-25h"}, nil)
+	addProbeAccount(t, up, "ds1")
+
+	if code, _, stderr := run(t, "model", "probe", "--account", "ds1", "--json"); code != 0 {
+		t.Fatalf("首次探活退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	st := storetest.Open(t)
+	now := time.Now()
+	st.BackdateModel(t, "ds1", "m-23h", now.Add(-23*time.Hour).Unix())
+	st.BackdateModel(t, "ds1", "m-25h", now.Add(-25*time.Hour).Unix())
+
+	// 不给 --max-age，走的就是默认值。
+	code, out, stderr := run(t, "model", "probe", "--account", "ds1", "--json")
+	if code != 0 {
+		t.Fatalf("退出码 = %d，stdout = %s，stderr = %s", code, out, stderr)
+	}
+	rows := mustProbeRows(t, out)
+	if len(rows) != 1 || rows["m-25h"].Status != "usable" {
+		t.Fatalf("只有 25 小时前的 m-25h 该重探，实际 %s", out)
+	}
+	if got := modelRequests(t, up); got["m-25h"] != 2 || got["m-23h"] != 1 || len(got) != 2 {
+		t.Fatalf("上游请求统计 = %v，期望 m-25h 探 2 次、m-23h 探 1 次（默认窗口 24h）", got)
+	}
+}
+
+// TestModelProbeSummaryMixedProbeAndSkip 确认人读汇总在「探一个、跳一个」
+// 的混合情形下两组计数都对：只有 0/3 与 2/0 两个极端覆盖不到中间的取数错误。
+func TestModelProbeSummaryMixedProbeAndSkip(t *testing.T) {
+	sandbox(t)
+	up := newProbeUpstream(t, []string{"m-new", "m-old"}, nil)
+	addProbeAccount(t, up, "ds1")
+
+	if code, _, stderr := run(t, "model", "probe", "--account", "ds1", "--json"); code != 0 {
+		t.Fatalf("首次探活退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	st := storetest.Open(t)
+	now := time.Now()
+	st.BackdateModel(t, "ds1", "m-old", now.Add(-25*time.Hour).Unix())
+	st.BackdateModel(t, "ds1", "m-new", now.Add(-time.Hour).Unix())
+
+	code, out, stderr := run(t, "model", "probe", "--account", "ds1")
+	if code != 0 {
+		t.Fatalf("退出码 = %d，stdout = %s，stderr = %s", code, out, stderr)
+	}
+	want := "ds1：本次探活 1 个，跳过 1 个，可用 1，无权 0，不存在 0，失败 0；选号列表共 2 个"
+	if !strings.Contains(out, want) {
+		t.Fatalf("汇总行缺 %q: %s", want, out)
+	}
+	// 跳过的不出现在输出里，一行表格只该有 m-old。
+	if !strings.Contains(out, "m-old") {
+		t.Fatalf("重探的 m-old 应出现在表格里: %s", out)
+	}
+	if strings.Contains(out, "m-new") {
+		t.Fatalf("跳过的 m-new 不该出现在输出里: %s", out)
 	}
 }
 
@@ -535,7 +670,7 @@ func TestModelProbeDoesNotSkipUnsettledStatuses(t *testing.T) {
 	up := newProbeUpstream(t, nil, nil)
 	addProbeAccount(t, up, "ds1")
 
-	st := openTestStore(t)
+	st := storetest.Open(t)
 	acc, err := st.GetAccount("ds1")
 	if err != nil {
 		t.Fatalf("读账号: %v", err)
@@ -577,7 +712,7 @@ func TestModelProbeAllSkippedWritesUsableModels(t *testing.T) {
 		t.Fatalf("首次探活退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	st := openTestStore(t)
+	st := storetest.Open(t)
 	acc, err := st.GetAccount("ds1")
 	if err != nil {
 		t.Fatalf("读账号: %v", err)
@@ -603,6 +738,97 @@ func TestModelProbeAllSkippedWritesUsableModels(t *testing.T) {
 	}
 }
 
+// TestModelProbeMixedAccountsExitCode 盯多账号的退出码：按照 5.7「报错与否只看终态」，
+// 整次命令退 0 的条件是库里至少一个账号有 usable，而不是每个账号都探出了东西。
+func TestModelProbeMixedAccountsExitCode(t *testing.T) {
+	t.Run("一号全跳过二号真实探活", func(t *testing.T) {
+		sandbox(t)
+		skippedUp := newProbeUpstream(t, []string{"m-a"}, nil)
+		liveUp := newProbeUpstream(t, []string{"m-b"}, nil)
+		addProbeAccount(t, skippedUp, "a-skip")
+		addProbeAccount(t, liveUp, "b-live")
+
+		if code, _, stderr := run(t, "model", "probe", "--json"); code != 0 {
+			t.Fatalf("首轮探活退出码 = %d，stderr = %s", code, stderr)
+		}
+		if got := modelRequests(t, skippedUp); got["m-a"] != 1 || len(got) != 1 {
+			t.Fatalf("首轮 a-skip 的请求统计 = %v", got)
+		}
+
+		// 只让二号的结论过期：一号继续全跳过，二号要真探一次。
+		st := storetest.Open(t)
+		st.BackdateModel(t, "b-live", "m-b", time.Now().Add(-25*time.Hour).Unix())
+
+		code, out, stderr := run(t, "model", "probe", "--json")
+		if code != 0 {
+			t.Fatalf("一号全跳过、二号探出可用时退出码 = %d，期望 0；stdout = %s，stderr = %s", code, out, stderr)
+		}
+		if stderr != "" {
+			t.Fatalf("这种情况不该有错误信息: %s", stderr)
+		}
+		rows := mustProbeRows(t, out)
+		if len(rows) != 1 || rows["m-b"].Status != "usable" {
+			t.Fatalf("本轮只该探 b-live 的 m-b，实际 %s", out)
+		}
+		if got := modelRequests(t, skippedUp); got["m-a"] != 1 || len(got) != 1 {
+			t.Fatalf("a-skip 的结论新鲜，不该再发请求，实际统计 %v", got)
+		}
+		if got := modelRequests(t, liveUp); got["m-b"] != 2 || len(got) != 1 {
+			t.Fatalf("b-live 的结论过期，应重探一次，实际统计 %v", got)
+		}
+	})
+
+	t.Run("一号全跳过且库里零可用另一号有可用", func(t *testing.T) {
+		sandbox(t)
+		// 一号的模型固定回 403：有定论、新鲜，但库里零可用。
+		noneUp := newProbeUpstream(t, []string{"m-a"}, map[string]int{"m-a": http.StatusForbidden})
+		liveUp := newProbeUpstream(t, []string{"m-b"}, nil)
+		addProbeAccount(t, noneUp, "a-none", "--models", "keep-me")
+		addProbeAccount(t, liveUp, "b-live")
+
+		if code, _, stderr := run(t, "model", "probe", "--json"); code != 0 {
+			t.Fatalf("首轮探活退出码 = %d，期望 0（b-live 探出可用）；stderr = %s", code, stderr)
+		}
+
+		// 只让二号过期：一号全跳过且零可用，二号真探一次。
+		st := storetest.Open(t)
+		st.BackdateModel(t, "b-live", "m-b", time.Now().Add(-25*time.Hour).Unix())
+
+		code, out, stderr := run(t, "model", "probe")
+		if code != 0 {
+			t.Fatalf("退出码 = %d，期望 0（终态至少一个账号有可用）；stdout = %s，stderr = %s", code, out, stderr)
+		}
+		if strings.Contains(stderr, "没有账号探出可用模型") {
+			t.Fatalf("至少一个账号有可用，不该落到零可用的错误分支: %s", stderr)
+		}
+		// 一号零可用但不报错，输出里说清「模型列表保持原样」；二号是真探的。
+		for _, want := range []string{
+			"a-none：本次探活 0 个，跳过 1 个，库里无一可用，模型列表保持原样",
+			"b-live：本次探活 1 个，跳过 0 个，可用 1",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("人读输出缺 %q: %s", want, out)
+			}
+		}
+
+		// 一号零可用，连它的手填列表也得保留，避免一次全跳过就把账号清空。
+		none, err := st.GetAccount("a-none")
+		if err != nil {
+			t.Fatalf("读账号: %v", err)
+		}
+		if len(none.Models) != 1 || none.Models[0] != "keep-me" {
+			t.Fatalf("零可用账号的 accounts.models 被改动：%v", none.Models)
+		}
+		live, err := st.GetAccount("b-live")
+		if err != nil {
+			t.Fatalf("读账号: %v", err)
+		}
+		if len(live.Models) != 1 || live.Models[0] != "m-b" {
+			t.Fatalf("可用账号的 accounts.models 应是 m-b，实际 %v", live.Models)
+		}
+	})
+}
+
 // TestModelProbeWritesRequestRows 确认探活写请求记录，跳过的模型不写，且进 usage 汇总。
 func TestModelProbeWritesRequestRows(t *testing.T) {
 	sandbox(t)
@@ -613,7 +839,7 @@ func TestModelProbeWritesRequestRows(t *testing.T) {
 		t.Fatalf("首次探活退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	st := openTestStore(t)
+	st := storetest.Open(t)
 	acc, err := st.GetAccount("ds1")
 	if err != nil {
 		t.Fatalf("读账号: %v", err)
@@ -696,10 +922,10 @@ func TestModelProbeLimitCountsPendingOnly(t *testing.T) {
 	}
 
 	// m1、m2 仍新鲜，m3、m4 超期。--limit 1 应当落在 m3 而不是被跳过的 m1。
-	st := openTestStore(t)
+	st := storetest.Open(t)
 	stale := time.Now().Add(-2 * time.Hour).Unix()
-	backdateCheckedAt(t, st, "m3", stale)
-	backdateCheckedAt(t, st, "m4", stale)
+	st.BackdateModel(t, "ds1", "m3", stale)
+	st.BackdateModel(t, "ds1", "m4", stale)
 
 	code, out, stderr := run(t, "model", "probe", "--account", "ds1", "--json", "--max-age", "1h", "--limit", "1")
 	if code != 0 {
@@ -708,6 +934,18 @@ func TestModelProbeLimitCountsPendingOnly(t *testing.T) {
 	rows := mustProbeRows(t, out)
 	if len(rows) != 1 || rows["m3"].Status != "usable" {
 		t.Fatalf("--limit 1 应只探待探的 m3，实际 %s", out)
+	}
+	// 输出行只能证明「没写结果」，数请求才能证明被截断的模型真的没花钱：
+	// m1、m2 被跳过，m3 落在额度里，m4 被 --limit 截掉，一条上游请求都不该有。
+	got := modelRequests(t, up)
+	want := map[string]int{"m1": 1, "m2": 1, "m3": 2, "m4": 1}
+	if len(got) != len(want) {
+		t.Fatalf("探活请求按模型统计 = %v，期望 %v", got, want)
+	}
+	for model, n := range want {
+		if got[model] != n {
+			t.Fatalf("模型 %s 被探 %d 次，期望 %d 次；统计 %v", model, got[model], n, got)
+		}
 	}
 }
 
@@ -735,7 +973,7 @@ func TestModelProbeStopsAtUnauthorized(t *testing.T) {
 		t.Fatalf("后续账号的假上游收到 %d 条请求，期望 0 条", got)
 	}
 
-	st := openTestStore(t)
+	st := storetest.Open(t)
 	acc, err := st.GetAccount("a-bad")
 	if err != nil {
 		t.Fatalf("读账号: %v", err)
@@ -799,7 +1037,7 @@ func TestModelProbeNeverPrintsKey(t *testing.T) {
 		}
 	}
 
-	st := openTestStore(t)
+	st := storetest.Open(t)
 	recs, err := st.RecentRequests(10)
 	if err != nil {
 		t.Fatalf("读请求记录: %v", err)

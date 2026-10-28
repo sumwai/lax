@@ -544,6 +544,65 @@ func TestProbeModelChatRowHasNoCacheWrite(t *testing.T) {
 	}
 }
 
+// responses 探活的用量在非流式响应体的顶层 usage 里（流式才在 response.completed 的嵌套结构里）。
+// 这条从探活到 requests 行整条链路上钉住它：scanner 单测过了、接线错了照样会让 token 记 0。
+func TestProbeModelResponsesRowReadsTopLevelUsage(t *testing.T) {
+	f := newFixture(t)
+
+	var gotPath, gotAuth string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"resp_1","object":"response","status":"completed","output":[],
+			"usage":{"input_tokens":9,"output_tokens":1,"total_tokens":10,
+			"input_tokens_details":{"cached_tokens":4}}}`)
+	}))
+	defer up.Close()
+
+	acc := f.add(t, "oa1", gateway.ProtocolResponses, up.URL, "sk-test", []string{"gpt-x"}, 100)
+	gs := newGateway(t, f)
+
+	res, err := gs.ProbeModel(context.Background(), acc, "gpt-x")
+	if err != nil {
+		t.Fatalf("探活: %v", err)
+	}
+	if res.Status != store.ModelUsable || res.HTTPStatus != http.StatusOK {
+		t.Fatalf("探活结果 = %+v，期望 usable/200", res)
+	}
+	if gotPath != "/v1/responses" {
+		t.Fatalf("上游路径 = %q，期望 /v1/responses", gotPath)
+	}
+	if gotAuth != "Bearer sk-test" {
+		t.Fatalf("上游 Authorization = %q", gotAuth)
+	}
+
+	recs, err := f.st.RecentRequests(10)
+	if err != nil {
+		t.Fatalf("读请求记录: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("探活应写 1 行请求记录，实际 %d 行", len(recs))
+	}
+	rec := recs[0]
+	if rec.Inbound != gateway.ProtocolResponses || rec.Outbound != gateway.ProtocolResponses {
+		t.Fatalf("入站与出站都应取账号协议，实际 %s→%s", rec.Inbound, rec.Outbound)
+	}
+	if rec.InTokens != 9 || rec.OutTokens != 1 {
+		t.Fatalf("token = %d/%d，期望 9/1（顶层 usage 的 input_tokens / output_tokens）",
+			rec.InTokens, rec.OutTokens)
+	}
+	if rec.CacheRead != 4 {
+		t.Fatalf("缓存读 = %d，期望 4（input_tokens_details.cached_tokens）", rec.CacheRead)
+	}
+	if rec.CacheWrite != 0 {
+		t.Fatalf("responses 只带缓存读，cache_write 应记 0，实际 %d", rec.CacheWrite)
+	}
+	if !rec.OK || rec.HTTPStatus != http.StatusOK {
+		t.Fatalf("探活行应为 200 且 ok: %+v", rec)
+	}
+}
+
 // 401 那条真实计费的调用同样要留一行请求记录，供 usage 汇总。
 func TestProbeModelUnauthorizedRecordsRequestRow(t *testing.T) {
 	f := newFixture(t)
