@@ -158,8 +158,7 @@ func TestSyncModelsOverrideAppliesWithoutRoutes(t *testing.T) {
 
 // TestSyncModelsWithEndpointOverride 钉住 `model sync --endpoint <路径>`：
 // 只影响这一次调用，压过厂商覆盖与路由。
-// 路径写法不在断言之列：拼接改成程序规整、不报错，`v1/model`、`//v1//model` 都会被规整成
-// 完整地址，不再是用法错误。
+// 路径写法是规整、不是用法错误：`v1/model`、`//v1//model/` 都会被打到规整后的 /v1/model。
 func TestSyncModelsWithEndpointOverride(t *testing.T) {
 	f := newFixture(t)
 	up := newModelsServer(t)
@@ -186,6 +185,17 @@ func TestSyncModelsWithEndpointOverride(t *testing.T) {
 	}
 	if up.path != "/v1/model" {
 		t.Fatalf("模型列表路径 = %q，期望 --endpoint 给的 /v1/model", up.path)
+	}
+	if up.bearer != "Bearer "+key {
+		t.Fatalf("Authorization = %q", up.bearer)
+	}
+
+	// 不规范的写法同样可用：没有前导斜杠、重复斜杠、末尾多一个斜杠都规整成同一个地址。
+	if _, err := gs.SyncModelsWithEndpoint(context.Background(), acc, "//v1//model/"); err != nil {
+		t.Fatalf("不规范路径不该报错: %v", err)
+	}
+	if up.path != "/v1/model" {
+		t.Fatalf("不规范路径规整后的模型列表路径 = %q，期望 /v1/model", up.path)
 	}
 	if up.bearer != "Bearer "+key {
 		t.Fatalf("Authorization = %q", up.bearer)

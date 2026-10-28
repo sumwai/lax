@@ -186,8 +186,8 @@ func TestCreateProviderValidatesAddressAndRoutes(t *testing.T) {
 		{"缺 base_url", store.Provider{Name: "a"}, chat, "base_url"},
 		{"地址不带协议头", store.Provider{Name: "b", BaseURL: "api.example.com"}, chat, "http://"},
 		{"没有路由", store.Provider{Name: "c", BaseURL: "https://c.example.com"}, nil, "至少要声明一条协议路由"},
-		{"路径不以 / 开头", store.Provider{Name: "d", BaseURL: "https://d.example.com"},
-			[]store.ProviderRoute{{Protocol: "openai-chat", Path: "v1/chat/completions"}}, "要以 / 开头"},
+		{"路径是空白", store.Provider{Name: "d", BaseURL: "https://d.example.com"},
+			[]store.ProviderRoute{{Protocol: "openai-chat", Path: "   "}}, "缺路径"},
 		{"协议不认识", store.Provider{Name: "e", BaseURL: "https://e.example.com"},
 			[]store.ProviderRoute{{Protocol: "gemini", Path: "/v1/chat/completions"}}, "不认识"},
 		{"默认协议不在这次路由里", store.Provider{Name: "f", BaseURL: "https://f.example.com", DefaultProtocol: "anthropic"},
@@ -308,9 +308,13 @@ func TestSetProviderPatchesOnlyGivenFields(t *testing.T) {
 	if got, err := st.GetProvider("myco"); err != nil || got.ModelsPath != "" {
 		t.Fatalf("清空后 models_path = %+v err=%v，期望空串", got, err)
 	}
+	// 没有前导斜杠不报错：规整之后就是 /models。路径写法是抄文档的差异，不是用法错误。
 	noSlash := "models"
-	if err := st.SetProvider("myco", store.ProviderPatch{ModelsPath: &noSlash}); err == nil {
-		t.Fatal("模型列表路径不以 / 开头应报错")
+	if err := st.SetProvider("myco", store.ProviderPatch{ModelsPath: &noSlash}); err != nil {
+		t.Fatalf("模型列表路径没有前导斜杠不该报错: %v", err)
+	}
+	if got, err := st.GetProvider("myco"); err != nil || got.ModelsPath != "/models" {
+		t.Fatalf("模型列表路径应规整成 /models，实际 %+v err=%v", got, err)
 	}
 
 	// 不存在的厂商与空地址都要拒绝。

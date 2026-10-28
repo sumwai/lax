@@ -45,7 +45,8 @@ type Provider struct {
 }
 
 // ProviderRoute 是一行 (厂商, 协议) 的路由。完整地址是厂商的 base_url 去掉末尾斜杠后直接拼 Path，
-// 不再做任何后缀猜测。
+// 不再做任何后缀猜测。Path 与 ModelsPath 在写入时都经 NormalizePath 规整（补一个前导斜杠、
+// 合并重复斜杠、去尾斜杠），读取侧拼地址时用的是同一个函数（DESIGN 5.8）。
 // ModelsPath 是这条路由的模型列表路径，空字符串表示这条协议没有自己的列表接口，
 // 读取时回退到同厂商协议名排序的第一条非空值。写入侧见 prepareRoutes 与 upsertRoutes（DESIGN 5.7）。
 type ProviderRoute struct {
@@ -170,27 +171,70 @@ func wireProtocol(protocol string) bool {
 	return false
 }
 
-// normalizeBaseURL 校验并规范化厂商地址：必须是 http:// 或 https:// 开头，去掉末尾斜杠。
+// NormalizePath 是路径规整的唯一入口，写入侧（CreateProvider、SetProvider、AddProvider 的
+// path 与 models_path）与读取侧（拼转发地址、拼模型列表地址、`model sync --endpoint`）都走它：
+// 去掉首尾空白、把连续斜杠合并成一个、补上恰好一个前导斜杠、去掉末尾斜杠。
+// 空串、只有斜杠、只有空白的输入一律返回空串，由调用方按「这一项没给」处理。
+//
+// 它只规整、不拒绝：`v1/chat/completions`、`//v1//chat/completions`、`/v1/chat/completions/`
+// 都当同一个地址。路径来自用户抄上游文档，多一个或少一个斜杠是写法差异，不是用法错误；
+// 报错只会让人先改命令再重敲一遍，得到的仍然是同一个地址。真正的用法错误是取值为空
+// （删除语义归 `provider unset`），那一条由调用方判断。
+func NormalizePath(raw string) string {
+	path := collapseSlashes(strings.TrimSpace(raw))
+	path = strings.TrimRight(path, "/")
+	if path == "" {
+		return ""
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return path
+}
+
+// collapseSlashes 把连续斜杠合并成一个。
+func collapseSlashes(s string) string {
+	if !strings.Contains(s, "//") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	prevSlash := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '/' {
+			if prevSlash {
+				continue
+			}
+			prevSlash = true
+		} else {
+			prevSlash = false
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// NormalizeBaseURL 校验并规整厂商地址：必须是 http:// 或 https:// 开头，
+// scheme 之后合并重复斜杠并去掉末尾斜杠，`https://api.example.com//api/paas/v4/`
+// 因此变成 `https://api.example.com/api/paas/v4`——真实存在的前缀原样保留。
 // 三个写入口（CreateProvider、SetProvider、AddProvider）都在这里过一道，cli 那层不再是唯一防线：
 // 脏地址一旦落库，转发与模型同步都会拿它拼路径。
-func normalizeBaseURL(raw string) (string, error) {
-	u := strings.TrimRight(strings.TrimSpace(raw), "/")
+// 读侧拼地址（gateway.joinEndpoint 等）也用它，保证最终地址在 scheme 之外不出现 `//`。
+func NormalizeBaseURL(raw string) (string, error) {
+	u := strings.TrimSpace(raw)
 	if u == "" {
 		return "", errors.New("缺少 base_url")
 	}
 	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
 		return "", fmt.Errorf("base_url %q 要以 http:// 或 https:// 开头，例如 https://api.example.com", raw)
 	}
-	return u, nil
-}
-
-// normalizeModelsPath 校验厂商级的模型列表路径覆盖。空串表示不覆盖，或者是「回到按路由取」。
-func normalizeModelsPath(raw string) (string, error) {
-	path := strings.TrimSpace(raw)
-	if path != "" && !strings.HasPrefix(path, "/") {
-		return "", fmt.Errorf("模型列表路径 %q 要以 / 开头，完整地址是 base_url 拼上它，例如 /v1/models", raw)
+	// 只合并 scheme 之后的斜杠：`https://` 里那一对是协议的一部分。
+	if i := strings.Index(u, "://"); i >= 0 {
+		u = u[:i+3] + collapseSlashes(u[i+3:])
 	}
-	return path, nil
+	u = strings.TrimRight(u, "/")
+	return u, nil
 }
 
 // DeriveModelsPath 是 models_path 的写入默认值：openai-chat 的路由把尾部 /chat/completions
@@ -208,7 +252,8 @@ func DeriveModelsPath(protocol, path string) string {
 	return ""
 }
 
-// prepareRoutes 校验一次写入要落的路由，并补上 models_path 的默认值。
+// prepareRoutes 规整一次写入要落的路由（路径与模型列表路径都走 NormalizePath），
+// 并补上 models_path 的默认值。路径写法不拒绝，只有规整之后为空才算缺值。
 func prepareRoutes(provider string, in []ProviderRoute) ([]ProviderRoute, error) {
 	out := make([]ProviderRoute, 0, len(in))
 	for _, r := range in {
@@ -217,15 +262,12 @@ func prepareRoutes(provider string, in []ProviderRoute) ([]ProviderRoute, error)
 			return nil, fmt.Errorf("厂商 %s 的路由协议 %q 不认识，只能是 %s、%s、%s",
 				provider, r.Protocol, translate.ProtocolAnthropic, translate.ProtocolChat, translate.ProtocolResponses)
 		}
-		path := strings.TrimSpace(r.Path)
-		if !strings.HasPrefix(path, "/") {
-			return nil, fmt.Errorf("厂商 %s 的 %s 路由路径 %q 要以 / 开头，例如 /v1/chat/completions；完整地址是 base_url 拼上它",
-				provider, protocol, r.Path)
+		path := NormalizePath(r.Path)
+		if path == "" {
+			return nil, fmt.Errorf("厂商 %s 的 %s 路由缺路径：它是相对 base_url 的完整路径，例如 /v1/chat/completions",
+				provider, protocol)
 		}
-		modelsPath, err := normalizeModelsPath(r.ModelsPath)
-		if err != nil {
-			return nil, fmt.Errorf("厂商 %s 的 %s 路由：%w", provider, protocol, err)
-		}
+		modelsPath := NormalizePath(r.ModelsPath)
 		auto := modelsPath == ""
 		if auto {
 			modelsPath = DeriveModelsPath(protocol, path)
@@ -300,7 +342,7 @@ func (s *Store) CreateProvider(p Provider, routes []ProviderRoute) error {
 	if name == "" {
 		return errors.New("厂商名不能为空")
 	}
-	base, err := normalizeBaseURL(p.BaseURL)
+	base, err := NormalizeBaseURL(p.BaseURL)
 	if err != nil {
 		return fmt.Errorf("厂商 %s：%w", name, err)
 	}
@@ -312,10 +354,7 @@ func (s *Store) CreateProvider(p Provider, routes []ProviderRoute) error {
 		return fmt.Errorf("厂商 %s 至少要声明一条协议路由（%s、%s、%s 里任一条），否则账号只能按 base_url 后缀猜路径",
 			name, translate.ProtocolChat, translate.ProtocolResponses, translate.ProtocolAnthropic)
 	}
-	modelsPath, err := normalizeModelsPath(p.ModelsPath)
-	if err != nil {
-		return fmt.Errorf("厂商 %s：%w", name, err)
-	}
+	modelsPath := NormalizePath(p.ModelsPath)
 	def := strings.TrimSpace(p.DefaultProtocol)
 	if def != "" && !hasRoute(prepared, def) {
 		return fmt.Errorf("厂商 %s 的默认协议是 %q，但这次没有声明这个协议的路由（这次声明：%s）；把默认协议改成已声明的其中一个，或补上这条路由",
@@ -375,7 +414,7 @@ func (s *Store) SetProvider(name string, patch ProviderPatch) error {
 	}
 
 	if patch.BaseURL != nil {
-		base, err := normalizeBaseURL(*patch.BaseURL)
+		base, err := NormalizeBaseURL(*patch.BaseURL)
 		if err != nil {
 			return fmt.Errorf("厂商 %s：%w", name, err)
 		}
@@ -385,17 +424,14 @@ func (s *Store) SetProvider(name string, patch ProviderPatch) error {
 		p.Note = strings.TrimSpace(*patch.Note)
 	}
 	if patch.ModelsPath != nil {
-		modelsPath, err := normalizeModelsPath(*patch.ModelsPath)
-		if err != nil {
-			return fmt.Errorf("厂商 %s：%w", name, err)
-		}
-		p.ModelsPath = modelsPath
+		// 空值表示回到按路由取（`provider unset <名称> models-path` 就是这么调的）。
+		p.ModelsPath = NormalizePath(*patch.ModelsPath)
 	}
 	if patch.DefaultProtocol != nil {
 		def := strings.TrimSpace(*patch.DefaultProtocol)
 		if def != "" && !wireProtocol(def) {
-			return fmt.Errorf("厂商 %s 的默认协议 %q 不认识，只能是 %s、%s、%s；传空串表示回到按固定顺序取第一条已声明的路由",
-				name, def, translate.ProtocolChat, translate.ProtocolResponses, translate.ProtocolAnthropic)
+			return fmt.Errorf("厂商 %s 的默认协议 %q 不认识，只能是 %s、%s、%s；清掉显式值、回到按固定顺序取第一条用 switchboard provider unset %s default-protocol",
+				name, def, translate.ProtocolChat, translate.ProtocolResponses, translate.ProtocolAnthropic, name)
 		}
 		p.DefaultProtocol = def
 	}
@@ -442,8 +478,8 @@ func (s *Store) SetProvider(name string, patch ProviderPatch) error {
 	// 不该挡住一次只改备注或地址的调用。
 	touchedRouting := len(patch.Routes) > 0 || patch.DefaultProtocol != nil
 	if touchedRouting && p.DefaultProtocol != "" && !hasRoute(routes, p.DefaultProtocol) {
-		return fmt.Errorf("厂商 %s 的默认协议 %q 对应的路由不存在（现有：%s）；先加上这条路由（--%s <路径>），或把默认协议改成已声明的其中一个（--default-protocol），也可以传空串回到按固定顺序取第一条",
-			name, p.DefaultProtocol, routeProtocols(routes), protocolFlagName(p.DefaultProtocol))
+		return fmt.Errorf("厂商 %s 的默认协议 %q 对应的路由不存在（现有：%s）；先补上这条路由（switchboard provider set %s --%s <路径>），或把默认协议改成已声明的其中一个（switchboard provider set %s --default-protocol <协议>），也可以清掉显式值回到按固定顺序取第一条（switchboard provider unset %s default-protocol）",
+			name, p.DefaultProtocol, routeProtocols(routes), name, protocolFlagName(p.DefaultProtocol), name, name)
 	}
 
 	if _, err := tx.Exec(`UPDATE providers SET base_url = ?, note = ?, default_protocol = ?, models_path = ?
@@ -486,9 +522,11 @@ func providerRoutesTx(tx *sql.Tx, provider string) ([]ProviderRoute, error) {
 	return out, rows.Err()
 }
 
-// AddProvider 是过渡期的 upsert 写入口：厂商已存在时更新 base_url 与备注，路由按 (厂商, 协议)
-// 覆盖或新增，没传入的路由不动。它比 CreateProvider 宽松——允许一条路由都没有——因为还没改造的
-// `provider add` 就是这么用的。新建走 CreateProvider、改走 SetProvider，这条在 cli 换完之后删掉。
+// AddProvider 是第二条 upsert 写入口：厂商已存在时更新 base_url 与备注，路由按 (厂商, 协议)
+// 覆盖或新增，没传入的路由不动。它比 CreateProvider 宽松——允许一条路由都没有。
+// 定位：`cli` 不走它（新建走 CreateProvider、改走 SetProvider），生产代码里也没有其它调用者，
+// 现在只有 `store` 自己的用例在用它。留着是为了不把「upsert 且允许零路由」这个形状从一个
+// 已经测过的入口里抹掉；真要收窄就整条删掉并同步删掉对应用例，不要把它当新建入口用。
 // p.DefaultProtocol 非空时必须落在「这次传入的路由」或「此前已声明的路由」上，否则整笔拒绝，
 // 不留下半条记录；传空字符串表示不改这一列（已有行保留原值）。
 func (s *Store) AddProvider(p Provider, routes []ProviderRoute) error {
@@ -496,7 +534,7 @@ func (s *Store) AddProvider(p Provider, routes []ProviderRoute) error {
 	if name == "" {
 		return errors.New("厂商名不能为空")
 	}
-	base, err := normalizeBaseURL(p.BaseURL)
+	base, err := NormalizeBaseURL(p.BaseURL)
 	if err != nil {
 		return fmt.Errorf("厂商 %s：%w", name, err)
 	}
@@ -504,10 +542,7 @@ func (s *Store) AddProvider(p Provider, routes []ProviderRoute) error {
 	if err != nil {
 		return err
 	}
-	modelsPath, err := normalizeModelsPath(p.ModelsPath)
-	if err != nil {
-		return fmt.Errorf("厂商 %s：%w", name, err)
-	}
+	modelsPath := NormalizePath(p.ModelsPath)
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -559,11 +594,11 @@ func requireDeclaredProtocol(tx *sql.Tx, provider, protocol string) error {
 		return err
 	}
 	if len(declared) == 0 {
-		return fmt.Errorf("厂商 %s 的默认协议是 %q，但这家还没有任何路由；先运行 switchboard provider add %s --base-url <地址> --route %s=<路径> 把这条路由加上，或去掉默认协议改回按固定顺序取第一条",
-			provider, protocol, provider, protocol)
+		return fmt.Errorf("厂商 %s 的默认协议是 %q，但这家还没有任何路由；先运行 switchboard provider set %s --%s <路径> 把这条路由加上，或去掉默认协议改回按固定顺序取第一条",
+			provider, protocol, provider, protocolFlagName(protocol))
 	}
-	return fmt.Errorf("厂商 %s 的默认协议是 %q，但这家没有这个协议的路由（已声明：%s）；先运行 switchboard provider add %s --base-url <地址> --route %s=<路径> 补上这条路由，或把默认协议改成已声明的其中一个：%s",
-		provider, protocol, strings.Join(declared, "、"), provider, protocol, strings.Join(declared, "、"))
+	return fmt.Errorf("厂商 %s 的默认协议是 %q，但这家没有这个协议的路由（已声明：%s）；先运行 switchboard provider set %s --%s <路径> 补上这条路由，或把默认协议改成已声明的其中一个：%s",
+		provider, protocol, strings.Join(declared, "、"), provider, protocolFlagName(protocol), strings.Join(declared, "、"))
 }
 
 // declaredProtocols 是事务里读这家厂商已声明协议的版本，按协议名升序，与 ProviderRoutes 一致。

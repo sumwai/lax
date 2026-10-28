@@ -515,6 +515,10 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 }
 
 // passthroughStream 原样转发同协议上游的字节，同时读出用量。
+//
+// 上游没发到收尾帧就断开时，已写出的字节一个不动，只在末尾追加该协议的合法结尾
+// （见 passthroughTail）：直通与转换两条路径对断流的处理一致，客户端总能拿到一个
+// 结束了的流，而不是戛然而止的半截字节（DESIGN 5.2 第 6 条、5.4）。
 func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, protocol string, flush func()) attempt {
 	scanner, err := translate.NewUsageScanner(protocol)
 	if err != nil {
@@ -523,6 +527,11 @@ func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, p
 
 	buf := bufio.NewReaderSize(resp.Body, 32*1024)
 	var readErr error
+	// ended 记「收尾帧已经转发给客户端了」：收尾帧之后再断开不算断流，不再补任何字节，
+	// 完整流的字节因此与上游逐字节一致。
+	var ended bool
+	// tail 是最后写出的至多两个字节，用来判断已写出的内容是不是停在帧边界上。
+	var tail []byte
 
 	for {
 		line, err := buf.ReadBytes('\n')
@@ -530,9 +539,17 @@ func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, p
 			if _, werr := w.Write(line); werr != nil {
 				return attempt{status: http.StatusOK, wrote: true, message: "客户端断开", err: werr}
 			}
+			tail = append(tail, line...)
+			if len(tail) > 2 {
+				tail = tail[len(tail)-2:]
+			}
 			trimmed := bytes.TrimRight(line, "\r\n")
 			if bytes.HasPrefix(trimmed, []byte("data:")) {
-				scanner.Feed(bytes.TrimSpace(trimmed[len("data:"):]))
+				data := bytes.TrimSpace(trimmed[len("data:"):])
+				scanner.Feed(data)
+				if streamFrameEnded(protocol, data) {
+					ended = true
+				}
 			}
 			flush()
 		}
@@ -551,13 +568,115 @@ func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, p
 		res.message = "上游流式响应中断: " + readErr.Error()
 		res.err = readErr
 	}
+	if !ended {
+		if res.err == nil {
+			// 干净的 EOF 也可能断在半路：收尾帧没到就是断流，与转换路径上解码器报错的判据一致。
+			res.message = "上游流式响应中断: 收尾帧之前连接就结束了"
+			res.err = errStreamTruncated
+		}
+		appendStreamTail(w, flush, tail, passthroughTail(protocol, res.message, in, out))
+	}
 	return res
+}
+
+// errStreamTruncated 表示上游在收尾帧之前就结束了连接（干净的 EOF，读不出别的错）。
+var errStreamTruncated = errors.New("上游流式响应在收尾帧之前结束")
+
+// streamFrameEnded 判断这一帧是不是该协议的收尾帧：anthropic 的 message_stop、
+// openai-chat 的 [DONE]、openai-responses 的三个终态事件。
+// 只看帧里的类型字段，不看正文，正文里出现同名文字不会被当成收尾。
+func streamFrameEnded(protocol string, data []byte) bool {
+	switch protocol {
+	case ProtocolAnthropic:
+		return bytes.Contains(data, []byte(`"type":"message_stop"`))
+	case ProtocolChat:
+		return string(bytes.TrimSpace(data)) == "[DONE]"
+	case ProtocolResponses:
+		for _, marker := range [][]byte{
+			[]byte(`"type":"response.completed"`),
+			[]byte(`"type":"response.incomplete"`),
+			[]byte(`"type":"response.failed"`),
+		} {
+			if bytes.Contains(data, marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// passthroughTail 给出直通路径断流之后要补的收尾帧，按入站（=出站）协议决定形状：
+//
+//   - anthropic：event: error，再补 message_delta（带已知 usage）与 message_stop；
+//   - openai-chat：一帧 data: {"error":…}，再补 data: [DONE]；
+//   - openai-responses：event: error，再补 response.failed。
+//
+// 用量是 scanner 已经从已转发帧里读出来的那些，读不到就是 0：补的是一个诚实的结尾，不是重放。
+func passthroughTail(protocol, message string, in, out int64) []translate.SSEEvent {
+	marshal := func(v any) []byte {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return []byte(`{}`)
+		}
+		return b
+	}
+
+	switch protocol {
+	case ProtocolAnthropic:
+		return []translate.SSEEvent{
+			translate.ErrorEvent("api_error", message),
+			{Event: "message_delta", Data: marshal(map[string]any{
+				"type":  "message_delta",
+				"delta": map[string]any{"stop_reason": translate.StopEndTurn, "stop_sequence": nil},
+				"usage": translate.AnthropicUsage{InputTokens: in, OutputTokens: out},
+			})},
+			{Event: "message_stop", Data: []byte(`{"type":"message_stop"}`)},
+		}
+	case ProtocolChat:
+		return []translate.SSEEvent{
+			{Data: marshal(map[string]any{"error": map[string]string{
+				"type": "api_error", "message": message,
+			}})},
+			{Data: []byte("[DONE]")},
+		}
+	case ProtocolResponses:
+		return []translate.SSEEvent{
+			{Event: "error", Data: marshal(map[string]any{"type": "error", "message": message})},
+			{Event: "response.failed", Data: marshal(map[string]any{
+				"type": "response.failed",
+				"response": map[string]any{
+					"id":     "resp_switchboard",
+					"object": "response",
+					"status": "failed",
+					"error":  map[string]string{"code": "server_error", "message": message},
+				},
+			})},
+		}
+	}
+	return nil
+}
+
+// appendStreamTail 把收尾帧追加到已写出的字节后面，前面已经发出去的内容一个字节都不改。
+// 已写出的内容停在半行或半帧（没以空行结尾）时先补一个空行：不补的话追加的第一行会被并进
+// 上一个事件，客户端那边仍然不是一个结束了的流。
+func appendStreamTail(w io.Writer, flush func(), written []byte, events []translate.SSEEvent) {
+	if len(written) > 0 && !bytes.HasSuffix(written, []byte("\n\n")) {
+		if _, err := w.Write([]byte("\n\n")); err != nil {
+			return
+		}
+	}
+	for _, e := range events {
+		if _, err := w.Write(e.Bytes()); err != nil {
+			return
+		}
+	}
+	flush()
 }
 
 // Endpoint 是 base_url 加协议的后缀猜测，作为没有厂商路由时的兜底：末尾带不带 /v1 都行。
 // 正常路径上的地址走 Server.endpoint（按 (厂商, 协议) 查 provider_routes）。
 func Endpoint(base, protocol string) string {
-	base = strings.TrimRight(base, "/")
+	base = normalizedBase(base)
 	suffix := "/chat/completions"
 	switch protocol {
 	case ProtocolAnthropic:
@@ -586,14 +705,21 @@ func (s *Server) endpoint(a store.Account, protocol string) string {
 	return joinEndpoint(a.BaseURL, route.Path)
 }
 
-// joinEndpoint 把 base_url 与路由里的完整路径拼起来：只去 base_url 末尾的斜杠并补 path 开头的斜杠，
+// normalizedBase 规整 base_url：scheme 之后合并重复斜杠、去掉末尾斜杠。
+// store.NormalizeBaseURL 还会校验协议头，这里只是拼地址，脏地址交给 http.NewRequest 报错。
+func normalizedBase(base string) string {
+	if u, err := store.NormalizeBaseURL(base); err == nil {
+		return u
+	}
+	return strings.TrimRight(strings.TrimSpace(base), "/")
+}
+
+// joinEndpoint 把 base_url 与路由里的完整路径拼起来，两者都按 store 的同一套规则规整：
+// base_url 去尾斜杠（scheme 之后合并重复斜杠），路径补一个前导斜杠、合并重复斜杠、去尾斜杠，
+// 因此最终地址在 scheme 之外不出现 `//`，`base_url` 里真实存在的前缀（如 /api/paas/v4）原样保留。
 // 其余一律照抄，不推 /v1、不猜后缀。
 func joinEndpoint(base, path string) string {
-	base = strings.TrimRight(base, "/")
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	return base + path
+	return normalizedBase(base) + store.NormalizePath(path)
 }
 
 // setAuth 按协议给上游请求配好凭据头。

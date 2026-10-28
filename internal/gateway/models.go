@@ -18,8 +18,9 @@ import (
 
 // ModelsEndpoint 是 base_url 加 /v1/models 的兜底：账号没有厂商行、或厂商一条路由都没声明时用它，
 // 末尾带不带 /v1 都行。正常路径上的地址走 Server.modelsEndpoint（按厂商覆盖与路由的 models_path 取）。
+// base_url 先按 store.NormalizeBaseURL 规整，最终地址在 scheme 之外不会出现 `//`。
 func ModelsEndpoint(base string) string {
-	base = strings.TrimRight(base, "/")
+	base = normalizedBase(base)
 	if strings.HasSuffix(base, "/v1") {
 		return base + "/models"
 	}
@@ -39,11 +40,9 @@ func ModelsEndpoint(base string) string {
 // 地址来自哪条路由就用哪条路由的协议。deepseek 的 anthropic 账号取到的是 chat 的 /v1/models，
 // 用账号协议发 x-api-key 上去只会换回一个 401/403，却把错误指到「凭据无效」上。
 func (s *Server) modelsEndpoint(a store.Account, override string) (endpoint, protocol string, err error) {
-	if override != "" {
-		path := strings.TrimSpace(override)
-		if !strings.HasPrefix(path, "/") {
-			return "", "", fmt.Errorf("模型列表路径 %q 要以 / 开头，完整地址是厂商 base_url 拼上它，例如 /v1/models", override)
-		}
+	// --endpoint 的取值同样只规整、不拒绝：`v1/models`、`//v1//models` 都当 /v1/models。
+	// 规整之后为空视为这次没给，回到厂商覆盖与路由。
+	if path := store.NormalizePath(override); path != "" {
 		return joinEndpoint(a.BaseURL, path), a.Protocol, nil
 	}
 

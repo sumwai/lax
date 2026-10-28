@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"switchboard/internal/gateway"
+	"switchboard/internal/translate"
 )
 
 // 这个文件钉住流式转发的分帧边界：上游在事件中间、在 UTF-8 多字节字符中间、在收尾事件之前断开时，
@@ -334,42 +335,173 @@ func TestStreamDisconnectBeforeFinishFrameKeepsLegalEnding(t *testing.T) {
 	}
 }
 
-// TestPassthroughStreamDisconnectRecordsTruncation 覆盖同协议直通时上游掉线：
-// 已经读到的字节按原样转发给客户端，请求记录写明上游中断。
-//
-// 直通路径目前只转发已读到的字节，不补错误帧也不补收尾事件（gateway.passthroughStream
-// 在 readErr 之后直接返回），与 DESIGN 5.2「上游中断则向客户端发一个错误事件」不一致；
-// 这里钉的是当前行为，改实现时把断言一起改掉。
-func TestPassthroughStreamDisconnectRecordsTruncation(t *testing.T) {
-	firstEvent := "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好\"}}]}\n\n"
-	prefix := firstEvent + `data: {"id":"c1","choices":[{"index":0,"delta":`
-	if !strings.HasPrefix(chatSSE, prefix) {
-		t.Fatalf("测试用例写错了：prefix 必须是 chatSSE 的真前缀")
-	}
-	f := newFixture(t)
-	up := truncatedSSEUpstream(t, chatSSE, prefix)
-	f.add(t, "ds1", gateway.ProtocolChat, up.URL, "sk-passthru-cut", []string{"m1"}, 100)
-	srv := f.server(t)
+// TestPassthroughStreamDisconnectKeepsLegalEnding 覆盖同协议直通时上游掉线，三种协议各一条：
+// 已经读到的字节按原样转发，末尾按入站协议补上合法结尾。补结尾是设计要求，不是顺手加的——
+// 上游中断时向客户端发一个错误事件并结束本次请求（DESIGN 5.2 第 6 条），直通与转换两条路径
+// 对断流的处理一致（DESIGN 5.4）：anthropic 补 event: error 加 message_delta（带已知 usage）
+// 与 message_stop，openai-chat 补一帧 data: {"error":…} 加 data: [DONE]，
+// openai-responses 补 event: error 加 response.failed。
+// 收尾帧到齐的完整流不会被追加任何字节，这条由 matrix_stream_test 的逐字节断言钉住。
+func TestPassthroughStreamDisconnectKeepsLegalEnding(t *testing.T) {
+	const key = "sk-passthru-cut"
 
-	status, body, ctype := streamFrom(t, srv, gateway.ProtocolChat, "m1")
-	if status != http.StatusOK {
-		t.Fatalf("状态 = %d，期望 200", status)
-	}
-	if !strings.HasPrefix(ctype, "text/event-stream") {
-		t.Fatalf("Content-Type = %q", ctype)
-	}
-	if body != prefix {
-		t.Fatalf("直通应在断点处停下，收到 %q，期望 %q", body, prefix)
+	cutBefore := func(full, marker string) string {
+		idx := strings.Index(full, marker)
+		if idx <= 0 {
+			t.Fatalf("测试用例写错了：完整流里找不到 %q", marker)
+		}
+		return full[:idx]
 	}
 
-	recs, err := f.st.RecentRequests(5)
-	if err != nil {
-		t.Fatalf("读请求记录: %v", err)
+	cases := []struct {
+		name     string
+		protocol string
+		// body 是假上游这次只写出来的字节，声明完整长度后关连接，客户端读到 unexpected EOF。
+		body func(t *testing.T) string
+		// check 断言追加的收尾帧。
+		check func(t *testing.T, body string)
+	}{
+		{
+			name:     "anthropic",
+			protocol: gateway.ProtocolAnthropic,
+			body: func(t *testing.T) string {
+				return cutBefore(streamBodies[translate.ProtocolAnthropic], "event: message_stop")
+			},
+			check: func(t *testing.T, body string) {
+				if !strings.Contains(body, "event: error\n") {
+					t.Fatalf("断流之后应有一个 error 事件：\n%s", tail(body, 200))
+				}
+				var delta struct {
+					Delta struct {
+						StopReason string `json:"stop_reason"`
+					} `json:"delta"`
+					Usage struct {
+						In  int64 `json:"input_tokens"`
+						Out int64 `json:"output_tokens"`
+					} `json:"usage"`
+				}
+				if err := json.Unmarshal([]byte(lastEventData(t, body, "message_delta")), &delta); err != nil {
+					t.Fatalf("message_delta 的 data 不是合法 JSON: %v", err)
+				}
+				// 用量取自已转发的 message_start 与 message_delta，不是零值。
+				if delta.Usage.In != 3 || delta.Usage.Out != 2 {
+					t.Fatalf("message_delta 的 usage = %d/%d，期望 3/2（scanner 已读到的用量）", delta.Usage.In, delta.Usage.Out)
+				}
+				if delta.Delta.StopReason != "end_turn" {
+					t.Fatalf("message_delta 的 stop_reason = %q，期望 end_turn", delta.Delta.StopReason)
+				}
+				if want := "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"; !strings.HasSuffix(body, want) {
+					t.Fatalf("流应以 message_stop 结尾，实际结尾 %q", tail(body, 80))
+				}
+			},
+		},
+		{
+			name:     "openai-chat",
+			protocol: gateway.ProtocolChat,
+			body: func(t *testing.T) string {
+				// 切在第二条 data 的 JSON 中间：连换行都没有，追加之前必须先补空行。
+				first := "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你好\"}}]}\n\n"
+				return first + `data: {"id":"c1","choices":[{"index":0,"delta":`
+			},
+			check: func(t *testing.T, body string) {
+				if !strings.Contains(body, "\n\ndata: {\"error\":") {
+					t.Fatalf("断流之后应有一个 data: {\"error\":…} 帧：\n%s", tail(body, 200))
+				}
+				if !strings.HasSuffix(body, "\n\ndata: [DONE]\n\n") {
+					t.Fatalf("流应以 data: [DONE] 结尾，实际结尾 %q", tail(body, 80))
+				}
+			},
+		},
+		{
+			name:     "openai-responses",
+			protocol: gateway.ProtocolResponses,
+			body: func(t *testing.T) string {
+				return cutBefore(streamBodies[translate.ProtocolResponses], "data: {\"type\":\"response.completed\"")
+			},
+			check: func(t *testing.T, body string) {
+				if !strings.Contains(body, "event: error\n") {
+					t.Fatalf("断流之后应有一个 error 事件：\n%s", tail(body, 200))
+				}
+				var failed struct {
+					Type     string `json:"type"`
+					Response struct {
+						Status string `json:"status"`
+						Error  struct {
+							Code    string `json:"code"`
+							Message string `json:"message"`
+						} `json:"error"`
+					} `json:"response"`
+				}
+				if err := json.Unmarshal([]byte(lastEventData(t, body, "response.failed")), &failed); err != nil {
+					t.Fatalf("response.failed 的 data 不是合法 JSON: %v", err)
+				}
+				if failed.Type != "response.failed" || failed.Response.Status != "failed" ||
+					failed.Response.Error.Code != "server_error" {
+					t.Fatalf("response.failed 的内容 = %+v，期望 status=failed、code=server_error", failed)
+				}
+				if !strings.Contains(failed.Response.Error.Message, "上游流式响应中断") {
+					t.Fatalf("response.failed 的 message = %q，期望写明上游中断", failed.Response.Error.Message)
+				}
+			},
+		},
 	}
-	if len(recs) != 1 || recs[0].OK {
-		t.Fatalf("请求记录 = %+v，期望一行且 ok=0", recs)
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			written := c.body(t)
+			up := truncatedSSEUpstream(t, written+"rest-never-sent", written)
+			f := newFixture(t)
+			f.add(t, "ds1", c.protocol, up.URL, key, []string{"m1"}, 100)
+			gs, logs := newGatewayWith(t, f, gateway.Options{})
+			srv := httptest.NewServer(gs.Handler())
+			t.Cleanup(srv.Close)
+
+			status, body, ctype := streamFrom(t, srv, c.protocol, "m1")
+			if status != http.StatusOK {
+				t.Fatalf("状态 = %d，期望 200（流式已在写响应头之后）", status)
+			}
+			if !strings.HasPrefix(ctype, "text/event-stream") {
+				t.Fatalf("Content-Type = %q", ctype)
+			}
+			// 已写出的字节不动：直通的内容必须原样是上游的前缀，收尾帧只往后接。
+			if !strings.HasPrefix(body, written) {
+				t.Fatalf("直通改动了已写出的字节：\n得到 %q\n期望前缀 %q", tail(body, 120), tail(written, 120))
+			}
+			c.check(t, body)
+
+			recs, err := f.st.RecentRequests(5)
+			if err != nil {
+				t.Fatalf("读请求记录: %v", err)
+			}
+			if len(recs) != 1 || recs[0].OK {
+				t.Fatalf("请求记录 = %+v，期望一行且 ok=0", recs)
+			}
+			if !strings.Contains(recs[0].Error, "上游流式响应中断") {
+				t.Fatalf("请求记录的 error = %q，期望写明上游中断", recs[0].Error)
+			}
+
+			// 凭据只以密文入库：日志、客户端收到的字节、请求记录里都不该出现 key 明文。
+			if leaked := logs(); strings.Contains(leaked, key) {
+				t.Fatalf("网关日志泄漏了凭据：%s", leaked)
+			}
+			if strings.Contains(body, key) || strings.Contains(recs[0].Error, key) {
+				t.Fatalf("流或请求记录泄漏了凭据：%q", tail(body, 120))
+			}
+		})
 	}
-	if !strings.Contains(recs[0].Error, "上游流式响应中断") {
-		t.Fatalf("请求记录的 error = %q，期望写明上游中断", recs[0].Error)
+}
+
+// lastEventData 取出某个具名事件最后一次出现时的 data 行内容。
+func lastEventData(t *testing.T, body, name string) string {
+	t.Helper()
+	marker := "event: " + name + "\ndata: "
+	idx := strings.LastIndex(body, marker)
+	if idx < 0 {
+		t.Fatalf("流里没有 %s 事件：\n%s", name, tail(body, 200))
 	}
+	rest := body[idx+len(marker):]
+	if end := strings.Index(rest, "\n"); end >= 0 {
+		rest = rest[:end]
+	}
+	return rest
 }

@@ -559,7 +559,7 @@ func TestAddProviderValidatesDefaultProtocol(t *testing.T) {
 	if err == nil {
 		t.Fatal("默认协议不在已声明路由里应报错")
 	}
-	for _, want := range []string{"openai-responses", "provider add myco", "--route openai-responses=", "已声明：anthropic、openai-chat", "把默认协议改成"} {
+	for _, want := range []string{"openai-responses", "provider set myco", "--responses", "已声明：anthropic、openai-chat", "把默认协议改成"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("错误文案 %q 缺少 %q", err.Error(), want)
 		}
@@ -580,7 +580,7 @@ func TestAddProviderValidatesDefaultProtocol(t *testing.T) {
 	if err == nil {
 		t.Fatal("没有任何路由时设默认协议应报错")
 	}
-	for _, want := range []string{"还没有任何路由", "--route openai-chat="} {
+	for _, want := range []string{"还没有任何路由", "provider set noroute", "--openai"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("错误文案 %q 缺少 %q", err.Error(), want)
 		}
