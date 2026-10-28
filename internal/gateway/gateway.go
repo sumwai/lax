@@ -1,4 +1,4 @@
-// Package gateway 是唯一发上游请求的地方：收任意入站协议，挑账号，转成账号的协议，记账。
+// Package gateway 是唯一发上游请求的地方：收任意入站协议，挑账号，转成该账号该模型的有效协议，记账。
 package gateway
 
 import (
@@ -20,7 +20,8 @@ import (
 	"switchboard/internal/translate"
 )
 
-// 协议常量。入站按路径区分，出站按账号的 protocol 字段区分。
+// 协议常量。入站按路径区分，出站按该模型的有效协议（account_models.protocol 优先，
+// 否则账号的 protocol）。
 const (
 	ProtocolAnthropic = translate.ProtocolAnthropic
 	ProtocolChat      = translate.ProtocolChat
@@ -195,14 +196,23 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// 协议归属在模型上：模型行有发现结果就用它，否则用账号的 protocol。
+		// 读不出来时退回账号协议，不让一次读库失败把请求打死。
+		outbound, err := s.store.EffectiveProtocol(cand.ID, cand.Protocol, req.Model)
+		if err != nil {
+			s.logf("读账号 %s 模型 %s 的有效协议失败，改按账号协议 %s: %v",
+				cand.Name, req.Model, cand.Protocol, err)
+			outbound = cand.Protocol
+		}
+
 		attemptStart := s.now()
-		res := s.tryUpstream(r.Context(), w, cand, inbound, raw, req)
+		res := s.tryUpstream(r.Context(), w, cand, outbound, inbound, raw, req)
 		latency := s.now().Sub(attemptStart)
 
 		rec := &store.RequestRecord{
 			TS:             attemptStart.Unix(),
 			Inbound:        inbound,
-			Outbound:       cand.Protocol,
+			Outbound:       outbound,
 			ModelRequested: req.Model,
 			ModelUsed:      req.Model,
 			AccountID:      cand.ID,
@@ -219,7 +229,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			s.logf("写请求记录失败: %v", err)
 		}
 		s.logf("%s %s→%s %s %s %d/%d %s%s",
-			cand.Name, inbound, cand.Protocol, req.Model,
+			cand.Name, inbound, outbound, req.Model,
 			fmt.Sprintf("%d", res.status), res.inTok, res.outTok,
 			latency.Round(time.Millisecond), errorSuffix(res.message))
 
@@ -285,7 +295,7 @@ func sessionFromBody(raw []byte) string {
 	}
 }
 
-func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store.Account,
+func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store.Account, outbound string,
 	inbound string, raw []byte, req *translate.Request) attempt {
 
 	key, err := secret.Decrypt(s.key, a.KeyCipher)
@@ -293,7 +303,7 @@ func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store
 		return attempt{status: http.StatusInternalServerError, message: "解密账号凭据失败"}
 	}
 
-	upReq, err := s.buildRequest(ctx, a, inbound, raw, req, string(key))
+	upReq, err := s.buildRequest(ctx, a, outbound, inbound, raw, req, string(key))
 	if err != nil {
 		return attempt{status: http.StatusBadGateway, message: err.Error(), err: err}
 	}
@@ -310,23 +320,25 @@ func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store
 	}
 
 	if req.Stream {
-		return s.streamSuccess(w, resp, inbound, a.Protocol, req)
+		return s.streamSuccess(w, resp, inbound, outbound, req)
 	}
-	return s.jsonSuccess(w, resp, inbound, a.Protocol, req)
+	return s.jsonSuccess(w, resp, inbound, outbound, req)
 }
 
-func (s *Server) buildRequest(ctx context.Context, a store.Account, inbound string, raw []byte,
+// buildRequest 按有效出站协议构造上游请求：路径、凭据头与请求体编码都跟它走。
+// 入站协议与它相同时直通（只改 model），不同时经中间表示转换。
+func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, inbound string, raw []byte,
 	req *translate.Request, key string) (*http.Request, error) {
 
-	endpoint := Endpoint(a.BaseURL, a.Protocol)
+	endpoint := Endpoint(a.BaseURL, outbound)
 
 	var body []byte
 	var err error
-	if inbound == a.Protocol {
+	if inbound == outbound {
 		// 同协议直通：只替换 model，其余字节原样保留。
 		body, err = patchModel(raw, req.Model)
 	} else {
-		body, err = translate.EncodeRequest(a.Protocol, req, req.Model)
+		body, err = translate.EncodeRequest(outbound, req, req.Model)
 	}
 	if err != nil {
 		return nil, err
@@ -340,7 +352,7 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, inbound stri
 	if req.Stream {
 		httpReq.Header.Set("Accept", "text/event-stream")
 	}
-	setAuth(httpReq, a.Protocol, key)
+	setAuth(httpReq, outbound, key)
 	if s.dumpBodies {
 		s.logf("→ 上游 %s 请求体: %s", endpoint, truncateForLog(string(body)))
 	}

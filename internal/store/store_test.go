@@ -1,11 +1,14 @@
 package store_test
 
 import (
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
 
 	"switchboard/internal/store"
+
+	_ "modernc.org/sqlite"
 )
 
 func openTemp(t *testing.T) *store.Store {
@@ -423,5 +426,237 @@ func TestDeleteAccountClearsModelRows(t *testing.T) {
 		t.Fatalf("读新账号模型: %v", err)
 	} else if len(rows) != 0 {
 		t.Fatalf("新账号继承了旧账号的模型行: %+v", rows)
+	}
+}
+
+// —— 模型级协议：account_models.protocol（迁移 0005） ——
+
+// TestMigrationsRunToLatestFromEmptyDB 确认空库能一路跑到最新的 user_version，
+// 且新列的默认值就是「继承账号协议」的空串。
+func TestMigrationsRunToLatestFromEmptyDB(t *testing.T) {
+	st := openTemp(t)
+
+	var version int
+	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("读 user_version: %v", err)
+	}
+	if version != 5 {
+		t.Fatalf("user_version = %d，期望 5（0001..0005 全部执行过）", version)
+	}
+
+	acc := newAccount(t, st, "ds1", nil)
+	if _, err := st.ReplaceModels(acc.ID, []string{"m1"}); err != nil {
+		t.Fatalf("写入模型行: %v", err)
+	}
+	rows, err := st.AccountModels(acc.ID)
+	if err != nil {
+		t.Fatalf("读模型行: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Protocol != "" {
+		t.Fatalf("新行的协议应为空串（继承账号），实际 %+v", rows)
+	}
+}
+
+// TestMigration0005UpgradesOldDatabase 模拟一个停在 0004 的库：加列之后老行拿到空串，
+// 已有数据与状态原样保留，user_version 推到 5。
+func TestMigration0005UpgradesOldDatabase(t *testing.T) {
+	path := t.TempDir() + "/old.db"
+
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("打开老库: %v", err)
+	}
+	// 0004 之后的形状：accounts 带 fail_streak，account_models 还没有 protocol 列。
+	ddl := []string{
+		`CREATE TABLE accounts (
+			id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, provider TEXT NOT NULL,
+			protocol TEXT NOT NULL, base_url TEXT NOT NULL, key_cipher BLOB NOT NULL,
+			models TEXT NOT NULL DEFAULT '[]', price_in REAL, price_out REAL,
+			priority INTEGER NOT NULL DEFAULT 100, enabled INTEGER NOT NULL DEFAULT 1,
+			cooldown_until INTEGER, last_error TEXT,
+			fail_streak INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)`,
+		`CREATE TABLE requests (
+			id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, inbound TEXT NOT NULL,
+			outbound TEXT NOT NULL, model_requested TEXT NOT NULL, model_used TEXT NOT NULL,
+			account_id INTEGER, http_status INTEGER NOT NULL, ok INTEGER NOT NULL,
+			in_tokens INTEGER NOT NULL DEFAULT 0, out_tokens INTEGER NOT NULL DEFAULT 0,
+			cache_read INTEGER NOT NULL DEFAULT 0, cache_write INTEGER NOT NULL DEFAULT 0,
+			latency_ms INTEGER NOT NULL DEFAULT 0, error TEXT)`,
+		`CREATE INDEX requests_ts ON requests(ts DESC)`,
+		`CREATE TABLE account_models (
+			account_id INTEGER NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL,
+			http_status INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '',
+			checked_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (account_id, model))`,
+		`INSERT INTO accounts (name, provider, protocol, base_url, key_cipher, models, enabled, created_at)
+			VALUES ('ds1', 'test', 'openai-chat', 'http://127.0.0.1:1', X'010203', '["m1","m2"]', 1, 100)`,
+		`INSERT INTO account_models (account_id, model, status, http_status, error, checked_at)
+			VALUES (1, 'm1', 'usable', 200, '', 12345)`,
+		`PRAGMA user_version = 4`,
+	}
+	for _, stmt := range ddl {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("建老库（%s）: %v", stmt, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("关老库: %v", err)
+	}
+
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("升级老库: %v", err)
+	}
+	defer st.Close()
+
+	var version int
+	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatalf("读 user_version: %v", err)
+	}
+	if version != 5 {
+		t.Fatalf("user_version = %d，期望 5", version)
+	}
+
+	rows, err := st.AccountModels(1)
+	if err != nil {
+		t.Fatalf("读老行: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("老库的模型行数 = %d，期望 1", len(rows))
+	}
+	if rows[0].Protocol != "" {
+		t.Fatalf("老行的协议应为空串（继承账号协议），实际 %q", rows[0].Protocol)
+	}
+	if rows[0].Status != store.ModelUsable || rows[0].HTTPStatus != 200 || rows[0].CheckedAt != 12345 {
+		t.Fatalf("老行的探活结论被改动: %+v", rows[0])
+	}
+
+	acc, err := st.GetAccount("ds1")
+	if err != nil {
+		t.Fatalf("读老账号: %v", err)
+	}
+	if len(acc.Models) != 2 || acc.Protocol != "openai-chat" {
+		t.Fatalf("老账号被改动: %+v", acc)
+	}
+
+	// 空串回退到账号协议。
+	if got, err := st.EffectiveProtocol(acc.ID, acc.Protocol, "m1"); err != nil {
+		t.Fatalf("取有效协议: %v", err)
+	} else if got != "openai-chat" {
+		t.Fatalf("有效协议 = %q，期望回退到账号协议 openai-chat", got)
+	}
+}
+
+// TestSetModelProtocolSurvivesReplaceModels 确认同步不覆盖协议发现结果：
+// 已有的协议非空，ReplaceModels 之后还是它，新出现的行才是空串。
+func TestSetModelProtocolSurvivesReplaceModels(t *testing.T) {
+	st := openTemp(t)
+	acc := newAccount(t, st, "ds1", nil)
+
+	if _, err := st.ReplaceModels(acc.ID, []string{"claude-a", "claude-b"}); err != nil {
+		t.Fatalf("首次刷新: %v", err)
+	}
+	if err := st.SetModelProtocol(acc.ID, "claude-a", "anthropic"); err != nil {
+		t.Fatalf("记协议: %v", err)
+	}
+	if err := st.SetModelStatus(acc.ID, "claude-a", store.ModelUsable, 200, ""); err != nil {
+		t.Fatalf("记探活结果: %v", err)
+	}
+
+	added, err := st.ReplaceModels(acc.ID, []string{"claude-a", "claude-c"})
+	if err != nil {
+		t.Fatalf("再次刷新: %v", err)
+	}
+	if added != 1 {
+		t.Fatalf("新增数 = %d，期望 1（claude-c 是新的）", added)
+	}
+
+	rows, err := st.AccountModels(acc.ID)
+	if err != nil {
+		t.Fatalf("读模型行: %v", err)
+	}
+	byModel := map[string]store.AccountModel{}
+	for _, r := range rows {
+		byModel[r.Model] = r
+	}
+	if got := byModel["claude-a"]; got.Protocol != "anthropic" || got.Status != store.ModelUsable {
+		t.Fatalf("同步之后 claude-a 的协议与状态被清掉: %+v", got)
+	}
+	if got := byModel["claude-c"]; got.Protocol != "" || got.Status != store.ModelSynced {
+		t.Fatalf("新行应是 synced 且协议为空串: %+v", got)
+	}
+
+	// SetModelStatus 只动状态，不动协议。
+	if err := st.SetModelStatus(acc.ID, "claude-a", store.ModelForbidden, 403, "套餐不含"); err != nil {
+		t.Fatalf("改状态: %v", err)
+	}
+	if got := modelRow(t, st, acc.ID, "claude-a"); got.Protocol != "anthropic" {
+		t.Fatalf("SetModelStatus 改动了协议列: %+v", got)
+	}
+}
+
+// modelRow 取某个账号某个模型的模型行，读不到就直接失败。
+func modelRow(t *testing.T, st *store.Store, accountID int64, model string) store.AccountModel {
+	t.Helper()
+	rows, err := st.AccountModels(accountID)
+	if err != nil {
+		t.Fatalf("读模型行: %v", err)
+	}
+	for _, r := range rows {
+		if r.Model == model {
+			return r
+		}
+	}
+	t.Fatalf("找不到模型行 %s", model)
+	return store.AccountModel{}
+}
+
+// TestEffectiveProtocolFallsBackToAccount 确认有效协议的三种情况：
+// 行存在且列非空用列，行存在但列为空回退账号，行不存在也回退且不报错。
+func TestEffectiveProtocolFallsBackToAccount(t *testing.T) {
+	st := openTemp(t)
+	acc := newAccount(t, st, "ds1", nil)
+
+	if got := store.ResolveProtocol("openai-chat", ""); got != "openai-chat" {
+		t.Fatalf("ResolveProtocol 空列应回退账号协议，得到 %q", got)
+	}
+	if got := store.ResolveProtocol("openai-chat", "anthropic"); got != "anthropic" {
+		t.Fatalf("ResolveProtocol 非空列应用列值，得到 %q", got)
+	}
+
+	// 行不存在。
+	if got, err := st.EffectiveProtocol(acc.ID, "openai-chat", "m-missing"); err != nil {
+		t.Fatalf("行不存在不该报错: %v", err)
+	} else if got != "openai-chat" {
+		t.Fatalf("行不存在时有效协议 = %q，期望回退账号协议", got)
+	}
+
+	// 行存在但列为空。
+	if _, err := st.ReplaceModels(acc.ID, []string{"m1"}); err != nil {
+		t.Fatalf("写入模型行: %v", err)
+	}
+	if got, err := st.EffectiveProtocol(acc.ID, "openai-chat", "m1"); err != nil {
+		t.Fatalf("取有效协议: %v", err)
+	} else if got != "openai-chat" {
+		t.Fatalf("列为空时有效协议 = %q，期望回退账号协议", got)
+	}
+
+	// 列非空。
+	if err := st.SetModelProtocol(acc.ID, "m1", "anthropic"); err != nil {
+		t.Fatalf("记协议: %v", err)
+	}
+	if got, err := st.EffectiveProtocol(acc.ID, "openai-chat", "m1"); err != nil {
+		t.Fatalf("取有效协议: %v", err)
+	} else if got != "anthropic" {
+		t.Fatalf("列为空时有效协议 = %q，期望用列值 anthropic", got)
+	}
+
+	// 另一账号的同名模型不受影响。
+	if _, err := st.ReplaceModels(acc.ID, []string{"m1", "m2"}); err != nil {
+		t.Fatalf("再加一行: %v", err)
+	}
+	if got, err := st.EffectiveProtocol(acc.ID, "openai-chat", "m2"); err != nil {
+		t.Fatalf("取 m2 的有效协议: %v", err)
+	} else if got != "openai-chat" {
+		t.Fatalf("m2 的有效协议 = %q，期望回退账号协议", got)
 	}
 }

@@ -375,6 +375,7 @@ const (
 )
 
 // AccountModel 是一个账号上一个模型的探活状态。
+// Protocol 是探活发现的「这个模型该用哪种协议」，空字符串表示继承账号的 protocol。
 type AccountModel struct {
 	AccountID  int64
 	Model      string
@@ -382,6 +383,51 @@ type AccountModel struct {
 	HTTPStatus int
 	Error      string
 	CheckedAt  int64
+	Protocol   string
+}
+
+// ResolveProtocol 是有效出站协议的纯规则：模型行上有协议就用它，否则继承账号的 protocol。
+func ResolveProtocol(accountProtocol, modelProtocol string) string {
+	if modelProtocol != "" {
+		return modelProtocol
+	}
+	return accountProtocol
+}
+
+// ModelProtocol 读一个模型行的协议发现结果。没有这一行时返回空字符串（也就是继承），
+// 不当作错误。
+func (s *Store) ModelProtocol(accountID int64, model string) (string, error) {
+	var protocol string
+	err := s.db.QueryRow(`SELECT protocol FROM account_models WHERE account_id = ? AND model = ?`,
+		accountID, model).Scan(&protocol)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return protocol, nil
+}
+
+// EffectiveProtocol 返回账号在某个模型上的有效出站协议，转发与展示共用这一次读。
+// 模型行不存在或协议列为空时回退账号的 protocol，不报错。
+func (s *Store) EffectiveProtocol(accountID int64, accountProtocol, model string) (string, error) {
+	protocol, err := s.ModelProtocol(accountID, model)
+	if err != nil {
+		return "", err
+	}
+	return ResolveProtocol(accountProtocol, protocol), nil
+}
+
+// SetModelProtocol 记录协议发现的结果，是这一列唯一的写入口。
+// 模型行还不存在时先落一行 synced 占位（探活本身就证明上游有这个模型），
+// 随后 SetModelStatus 再写状态；已存在的行只改协议列。
+func (s *Store) SetModelProtocol(accountID int64, model, protocol string) error {
+	_, err := s.db.Exec(`INSERT INTO account_models (account_id, model, status, http_status, error, checked_at, protocol)
+		VALUES (?, ?, 'synced', 0, '', 0, ?)
+		ON CONFLICT(account_id, model) DO UPDATE SET protocol = excluded.protocol`,
+		accountID, model, protocol)
+	return err
 }
 
 // ReplaceModels 用上游列表刷新账号的模型集合。已有的探活状态保留，消失的行删除，
@@ -412,6 +458,8 @@ func (s *Store) ReplaceModels(accountID int64, models []string) (int, error) {
 
 	added := 0
 	for _, m := range models {
+		// DO NOTHING：已存在的行一个字段都不动，探活状态、时间戳与发现到的协议原样保留，
+		// 一次同步不会把发现结果推倒重来。只有新出现的行拿默认值。
 		res, err := tx.Exec(`INSERT INTO account_models (account_id, model, status, http_status, error, checked_at)
 			VALUES (?, ?, 'synced', 0, '', 0)
 			ON CONFLICT(account_id, model) DO NOTHING`, accountID, m)
@@ -425,7 +473,8 @@ func (s *Store) ReplaceModels(accountID int64, models []string) (int, error) {
 	return added, tx.Commit()
 }
 
-// SetModelStatus 记录一个模型的探活结果。
+// SetModelStatus 记录一个模型的探活结果。只动状态、HTTP 状态、备注与时间，
+// 不动 protocol：协议发现的结果只由 SetModelProtocol 写。
 func (s *Store) SetModelStatus(accountID int64, model, status string, httpStatus int, msg string) error {
 	_, err := s.db.Exec(`INSERT INTO account_models (account_id, model, status, http_status, error, checked_at)
 		VALUES (?, ?, ?, ?, ?, ?)
@@ -438,7 +487,7 @@ func (s *Store) SetModelStatus(accountID int64, model, status string, httpStatus
 
 // AccountModels 返回一个账号的模型与状态，按模型名排序。
 func (s *Store) AccountModels(accountID int64) ([]AccountModel, error) {
-	rows, err := s.db.Query(`SELECT account_id, model, status, http_status, error, checked_at
+	rows, err := s.db.Query(`SELECT account_id, model, status, http_status, error, checked_at, protocol
 		FROM account_models WHERE account_id = ? ORDER BY model`, accountID)
 	if err != nil {
 		return nil, err
@@ -449,7 +498,7 @@ func (s *Store) AccountModels(accountID int64) ([]AccountModel, error) {
 
 // AllAccountModels 返回全部账号的模型状态。
 func (s *Store) AllAccountModels() ([]AccountModel, error) {
-	rows, err := s.db.Query(`SELECT account_id, model, status, http_status, error, checked_at
+	rows, err := s.db.Query(`SELECT account_id, model, status, http_status, error, checked_at, protocol
 		FROM account_models ORDER BY model`)
 	if err != nil {
 		return nil, err
@@ -462,7 +511,7 @@ func scanAccountModels(rows *sql.Rows) ([]AccountModel, error) {
 	var out []AccountModel
 	for rows.Next() {
 		var m AccountModel
-		if err := rows.Scan(&m.AccountID, &m.Model, &m.Status, &m.HTTPStatus, &m.Error, &m.CheckedAt); err != nil {
+		if err := rows.Scan(&m.AccountID, &m.Model, &m.Status, &m.HTTPStatus, &m.Error, &m.CheckedAt, &m.Protocol); err != nil {
 			return nil, err
 		}
 		out = append(out, m)

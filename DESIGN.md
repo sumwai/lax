@@ -4,7 +4,7 @@
 
 本机上的模型总机。手上有几家模型的账号，客户端只连 `http://127.0.0.1:4567`，由 switchboard 挑账号、转协议、记用量。
 
-入站收三种线协议，按路径区分：`POST /v1/messages` 是 anthropic，`POST /v1/chat/completions` 是 openai-chat，`POST /v1/responses` 是 openai-responses。出站协议由账号的 `protocol` 字段决定，取值同样是这三种。入站与出站相同则直通，不同则经中间表示转换，九种组合全部可用。
+入站收三种线协议，按路径区分：`POST /v1/messages` 是 anthropic，`POST /v1/chat/completions` 是 openai-chat，`POST /v1/responses` 是 openai-responses。出站协议取值同样是这三种，归属在模型上：`account_models.protocol` 有值就用它，为空则继承账号的 `protocol`（见 5.7）。入站协议与有效出站协议相同则直通，不同则经中间表示转换，九种组合全部可用。
 
 与同类产品的差别：
 
@@ -163,7 +163,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 1. 收到入站请求，按路径定入站协议：`/v1/messages` 是 anthropic，`/v1/chat/completions` 是 openai-chat，`/v1/responses` 是 openai-responses，其余路径返回 404。请求体解析失败返回 400，错误消息前缀协议名。定好协议后记下模型名与开始时间。
 2. 按模型名取候选账号：`enabled=1`、模型列表包含该模型、冷却已过。
 3. 按 `priority` 升序，同一会话（见 5.3）优先沿用上次的账号。
-4. 解密凭据，按出站协议构造上游请求：入站协议与账号协议相同则直通，否则经中间表示转换（见 5.4）。
+4. 解密凭据，按该账号该模型的有效出站协议构造上游请求：入站协议与有效出站协议相同则直通，否则经中间表示转换（见 5.4）。上游路径、凭据头、请求体编码都跟有效出站协议走。
 5. 发上游请求，读响应头。上游返回 429、5xx 或超时，且尚未向客户端写出任何字节时，把该账号打入冷却，换下一个候选。
 6. 已开始向客户端输出后不再换号；上游中断则向客户端发一个错误事件并结束本次请求。
 7. 解析响应里的用量字段，写一行请求记录。
@@ -172,6 +172,8 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 ### 5.3 选号与失败转移
 
 - 候选集合由模型名决定。模型名用请求里的 `model` 字段原文匹配，不做别名归一（第一版）。`model sync` 只刷新 `account_models`，不改变选号依据；`model probe` 探出可用模型后才把列表写进 `accounts.models`，选号此后按新列表走。
+- 协议不进选号。候选量与排序只看 `accounts.models`、`enabled`、冷却与 `priority`，协议决定的是「怎么打」而不是「能不能接」：同一账号的两个模型可以各走各的协议，不必为了协议不同拆成两个账号、重复同步与重复探活。有效出站协议按 `account_models.protocol` 优先、账号 `protocol` 兜底算出（见 5.7），换号时按候选账号各自的有效协议重新算。
+- 协议只影响路径、凭据头与请求体编码。冷却、失败转移、会话粘性、401 停用与 403 原话返回都在这层之上，不因协议不同而变。
 - 冷却：429 起始 60 秒，5xx 起始 10 秒，连续失败翻倍，上限 30 分钟；连续失败次数记在账号的 `fail_streak` 列，跨请求累计。任意一次成功、`account test` 成功或 `account enable` 都会把冷却、`last_error` 与 `fail_streak` 一起清零。
 - 会话粘性：请求头带 `x-switchboard-session` 或 `metadata.user_id` 时，同一个值在一小时内粘同一个账号；否则按 `priority` 轮转。
 - 401 说明凭据本身不行：把账号标为 `enabled=0` 并把错误返回客户端，避免同一条错误把整个候选池刷成不可用。`account test` 成功或 `account enable` 可恢复，两者都会清冷却。
@@ -251,7 +253,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 
 `inbound` 与 `outbound` 两列记的是这一行实际用到的协议对，转换时两列不同，直通时两列相同。除输入与输出 token，`cache_read` 与 `cache_write` 也会写入：anthropic 的缓存读与缓存写分别取自 `cache_read_input_tokens` 与 `cache_creation_input_tokens`；chat 与 responses 只带缓存读（`cached_tokens`），这两家的缓存写记为 0。直通与转换两条路径都会填这几个字段。
 
-`model probe` 的 `max_tokens=1` 调用同样写一行。这类行的取值：`ts` 是这次请求的开始时间；`inbound` 与 `outbound` 都取账号的 `protocol`，探活就是「用账号自己的协议直连上游」；`model_requested` 与 `model_used` 都取被探的模型名；`account_id` 取账号 id；`http_status` 与 `ok` 取上游响应，`ok` 表示 2xx，网络错误时 `http_status` 记 0；`in_tokens`、`out_tokens`、`cache_read`、`cache_write` 都由该账号协议的 usage scanner 从响应体读出：anthropic 的 scanner 四项齐全（`cache_read_input_tokens` 与 `cache_creation_input_tokens`），chat 与 responses 只读得到缓存读（`cached_tokens`），`cache_write` 记 0；非 2xx 与网络错误记 0；`latency_ms` 是这次请求的耗时；`error` 是错误摘要，与探活结果一样过 `scrubSecret`，凭据不进库。这类行因此也进 `usage` 的汇总。
+`model probe` 的 `max_tokens=1` 调用同样写一行，一个模型这次探活写一行，记的是得出判定结果的那一次调用（发现成功的 2xx、账号协议那次的 401，或者候选都试完时的账号协议那次）。协议发现换协议重试的中间调用不单独记行：它们都没得出判定，也没产生 token。这类行的取值：`ts` 是这次请求的开始时间；`inbound` 与 `outbound` 都取这次实际使用的协议（发现成功的那次是发现到的协议，其余是账号协议），探活就是「用这个协议直连上游」；`model_requested` 与 `model_used` 都取被探的模型名；`account_id` 取账号 id；`http_status` 与 `ok` 取上游响应，`ok` 表示 2xx，网络错误时 `http_status` 记 0；`in_tokens`、`out_tokens`、`cache_read`、`cache_write` 都由这次所用协议的 usage scanner 从响应体读出：anthropic 的 scanner 四项齐全（`cache_read_input_tokens` 与 `cache_creation_input_tokens`），chat 与 responses 只读得到缓存读（`cached_tokens`），`cache_write` 记 0；非 2xx 与网络错误记 0；`latency_ms` 是这次请求的耗时；`error` 是错误摘要，与探活结果一样过 `scrubSecret`，凭据不进库。这类行因此也进 `usage` 的汇总。
 
 估算花费需要价格表；价格表第一版放在账号上（`--price-in / --price-out`，单位每百万 token），缺省则花费记为 null，不猜价格。
 
@@ -270,6 +272,7 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 - 模型列表地址由 `base_url` 推出，末尾是 `/v1` 就补 `/models`，否则补 `/v1/models`。
 - 响应按 `{data:[{id}]}` 解析，按名字排序去重。上游返回空列表算该账号失败。
 - 结果写进 `account_models`：新出现的模型行状态为 `synced`，已存在的行保留既有探活状态，上游已消失的行删除。
+- 协议发现结果不被同步清掉：写入走 `INSERT … ON CONFLICT(account_id, model) DO NOTHING`，已存在的行一个字段都不动，`status`、`checked_at` 与 `protocol` 原样保留，只有新出现的行拿默认值。一次同步不会把探活与协议发现的结论推倒重来。
 - 这条命令只改 `account_models`，不动 `accounts.models`，所以同步本身不改变选号结果。
 - 某个账号失败不打断其余账号：全部处理完才返回，退出码 1，失败原因写在那一个账号的备注列。
 
@@ -284,6 +287,20 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 | 400 且错误文本明确说模型不存在 | `notfound` | 按模型名不存在处理 |
 | 其它 | `error` | 临时错误，结论为不可用 |
 
+协议发现。协议真正的归属是 `(base_url, model)` 而不是账号：同一家上游的 `claude-*` 只接受 `/messages`，其余模型走 `/v1/chat/completions`，用的是同一个 key。所以探活除了判定可用性，还顺手把「这个模型该用哪种协议」测出来，结论写进 `account_models.protocol`（见 6）。
+
+- 先用账号的 `protocol` 试一次。这一次的结论先存着，它就是「按账号配置打」的真相。
+- 这一次失败时，只有可能只是路径不对的才换协议再试：`404`（路径不存在）、`405`（方法不允许）、`403`（有的网关按路径拒，commandcode 对非 `/messages` 的 `claude-*` 就是 403），以及 `400` 且错误文本指向端点、路径或「不支持该协议」。其余失败（例如明确说模型不存在、`5xx`、网络错误）直接按上表判定，不换协议。
+- 换协议时依次试另外两种，顺序固定：账号协议优先，其余按 anthropic、openai-chat、openai-responses 补齐。顺序固定是为了同一模型多次探活得到同一个结论，不随运行顺序变化。
+- 候选协议列表是探活的入参，默认就是三种线协议全试。以后按厂商声明收紧（例如某家只有 anthropic 与 chat 两条）时只传该厂商声明过的那些，循环本身不改，也不会对着不存在的端点白打一次。
+- 第一个 `2xx` 就是结论：状态记 `usable`，把这次用的协议写进 `account_models.protocol`，剩下的协议不再试。
+- `401` 一律不换协议：凭据问题与路径无关，照旧停用账号并立即停止整次探活。这一条只判账号协议那一次；换协议之后的 `401` 多半是凭据头形状不对（anthropic 用 `x-api-key`，另两家用 `Bearer`），既不停用账号也不算凭据被拒。
+- 三种协议都没试出 `2xx` 时，结论取账号协议那一次的判定（状态、HTTP 状态与错误文本），`protocol` 保持原值不动。协议列只在发现成功时写，一次失败不会把之前测出的协议抹掉，也不会凭空写入一个。
+
+花费：先用账号协议试，成功时只花一次调用，只有失败才会多花一到两次。同一模型重复探活的结果稳定，代价最多是每次 `--refresh` 多一两次 `max_tokens=1` 的调用，跟 `--max-age` 省下的调用相比是小头。得出判定的那次在 `requests` 里留一行（见 5.5）。
+
+`account test` 与具体模型无关，仍按账号的 `protocol` 打一次，不看模型上的协议发现结果：它检验的是凭据与账号整体可用性。
+
 参数与处理顺序：
 
 - 该账号没有模型行，或给了 `--sync` 时，先同步一次，不需要手工跑两遍。自动同步失败的账号跳过不探，其余账号照常处理，最终退出码 1。
@@ -295,7 +312,7 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 - `--concurrency N` 改并发，默认 4，且不超过待探的模型数。
 - 一个账号探完立刻写回结果并打印该账号的「本次探活 / 跳过 / 可用 / 无权 / 不存在 / 失败」计数，再处理下一个账号。
 
-探活是要花钱的。每个模型的一次判定都是一次真实的上游调用，`max_tokens=1` 也照样计入上游账单与速率限制，所以模型多的账号用 `--limit` 控制这一次的花费，重复跑同一批账号靠 `--max-age` 与 `--refresh` 控制。这些调用各写一行 `requests`，`usage` 与 `log tail` 里都能看到（见 5.5）。
+探活是要花钱的。每个模型的一次判定都是一次真实的上游调用，`max_tokens=1` 也照样计入上游账单与速率限制，所以模型多的账号用 `--limit` 控制这一次的花费，重复跑同一批账号靠 `--max-age` 与 `--refresh` 控制。得出判定的那次调用在 `requests` 里留一行，`usage` 与 `log tail` 里都能看到（见 5.5）；换协议多打的调用没有 token，不单独记行。
 
 任何一个账号碰到 401，整次探活就停下并返回错误：凭据都不行了，继续探下去只是重复同一条错误。此时该账号已被停用，后续账号不再处理，其余结论不作数，也不会写回 `accounts.models`——即使同批里已经探出了可用模型，也不写，避免把一次凭据故障当成新的事实。
 
@@ -351,11 +368,16 @@ CREATE TABLE account_models (
   http_status INTEGER NOT NULL DEFAULT 0,
   error       TEXT    NOT NULL DEFAULT '',
   checked_at  INTEGER NOT NULL DEFAULT 0,
+  protocol    TEXT    NOT NULL DEFAULT '',
   PRIMARY KEY (account_id, model)
 );
 ```
 
 `account_models` 由迁移 `0003` 建立，`status` 取值就是 `synced`、`usable`、`forbidden`、`notfound`、`auth`、`error`（见 5.7）。`accounts.fail_streak` 由迁移 `0004` 加入，只用于冷却翻倍，写入口只有 `RecordFailure`（加一）与 `ClearFailure`（清零）。`accounts.models` 仍是选号实际读的那份列表。删除账号时 `DeleteAccount` 在同一个事务里删掉它的 `account_models` 行：SQLite 的 rowid 会被复用，遗留子行会让新账号继承旧账号的探活状态。
+
+`account_models.protocol` 由迁移 `0005` 加入，记录「这个模型该用哪种协议」，取值同样是 anthropic、openai-chat、openai-responses。**空字符串表示继承账号的 `protocol`**：有效出站协议是「列非空就用列，否则用账号的 `protocol`」，纯规则在 `store.ResolveProtocol`，读库入口是 `store.EffectiveProtocol(accountID, accountProtocol, model)`，行不存在与列为空都当成继承，不报错。转发与展示只读这个有效协议，不在调用方拼规则；`cli` 要显示协议时也只调它。
+
+这个列只有一个写入口 `SetModelProtocol`，由探活发现协议后调用（见 5.7）。`SetModelStatus` 只改 `status`、`http_status`、`error`、`checked_at`，不动 `protocol`；`ReplaceModels` 的 `ON CONFLICT DO NOTHING` 也只给新行写默认值，同步不会覆盖已发现的协议。旧库升上来时整列默认空串，也就是全部回退到账号协议，行为与 M7 一致。
 
 迁移用 `internal/store/migrations/*.sql`，按文件顺序执行，`PRAGMA user_version` 记录已执行版本。
 
@@ -371,8 +393,9 @@ CREATE TABLE account_models (
 | M5 | 模型同步与探活：`model sync`、`model probe`、`model ls` 按模型列账号状态 | 对真实上游 `model sync` 能拉出模型数；`model probe` 能区分 `usable` 与 `forbidden`；零可用模型时不改 `accounts.models` |
 | M6 | 协议矩阵：三入站 × 三出站 + 同协议直通，中间表示与三个编解码器，流式增量 | 9 种组合的非流式与流式用例通过；对真实上游三种入站各打一条能拿到回复 |
 | M7 | 模型探活跳过与记账：`model probe` 按 `--max-age` 跳过有定论且新鲜的结论、`--refresh` 强制重探，每次探活的上游调用写一行 `requests` 并带缓存读写 | `TestModelProbe*` 覆盖跳过、刷新、`--limit`、记账、零可用的跳过计数，`TestProbeModel*` 覆盖各状态判定、401 停用与探活请求行；`log tail` 能看到探活行，零可用时 `accounts.models` 不变 |
+| M8 | 协议归属从账号降到模型：`account_models.protocol`（迁移 `0005`）覆盖账号的 `protocol`，探活顺手发现协议，选号与转发按有效协议算，同步不覆盖发现结果 | 同一账号下两个模型可以分别走 anthropic 与 openai-chat：各自打到正确的路径与凭据头，「入站 == 出站」按模型协议算；协议发现用例覆盖 `404`、`403`、`400 指向端点` 三种失败换协议、账号协议直接成功只花一次调用、`401` 不换协议并停用账号；`EffectiveProtocol` 在行不存在或列为空时回退账号；旧库升上来 `protocol` 默认为空串，`ReplaceModels` 不动已发现的协议 |
 
-M0 到 M7 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkeleton` 用假上游验证：初始化、加账号、`call`、`log tail`、`usage`、`doctor` 全链路走通。协议矩阵由 `internal/gateway/matrix_test.go` 与 `matrix_stream_test.go` 验证：9 种组合的非流式与流式各跑一遍，同协议直通的「不改字节」「保留陌生字段」与跨协议的「丢弃陌生字段」单独有用例。上游是 `httptest` 假服务，M5、M6 与 M7 里涉及真实厂商的那部分需要拿到 key 后手工验收。
+M0 到 M8 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkeleton` 用假上游验证：初始化、加账号、`call`、`log tail`、`usage`、`doctor` 全链路走通。协议矩阵由 `internal/gateway/matrix_test.go` 与 `matrix_stream_test.go` 验证：9 种组合的非流式与流式各跑一遍，同协议直通的「不改字节」「保留陌生字段」与跨协议的「丢弃陌生字段」单独有用例。协议降级到模型的那部分由 `internal/gateway` 的 `TestProbeModel*` 与 `TestForwardUsesModelProtocol` 验证，迁移兼容由 `internal/store` 的 `TestMigration0005*` 与 `TestMigrationsRunToLatestFromEmptyDB` 验证。上游是 `httptest` 假服务，M5、M6、M7 与 M8 里涉及真实厂商的那部分需要拿到 key 后手工验收。
 
 已知未做，按已知行为处理：
 

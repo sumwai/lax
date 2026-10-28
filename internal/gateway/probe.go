@@ -48,7 +48,9 @@ func (s *Server) Probe(ctx context.Context, a store.Account) (ProbeResult, error
 	if err != nil {
 		return res, err
 	}
-	upReq, err := s.buildRequest(ctx, a, a.Protocol, raw, ir, string(key))
+	// 账号探活按账号自己的协议打：它检验的是凭据与账号整体可用性，
+	// 不跟模型上的协议发现结果走（那个由 model probe 负责）。
+	upReq, err := s.buildRequest(ctx, a, a.Protocol, a.Protocol, raw, ir, string(key))
 	if err != nil {
 		return res, err
 	}
