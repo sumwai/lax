@@ -15,3 +15,4 @@ commit in the row so a later reader can tell whether the note still applies.
 | 2026-10-29 | A public model list proves nothing about credentials | [lessons/2026-10-29-public-model-list.md](lessons/2026-10-29-public-model-list.md) | fixed in 2ed8c7c |
 | 2026-10-29 | A gateway that rebuilds upstream headers must forward the client's feature headers | [lessons/2026-10-29-client-header-forwarding.md](lessons/2026-10-29-client-header-forwarding.md) | fixed in f86972e |
 | 2026-10-29 | "Input tokens" does not mean the same thing in every protocol | [lessons/2026-10-29-input-token-semantics.md](lessons/2026-10-29-input-token-semantics.md) | fixed in 8700e1c |
+| 2026-10-29 | A dropped column must not be the same change that introduces its replacement | [lessons/2026-10-29-drop-column-sequencing.md](lessons/2026-10-29-drop-column-sequencing.md) | 0014 / 0015 |
