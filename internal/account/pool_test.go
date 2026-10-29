@@ -23,7 +23,8 @@ func TestCandidatesFiltersAndOrders(t *testing.T) {
 		acc(3, "disabled", 50, []string{"m1"}, false, 0),
 		acc(4, "cooling", 50, []string{"m1"}, true, now.Unix()+60),
 		acc(5, "other-model", 10, []string{"m2"}, true, 0),
-		acc(6, "any-model", 300, nil, true, 0),
+		// 模型列表为空的账号不提供任何模型，不参与选号（即使 priority 最小、没有冷却）。
+		acc(6, "no-models", 1, nil, true, 0),
 	}
 
 	got := account.Candidates(accounts, "m1", now, "")
@@ -31,7 +32,7 @@ func TestCandidatesFiltersAndOrders(t *testing.T) {
 	for _, a := range got {
 		names = append(names, a.Name)
 	}
-	want := []string{"a", "b", "any-model"}
+	want := []string{"a", "b"}
 	if len(names) != len(want) {
 		t.Fatalf("候选 = %v，期望 %v", names, want)
 	}
@@ -39,6 +40,38 @@ func TestCandidatesFiltersAndOrders(t *testing.T) {
 		if names[i] != want[i] {
 			t.Fatalf("候选 = %v，期望 %v", names, want)
 		}
+	}
+}
+
+func TestSupportsEmptyModelListMeansNoModels(t *testing.T) {
+	fresh := acc(1, "fresh", 100, nil, true, 0)
+	if account.Supports(fresh, "anything") {
+		t.Fatal("模型列表为空的账号不该支持任何模型")
+	}
+	fresh.Models = []string{}
+	if account.Supports(fresh, "anything") {
+		t.Fatal("空切片与 nil 同样表示不提供任何模型")
+	}
+	if !account.Supports(acc(2, "with-model", 100, []string{"m1"}, true, 0), "m1") {
+		t.Fatal("列表里有该模型时应支持")
+	}
+}
+
+// Providers 不看 enabled 与冷却：它回答的是「清单里有没有人提供这个模型」。
+func TestProvidersIgnoresAvailability(t *testing.T) {
+	now := time.Unix(1000, 0)
+	accounts := []store.Account{
+		acc(1, "cooling", 100, []string{"m1"}, true, now.Unix()+60),
+		acc(2, "disabled", 100, []string{"m1"}, false, 0),
+		acc(3, "other-model", 100, []string{"m2"}, true, 0),
+		acc(4, "no-models", 100, nil, true, 0),
+	}
+	got := account.Providers(accounts, "m1")
+	if len(got) != 2 || got[0].Name != "cooling" || got[1].Name != "disabled" {
+		t.Fatalf("Providers = %+v，期望 cooling 与 disabled", got)
+	}
+	if got := account.Providers(accounts, "m9"); len(got) != 0 {
+		t.Fatalf("没有账号提供 m9 时 Providers = %+v", got)
 	}
 }
 
