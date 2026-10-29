@@ -170,18 +170,24 @@ func TestGeminiUnauthorizedDisablesAccountWithoutFailover(t *testing.T) {
 	if status != http.StatusUnauthorized {
 		t.Fatalf("状态 = %d，期望 401，响应 %s", status, body)
 	}
+	// gemini 入站拿 google 的形状：code 是 HTTP 状态码整数，status 是 google 的状态名
+	// （DESIGN 5.2），不是 anthropic 那套 error.type。
 	var out struct {
 		Type  string `json:"type"`
 		Error struct {
-			Type    string `json:"type"`
+			Code    int    `json:"code"`
 			Message string `json:"message"`
+			Status  string `json:"status"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal([]byte(body), &out); err != nil {
 		t.Fatalf("错误体不是 JSON: %v，原文 %s", err, body)
 	}
-	if out.Error.Type != "authentication_error" {
-		t.Fatalf("错误类型 = %q，期望 authentication_error", out.Error.Type)
+	if out.Type != "" {
+		t.Fatalf("gemini 错误体不该有顶层 type，实际 %q", out.Type)
+	}
+	if out.Error.Code != http.StatusUnauthorized || out.Error.Status != "UNAUTHENTICATED" {
+		t.Fatalf("错误体 = %+v，期望 code=401、status=UNAUTHENTICATED", out.Error)
 	}
 	for _, want := range []string{"bad", "已停用", "API key not valid"} {
 		if !strings.Contains(out.Error.Message, want) {

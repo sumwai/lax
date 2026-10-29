@@ -191,15 +191,16 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 从这里开始入站协议已经定下来，错误体按它给形状（writeInboundError）。
 	raw, err := io.ReadAll(io.LimitReader(r.Body, 32<<20))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "读取请求体失败: "+err.Error())
+		writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", "读取请求体失败: "+err.Error())
 		return
 	}
 
 	req, err := translate.DecodeRequest(inbound, raw)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", inbound+": "+err.Error())
+		writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", inbound+": "+err.Error())
 		return
 	}
 	if inbound == ProtocolGemini {
@@ -207,7 +208,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		req.Stream = pathStream
 	}
 	if strings.TrimSpace(req.Model) == "" {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "缺少 model 字段")
+		writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", "缺少 model 字段")
 		return
 	}
 
@@ -218,7 +219,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 
 	accounts, err := s.store.ListAccounts()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "api_error", "读取账号失败: "+err.Error())
+		writeInboundError(w, inbound, http.StatusInternalServerError, "api_error", "读取账号失败: "+err.Error())
 		return
 	}
 	candidates := account.Candidates(accounts, req.Model, s.now(), session)
@@ -226,10 +227,10 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		// 候选为空有两种成因，报错不能混在一起：没有任何账号声明提供这个模型，是清单问题；
 		// 有账号提供但全部在冷却或被停用，是可用性问题，仍按 503 走。
 		if len(account.Providers(accounts, req.Model)) == 0 {
-			writeError(w, http.StatusNotFound, modelNotFoundKind(inbound), modelNotFoundMessage(req.Model))
+			writeInboundError(w, inbound, http.StatusNotFound, modelNotFoundKind(inbound), modelNotFoundMessage(req.Model))
 			return
 		}
-		writeError(w, http.StatusServiceUnavailable, "api_error",
+		writeInboundError(w, inbound, http.StatusServiceUnavailable, "api_error",
 			fmt.Sprintf("模型 %s 的账号都在冷却或被停用，先用 switchboard account ls 看状态", req.Model))
 		return
 	}
@@ -299,12 +300,12 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 
 		switch {
 		case res.status == http.StatusUnauthorized:
-			writeError(w, http.StatusUnauthorized, "authentication_error",
+			writeInboundError(w, inbound, http.StatusUnauthorized, "authentication_error",
 				fmt.Sprintf("账号 %s 的凭据被上游拒绝，已停用。%s", cand.Name, res.message))
 			return
 		case res.status == http.StatusForbidden:
 			// 403 多为套餐或模型权限不对，凭据本身还能用，不停用也不再换号。
-			writeError(w, http.StatusForbidden, "permission_error",
+			writeInboundError(w, inbound, http.StatusForbidden, "permission_error",
 				fmt.Sprintf("账号 %s 无权使用该模型：%s", cand.Name, res.message))
 			return
 		case state.Failure:
@@ -313,12 +314,12 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		case res.wrote:
 			return
 		default:
-			writeError(w, mapErrorStatus(res.status), errorKind(res.status), res.message)
+			writeInboundError(w, inbound, mapErrorStatus(res.status), errorKind(res.status), res.message)
 			return
 		}
 	}
 
-	writeError(w, http.StatusServiceUnavailable, "api_error", "所有候选账号都失败："+lastErr)
+	writeInboundError(w, inbound, http.StatusServiceUnavailable, "api_error", "所有候选账号都失败："+lastErr)
 }
 
 // modelNotFoundKind 给出「没有账号提供该模型」在入站协议里的错误类型：anthropic 用它自己的
@@ -516,7 +517,7 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 	}
 
 	if inbound == outbound {
-		return s.passthroughStream(w, resp, outbound, flush)
+		return s.passthroughStream(w, resp, outbound, flush, secretValue)
 	}
 
 	dec, err := translate.NewStreamDecoder(outbound)
@@ -596,7 +597,8 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 	}
 	if failure != "" && upstreamErr == "" {
 		// 错误增量走编码器，不另写一帧：入站协议是 responses 时它就是 error 加
-		// response.failed，是 anthropic 时是 event: error——形状跟入站协议走。
+		// response.failed，是 anthropic 时是 event: error——形状跟入站协议走，与非 2xx 响应用的是
+		// 同一份映射（DESIGN 5.2 的错误体一节）。
 		_ = emit([]translate.Delta{{Kind: translate.DeltaError, Text: failure}})
 	}
 	_ = emit(dec.Close())
@@ -620,7 +622,8 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 // 上游没发到收尾帧就断开时，已写出的字节一个不动，只在末尾追加该协议的合法结尾
 // （见 passthroughTail）：直通与转换两条路径对断流的处理一致，客户端总能拿到一个
 // 结束了的流，而不是戛然而止的半截字节（DESIGN 5.2 第 6 条、5.4）。
-func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, protocol string, flush func()) attempt {
+func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, protocol string,
+	flush func(), secretValue string) attempt {
 	scanner, err := translate.NewUsageScanner(protocol)
 	if err != nil {
 		return attempt{status: http.StatusBadGateway, message: err.Error(), err: err, wrote: true}
@@ -697,6 +700,9 @@ func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, p
 			res.message = truncatedMessage
 			res.err = errStreamTruncated
 		}
+		// 错误帧的正文既发给客户端也写进 requests，与转换路径一样先过 scrubSecret：
+		// 读错误里可能带上游回显的地址或凭据（DESIGN 5.6）。
+		res.message = scrubSecret(res.message, secretValue)
 		appendStreamTail(w, flush, tail, passthroughTail(protocol, res.message, in, out))
 	}
 	return res
@@ -768,6 +774,10 @@ func streamFrameEnded(protocol, event string, data []byte) bool {
 //   - openai-responses：event: error，再补 response.failed；
 //   - gemini：一帧 data: {"error":…}，再补一帧带 finishReason 与 usageMetadata 的候选（gemini
 //     没有单独的结束事件，收尾就是这一帧）。
+//
+// 错误帧的形状与四条入站路径的非流式错误一致（DESIGN 5.2）：openai-responses 的错误体在
+// response.failed 的 response.error 里，gemini 用 google 的 code 与 status——流已经以 200
+// 开头，没有别的 HTTP 状态码可用，因此 code 固定 500、status 是 INTERNAL。
 //
 // 用量是 scanner 已经从已转发帧里读出来的那些，读不到就是 0：补的是一个诚实的结尾，不是重放。
 func passthroughTail(protocol, message string, in, out int64) []translate.SSEEvent {
@@ -1058,11 +1068,80 @@ func mapErrorStatus(status int) int {
 	}
 }
 
+// writeError 写出统一形状的错误体：顶层 type 是 error，error.type 与 error.message 给类型与
+// 文案。anthropic 入站就是这条形状，没有入站协议可依的路径（/v1/models、/v1/models/{id}、
+// 未知路径、405、写库失败一类的内部错误）也用它——那些请求没有「客户端在等哪种形状」可谈。
 func writeError(w http.ResponseWriter, status int, kind, message string) {
 	writeJSON(w, status, map[string]any{
 		"type":  "error",
 		"error": map[string]string{"type": kind, "message": message},
 	})
+}
+
+// writeInboundError 按入站协议写出错误体（DESIGN 5.2）：四条入站路径的客户端读的字段不同，
+// 形状由入站协议决定，不由上游协议决定。入站协议为空或认不出时退回统一形状。
+//
+//   - anthropic：规定形状，与 writeError 一致；
+//   - openai-chat 与 openai-responses：顶层只有 error，type 用 OpenAI 的取值，param 与 code
+//     显式给 null（SDK 会读这两个键在不在）；
+//   - gemini：code 是 HTTP 状态码的整数，status 是 google 的状态名。
+//
+// message 由调用方给：上游原话在 tryUpstream 里已经过 scrubSecret（DESIGN 5.6）。
+func writeInboundError(w http.ResponseWriter, inbound string, status int, kind, message string) {
+	switch inbound {
+	case ProtocolChat, ProtocolResponses:
+		writeJSON(w, status, map[string]any{"error": map[string]any{
+			"message": message,
+			"type":    openAIErrorType(kind),
+			"param":   nil,
+			"code":    nil,
+		}})
+	case ProtocolGemini:
+		writeJSON(w, status, map[string]any{"error": map[string]any{
+			"code":    status,
+			"message": message,
+			"status":  googleErrorStatus(status),
+		}})
+	default:
+		writeError(w, status, kind, message)
+	}
+}
+
+// openAIErrorType 把内部的语义 kind 换成两条 openai 入站用的取值：客户端按 type 分支处理，
+// rate_limit_exceeded 与 server_error 是 OpenAI 的写法，anthropic 的 rate_limit_error 与
+// api_error 不是。其余取值两边同名，原样带出。
+func openAIErrorType(kind string) string {
+	switch kind {
+	case "rate_limit_error":
+		return "rate_limit_exceeded"
+	case "api_error":
+		return "server_error"
+	}
+	return kind
+}
+
+// googleErrorStatus 把 HTTP 状态码换成 google 的状态名（DESIGN 5.2）。映射之外的码给 UNKNOWN：
+// 编一个更具体却不对的名字会让客户端按错的类别重试或放弃。
+func googleErrorStatus(status int) string {
+	switch status {
+	case http.StatusBadRequest:
+		return "INVALID_ARGUMENT"
+	case http.StatusUnauthorized:
+		return "UNAUTHENTICATED"
+	case http.StatusForbidden:
+		return "PERMISSION_DENIED"
+	case http.StatusNotFound:
+		return "NOT_FOUND"
+	case http.StatusMethodNotAllowed:
+		return "UNIMPLEMENTED"
+	case http.StatusTooManyRequests:
+		return "RESOURCE_EXHAUSTED"
+	case http.StatusInternalServerError:
+		return "INTERNAL"
+	case http.StatusServiceUnavailable:
+		return "UNAVAILABLE"
+	}
+	return "UNKNOWN"
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -279,14 +279,23 @@ func TestGeminiInboundErrorBodyUnwrapped(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("状态 = %d，期望 400，响应 %s", status, resp)
 	}
-	if !strings.Contains(resp, "API key not valid") {
-		t.Fatalf("错误文案里没有上游原话: %s", resp)
+	var out struct {
+		Error struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+			Status  string `json:"status"`
+		} `json:"error"`
 	}
-	if strings.Contains(resp, "INVALID_ARGUMENT") {
-		t.Fatalf("错误文案不该带整段上游 JSON: %s", resp)
+	if err := json.Unmarshal([]byte(resp), &out); err != nil {
+		t.Fatalf("错误体不是 JSON: %v，原文 %s", err, resp)
 	}
-	if !strings.Contains(resp, `"invalid_request_error"`) {
-		t.Fatalf("错误类型应当是 invalid_request_error: %s", resp)
+	// 上游那一段 JSON 只取 message，客户端拿到的是那句话；code 是本次 HTTP 状态码，
+	// status 按它映射（400 → INVALID_ARGUMENT），不是上游正文里的字段原样带出。
+	if out.Error.Message != "API key not valid. Please pass a valid API key." {
+		t.Fatalf("错误文案 = %q，期望只有上游原话", out.Error.Message)
+	}
+	if out.Error.Code != http.StatusBadRequest || out.Error.Status != "INVALID_ARGUMENT" {
+		t.Fatalf("错误体 = %+v，期望 code=400、status=INVALID_ARGUMENT", out.Error)
 	}
 
 	recs, err := f.st.RecentRequests(5)
