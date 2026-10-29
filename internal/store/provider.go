@@ -39,9 +39,10 @@ var defaultProtocolOrder = []string{
 }
 
 // Provider 是一行厂商。行里只有默认地址、默认协议、模型列表覆盖与备注，
-// 协议的路径细节都在 ProviderRoute 上。账号行仍固化自己的 base_url，改这张表只影响之后新加的账号。
+// 协议的路径细节都在 ProviderRoute 上。账号行只存厂商名，地址与默认协议都从这里读
+// （见迁移 0014 与 DESIGN 5.8），因此改这一行会立即影响所有引用它的账号。
 // DefaultProtocol 为空字符串表示这家没有显式默认协议，按固定顺序取第一条路由；
-// 有效默认协议的算法只有 ResolveDefaultProtocol 一处。
+// 有效默认协议的算法只有 ResolveDefaultProtocol 一处，读库入口是 providerDefaultProtocol。
 // ModelsPath 是厂商级的模型列表地址覆盖，空字符串表示不覆盖、按路由的 models_path 取（见 5.7）。
 // 取值可以是相对 base_url 的路径，也可以是整条地址，两种写法同一套校验（见 NormalizeEndpoint）。
 type Provider struct {
@@ -852,10 +853,11 @@ func ResolveModelsPath(override string, routes []ProviderRoute, accountProtocol 
 	return "", ""
 }
 
-// EffectiveProviderProtocol 返回厂商的有效默认协议，是读默认协议的唯一入口：
-// `account add` 在没给 --protocol 时用它补，`provider ls` 展示也用它。
-// 厂商不存在时返回 ErrProviderNotFound；厂商在但一条路由都没有时返回空串与 ErrProviderNoRoutes，
-// 需要自己的提示文案的调用方用 errors.Is 判这个哨兵，自己写。
+// EffectiveProviderProtocol 返回厂商的有效默认协议，是 `provider ls` 这类「要算不出来就报错」的
+// 调用方的入口：厂商不存在返回 ErrProviderNotFound，厂商在但一条路由都没有时返回空串与
+// ErrProviderNoRoutes，需要自己的提示文案的调用方用 errors.Is 判哨兵，自己写。
+// 账号的派生 Protocol 与 EffectiveProtocol 的兜底不要用它：那两处算不出来就是空串，不是错误，
+// 它们走 providerDefaultProtocol。
 func (s *Store) EffectiveProviderProtocol(name string) (string, error) {
 	p, err := s.GetProvider(name)
 	if err != nil {
@@ -872,11 +874,46 @@ func (s *Store) EffectiveProviderProtocol(name string) (string, error) {
 	return proto, nil
 }
 
+// providerDefaultProtocol 返回厂商的有效默认协议，是读单家厂商默认协议的轻入口：
+// 账号的派生 Protocol 与 EffectiveProtocol 的兜底都走它，规则仍是 ResolveDefaultProtocol 一份。
+// 厂商不存在（含 name 为空串）、或厂商行在但一条路由都没声明时返回空串，不报错：
+// 调用方要的是「算出来是什么」，而算不出来就是空串，拿空串回退即可，不是故障。
+func (s *Store) providerDefaultProtocol(name string) (string, error) {
+	if name == "" {
+		return "", nil
+	}
+	var explicit string
+	err := s.db.QueryRow(`SELECT default_protocol FROM providers WHERE name = ?`, name).Scan(&explicit)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	routes, err := s.ProviderRoutes(name)
+	if err != nil {
+		return "", err
+	}
+	return ResolveDefaultProtocol(explicit, routes), nil
+}
+
 // DeleteProvider 在一个事务里删掉厂商行与它的全部路由行。两张表之间没有外键，
 // 分两条语句删就必须同一个事务，否则中途失败会留下没有厂商的孤儿路由。
-// 仍有账号使用这个厂商时这里不拦：那是调用方的事（`provider rm` 要求 --force），
-// 账号表只存 provider 字符串，删厂商不影响已有账号的 base_url。
+// 指向它的账号不动：`provider rm` 不带 --force 时调用方已经先拒绝了，那是 DeleteProviderForce 的事。
 func (s *Store) DeleteProvider(name string) error {
+	return s.deleteProvider(name, false)
+}
+
+// DeleteProviderForce 是 `provider rm --force` 的入口：除了删厂商与路由，还在同一个事务里把指向
+// 它的账号停用（enabled=0 并写明 last_error）。为什么要停用：账号行的地址与默认协议都从厂商行取
+// （见 DESIGN 5.8），厂商没了这两样就都没了，留它们在选号池里必然一个请求一个 502。
+// 停用走的是 setEnabledTx，与 SetEnabled 同一条写路径；账号本身与它的 key、模型清单、探活结果都不删，
+// 用 `provider add` 重建同名厂商或 `account set` 改厂商之后手动 `account enable` 就能接着用。
+func (s *Store) DeleteProviderForce(name string) error {
+	return s.deleteProvider(name, true)
+}
+
+func (s *Store) deleteProvider(name string, force bool) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -894,19 +931,46 @@ func (s *Store) DeleteProvider(name string) error {
 	if _, err := tx.Exec(`DELETE FROM provider_routes WHERE provider = ?`, name); err != nil {
 		return err
 	}
+
+	if force {
+		ids, err := accountIDsByProviderTx(tx, name)
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			if err := setEnabledTx(tx, id, false, providerDeletedReason); err != nil {
+				return err
+			}
+		}
+	}
 	return tx.Commit()
 }
 
-// ListAccountsByProvider 返回 provider 字段等于 name 的账号，按 priority、id 升序。
-// `provider rm` 用它列出还在用的账号。
-func (s *Store) ListAccountsByProvider(name string) ([]Account, error) {
-	rows, err := s.db.Query(`SELECT id, name, provider, protocol, base_url, key_cipher, models,
-		price_in, price_out, price_cache_read, price_cache_write,
-		priority, enabled, COALESCE(cooldown_until, 0), COALESCE(last_error, ''), fail_streak, created_at
-		FROM accounts WHERE provider = ? ORDER BY priority ASC, id ASC`, name)
+// providerDeletedReason 是 `provider rm --force` 停用账号时写进 last_error 的话：
+// 说清发生了什么与下一步做什么（DESIGN 5.8）。
+const providerDeletedReason = "厂商已删除，请 provider add 重建或修改账号的厂商"
+
+// accountIDsByProviderTx 是事务里列指向某家厂商的账号，按 id 升序，结果与行序无关。
+func accountIDsByProviderTx(tx *sql.Tx, name string) ([]int64, error) {
+	rows, err := tx.Query(`SELECT id FROM accounts WHERE provider = ? ORDER BY id`, name)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanAccounts(rows)
+
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// ListAccountsByProvider 返回 provider 字段等于 name 的账号，按 priority、id 升序。
+// `provider rm` 用它列出还在用的账号（不带 --force 时先列出再拒绝）。
+func (s *Store) ListAccountsByProvider(name string) ([]Account, error) {
+	return s.queryAccounts("WHERE a.provider = ?", name)
 }

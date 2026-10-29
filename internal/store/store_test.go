@@ -524,15 +524,25 @@ func TestMigration0005UpgradesOldDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读老账号: %v", err)
 	}
-	if len(acc.Models) != 2 || acc.Protocol != "openai-chat" {
-		t.Fatalf("老账号被改动: %+v", acc)
+	// 迁移 0014 把孤儿账号的地址搬成了一行厂商（名字取账号的 provider，地址取账号的 base_url），
+	// 账号的 BaseURL 因此是那条厂商的地址；这家一条路由都没声明，默认协议算不出来，
+	// Protocol 就是空串（见 DESIGN 5.8）。
+	if len(acc.Models) != 2 || acc.BaseURL != "http://127.0.0.1:1" || acc.Protocol != "" {
+		t.Fatalf("老账号的派生值不对: %+v", acc)
+	}
+	p, err := st.GetProvider("test")
+	if err != nil {
+		t.Fatalf("迁移没给孤儿账号补建厂商: %v", err)
+	}
+	if p.BaseURL != "http://127.0.0.1:1" || p.DefaultProtocol != "openai-chat" || p.Note != "由迁移 0014 从账号地址补建" {
+		t.Fatalf("补建的厂商行不对: %+v", p)
 	}
 
-	// 空串回退到账号协议。
-	if got, err := st.EffectiveProtocol(acc.ID, acc.Protocol, "m1"); err != nil {
+	// 模型行没有协议、厂商又没有路由时，有效协议是空串（不报错，也不去猜）。
+	if got, err := st.EffectiveProtocol(acc.ID, "m1"); err != nil {
 		t.Fatalf("取有效协议: %v", err)
-	} else if got != "openai-chat" {
-		t.Fatalf("有效协议 = %q，期望回退到账号协议 openai-chat", got)
+	} else if got != "" {
+		t.Fatalf("有效协议 = %q，期望空串（厂商没有路由，算不出默认协议）", got)
 	}
 }
 
@@ -600,53 +610,87 @@ func modelRow(t *testing.T, st *store.Store, accountID int64, model string) stor
 	return store.AccountModel{}
 }
 
-// TestEffectiveProtocolFallsBackToAccount 确认有效协议的三种情况：
-// 行存在且列非空用列，行存在但列为空回退账号，行不存在也回退且不报错。
-func TestEffectiveProtocolFallsBackToAccount(t *testing.T) {
+// TestEffectiveProtocolFollowsModelAndProvider 确认新签名 (accountID, model) 的三种情况：
+// 模型行非空用列值，列为空用账号所属厂商的有效默认协议，厂商算不出默认协议时为空串。
+// 厂商的默认协议刻意选 anthropic 而不是固定顺序里的 chat：deepseek 那种两家都声明了路由的
+// 厂商，靠排序会算错。
+func TestEffectiveProtocolFollowsModelAndProvider(t *testing.T) {
 	st := openTemp(t)
-	acc := newAccount(t, st, "ds1", nil)
 
-	if got := store.ResolveProtocol("openai-chat", ""); got != "openai-chat" {
-		t.Fatalf("ResolveProtocol 空列应回退账号协议，得到 %q", got)
+	if err := st.AddProvider(store.Provider{
+		Name: "co", BaseURL: "https://api.example.com", DefaultProtocol: "anthropic",
+	}, []store.ProviderRoute{
+		{Provider: "co", Protocol: "openai-chat", Path: "/v1/chat/completions"},
+		{Provider: "co", Protocol: "anthropic", Path: "/v1/messages"},
+	}); err != nil {
+		t.Fatalf("建厂商: %v", err)
 	}
-	if got := store.ResolveProtocol("openai-chat", "anthropic"); got != "anthropic" {
+	acc := store.Account{Name: "c1", Provider: "co", KeyCipher: []byte{1}, Models: []string{"m1"}, Enabled: true}
+	if err := st.CreateAccount(&acc); err != nil {
+		t.Fatalf("建账号: %v", err)
+	}
+
+	if got := store.ResolveProtocol("anthropic", ""); got != "anthropic" {
+		t.Fatalf("ResolveProtocol 空列应回退厂商默认协议，得到 %q", got)
+	}
+	if got := store.ResolveProtocol("anthropic", "openai-chat"); got != "openai-chat" {
 		t.Fatalf("ResolveProtocol 非空列应用列值，得到 %q", got)
 	}
 
-	// 行不存在。
-	if got, err := st.EffectiveProtocol(acc.ID, "openai-chat", "m-missing"); err != nil {
+	// 行不存在：用厂商的有效默认协议。
+	if got, err := st.EffectiveProtocol(acc.ID, "m-missing"); err != nil {
 		t.Fatalf("行不存在不该报错: %v", err)
-	} else if got != "openai-chat" {
-		t.Fatalf("行不存在时有效协议 = %q，期望回退账号协议", got)
+	} else if got != "anthropic" {
+		t.Fatalf("行不存在时有效协议 = %q，期望厂商默认协议 anthropic", got)
 	}
 
-	// 行存在但列为空。
+	// 行存在但列为空：同样回退厂商默认协议。
 	if _, err := st.ReplaceModels(acc.ID, []string{"m1"}); err != nil {
 		t.Fatalf("写入模型行: %v", err)
 	}
-	if got, err := st.EffectiveProtocol(acc.ID, "openai-chat", "m1"); err != nil {
-		t.Fatalf("取有效协议: %v", err)
-	} else if got != "openai-chat" {
-		t.Fatalf("列为空时有效协议 = %q，期望回退账号协议", got)
-	}
-
-	// 列非空。
-	if err := st.SetModelProtocol(acc.ID, "m1", "anthropic"); err != nil {
-		t.Fatalf("记协议: %v", err)
-	}
-	if got, err := st.EffectiveProtocol(acc.ID, "openai-chat", "m1"); err != nil {
+	if got, err := st.EffectiveProtocol(acc.ID, "m1"); err != nil {
 		t.Fatalf("取有效协议: %v", err)
 	} else if got != "anthropic" {
-		t.Fatalf("列为空时有效协议 = %q，期望用列值 anthropic", got)
+		t.Fatalf("列为空时有效协议 = %q，期望厂商默认协议 anthropic", got)
 	}
 
-	// 另一账号的同名模型不受影响。
+	// 列非空：压过厂商默认协议。另一行不受影响。
+	if err := st.SetModelProtocol(acc.ID, "m1", "gemini"); err != nil {
+		t.Fatalf("记协议: %v", err)
+	}
 	if _, err := st.ReplaceModels(acc.ID, []string{"m1", "m2"}); err != nil {
 		t.Fatalf("再加一行: %v", err)
 	}
-	if got, err := st.EffectiveProtocol(acc.ID, "openai-chat", "m2"); err != nil {
+	if got, err := st.EffectiveProtocol(acc.ID, "m1"); err != nil {
+		t.Fatalf("取 m1 的有效协议: %v", err)
+	} else if got != "gemini" {
+		t.Fatalf("列非空时有效协议 = %q，期望用列值 gemini", got)
+	}
+	if got, err := st.EffectiveProtocol(acc.ID, "m2"); err != nil {
 		t.Fatalf("取 m2 的有效协议: %v", err)
-	} else if got != "openai-chat" {
-		t.Fatalf("m2 的有效协议 = %q，期望回退账号协议", got)
+	} else if got != "anthropic" {
+		t.Fatalf("m2 的有效协议 = %q，期望厂商默认协议 anthropic", got)
+	}
+
+	// 厂商一条路由都没声明：算不出默认协议，返回空串，不报错。
+	if err := st.AddProvider(store.Provider{Name: "bare", BaseURL: "https://bare.example.com"}, nil); err != nil {
+		t.Fatalf("建没有路由的厂商: %v", err)
+	}
+	bare := store.Account{Name: "b1", Provider: "bare", KeyCipher: []byte{1}, Enabled: true}
+	if err := st.CreateAccount(&bare); err != nil {
+		t.Fatalf("建 bare 账号: %v", err)
+	}
+	if got, err := st.EffectiveProtocol(bare.ID, "anything"); err != nil {
+		t.Fatalf("厂商没有路由时不该报错: %v", err)
+	} else if got != "" {
+		t.Fatalf("厂商没有路由时有效协议 = %q，期望空串", got)
+	}
+
+	// 旧的三参数写法还有调用方（internal/gateway、internal/cli）：第二个参数被忽略，
+	// 第三个参数才是模型名，结果与新写法一致。
+	if got, err := st.EffectiveProtocol(acc.ID, "whatever-account-protocol", "m1"); err != nil {
+		t.Fatalf("旧写法取有效协议: %v", err)
+	} else if got != "gemini" {
+		t.Fatalf("旧写法的有效协议 = %q，期望与新写法一样是 gemini", got)
 	}
 }

@@ -29,12 +29,20 @@ type Store struct {
 }
 
 // Account 是一行账号。
+//
+// Provider 是唯一的地址来源：转发用的地址、默认协议与路由都按它在 providers / provider_routes
+// 里查（见 DESIGN 5.8）。BaseURL 与 Protocol 是只读派生值，账号表里没有这两列（迁移 0014 删掉了）：
+// 读账号时由 queryAccounts 填上，写入（CreateAccount）不看它们，改了也不会落库。
 type Account struct {
-	ID        int64
-	Name      string
-	Provider  string
+	ID       int64
+	Name     string
+	Provider string
+	// BaseURL 派生自 providers.base_url，厂商行不存在时为空串。
+	BaseURL string
+	// Protocol 派生自这家厂商的有效默认协议（ResolveDefaultProtocol 的结果：显式值落在已声明的
+	// 路由上才用它，否则按固定顺序取第一条，没有路由时为空串），厂商行不存在时同样是空串。
+	// 逐模型的协议覆盖仍在 account_models.protocol，见 EffectiveProtocol。
 	Protocol  string
-	BaseURL   string
 	KeyCipher []byte
 	Models    []string
 	PriceIn   *float64
@@ -211,7 +219,18 @@ func decodeModels(s string) []string {
 	return models
 }
 
+// accountSelect 是读账号的唯一列清单：账号自己的列，加上厂商行上的地址。
+// Protocol 不在这里取：它是这家厂商路由算出来的有效默认协议，一条 JOIN 算不出来，
+// 由 fillDerivedProtocols 填（规则只有 ResolveDefaultProtocol 一份）。
+const accountSelect = `SELECT a.id, a.name, a.provider, a.key_cipher, a.models,
+	a.price_in, a.price_out, a.price_cache_read, a.price_cache_write,
+	a.priority, a.enabled, COALESCE(a.cooldown_until, 0), COALESCE(a.last_error, ''), a.fail_streak,
+	a.created_at, COALESCE(p.base_url, '')
+	FROM accounts a LEFT JOIN providers p ON p.name = a.provider`
+
 // CreateAccount 插入账号，名称重复时返回错误。
+// 只写账号自己的列：地址与默认协议在厂商行上（见迁移 0014 与 DESIGN 5.8），
+// 传进来的 BaseURL 与 Protocol 不落库，读回来的是派生值。
 func (s *Store) CreateAccount(a *Account) error {
 	if a.CreatedAt == 0 {
 		a.CreatedAt = time.Now().Unix()
@@ -220,10 +239,10 @@ func (s *Store) CreateAccount(a *Account) error {
 		a.Priority = 100
 	}
 	res, err := s.db.Exec(`INSERT INTO accounts
-		(name, provider, protocol, base_url, key_cipher, models, price_in, price_out,
+		(name, provider, key_cipher, models, price_in, price_out,
 		 price_cache_read, price_cache_write, priority, enabled, cooldown_until, last_error, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', ?)`,
-		a.Name, a.Provider, a.Protocol, a.BaseURL, a.KeyCipher, encodeModels(a.Models),
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', ?)`,
+		a.Name, a.Provider, a.KeyCipher, encodeModels(a.Models),
 		a.PriceIn, a.PriceOut, a.PriceCacheRead, a.PriceCacheWrite, a.Priority, boolInt(a.Enabled), a.CreatedAt)
 	if err != nil {
 		return err
@@ -234,27 +253,43 @@ func (s *Store) CreateAccount(a *Account) error {
 
 // ListAccounts 按 priority、id 升序返回全部账号。
 func (s *Store) ListAccounts() ([]Account, error) {
-	rows, err := s.db.Query(`SELECT id, name, provider, protocol, base_url, key_cipher, models,
-		price_in, price_out, price_cache_read, price_cache_write,
-		priority, enabled, COALESCE(cooldown_until, 0), COALESCE(last_error, ''), fail_streak, created_at
-		FROM accounts ORDER BY priority ASC, id ASC`)
+	return s.queryAccounts("")
+}
+
+// queryAccounts 跑一条账号查询并填上派生字段：账号读的三个入口（ListAccounts、GetAccount、
+// ListAccountsByProvider）都走它，派生规则因此只有一份。
+// where 是附加的筛选条件（不含 ORDER BY，带 WHERE 关键字），空串表示全表。
+func (s *Store) queryAccounts(where string, args ...any) ([]Account, error) {
+	q := accountSelect
+	if where != "" {
+		q += " " + where
+	}
+	rows, err := s.db.Query(q+" ORDER BY a.priority ASC, a.id ASC", args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanAccounts(rows)
+	list, err := scanAccounts(rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.fillDerivedProtocols(list); err != nil {
+		return nil, err
+	}
+	return list, nil
 }
 
 // scanAccounts 把一行账号读成 Account，账号列表的几个查询共用它。
+// Protocol 此时还是零值，由 fillDerivedProtocols 填。
 func scanAccounts(rows *sql.Rows) ([]Account, error) {
 	var out []Account
 	for rows.Next() {
 		var a Account
 		var models string
 		var enabled int
-		if err := rows.Scan(&a.ID, &a.Name, &a.Provider, &a.Protocol, &a.BaseURL, &a.KeyCipher,
+		if err := rows.Scan(&a.ID, &a.Name, &a.Provider, &a.KeyCipher,
 			&models, &a.PriceIn, &a.PriceOut, &a.PriceCacheRead, &a.PriceCacheWrite,
-			&a.Priority, &enabled, &a.CooldownUntil, &a.LastError, &a.FailStreak, &a.CreatedAt); err != nil {
+			&a.Priority, &enabled, &a.CooldownUntil, &a.LastError, &a.FailStreak, &a.CreatedAt, &a.BaseURL); err != nil {
 			return nil, err
 		}
 		a.Models = decodeModels(models)
@@ -264,23 +299,36 @@ func scanAccounts(rows *sql.Rows) ([]Account, error) {
 	return out, rows.Err()
 }
 
-// GetAccount 按名称取账号。
-func (s *Store) GetAccount(name string) (Account, error) {
-	var a Account
-	var models string
-	var enabled int
-	err := s.db.QueryRow(`SELECT id, name, provider, protocol, base_url, key_cipher, models,
-		price_in, price_out, price_cache_read, price_cache_write,
-		priority, enabled, COALESCE(cooldown_until, 0), COALESCE(last_error, ''), fail_streak, created_at
-		FROM accounts WHERE name = ?`, name).Scan(&a.ID, &a.Name, &a.Provider, &a.Protocol, &a.BaseURL,
-		&a.KeyCipher, &models, &a.PriceIn, &a.PriceOut, &a.PriceCacheRead, &a.PriceCacheWrite,
-		&a.Priority, &enabled, &a.CooldownUntil, &a.LastError, &a.FailStreak, &a.CreatedAt)
-	if err != nil {
-		return a, err
+// fillDerivedProtocols 填上派生的 Protocol：账号所属厂商的有效默认协议。
+// 同一家厂商只算一次：账号再多，最多也只多查两回（厂商行与它的路由）。
+func (s *Store) fillDerivedProtocols(list []Account) error {
+	cache := make(map[string]string, len(list))
+	for i := range list {
+		name := list[i].Provider
+		def, ok := cache[name]
+		if !ok {
+			var err error
+			def, err = s.providerDefaultProtocol(name)
+			if err != nil {
+				return err
+			}
+			cache[name] = def
+		}
+		list[i].Protocol = def
 	}
-	a.Models = decodeModels(models)
-	a.Enabled = enabled == 1
-	return a, nil
+	return nil
+}
+
+// GetAccount 按名称取账号。不存在时返回 sql.ErrNoRows。
+func (s *Store) GetAccount(name string) (Account, error) {
+	list, err := s.queryAccounts("WHERE a.name = ?", name)
+	if err != nil {
+		return Account{}, err
+	}
+	if len(list) == 0 {
+		return Account{}, sql.ErrNoRows
+	}
+	return list[0], nil
 }
 
 // DeleteAccount 按名称删除账号，连带删除它的模型行。
@@ -606,7 +654,7 @@ const (
 )
 
 // AccountModel 是一个账号上一个模型的探活状态。
-// Protocol 是探活发现的「这个模型该用哪种协议」，空字符串表示继承账号的 protocol。
+// Protocol 是探活发现的「这个模型该用哪种协议」，空字符串表示继承厂商的有效默认协议（见 5.8）。
 type AccountModel struct {
 	AccountID  int64
 	Model      string
@@ -617,12 +665,13 @@ type AccountModel struct {
 	Protocol   string
 }
 
-// ResolveProtocol 是有效出站协议的纯规则：模型行上有协议就用它，否则继承账号的 protocol。
-func ResolveProtocol(accountProtocol, modelProtocol string) string {
+// ResolveProtocol 是有效出站协议的纯规则：模型行上有协议就用它，否则用厂商的有效默认协议
+// （账号行不再存协议，见迁移 0014 与 DESIGN 5.8）。两部分都是空串时结果就是空串。
+func ResolveProtocol(providerProtocol, modelProtocol string) string {
 	if modelProtocol != "" {
 		return modelProtocol
 	}
-	return accountProtocol
+	return providerProtocol
 }
 
 // ModelProtocol 读一个模型行的协议发现结果。没有这一行时返回空字符串（也就是继承），
@@ -641,13 +690,51 @@ func (s *Store) ModelProtocol(accountID int64, model string) (string, error) {
 }
 
 // EffectiveProtocol 返回账号在某个模型上的有效出站协议，转发与展示共用这一次读。
-// 模型行不存在或协议列为空时回退账号的 protocol，不报错。
-func (s *Store) EffectiveProtocol(accountID int64, accountProtocol, model string) (string, error) {
+// 写法是 (accountID, model)：模型行的协议非空就用它，否则用账号所属厂商的有效默认协议
+// （与 Account.Protocol 同一个规则）；行不存在、列为空、厂商行不存在或这家没有路由时都回退到
+// 空串，不报错。账号行不再存协议，所以第二个参数也从旧写法里的「账号协议」换成了模型名。
+//
+// Deprecated: 三参数写法 EffectiveProtocol(accountID, accountProtocol, model) 只为尚未改完的调用点
+// 保留（internal/gateway、internal/cli），第二个参数是账号协议，现在已经无用且被忽略；
+// 两个写法走的是同一条规则，改完调用点后就收回这个口子。
+func (s *Store) EffectiveProtocol(accountID int64, model string, legacyAccountProtocol ...string) (string, error) {
+	if len(legacyAccountProtocol) > 1 {
+		return "", fmt.Errorf("EffectiveProtocol 只收 (accountID, model) 两个参数：账号不再存协议，多余的参数是 %v", legacyAccountProtocol[1:])
+	}
+	if len(legacyAccountProtocol) == 1 {
+		// 旧写法：第二个参数是账号协议（忽略），真正的模型名落在第三个参数上。
+		model = legacyAccountProtocol[0]
+	}
 	protocol, err := s.ModelProtocol(accountID, model)
 	if err != nil {
 		return "", err
 	}
-	return ResolveProtocol(accountProtocol, protocol), nil
+	if protocol != "" {
+		return protocol, nil
+	}
+	provider, err := s.accountProvider(accountID)
+	if err != nil {
+		return "", err
+	}
+	fallback, err := s.providerDefaultProtocol(provider)
+	if err != nil {
+		return "", err
+	}
+	return ResolveProtocol(fallback, protocol), nil
+}
+
+// accountProvider 读账号的厂商名。账号不存在时返回空串、不报错：有效协议的契纡是
+// 「算不出来就是空串」，不因为一行不存在或读不到而中断转发。
+func (s *Store) accountProvider(accountID int64) (string, error) {
+	var provider string
+	err := s.db.QueryRow(`SELECT provider FROM accounts WHERE id = ?`, accountID).Scan(&provider)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return provider, nil
 }
 
 // SetModelProtocol 记录协议发现的结果，是这一列唯一的写入口。

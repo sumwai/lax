@@ -148,13 +148,21 @@ func TestMigration0009UpgradesOldDatabase(t *testing.T) {
 	assertGeminiSeed(t, st)
 
 	// 老账号与模型行原样：升级只加厂商与路由，不动账号一侧的任何表。
+	// 地址不再是账号自己的：它从厂商行取（迁移 0014 删掉了 accounts.base_url，
+	// 账号的 provider 已经在表里就不会被补建，旧地址随列一起丢掉），协议同样取自
+	// google-gemini 的默认协议。
 	acc, err := st.GetAccount("gem")
 	if err != nil {
 		t.Fatalf("读老账号: %v", err)
 	}
 	if acc.Provider != "google-gemini" || acc.Protocol != "gemini" ||
-		acc.BaseURL != "https://gemini-proxy.example.com" || len(acc.Models) != 1 {
-		t.Fatalf("老账号被改动: %+v", acc)
+		acc.BaseURL != "https://generativelanguage.googleapis.com" || len(acc.Models) != 1 {
+		t.Fatalf("老账号的派生值不对: %+v", acc)
+	}
+	if got, err := st.EffectiveProtocol(acc.ID, "gemini-2.5-pro"); err != nil {
+		t.Fatalf("取有效协议: %v", err)
+	} else if got != "gemini" {
+		t.Fatalf("老账号的有效协议 = %q，期望模型行上的 gemini", got)
 	}
 	rows, err := st.AccountModels(acc.ID)
 	if err != nil {

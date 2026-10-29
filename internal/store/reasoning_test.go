@@ -167,6 +167,8 @@ func TestMigration0012KeepsHistoryAtZero(t *testing.T) {
 		t.Fatalf("打开老库: %v", err)
 	}
 	// 0011 之后的形状：requests 已经有 in_tokens_uncached，没有 reasoning 两列。
+	// providers 与 provider_routes 得建出来：0011 那会儿它们已经在（0006 建的），
+	// 迁移 0014 会按它们判断哪个账号属于孤儿、要不要补建厂商。
 	ddl := []string{
 		`CREATE TABLE accounts (
 			id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, provider TEXT NOT NULL,
@@ -190,6 +192,15 @@ func TestMigration0012KeepsHistoryAtZero(t *testing.T) {
 			http_status INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '',
 			checked_at INTEGER NOT NULL DEFAULT 0, protocol TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY (account_id, model))`,
+		`CREATE TABLE providers (
+			name TEXT PRIMARY KEY, base_url TEXT NOT NULL, note TEXT NOT NULL DEFAULT '',
+			default_protocol TEXT NOT NULL DEFAULT '', models_path TEXT NOT NULL DEFAULT '')`,
+		`CREATE TABLE provider_routes (
+			provider TEXT NOT NULL, protocol TEXT NOT NULL, path TEXT NOT NULL,
+			models_path TEXT NOT NULL DEFAULT '', PRIMARY KEY (provider, protocol))`,
+		`INSERT INTO providers (name, base_url) VALUES ('test', 'http://127.0.0.1:1')`,
+		`INSERT INTO provider_routes (provider, protocol, path)
+			VALUES ('test', 'openai-chat', '/v1/chat/completions')`,
 		`INSERT INTO accounts (name, provider, protocol, base_url, key_cipher, models, price_in, price_out, enabled, created_at)
 			VALUES ('ds1', 'test', 'openai-chat', 'http://127.0.0.1:1', X'010203', '["m1"]', 2, 8, 1, 100)`,
 		`INSERT INTO requests (ts, inbound, outbound, model_requested, model_used, account_id,
