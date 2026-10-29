@@ -692,16 +692,17 @@ var modelSubs = []groupItem{
 	{"ls", "列出网关可提供的模型、账号状态与目录里的元数据"},
 	{"sync", "从上游拉取模型列表，名字进模型目录并把这个账号标成可用"},
 	{"probe", "逐个模型发 max_tokens=1 的请求探活，把可达性写进账号"},
+	{"alias", "维护模型别名：客户端写死的模型名指到真实模型名上（set / unset / ls）"},
 }
 
 // cmdModel 是 model 这一组子命令的入口。
 func cmdModel(e *Env, args []string) error {
 	if isHelpRequest(args) {
-		printGroupHelp(e.Stdout, "model", "模型同步与探活", modelSubs)
+		printGroupHelp(e.Stdout, "model", "模型同步、探活与别名", modelSubs)
 		return nil
 	}
 	if len(args) == 0 {
-		return usagef("需要子命令：ls | sync | probe\n用 switchboard model --help 查看子命令")
+		return usagef("需要子命令：ls | sync | probe | alias\n用 switchboard model --help 查看子命令")
 	}
 	switch args[0] {
 	case "ls":
@@ -710,8 +711,10 @@ func cmdModel(e *Env, args []string) error {
 		return cmdModelSync(e, args[1:])
 	case "probe":
 		return cmdModelProbe(e, args[1:])
+	case "alias":
+		return cmdModelAlias(e, args[1:])
 	default:
-		return usagef("未知子命令 %q，可用：ls | sync | probe\n用 switchboard model --help 查看子命令", args[0])
+		return usagef("未知子命令 %q，可用：ls | sync | probe | alias\n用 switchboard model --help 查看子命令", args[0])
 	}
 }
 

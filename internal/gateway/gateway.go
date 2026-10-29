@@ -229,6 +229,22 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 别名解析只做一次（DESIGN 5.12）：客户端给的名字原样记进 model_requested，此后选号、
+	// 路由的 {model} 占位符、请求体里的 model 与 gemini 路径全部用解析后的真实名字。
+	// 响应里的模型名不改，别名只影响请求方向。走链、成环与超长的判定只有 store.ResolveModelAlias
+	// 一份，这里不自己按跳查表。
+	requested := req.Model
+	if resolved, isAlias, err := s.store.ResolveModelAlias(requested); err != nil {
+		// 链成环或太长：这不是「清单里没有这个模型」，而是这个名字眼下解不出真实名字，
+		// 换哪个账号都发不出去，按请求本身有问题报 400。
+		writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error",
+			aliasBrokenMessage(requested, err))
+		return
+	} else if isAlias {
+		req.Model = resolved
+		s.logf("模型名 %s 按别名解析为 %s", requested, req.Model)
+	}
+
 	session := requestSession(r, raw)
 
 	accounts, err := s.store.ListAccounts()
@@ -242,7 +258,8 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		// `account_models.access='allowed'` 上（清单问题），或者有账号可达但全部在冷却或被停用
 		// （可用性问题，仍按 503 走）。可达性是账号侧唯一的事实，账号行没有第二份清单可对。
 		if len(account.Providers(accounts, req.Model)) == 0 {
-			writeInboundError(w, inbound, http.StatusNotFound, modelNotFoundKind(inbound), modelNotFoundMessage(req.Model))
+			writeInboundError(w, inbound, http.StatusNotFound, modelNotFoundKind(inbound),
+				modelNotFoundMessage(requested, req.Model))
 			return
 		}
 		writeInboundError(w, inbound, http.StatusServiceUnavailable, "api_error",
@@ -279,11 +296,13 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		res := s.tryUpstream(r.Context(), w, cand, outbound, inbound, r.Header, raw, req, session)
 		latency := s.now().Sub(attemptStart)
 
+		// 两列正好分工（DESIGN 5.12）：model_requested 记客户端给的名字（可能是别名），
+		// model_used 记真正发给上游的真实名字。
 		rec := &store.RequestRecord{
 			TS:             attemptStart.Unix(),
 			Inbound:        inbound,
 			Outbound:       outbound,
-			ModelRequested: req.Model,
+			ModelRequested: requested,
 			ModelUsed:      req.Model,
 			AccountID:      cand.ID,
 			HTTPStatus:     res.status,
@@ -370,9 +389,23 @@ func modelNotFoundKind(inbound string) string {
 }
 
 // modelNotFoundMessage 说明找不到模型，并给出下一步的两条命令：先看现有清单，再探活。
-func modelNotFoundMessage(model string) string {
+// requested 是客户端给的名字，used 是解析后的真实名字（没有别名时两者相同）。别名命中时
+// 必须把两个名字都写出来：只说「没有账号提供 X」会让人去清单里找一个永远不存在的名字
+// （DESIGN 5.12）。
+func modelNotFoundMessage(requested, used string) string {
+	if requested != used {
+		return fmt.Sprintf("别名 %s 指向 %s，但没有账号提供 %s；用 switchboard model ls 看现有清单",
+			requested, used, used)
+	}
 	return fmt.Sprintf("没有账号提供模型 %s；先运行 switchboard model ls 看现有清单，"+
-		"再用 switchboard model probe 探活", model)
+		"再用 switchboard model probe 探活", used)
+}
+
+// aliasBrokenMessage 说明别名链解不出真实名字（成环或太长）。store 的原文里带着整条链，
+// 这里只补上「下一步做什么」：改掉链上的一条，或先看一眼现有别名。
+func aliasBrokenMessage(name string, err error) string {
+	return fmt.Sprintf("模型名 %s 解析别名失败：%v；用 switchboard model alias ls 看别名链，"+
+		"改掉或删掉其中一条，客户端也可以直接写真实模型名", name, err)
 }
 
 // requestSession 取本次入站请求的会话键（见 DESIGN 5.3）：`x-switchboard-session` 头优先，
