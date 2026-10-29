@@ -1,0 +1,51 @@
+{
+  "max_tokens": 32,
+  "messages": [
+    {
+      "content": "只答一句",
+      "role": "system"
+    },
+    {
+      "content": "北京天气",
+      "role": "user"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"city\": \"北京\"}",
+            "name": "weather"
+          },
+          "id": "gemini_call_1",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "{\"result\": \"晴\"}",
+      "role": "tool",
+      "tool_call_id": "weather"
+    }
+  ],
+  "model": "up-chat",
+  "temperature": 0.2,
+  "tool_choice": "none",
+  "tools": [
+    {
+      "function": {
+        "description": "查天气",
+        "name": "weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ]
+}

@@ -356,13 +356,13 @@ func TestProbeModelRouteProtocolsOption(t *testing.T) {
 		acc := f.addAs(t, "a1", "custom", gateway.ProtocolChat, up.URL, "sk-bad-protocol", []string{"m1"})
 		gs, _ := newGatewayWith(t, f, gateway.Options{
 			RouteProtocols: func(provider, model string) []string {
-				return []string{"gemini"}
+				return []string{"cohere"}
 			},
 		})
 
 		if _, err := gs.ProbeModel(context.Background(), acc, "m1"); err == nil {
 			t.Fatal("非法协议应报错，不能静默落进 chat 分支")
-		} else if !strings.Contains(err.Error(), "gemini") {
+		} else if !strings.Contains(err.Error(), "cohere") {
 			t.Fatalf("错误信息应带上非法取值，实际 %v", err)
 		}
 		if paths := rec.paths(); len(paths) != 0 {

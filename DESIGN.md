@@ -4,7 +4,7 @@
 
 本机上的模型总机。手上有几家模型的账号，客户端只连 `http://127.0.0.1:4567`，由 switchboard 挑账号、转协议、记用量。
 
-入站收三种线协议，按路径区分：`POST /v1/messages` 是 anthropic，`POST /v1/chat/completions` 是 openai-chat，`POST /v1/responses` 是 openai-responses。出站协议取值同样是这三种，归属在模型上：`account_models.protocol` 有值就用它，为空则继承账号的 `protocol`（见 5.7）。入站协议与有效出站协议相同则直通，不同则经中间表示转换，九种组合全部可用。
+入站收三种线协议，按路径区分：`POST /v1/messages` 是 anthropic，`POST /v1/chat/completions` 是 openai-chat，`POST /v1/responses` 是 openai-responses。出站协议在这三种之外多一条 gemini，归属在模型上：`account_models.protocol` 有值就用它，为空则继承账号的 `protocol`（见 5.7）。入站协议与有效出站协议相同则直通，不同则经中间表示转换，三条入站 × 四条出站共十二种组合。gemini 只作出站、只做非流式，其余八种组合的流式与非流式都可用（见 5.9）。
 
 与同类产品的差别：
 
@@ -20,20 +20,21 @@
 | 账号类型 | 只支持粘贴 API key | 订阅账号要走浏览器登录与 token 刷新，受上游条款约束，风险和工作量都不适合放进第一版 |
 | 客户端配置改写 | 不做 | 程序只管网关与账号，各客户端里把 base URL 与 key 填成本机地址即可；改写别人家的配置文件不属于这里的职责 |
 | 入站协议 | anthropic、openai-chat、openai-responses 三个入口，按路径区分 | 客户端说什么协议就应当能接什么：Claude Code 说 anthropic，Codex 说 responses，普通 OpenAI SDK 说 chat。只做一个入口等于把其余客户端挡在门外 |
+| 出站协议 | anthropic、openai-chat、openai-responses 三条加上 gemini，归属在模型上（见 5.7） | 账号那头的协议不由账号名决定：同一家的 `claude-*` 与其余模型走不同路径。gemini 另有一套路径与凭据头，单独算一条协议比在 openai 兼容层里塞特例清楚（见 5.9） |
 | 存储 | SQLite 单文件 | 不装数据库服务，事务与查询都够用 |
 | 界面 | 纯命令行 | 用量由 `usage` 与 `log` 子命令查看 |
 | 计费 | 不做 | 没有第三方付款方，只记录 token 与估算花费 |
 
-协议矩阵。行列都按线协议算，当前实现的是三种协议之间的九种组合：
+协议矩阵。行列都按线协议算，当前实现的是三条入站 × 四条出站里的十二种组合：
 
 | 入站 ＼ 出站 | anthropic | openai-chat | openai-responses | gemini |
 | --- | --- | --- | --- | --- |
-| anthropic | 直通 | 转换 | 转换 | 未实现 |
-| openai-chat | 转换 | 直通 | 转换 | 未实现 |
-| openai-responses | 转换 | 转换 | 直通 | 未实现 |
+| anthropic | 直通 | 转换 | 转换 | 可用（非流式） |
+| openai-chat | 转换 | 直通 | 转换 | 可用（非流式） |
+| openai-responses | 转换 | 转换 | 直通 | 可用（非流式） |
 | gemini | 未实现 | 未实现 | 未实现 | 未实现 |
 
-同行同列是“直通”，其余是“转换”。“直通”只需重写请求体里的 `model` 字段，其余字段与值原样带到上游，响应与流式帧按字节原样返回（上游中途断流时按同一协议补上错误帧与收尾帧，见 5.4），用量另由该协议的 scanner 读出。“转换”走中间表示：请求与响应都只搬映射表里定义过的字段（见 5.4）。gemini 既没有入站路径，也没有可在账号上选的出站协议。
+同行同列是“直通”，其余是“转换”。“直通”只需重写请求体里的 `model` 字段，其余字段与值原样带到上游，响应与流式帧按字节原样返回（上游中途断流时按同一协议补上错误帧与收尾帧，见 5.4），用量另由该协议的 scanner 读出。“转换”走中间表示：请求与响应都只搬映射表里定义过的字段（见 5.4）。gemini 只作出站且只做非流式：没有入站路径，账号上可以选它做有效出站协议，流式请求在写出任何字节之前就被拒（见 5.9）。
 
 ## 3 用起来是这样
 
@@ -140,7 +141,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | --- | --- | --- | --- |
 | `init` | `--force` | 建配置目录与数据目录，写默认配置；`--force` 覆盖 | 两个路径 |
 | `serve` | `--addr`、`--log-level` | 前台起网关，注册三条入站路由、`/healthz` 与两个只读的模型清单接口（`GET /v1/models`、`GET /v1/models/{id}`，见 5.2.1）；启动只统计账号与模型数，不发上游请求 | 启动摘要，之后按请求打日志 |
-| `account add` | `<名称> --provider --key [--protocol] [--base-url] [--models] [--priority]` | 加密存 key；缺 `--base-url` 或 `--protocol` 时从厂商表补：地址取厂商的 `base_url`，协议取该厂商的有效默认协议（显式值落在已声明路由上就用它，否则按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 取第一条，见 5.8），两个参数都仍能覆盖。厂商行在但一条路由都没有时算不出默认协议：没给 `--protocol` 也没给 `--base-url` 就报错，提示先用 `provider set` 补上路由，或改用这两个参数；给了 `--base-url` 则按自建地址加账号、协议回退 openai-chat。厂商不在表里且没给 `--base-url` 时报错，列出已知厂商、编辑距离不超过 2 时给出最接近的名字，并说明 `--provider <自定义名> --base-url <地址>` 仍可自建；厂商表为空时只认 `--base-url`。`--protocol` 只收 anthropic、openai-chat、openai-responses（见 5.8）。`--base-url` 与 `provider add` 同一份校验（`store.NormalizeBaseURL`，见 5.8），只有 scheme 没有主机名的写法是用法错误、退出码 2，落库的是规整后的形态 | 新账号名称 |
+| `account add` | `<名称> --provider --key [--protocol] [--base-url] [--models] [--priority]` | 加密存 key；缺 `--base-url` 或 `--protocol` 时从厂商表补：地址取厂商的 `base_url`，协议取该厂商的有效默认协议（显式值落在已声明路由上就用它，否则按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 取第一条，见 5.8），两个参数都仍能覆盖。厂商行在但一条路由都没有时算不出默认协议：没给 `--protocol` 也没给 `--base-url` 就报错，提示先用 `provider set` 补上路由，或改用这两个参数；给了 `--base-url` 则按自建地址加账号、协议回退 openai-chat。厂商不在表里且没给 `--base-url` 时报错，列出已知厂商、编辑距离不超过 2 时给出最接近的名字，并说明 `--provider <自定义名> --base-url <地址>` 仍可自建；厂商表为空时只认 `--base-url`。`--protocol` 只收 anthropic、openai-chat、openai-responses 与 gemini；gemini 只作出站，没有入站路径，也还不支持流式（见 5.9）。白名单只有 `store.IsWireProtocol` 一份，cli 与 store 不再各写一套。`--base-url` 与 `provider add` 同一份校验（`store.NormalizeBaseURL`，见 5.8），只有 scheme 没有主机名的写法是用法错误、退出码 2，落库的是规整后的形态 | 新账号名称 |
 | `account ls` | `--json` | 列账号、模型数、是否处在冷却；`account_models` 有数据时模型列显示「N 可用 / M 同步」，协议列显示账号默认协议，存在与它不同的已发现协议时写成「openai-chat + 另 1 种」；`--json` 每行多了 `models_usable`、`models_synced` 两个计数与 `protocols`（默认协议在前，其余是模型行上发现到的协议） | 表格 |
 | `account set` | `<名称> --key <key>` | 换掉已有账号的凭据，不删号重建：删号会丢掉 `account_models` 里的探活结果、协议发现与请求记录的账号归属。`--key` 的三种给法与 `account add` 一致（直接写值、`--key -` 从标准输入读、留空读 `SWITCHBOARD_KEY`），缺凭据是用法错误（退出码 2 并打出用法）。key 走同一条加密路径覆盖 `key_cipher`，明文不进日志、不进 `--json` 输出。旧凭据的结论一并作废：同一个事务里清掉 `cooldown_until`、`fail_streak`、`last_error` 并把账号重新启用（`enabled=1`），写入口是 `store.RotateKey`。不动 `account_models`、`accounts.models` 与协议发现结果，也不碰厂商表。账号不存在时报错并提示先 `switchboard account add` | 确认一行（新凭据的掩码、冷却与失败计数已清零、账号已启用）；`--json` 含 `name`、`key`（掩码）、`cooldown_cleared`、`fail_streak_cleared`、`enabled` |
 | `account rm` | `<名称>` | 删账号，同时删掉它的 `account_models` 行；关联的请求记录保留 | 确认一行 |
@@ -149,7 +150,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | `account disable` | `<名称>` | 停用账号，不再参与选号 | 确认一行 |
 | `model ls` | `[--provider 厂商]` `[--account 账号]` `--json` | 按模型名列出可用账号与计价来源；`account_models` 有数据时每个账号带状态（可用 / 待探活 / 无权 / 不存在 / 凭据被拒 / 失败），没有任何模型行时回退到 `accounts.models` 并标「手填」；另有协议列，显示该模型在这个账号上的有效出站协议，取值只经 `store.EffectiveProtocol`，行不存在或协议列为空时由它回退到账号协议；`--json` 每个账号多了 `protocol` | 表格 |
 | `provider ls` | `--json` | 列厂商、`base_url`、默认协议、模型列表、各协议的路由与备注；默认协议是该厂商的有效默认协议（显式值落在已声明路由上就用它，否则按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 取第一条，见 5.8），一条路由都没有时显示 `-`，不算错误；模型列表列：厂商级 `models_path` 非空就显示它，否则显示各路由自己的 `models_path`（多条路由共用一个路径时只显示一次），都没有时显示 `-`；`--json` 每项含 `name`、`base_url`、`default_protocol`、`models_path`、`protocols`（每项 `protocol`、`path`、`models_path`）、`note`，没有路由时 `default_protocol` 为空串、`protocols` 为空数组 | 表格 |
-| `provider add` | `<名称> --base-url <地址> [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]` | 只新建：名称已在厂商表里时报错（「厂商 X 已存在，改用 switchboard provider set X 修改」），绝不顺手改已有的行。`--base-url` 必填，校验与规整走 `store.NormalizeBaseURL`（见 5.8），cli 不另写一份 scheme/主机名预检：必须是带主机名的完整地址，`https://` 这种只有 scheme 的写法是用法错误（退出码 2，文案说明缺主机名并给正确例子）；scheme 大小写不敏感（`HTTPS://host/` 能用），落库时归一成小写、路径里重复斜杠合并、末尾斜杠去掉。至少要给一条协议路由，一条都不给是用法错误（不再需要这家厂商就用 `provider rm`）。三个协议 flag 各声明 `(厂商, 协议)` 的一条路由，值可以是相对 `base_url` 的完整路径，也可以是整条地址（含 `://`，见 5.8）：相对路径只规整不拒绝，`v1/chat/completions`、`//v1//chat/completions`、`/v1/chat/completions/` 都落成同一个地址，不报错，只有规整之后为空才算缺值；整条地址校验 scheme 与主机名（`https://`、`https:///x`、`ftp://host/x` 都是用法错误，退出码 2，文案指出缺的是主机名还是 scheme 不对），路径部分照旧规整、查询串与 `#` 之后原样保留，使用时不再拼 `--base-url`。同一个 `base_url` 上不同协议落在不同域名时，协议 flag 直接写整条地址：`switchboard provider add myco --base-url https://api.example.com --openai https://openai.example.com/v1/chat/completions --anthropic https://claude.example.com/v1/messages`。`--help` 写明目前支持 anthropic、openai、responses 三种协议，没有 `--gemini`：gemini 协议尚未实现，留一条永远用不上的路由只会误导。没给每条路由的模型列表路径时按规则自动填：`openai`（openai-chat）路由把尾部 `/chat/completions` 换成 `/models`（`/v1/chat/completions` → `/v1/models`、`/chat/completions` → `/models`），其余协议留空表示回退到同厂商其它协议的非空值（见 5.8）。`--models-path` 是厂商级覆盖，收同样两种写法（相对路径或整条地址），整条地址同样要带主机名。`--default-protocol` 是这家的默认协议，取值是命令行写法 `anthropic`、`openai`、`responses`（也认线协议全名 `openai-chat`、`openai-responses`，`openai` 就是 chat），必须落在这次声明的路由上，否则整笔拒绝、退出码 1、一条路由都不落库；缺省时按固定顺序 `openai` → `responses` → `anthropic` 取第一条已声明的路由。取值参数传给空串（或只有斜杠这类规整之后为空的写法）是用法错误，删除与清空见 `provider unset` | 确认一行（地址、默认协议、几条路由） |
+| `provider add` | `<名称> --base-url <地址> [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]` | 只新建：名称已在厂商表里时报错（「厂商 X 已存在，改用 switchboard provider set X 修改」），绝不顺手改已有的行。`--base-url` 必填，校验与规整走 `store.NormalizeBaseURL`（见 5.8），cli 不另写一份 scheme/主机名预检：必须是带主机名的完整地址，`https://` 这种只有 scheme 的写法是用法错误（退出码 2，文案说明缺主机名并给正确例子）；scheme 大小写不敏感（`HTTPS://host/` 能用），落库时归一成小写、路径里重复斜杠合并、末尾斜杠去掉。至少要给一条协议路由，一条都不给是用法错误（不再需要这家厂商就用 `provider rm`）。三个协议 flag 各声明 `(厂商, 协议)` 的一条路由，值可以是相对 `base_url` 的完整路径，也可以是整条地址（含 `://`，见 5.8）：相对路径只规整不拒绝，`v1/chat/completions`、`//v1//chat/completions`、`/v1/chat/completions/` 都落成同一个地址，不报错，只有规整之后为空才算缺值；整条地址校验 scheme 与主机名（`https://`、`https:///x`、`ftp://host/x` 都是用法错误，退出码 2，文案指出缺的是主机名还是 scheme 不对），路径部分照旧规整、查询串与 `#` 之后原样保留，使用时不再拼 `--base-url`。同一个 `base_url` 上不同协议落在不同域名时，协议 flag 直接写整条地址：`switchboard provider add myco --base-url https://api.example.com --openai https://openai.example.com/v1/chat/completions --anthropic https://claude.example.com/v1/messages`。`--help` 写明目前支持 anthropic、openai、responses 三种协议，还没有 `--gemini`：gemini 只作出站且只做非流式（见 5.9），声明 gemini 路由的 flag 与厂商行一起留到下一步，现在写进去的 flag 只会被当成未知参数。没给每条路由的模型列表路径时按规则自动填：`openai`（openai-chat）路由把尾部 `/chat/completions` 换成 `/models`（`/v1/chat/completions` → `/v1/models`、`/chat/completions` → `/models`），其余协议留空表示回退到同厂商其它协议的非空值（见 5.8）。`--models-path` 是厂商级覆盖，收同样两种写法（相对路径或整条地址），整条地址同样要带主机名。`--default-protocol` 是这家的默认协议，取值是命令行写法 `anthropic`、`openai`、`responses`（也认线协议全名 `openai-chat`、`openai-responses`，`openai` 就是 chat），必须落在这次声明的路由上，否则整笔拒绝、退出码 1、一条路由都不落库；缺省时按固定顺序 `openai` → `responses` → `anthropic` 取第一条已声明的路由。取值参数传给空串（或只有斜杠这类规整之后为空的写法）是用法错误，删除与清空见 `provider unset` | 确认一行（地址、默认协议、几条路由） |
 | `provider set` | `<名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--models-path <路径>] [--default-protocol <协议>] [--note <备注>]` | 只设值，不承担删除：只改传入的字段，其余一律保留。协议 flag 覆盖或新增那条路由的路径（写法与 `provider add` 同一套：相对路径只规整，整条地址校验后直接使用），`--default-protocol` 与 `--models-path` 换新值（`--models-path` 同样收两种写法），`--note` 换备注。任何取值参数传空串（例如 `--openai ""`、`--note ""`）都是用法错误、文案指向 `provider unset`，路径参数只有斜杠这类规整之后为空的写法同样算空值，不做「空串即删除」的约定：误敲一个空引号不该把已有路由或备注抹掉。改完之后默认协议必须仍指向一条存在的路由，否则整笔拒绝并提示先加路由或改默认协议。没给模型列表路径的路由按 `openai` 推导规则重算，手工填过的值保持不动。厂商不存在时报错并提示用 `provider add` 新建；一个参数都不给是用法错误 | 确认一行（改了几项、现有几条路由、默认协议） |
 | `provider unset` | `<名称> <字段> [<字段>...]` | 删除必须显式声明：`anthropic`、`openai`、`responses` 删掉那条协议路由，`models-path` 清掉厂商级覆盖、回到按路由取，`default-protocol` 清掉显式值、回到 `openai` → `responses` → `anthropic` 固定顺序取第一条路由，`note` 清空备注。字段是位置参数，一次可以给多个，重复的只处理一次。要删的项本来就不存在时不报错（幂等），输出一行说明「X 本来就没有 …」。`base-url` 与厂商名不能 unset：前者是必填地址、清掉就无处转发，后者是主键、清不掉，两者都报错说明原因；未知字段、带 `--` 前缀、大小写不符报错并列出可用字段。删到一条路由都不剩时整笔拒绝并指向 `provider rm <名称>`；删掉的路由正好是默认协议时同样整笔拒绝，文案由 store 给，列出仍然声明的协议并给出 `provider set <名称> --default-protocol <协议>` 与 `provider unset <名称> default-protocol` 两条出路（cli 不另算一份回退规则），同一次调用里带上 `default-protocol` 即放行。`--json` 输出与 `provider ls` 的单项同形 | 逐项确认（清掉了什么 / 本来就没有）+ 现有几条路由与默认协议 |
 | `provider rm` | `<名称> [--force]` | 删除厂商行与它的全部路由行；仍有账号指向该厂商时列出这些账号并拒绝，加 `--force` 才删，删完说明这些账号仍保留自己的 `base_url` | 确认一行，或待确认的账号清单 |
@@ -164,7 +165,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 退出码：`0` 成功；`1` 运行失败（含 `doctor` 有检查未通过、`call` 非 2xx）；`2` 用法错误。
 错误信息写 stderr，`--json` 时结果写 stdout，两者不混在一起。
 
-`serve` 同时暴露三条入站路径：`/v1/messages`（anthropic）、`/v1/chat/completions`（openai-chat）、`/v1/responses`（openai-responses），路径决定入站协议（见 5.2），三条都只收 POST，其余方法 405 并带 `Allow: POST`；另有两条只读的模型清单接口 `GET /v1/models` 与 `GET /v1/models/{id}`，给客户端发现模型名用，它们不是入站协议入口，只收 GET（见 5.2.1）。`/healthz` 的响应里带 `inbound` 与 `outbound` 两份协议清单。未知路径返回 404，这与清单接口的两条路径不冲突：它们各自注册了处理器，`/v1/models/` 之后一律当作模型名，不会落进「未知路径」；这条「之后全部算模型名」有一个例外，来自 `http.ServeMux` 的路径规整（见 5.2.1）。
+`serve` 同时暴露三条入站路径：`/v1/messages`（anthropic）、`/v1/chat/completions`（openai-chat）、`/v1/responses`（openai-responses），路径决定入站协议（见 5.2），三条都只收 POST，其余方法 405 并带 `Allow: POST`；另有两条只读的模型清单接口 `GET /v1/models` 与 `GET /v1/models/{id}`，给客户端发现模型名用，它们不是入站协议入口，只收 GET（见 5.2.1）。`/healthz` 的响应里带 `inbound` 与 `outbound` 两份协议清单（`outbound` 里含只作出站的 gemini）。未知路径返回 404，这与清单接口的两条路径不冲突：它们各自注册了处理器，`/v1/models/` 之后一律当作模型名，不会落进「未知路径」；这条「之后全部算模型名」有一个例外，来自 `http.ServeMux` 的路径规整（见 5.2.1）。
 
 ## 5 程序内部做什么
 
@@ -225,7 +226,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 
 ### 5.4 中间表示与转换规则
 
-入站协议三条，出站协议三条，两边相同时直通，不同时经中间表示互转。中间表示不绑任何一家上游的字段名，协议差异全部在编解码器里吸收。
+入站协议三条，出站协议四条（多一条只作出站、只做非流式的 gemini，见 5.9），两边相同时直通，不同时经中间表示互转。中间表示不绑任何一家上游的字段名，协议差异全部在编解码器里吸收。
 
 中间表示在 `internal/translate/ir.go`：
 
@@ -238,7 +239,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | `Response` | `ID`、`Model`、`Blocks`、`StopReason`、`Usage` |
 | `Usage` | `In`、`Out`、`CacheRead`、`CacheWrite` |
 
-按协议名分发的入口都在 `ir.go`：`DecodeRequest`、`EncodeRequest`、`DecodeResponse`、`EncodeResponse`、`NewStreamDecoder`、`NewStreamEncoder`、`NewUsageScanner`、`PathProtocol`。三套编解码器分别在 `anthropic.go`、`chat.go`、`responses.go`。
+按协议名分发的入口都在 `ir.go`：`DecodeRequest`、`EncodeRequest`、`DecodeResponse`、`EncodeResponse`、`NewStreamDecoder`、`NewStreamEncoder`、`NewUsageScanner`、`PathProtocol`。三套入站编解码器分别在 `anthropic.go`、`chat.go`、`responses.go`；gemini 的出站编解码与用量读取在 `gemini.go`，它只接在 `DecodeRequest`、`EncodeRequest`、`DecodeResponse`、`NewUsageScanner` 四个入口上（没有入站路径，也还没有流式编解码器）。
 
 同一个概念在三条协议里落的位置不同：
 
@@ -350,7 +351,7 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 `model sync [--provider 厂商] [--account 账号] [--endpoint <路径>]` 只解决前者：
 
 - 模型列表地址按这个顺序取，纯规则在 `store.ResolveModelsPath`：`--endpoint` 给的地址（只作用于这一次调用，压过下面全部）→ 厂商级 `providers.models_path` 覆盖 → 账号协议那条路由的 `models_path` → 同厂商按协议名排序的第一条非空 `models_path`；每一项都可能是相对路径或整条地址（见 5.8），整条地址直接访问、不再拼账号的 `base_url`；厂商行存在且声明了路由、但一个非空 `models_path` 都没有时报错，提示用 `--models` 手填或 `provider set --models-path <地址>` 补上；厂商行不存在或一条路由都没声明时按 `base_url` 后缀猜（见 5.8）。
-- 凭据头与地址一起定：地址来自哪条路由，就用那条路由的协议选凭据头（anthropic 用 `x-api-key`，另两家用 `Bearer`）；厂商级覆盖与 `--endpoint` 没有自己的协议，按账号协议发。deepseek 的 anthropic 账号取到的是 chat 路由上的 `/v1/models`，所以必须发 `Bearer`——按账号协议发 `x-api-key` 只会换回 401/403，还把错误指到「凭据无效」上。
+- 凭据头与地址一起定：地址来自哪条路由，就用那条路由的协议选凭据头（anthropic 用 `x-api-key`，gemini 用 `x-goog-api-key`，两条 openai 协议用 `Bearer`）；厂商级覆盖与 `--endpoint` 没有自己的协议，按账号协议发。deepseek 的 anthropic 账号取到的是 chat 路由上的 `/v1/models`，所以必须发 `Bearer`——按账号协议发 `x-api-key` 只会换回 401/403，还把错误指到「凭据无效」上。
 - `model sync --endpoint <地址>` 只影响这一次调用：值是相对账号的 `base_url` 的完整路径，也可以是整条地址（账号行固化地址，见 5.8），相对路径按 5.8 的规则规整（`v1/models`、`//v1//models/` 都落成 `/v1/models`）、整条地址校验后直接访问、不再拼 `base_url`；给了就忽略厂商覆盖、路由的 `models_path` 与 `base_url` 兜底，作用于被选中的每个账号。
 - 响应形状自动识别，不加配置、不加 flag，按这个顺序试，第一个命中生效：`{data:[…]}`（OpenAI 兼容，主流）→ `{models:[…]}`（ollama 的 `/api/tags` 这类）→ 顶层数组（`["m1"]` 或 `[{"id":…}]`）。每个条目按 `id` → `name` → `model` 取第一个非空字符串，去空白、去重、排序，缺这些字段的条目跳过。判定只看字段在不在：只有字段不存在时才试下一种形状，字段存在但为空（`{"data":[]}`、`{"models":[]}`，或该字段是 `null`）就是「上游返回空列表」，算该账号失败，不拿后面的形状兜底——空列表与形状不对是两件事。三种形状都不匹配时报错，文案列出这三种形状并提示检查 `base-url`（也可以用 `--models` 手填）。
 - 结果写进 `account_models`：新出现的模型行状态为 `synced`，已存在的行保留既有探活状态，上游已消失的行删除。
@@ -375,10 +376,10 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 - 账号协议那一次失败时，只有可能只是路径不对的才换协议再试：`404`（路径不存在）、`405`（方法不允许）、`403`（有的网关按路径拒，commandcode 对非 `/messages` 的 `claude-*` 就是 403），以及 `400` 且错误文本指向端点、路径或「不支持该协议」。其余失败（例如明确说模型不存在、`5xx`、网络错误）直接按上表判定，不再花调用。
 - 换协议之后的那几次失败都不作数：不管是什么原因，都接着试剩下的候选，直到候选用完，结论仍回账号协议那次。中途停手会让排在后面的候选永远试不到，而换协议后的 `401` 本来就是常态（凭据头形状不对）。
 - 顺序：库里已经发现过这个模型的协议排最前，否则账号协议最前；其余按候选列表的顺序。库里已有的发现结果排前面是为了让 `--refresh` 重探已知模型时不再白打一次 `404`。顺序固定，同一模型多次探活得到同一个结论，不随运行顺序变化。
-- 候选协议由 `gateway.Options.RouteProtocols`（resolver）给出：入参是账号的厂商与模型名，默认实现取该厂商在 `provider_routes` 里声明过的协议（见 5.8）；没注入、或该厂商一个路由都没声明时它们就是三种线协议全试。resolver 负责去重与校验，只认三种线协议，出现别的值直接报错——静默落进 chat 分支会把一条配置错误变成对错误地址的上游调用。循环本身不认识厂商，也不会对着不存在的端点白打一次。
+- 候选协议由 `gateway.Options.RouteProtocols`（resolver）给出：入参是账号的厂商与模型名，默认实现取该厂商在 `provider_routes` 里声明过的协议（见 5.8）；没注入、或该厂商一个路由都没声明时它们就是三条入站协议全试（gemini 不在兜底里：它只作出站，声明过 gemini 路由时才进候选）。resolver 负责去重与校验，只认 `store.IsWireProtocol` 认的线协议，出现别的值直接报错——静默落进 chat 分支会把一条配置错误变成对错误地址的上游调用。循环本身不认识厂商，也不会对着不存在的端点白打一次。
 - 第一个 `2xx` 就是结论：状态记 `usable`，把这次用的协议写进 `account_models.protocol`，剩下的协议不再试。
-- `401` 一律不换协议：凭据问题与路径无关，照旧停用账号并立即停止整次探活。这一条只判账号协议那一次；换协议之后的 `401` 多半是凭据头形状不对（anthropic 用 `x-api-key`，另两家用 `Bearer`），既不停用账号也不算凭据被拒。
-- 三种协议都没试出 `2xx` 时，结论取账号协议那一次的判定（状态、HTTP 状态与错误文本），`protocol` 保持原值不动。协议列只在发现成功时写，一次失败不会把之前测出的协议抹掉，也不会凭空写入一个。
+- `401` 一律不换协议：凭据问题与路径无关，照旧停用账号并立即停止整次探活。这一条只判账号协议那一次；换协议之后的 `401` 多半是凭据头形状不对（anthropic 用 `x-api-key`，gemini 用 `x-goog-api-key`，两条 openai 协议用 `Bearer`），既不停用账号也不算凭据被拒。
+- 候选协议都没试出 `2xx` 时，结论取账号协议那一次的判定（状态、HTTP 状态与错误文本），`protocol` 保持原值不动。协议列只在发现成功时写，一次失败不会把之前测出的协议抹掉，也不会凭空写入一个。
 
 花费：先用账号协议试，成功时只花一次调用，只有失败才会多花一到两次。同一模型重复探活的结果稳定，代价最多是每次 `--refresh` 多一两次 `max_tokens=1` 的调用，跟 `--max-age` 省下的调用相比是小头。每次上游调用都在 `requests` 里各留一行（见 5.5），打出几次就记几行。
 
@@ -410,22 +411,22 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 出站地址不由代码里的厂商表决定，也不靠 `base_url` 末尾有没有 `/v1` 猜后缀：同一个 `base_url` 上不同协议的路径并不一样，猜出来的地址对其中一种协议一定是错的。deepseek 的 chat 在 `/v1/chat/completions`，anthropic 在 `/anthropic/v1/messages`；commandcode 的 base 是 `https://api.commandcode.ai/provider/v1`，chat 在 `/chat/completions`、anthropic 在 `/messages`，模型列表在 `/models`。
 
 - `providers` 一行提供 `base_url`、备注、一列默认协议与一列模型列表路径覆盖；协议的路径细节一律在 `provider_routes` 上，厂商行不存转发路径。
-- `provider_routes` 按 `(厂商, 协议)` 存完整路径 `path` 与模型列表路径 `models_path`。`path` 是相对路径时，完整地址是 `base_url` 去掉末尾斜杠后直接拼它；`path` 是整条地址时直接用它，不做任何猜测与补全（两种写法见下一条）。
+- `provider_routes` 按 `(厂商, 协议)` 存完整路径 `path` 与模型列表路径 `models_path`。`path` 是相对路径时，完整地址是 `base_url` 去掉末尾斜杠后直接拼它；`path` 是整条地址时直接用它，不做任何猜测与补全（两种写法见下一条）。`path` 里可以出现 `{model}` 占位符，两种写法都支持：拼好的完整地址在发请求之前把 `{model}` 换成转义后的模型名（见 5.9）。规整只合并斜杠，花括号与冒号原样落库。
 - 路由的 `path`、路由与厂商的 `models_path`、`model sync --endpoint` 三处收两种写法，判定与解释只有一份（`store.IsFullAddress` 与 `store.NormalizeEndpoint`）：含 `://` 的是整条地址，用 `url.Parse` 校验 scheme 为 `http` 或 `https`、主机名非空，规整时 scheme 归一成小写、路径合并重复斜杠去尾斜杠，授权部分、查询串与 `#` 之后原文保留，使用时不再拼 `base_url`；不含 `://` 的是相对路径，走 `NormalizePath` 拼账号的 `base_url`。整条地址让同一厂商的不同协议落在不同域名上：openai 兼容端点在 `https://openai.example.com/v1/chat/completions`、anthropic 端点在 `https://claude.example.com/v1/messages`，此时 `base_url` 只是其中一家的地址（仍必填，账号行要用它兜底）。`https://`、`https:///x` 这类只有 scheme 没有主机名的写法报错，`ftp://host/x` 这类其它 scheme 同样报错，错误文案用中文指出缺什么；写入侧（`CreateProvider`、`SetProvider`、`AddProvider`）碰到坏整条地址整笔拒绝、一个字段都不落库，读取侧（`joinEndpoint`、`modelsEndpoint`）把存量的脏值原样交给 `http.NewRequest` 报错，不改写用户数据。
 - 相对路径只规整、不拒绝输入，规则是 `store.NormalizePath`（由 `store.NormalizeEndpoint` 在取值不含 `://` 时调用）：去掉首尾空白、把连续斜杠合并成一个、补上恰好一个前导斜杠、去掉末尾斜杠；空串、只有斜杠、只有空白的输入一律视为空。`v1/chat/completions`、`//v1//chat//completions`、`/v1/chat/completions/` 因此是同一个地址，`--openai`、`--models-path`、`model sync --endpoint` 都不再要求「必须以 `/` 开头」。写入侧（`CreateProvider`、`SetProvider`、`AddProvider` 的 `path` 与 `models_path`）与读取侧（拼转发地址、拼模型列表地址、`--endpoint`）走同一个入口：库里存的永远是规整形态，读取侧拼地址时再过一遍，历史库里的不规整写法因此也拼得出正确地址。理由：路径是照着上游文档抄的，多一个或少一个斜杠是写法差异，不是用法错误；为此报错只会让人先改命令再重敲一遍，得到的仍是同一个地址。真正的用法错误是非空字段规整之后为空（删除语义归 `provider unset`），以及整条地址校验不过，那两条仍然报错。
 - `base_url` 同理只规整路径、不拒绝输入（`store.NormalizeBaseURL`），校验用 `url.Parse` 做：scheme 只认 `http` 与 `https`，大小写不敏感，落库时归一成小写；缺主机名是错误——`https://` 里没有地址，规整出来的 `https:` 拼不出可用的请求地址，不能当成一条 `base_url` 落库；缺 scheme 与别的 scheme 同样报错。规整只作用在路径部分：合并重复斜杠、补一个前导斜杠、去掉末尾斜杠，`https://api.example.com//api//paas//v4/` 落成 `https://api.example.com/api/paas/v4`——真实存在的前缀原样保留。授权部分（含端口与用户信息）、查询串与 `#` 之后的内容一个字不动：那里的连写斜杠是值的一部分，合并会改掉语义；`..` 与 `.` 段也原样保留，静默改写等于把地址换成另一个地址。拼地址时两侧（`base_url` 的路径与路由的 `path`）都过这套规则，最终地址的路径里不出现 `//`；`http://`、`https://` 里那一对斜杠不属于要合并的范围。
-- 协议由三个 flag 声明：`--anthropic`、`--openai`（openai-chat）、`--responses`（openai-responses）。没有 `--gemini`：gemini 协议进出都没实现，留一条永远用不上的路由只会误导。`provider add` 用它们新建，`provider set` 用它们覆盖或新增一条路由，删掉一条路由是 `provider unset <名称> <协议>`：传空值是用法错误，删除只在 `unset` 里发生。`--default-protocol` 认命令行写法 `anthropic`、`openai`、`responses`，也认线协议全名 `openai-chat`、`openai-responses`，两种写法落到同一个线协议，输入 `openai` 就是 chat；错误文案用命令行写法举例。
+- 协议由三个 flag 声明：`--anthropic`、`--openai`（openai-chat）、`--responses`（openai-responses）。还没有 `--gemini`：gemini 只作出站且只做非流式（见 5.9），这个 flag 与厂商行一起留到下一步；库里已经有 gemini 路由时（用例与将来的种子数据）转发照常认它，没有路由的 gemini 账号走 `base_url` 后缀兜底。`provider add` 用它们新建，`provider set` 用它们覆盖或新增一条路由，删掉一条路由是 `provider unset <名称> <协议>`：传空值是用法错误，删除只在 `unset` 里发生。`--default-protocol` 认命令行写法 `anthropic`、`openai`、`responses`，也认线协议全名 `openai-chat`、`openai-responses`，两种写法落到同一个线协议，输入 `openai` 就是 chat；错误文案用命令行写法举例。
 - `models_path` 的推导只发生在写入侧，读取侧不拿它重算。写入时没给模型列表地址的路由按规则补默认值（`store.DeriveModelsPath`）：openai-chat 路由把尾部 `/chat/completions` 换成 `/models`（`/v1/chat/completions` → `/v1/models`、`/chat/completions` → `/models`；整条地址则在同一个 scheme + host 上换尾段，`https://openai.example.com/v1/chat/completions` → `https://openai.example.com/v1/models`，查询串与 `#` 之后跟着原样带过去，不换域名），其它协议留空，表示这条协议没有自己的列表接口、读取时回退到同厂商其它协议的非空值。推导值跟着路径走：改路径时只有「空」或「原本就是旧路径的推导值」才换成新推导值，手工填过的值不动。内置 `anthropic` 厂商只有 anthropic 一条路由，没有 openai 路由可以推导，它的 `/v1/models` 因此不会因为重写那条路由而消失——读取侧推导会让 anthropic 型账号彻底失去模型列表来源。
 - `providers.models_path` 是厂商级覆盖：非空时 `model sync` 直接用它，不看路由；空串表示不覆盖、按路由取。它同样收相对路径与整条地址两种写法。要改一家上游的列表地址又不想逐条写 `models_path` 时用它。
 - 模型列表的凭据头跟取到路径的那条路由的协议走（见 5.7），不是账号协议：deepseek 的 anthropic 账号用的是 chat 路由上的 `/v1/models`，就得发 `Bearer`。
 - 账号行仍固化自己的 `base_url`（`account add` 时写入厂商默认值）。改厂商表只影响之后新加的账号，已有账号的地址不变。
 - 厂商行存在但没有该协议的路由，以及账号的 `provider` 在表里根本不存在（用户显式 `--base-url` 的自建地址），都退回原来的后缀猜测：末尾是 `/v1` 就补 `/chat/completions`、`/messages` 或 `/responses`，否则补 `/v1` 再接同样的后缀；模型列表同理补 `/models` 或 `/v1/models`。自建地址因此仍然可用。
-- 探活的候选协议跟着路由收紧：只用该厂商在 `provider_routes` 里声明过的协议，不去打这家没有声明的路径；没有厂商行的账号仍三种全试。顺序（已发现的协议、账号协议在前，其余按协议名排序）见 5.7。读库失败时报错，不放宽成三种全试——放宽等于去打这家没声明的路径，把一次读库故障变成对错误地址的上游调用。
+- 探活的候选协议跟着路由收紧：只用该厂商在 `provider_routes` 里声明过的协议（含 gemini），不去打这家没有声明的路径；没有厂商行的账号仍三条入站协议全试。顺序（已发现的协议、账号协议在前，其余按协议名排序）见 5.7。读库失败时报错，不放宽成全部协议全试——放宽等于去打这家没声明的路径，把一次读库故障变成对错误地址的上游调用。
 - 默认协议：显式值优先，但必须落在这家已声明的路由上；否则按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 取第一条已声明的路由，一条路由都没有时为空。`account add` 用它补账号的 `protocol`，`provider ls` 也显示它，两处同一个规则。规则是纯函数 `store.ResolveDefaultProtocol`，读库入口是 `store.EffectiveProviderProtocol`：厂商不存在返回 `ErrProviderNotFound`，厂商在但一条路由都没有时返回空串与 `ErrProviderNoRoutes`，提示文案由调用方写，`cli` 不再自己算这条回退。**不能靠协议名字典序兜底**：deepseek 与 commandcode 都同时声明了 `openai-chat` 与 `anthropic` 两条路由，字典序把 `anthropic` 排在前面，默认协议就会从升级前的 `openai-chat` 变成 `anthropic`，这两个厂商的账号在升级前后默认协议不一致。升级前的默认值因此由迁移 `0007` 逐家显式种进 `default_protocol`：`anthropic` 自己是 `anthropic`，其余 7 家是 `openai-chat`。
 - 默认协议的写入侧与读取侧分工：`provider add` 的 `--default-protocol` 必须落在这次声明的路由上，`provider set` 改完之后必须仍然指向一条存在的路由，`provider unset <协议>` 删掉的正好是默认协议时也整笔拒绝（提示先改默认协议再删），两处都是同一个事务，指不到就一条都不落库。读取侧对历史脏数据（旧版本删路由时没清默认协议）按固定顺序回退到仍然存在的路由，不静默交给后缀猜测。
 - `base_url` 的 `http://`、`https://` 前缀在 `store` 的三个写入口（`CreateProvider`、`SetProvider`、`AddProvider`）里校验并规整（合并重复斜杠、去掉末尾斜杠），整条地址的 `path` 与 `models_path` 用的是同一套校验（`store.NormalizeEndpoint`），`cli` 那层不再是唯一防线：脏地址一旦落库，转发与模型同步都会拿它拼路径。读侧拼地址用的也是同一个 `store.NormalizeBaseURL`。
 - `provider add` 只新建，`provider set` 只改传入的字段；两者都在一个事务里写厂商行与路由，失败时不留半条记录。`provider rm` 删厂商行与它的全部路由，仍有账号指过来时先列出这些账号并拒绝，`--force` 才删；账号行只存 `provider` 字符串，删厂商不影响已有账号的 `base_url`。
-- 凭据头仍按协议而不是按厂商：anthropic 用 `x-api-key` 加 `anthropic-version`，另两种用 `Bearer`。
+- 凭据头仍按协议而不是按厂商：anthropic 用 `x-api-key` 加 `anthropic-version`，gemini 用 `x-goog-api-key`，两条 openai 协议用 `Bearer`（见 5.9 与 gateway 的 `setAuth`）。
 
 `base_url` 与 `path` 拼出来的完整地址（`path` 是整条地址时直接用，不拼 `base_url`），几行示例：
 
@@ -439,6 +440,74 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 | split | anthropic | `/v1/messages` | `https://claude.example.com/v1/messages`（`base_url` 是这一家） |
 
 种子数据在迁移 `0006` 里，默认协议在迁移 `0007` 里，厂商级模型列表覆盖那一列在迁移 `0008` 里，都不在代码里。`providers` 表为空不算错误：用户可以把种子厂商删光，此时所有账号走兜底。维护用 `provider` 子命令（见 4）。
+
+### 5.9 gemini 出站
+
+gemini 的原生接口（Generative Language API 的 `generateContent`）与另外三条协议有两处结构差异，这一步先只处理它们，并且只做非流式出站：
+
+- 模型名在 URL 路径里：`POST {base}/v1beta/models/{model}:generateContent`。请求体里没有 `model` 字段，跨协议转换时也没有地方写它，所以模型名只能靠路径。路由表的 `path` 因此支持 `{model}` 占位符。
+- 凭据不走 `Authorization` 也不走 `x-api-key`：`x-goog-api-key: <key>`。这条按协议决定，与厂商无关——同一家代理可能同时提供 gemini 原生端点与 openai 兼容端点，地址不同、头也不同，按厂商选头必然在其中一条上错。
+
+出站地址与占位符：
+
+- 路由的 `path` 里可以出现 `{model}`，出现一次或多次都行，只替换这一个字面量。替换发生在地址拼好之后、发请求之前（`gateway.modelEndpoint` 对完整地址做 `strings.ReplaceAll`），替换值是 `url.PathEscape(模型名)`：模型名按路径段转义，`org/gemini` 这样的名字落成 `org%2Fgemini`，不会被拆成两段路径；路径里的 `:`（`:generateContent`）与查询串一个字不动。
+- 两种写法与占位符共存：相对路径 `/v1beta/models/{model}:generateContent` 由 `base_url` 拼上；整条地址 `https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` 直接使用、不再拼 `base_url`。`store.NormalizePath` 与 `store.NormalizeEndpoint` 只合并斜杠，花括号与冒号原样落库，读取侧拼地址时再过一遍同样的规则。
+- 不含占位符的路由行为不变：地址里没有 `{model}` 就一个字节都不改，另外三条协议因此不受影响（它们的路径里本来就没有模型名）。
+- 没有厂商行、或厂商没有 gemini 路由时退到后缀兜底，兜底值同样带占位符：`{base}/v1beta/models/{model}:generateContent`（`base_url` 末尾写了 `/v1beta` 也不会拼出两层）。只给 `--base-url` 与 `--protocol gemini` 就能用，不必先声明路由。
+
+请求映射（中间表示 → gemini）：
+
+| 中间表示 | gemini 请求 |
+| --- | --- |
+| `Request.System`，以及 `role=system` 消息 | 顶层 `systemInstruction.parts[]`（多段按换行拼成一段文本） |
+| `RoleUser` 消息 | `contents[]` 里 `role=user` 的一条 |
+| `RoleAssistant` 消息 | `contents[]` 里 `role=model` 的一条（gemini 只有 `user` 与 `model` 两种角色） |
+| `RoleTool` 消息（工具结果） | 折进 `role=user` 的 `functionResponse` part；之后紧跟的 user 内容并进同一条，`functionResponse` 在前 |
+| `text` 块 | `parts[].text` |
+| `image` 块（data URI） | `parts[].inlineData`（`mimeType` + `data`） |
+| `image` 块（http(s) 地址） | `parts[].fileData.fileUri` |
+| `tool_use` 块 | `parts[].functionCall`（`name` + `args`） |
+| `tool_result` 块 | `parts[].functionResponse`（`name` 由 `tool_use_id` 查历史里的 `tool_use` 得到，正文写成 `{"result": <文本>}`） |
+| `tools[].name` / `description` / `input_schema` | `tools[].functionDeclarations[]` 的 `name` / `description` / `parameters` |
+| `max_tokens` / `temperature` / `top_p` / `stop_sequences` | `generationConfig` 的 `maxOutputTokens` / `temperature` / `topP` / `stopSequences` |
+| `tool_choice` = `auto` / `required` / `none` | `toolConfig.functionCallingConfig.mode` = `AUTO` / `ANY` / `NONE` |
+| `tool_choice` = 指定工具 | `mode=ANY` 加 `allowedFunctionNames: [name]` |
+
+表里看不出来的五条取舍：
+
+- 工具定义只搬客户端函数：anthropic 的服务端内置工具（`type` 不是 `custom`）整条丢弃；gemini 自己的内置工具（`googleSearch` 一类）不在映射表里，也不伪造。
+- 工具调用的 id 出站时丢弃：gemini 的 `functionCall` 没有 id，`functionResponse` 按函数名对回调用。编码时先按历史里的 `tool_use` 建一张 `id → 函数名` 的表，查不到名字的 `tool_result` 整块丢弃——把 id 当成函数名写出去，上游会认为它对应一个没声明过的函数，换来的是整条请求 400。
+- `args` 与 `response` 必须是 JSON 对象（protobuf `Struct`）：非对象的工具参数（`null`、字符串、数组）整段省略，不让一条参数把整条请求换成 400。
+- `tool_choice` 没有「只准调某一个函数」这一档，用 `ANY` 加 `allowedFunctionNames` 表达，这是最接近的写法；上游不认白名单时会退化成 `ANY` 的语义（任何已声明函数都可能被调），比丢掉限制更接近客户端的本意。
+- `ParallelToolCalls`、`tool_result.is_error`、思考配置参数在 gemini 里没有落点，丢弃；`stream` 为真的请求直接报错（见下）。
+
+响应映射（gemini → 中间表示）：
+
+| gemini 响应 | 中间表示 |
+| --- | --- |
+| `candidates[].content.parts[].text` | `text` 块 |
+| `parts[].functionCall` | `tool_use` 块，`input` 取 `args` |
+| `parts[].inlineData` / `parts[].fileData` | `image` 块（data URI / 地址） |
+| `finishReason=STOP` | `end_turn` |
+| `finishReason=MAX_TOKENS` | `max_tokens` |
+| `finishReason` 为 `STOP` 且响应里有 `functionCall` | `tool_use` |
+| `finishReason=SAFETY` / `RECITATION` / `BLOCKLIST` / 其它 | `end_turn` |
+| `usageMetadata.promptTokenCount` / `candidatesTokenCount` / `cachedContentTokenCount` | `Usage.In` / `Out` / `CacheRead` |
+| `responseId` / `modelVersion` | `Response.ID` / 缺 `requestedModel` 时的 `Model` |
+
+- 只取 `candidates[0]`，第一版不做多候选。`candidates` 为空但给了 `promptFeedback.blockReason` 时报错并带上这个原因：提示词被安全策略拦下与「响应形状不对」要分开说，用户看到 `SAFETY` 才知道该改的是提示词而不是请求格式。
+- gemini 没有「因为工具调用而停」这一档：有 `functionCall` 时 `finishReason` 仍是 `STOP`。所以响应里出现 `functionCall` 就按 `tool_use` 编出去，客户端才会走工具调用分支（chat 是 `finish_reason=tool_calls`，anthropic 是 `stop_reason=tool_use`）；`SAFETY` 一类仍按 `end_turn`，不冒充 `tool_use`。
+- 工具调用没有 id，而 anthropic 的 `tool_use` 与 chat 的 `tool_calls` 都必须有：解码时按出现顺序补一个合成 id `gemini_call_<n>`（同一份响应多次解码得到同一个值）。它只活在我们发给客户端的响应里，下一轮客户端回填时反正会被丢掉。
+- `cachedContentTokenCount` 是 `promptTokenCount` 的子集（gemini 的 prompt 计数里已经包含命中缓存的部分），与 chat 的 `prompt_tokens_details.cached_tokens` 同一套记法，因此直接落到 `Usage.CacheRead`，`CacheWrite` 恒为 0。
+- 思考内容（part 上的 `thought` 标记与 `thoughtSignature`）不搬，`thinkingConfig` 也不进请求：这一步只搬上表里的五类块，思考内容在 5.4 里本来就是只往响应方向搬，gemini 这一档还没有落点。
+
+第一步不做，按已知行为处理（同时写进第 7 节）：
+
+- 入站 gemini：`PathProtocol` 不认 `:generateContent` 这种路径，`EncodeResponse` 与 `NewStreamEncoder` 仍然拒绝 gemini。`DecodeGeminiRequest` 有一个最小实现（能解析 `contents`、`systemInstruction`、`tools`、`generationConfig`），留给将来用；报文里没有模型名，入站实现时要由路径注入。
+- 流式：`NewStreamDecoder(gemini)` 仍然报错。网关在写出任何字节、也不打上游之前把「gemini 出站 + `stream=true`」的请求拒成 400（`invalid_request_error`），并且不把这个账号打入冷却——本机还没实现这种组合，不是上游的错；这一次请求也不写 `requests` 行，因为没有上游调用，账上不该凭空多一条。
+- 模型列表同步：gemini 的 `GET /v1beta/models` 形状（`{"models":[{"name":"models/gemini-2.5-flash",…}]}`）与 5.7 认的三种形状都不同，名字还带 `models/` 前缀，现在给 gemini 路由写 `models_path` 只会换回 422/404。gemini 账号暂时用 `--models` 手填，或让同厂商其它协议的路由提供列表。
+- 探活：gemini 的 `maxOutputTokens=1` 请求能跑通（`ProbeModel` 发的是非流式请求，路径同样带模型名），但候选协议来自厂商声明过的路由，命令面还没有 `--gemini`，所以现在只有库里已经有 gemini 路由时才会走到。
+- 命令面：`provider add/set` 还没有 `--gemini` flag，gemini 路由暂时只能由 store 写入（用例就是这么建的）或走 `base_url` 兜底；账号的 `--protocol` 已经接受 gemini（`store.IsWireProtocol` 一份白名单），帮助文案里还没列出它。
 
 ## 6 数据模型
 
@@ -503,7 +572,7 @@ CREATE TABLE providers (
 CREATE TABLE provider_routes (
   provider    TEXT NOT NULL,
   protocol    TEXT NOT NULL,
-  path        TEXT NOT NULL,                -- 相对 base_url 的路径，或整条地址（含 ://）
+  path        TEXT NOT NULL,                -- 相对 base_url 的路径，或整条地址（含 ://），可含 {model} 占位符
   models_path TEXT NOT NULL DEFAULT '',     -- 同上，空串表示回退到同厂商其它协议
   PRIMARY KEY (provider, protocol)
 );
@@ -511,7 +580,7 @@ CREATE TABLE provider_routes (
 
 `account_models` 由迁移 `0003` 建立，`status` 取值就是 `synced`、`usable`、`forbidden`、`notfound`、`auth`、`error`（见 5.7）。`accounts.fail_streak` 由迁移 `0004` 加入，只用于冷却翻倍，写入口只有 `RecordFailure`（加一）、`ClearFailure`（清零）与 `RotateKey`（换凭据时清零，见 5.6）。`accounts.models` 仍是选号实际读的那份列表。删除账号时 `DeleteAccount` 在同一个事务里删掉它的 `account_models` 行：SQLite 的 rowid 会被复用，遗留子行会让新账号继承旧账号的探活状态。
 
-`account_models.protocol` 由迁移 `0005` 加入，记录「这个模型该用哪种协议」，取值同样是 anthropic、openai-chat、openai-responses。**空字符串表示继承账号的 `protocol`**：有效出站协议是「列非空就用列，否则用账号的 `protocol`」，纯规则在 `store.ResolveProtocol`，读库入口是 `store.EffectiveProtocol(accountID, accountProtocol, model)`，行不存在与列为空都当成继承，不报错。转发与展示只读这个有效协议，不在调用方拼规则；`cli` 要显示协议时也只调它。
+`account_models.protocol` 由迁移 `0005` 加入，记录「这个模型该用哪种协议」，取值是 anthropic、openai-chat、openai-responses 与 gemini（最后一条只作出站，见 5.9）。**空字符串表示继承账号的 `protocol`**：有效出站协议是「列非空就用列，否则用账号的 `protocol`」，纯规则在 `store.ResolveProtocol`，读库入口是 `store.EffectiveProtocol(accountID, accountProtocol, model)`，行不存在与列为空都当成继承，不报错。转发与展示只读这个有效协议，不在调用方拼规则；`cli` 要显示协议时也只调它。
 
 这个列只有一个写入口 `SetModelProtocol`，由探活发现协议后调用（见 5.7）。`SetModelStatus` 只改 `status`、`http_status`、`error`、`checked_at`，不动 `protocol`；`ReplaceModels` 的 `ON CONFLICT DO NOTHING` 也只给新行写默认值，同步不会覆盖已发现的协议。旧库升上来时整列默认空串，也就是全部回退到账号协议，行为与 M7 一致。
 
@@ -520,6 +589,8 @@ CREATE TABLE provider_routes (
 `provider_routes.models_path` 是写入侧的默认值，不是读取侧的唯一来源：`CreateProvider`/`SetProvider` 写一条没有模型列表地址的路由时按 `DeriveModelsPath` 补（只给 openai-chat 补，尾部 `/chat/completions` 换成 `/models`），其它协议留空表示「这条协议没有自己的列表接口」。空串在读取时回退到同厂商其它协议的非空值，纯规则在 `store.ResolveModelsPath`：厂商级覆盖 → 账号协议那条路由 → 协议名排序的第一条非空值，返回路径时一并返回这条路径所属的协议，模型同步按它选凭据头。推导不放在读取侧，因为内置 `anthropic` 厂商只有 anthropic 一条路由，读时推导会让 anthropic 型账号彻底失去模型列表来源。
 
 `providers.default_protocol` **空字符串表示这家没有显式默认协议**：有效默认协议按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 回退到第一条已声明的路由（用户自建的厂商通常不填）。纯规则在 `store.ResolveDefaultProtocol`：显式值必须落在已声明的路由上才用它，指不到时同样按固定顺序回退——历史脏数据因此不会静默交给后缀猜测。读库入口是 `store.EffectiveProviderProtocol(provider)`：厂商不存在返回 `ErrProviderNotFound`，厂商在但一条路由都没有时返回空串与 `ErrProviderNoRoutes`，文案留给调用方。写入侧保证不产生悬空值：`CreateProvider` 的默认协议必须落在这次声明的路由上，`SetProvider` 改完之后必须仍指向一条存在的路由，否则整笔事务拒绝；`SetProvider` 收到空的 `DefaultProtocol` 表示清掉显式值、回到固定顺序，这一条只由 `provider unset <名称> default-protocol` 触发。旧库升上来时 8 家种子厂商由 `0007` 拿到显式默认协议，用户自建的厂商保持空串。
+
+`provider_routes.path` 里的 `{model}` 是出站模型名占位符（见 5.9）：规整只合并斜杠，花括号与冒号原样保留，替换发生在网关拼好地址之后。协议取值的白名单只有一份 `store.IsWireProtocol`（入站三条加只作出站的 gemini），厂商路由、默认协议、账号的 `--protocol` 与探活候选都读它。
 
 `providers` 的三个写入口（`CreateProvider`、`SetProvider`、`AddProvider`）都在 `store` 里校验 `base_url` 的 scheme 与主机名并规整（只合并路径里的重复斜杠、去尾斜杠，查询串与 `#` 之后的内容不动，`store.NormalizeBaseURL`），`cli` 那层不再是唯一防线。`path` 与 `models_path` 三列同样在写入侧经 `store.NormalizeEndpoint` 解释后落库：相对路径只规整（路径写法不拒绝，`v1/chat/completions` 与 `/v1/chat/completions/` 落成同一个值），整条地址（含 `://`）校验 scheme 与主机名后按整条地址落库，读取侧拼地址时再用同一个入口过一遍，历史库里的不规整写法因此也拼得出正确地址。两列因此可能存整条地址，也可能存相对路径，判定只看有没有 `://`（`store.IsFullAddress`）。
 
@@ -537,13 +608,14 @@ CREATE TABLE provider_routes (
 | M3 | 流式：SSE 双向转换 | 客户端能流式拿到 token 与工具调用 |
 | M4 | 多账号：冷却、失败转移、`usage` | 两个账号时杀掉一个，请求自动落到另一个 |
 | M5 | 模型同步与探活：`model sync`、`model probe`、`model ls` 按模型列账号状态 | 对真实上游 `model sync` 能拉出模型数；`model probe` 能区分 `usable` 与 `forbidden`；零可用模型时不改 `accounts.models` |
-| M6 | 协议矩阵：三入站 × 三出站 + 同协议直通，中间表示与三个编解码器，流式增量 | 9 种组合的非流式与流式用例通过；对真实上游三种入站各打一条能拿到回复 |
+| M6 | 协议矩阵：三入站 × 三出站 + 同协议直通，中间表示与三个编解码器，流式增量（gemini 出站另见 M12） | 9 种组合的非流式与流式用例通过；对真实上游三种入站各打一条能拿到回复 |
 | M7 | 模型探活跳过与记账：`model probe` 按 `--max-age` 跳过有定论且新鲜的结论、`--refresh` 强制重探，每次探活的上游调用写一行 `requests` 并带缓存读写 | `TestModelProbe*` 覆盖跳过、刷新、`--limit`、记账、零可用的跳过计数，`TestProbeModel*` 覆盖各状态判定、401 停用与探活请求行；`log tail` 能看到探活行，零可用时 `accounts.models` 不变 |
 | M8 | 协议归属从账号降到模型：`account_models.protocol`（迁移 `0005`）覆盖账号的 `protocol`，探活顺手发现协议，选号与转发按有效协议算，同步不覆盖发现结果 | 同一账号下两个模型可以分别走 anthropic 与 openai-chat：各自打到正确的路径与凭据头，「入站 == 出站」按模型协议算；协议发现用例覆盖 `404`、`403`、`400 指向端点` 三种失败换协议、账号协议直接成功只花一次调用、`401` 不换协议并停用账号；`EffectiveProtocol` 在行不存在或列为空时回退账号；旧库升上来 `protocol` 默认为空串，`ReplaceModels` 不动已发现的协议 |
 | M9 | 厂商与路由进库：`providers` 与 `provider_routes`（迁移 `0006`），出站地址按 `(厂商, 协议)` 的 `path` 拼，模型列表按 `models_path` 取，探活候选协议按厂商声明过的路由收紧；没有厂商行的账号保留后缀猜测 | 空库跑到最新版本后种子逐行对上，11 条路由拼出的完整地址与 `models_path` 全部正确；deepseek 账号下 anthropic 模型打到 `/anthropic/v1/messages` 并带 `x-api-key`，chat 模型打到 `/v1/chat/completions` 并带 `Bearer`；只有一条路由的厂商探活失败时上游只收到一次请求，deepseek 试两条；`models_path` 为空时回退到同厂商第一条非空路径，全空时报错文案带「用 --models 手填」；自定义 `base_url` 且 `provider` 不在表里时仍按后缀猜测；空库跑到最新版本与从 `0006` 升级两条路径下，8 家的 `default_protocol` 逐行对上，显式默认优先于固定顺序兜底，deepseek 与 commandcode 的默认协议仍是 `openai-chat`（单靠协议名字典序会给 `anthropic`） |
 | M10 | 厂商命令面与模型列表路径：`provider add` 只新建、`provider set` 增量改（空值是用法错误，删除只在 `provider unset`）、默认协议按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 兜底，`models_path` 的写入默认值与厂商级覆盖（迁移 `0008`），模型列表的凭据头跟着取到路径的那条路由走，`model sync --endpoint`，`base_url` 校验下沉到 store，探活读库失败报错而不放宽候选协议 | 空库与从 `0007` 升级两条路径都到最新版本：升级后 `provider_routes.models_path` 还在、路由数据一个字段不动、`providers.models_path` 全场空串；`provider add` 重名报 `ErrProviderExists` 并提示 `provider set`，一条路由都不给报错；`provider set` 只改传入的字段，协议 flag 传空串是用法错误、删除走 `provider unset`，删到一条不剩报错，默认协议悬空整笔拒绝（同一次里一起改则放行）；`/v1/chat/completions` → `/v1/models`、`/chat/completions` → `/models`、anthropic 路由留空，重写内置 `anthropic` 厂商的 `/v1/messages` 之后它的 `/v1/models` 仍在；deepseek 的 anthropic 账号同步模型列表打到 `/v1/models` 并带 `Bearer`（不是 `x-api-key`）；`--endpoint /v1/model` 压过厂商覆盖与路由，`v1/model`、`//v1//model/` 这类写法被规整成同一个地址、不报错；默认协议显式优先、缺省按固定顺序、指不到路由拒绝、悬空的历史值按固定顺序回退 |
 | M11 | 端点两种写法的命令面与凭据轮换：`--anthropic`、`--openai`、`--responses`、`--models-path` 与 `model sync --endpoint` 一律收相对路径或整条地址，校验只有 `store.NormalizeEndpoint` 一份，cli 把它的错误包成用法错误；`account set --key`（`update` 同义）换凭据并在同一事务里清掉旧凭据的冷却与失败计数、重新启用账号；`serve` 增加两个只读的模型清单接口 `GET /v1/models` 与 `GET /v1/models/{id}`（见 5.2.1），清单取 `enabled=1` 账号的 `accounts.models`，按名字去重升序，`owned_by` 取厂商名 | `provider add` 用整条地址声明 openai 路由后，`provider ls --json` 的 `path` 就是整条地址，转发与 `model sync` 都打到那个 host、`base_url` 那台一次请求都不收；`https://`、`https:///x`、`ftp://host/x` 与空值在 add、set、`--models-path`、`--endpoint` 四处都退出码 2 且不落库；`model sync --endpoint <整条地址>` 打到该地址，下一轮回到路由的 `models_path`；`account set --key` 之后 `key_cipher` 变化、旧密文不再存在，`cooldown_until`、`fail_streak`、`last_error` 清零且 `enabled=1`，`accounts.models` 与 `account_models` 一个字段不动，新 key 能转发、`--json` 不含明文、`update` 与 `set` 输出一致；`account test` 对模型列表为空的账号退出码 0，用默认模型名探活且不 panic；`GET /v1/models` 对两个账号各自的模型去重后升序给出、同名模型取厂商名字典序第一个，停用账号的模型不出现、冷却中账号的模型出现，没有任何模型时是 200 加 `data:[]`；`GET /v1/models/{id}` 命中返回单个对象、未命中 404 且类型是 `not_found_error`；两个接口的非 GET 方法 405 并带 `Allow: GET`，不写 `requests` 行、不改账号状态，`/healthz` 与三条入站路径行为不变 |
-M0 到 M11 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkeleton` 用假上游验证：初始化、加账号、`call`、`log tail`、`usage`、`doctor` 全链路走通。协议矩阵由 `internal/gateway/matrix_test.go` 与 `matrix_stream_test.go` 验证：9 种组合的非流式与流式各跑一遍，同协议直通的「不改字节」「保留陌生字段」与跨协议的「丢弃陌生字段」单独有用例。思考内容的映射与它的代价由 `internal/translate` 的 `TestGolden` 按 `testdata/in` 与 `testdata/out` 对拍：三对协议的请求、响应与流式都有用例，含带签名的往返、无签名时丢弃与请求方向不回填（`anthropic_thinking_request_to_chat_dropped`、`responses_reasoning_request_to_chat_dropped` 等）。工具调用的五条规则同样各有用例：`chat_tool_results_to_anthropic_user_message` 与 `responses_tool_results_to_anthropic_user_message` 钉住工具结果折叠进 user 消息，`chat_tool_result_then_user_followup_to_anthropic_merged_user` 与 `responses_tool_result_then_user_followup_to_anthropic_merged_user` 钉住工具结果之后的追问并进同一条 user 消息，`anthropic_parallel_tools_stream_to_chat_dense_index` 钉住 chat 的稠密工具序号，`chat_tool_stream_to_responses_done_events` 与 `responses_output_item_done_stream_to_anthropic` 钉住 responses 的 done 事件与 output 回填、只发 done 的上游，`anthropic_builtin_tool_to_chat_dropped` 钉住内置工具丢弃；思考与工具参数交替时的块开关由 `chat_reasoning_between_tool_args_stream_to_anthropic_reopen_block` 与 `TestAnthropicStreamEncoderKeepsDeltasOnOpenBlocks` 验证，缺 `parameters` 的工具补空 schema 由 `responses_tool_without_parameters_to_anthropic_empty_input_schema` 验证；断流时工具参数不完整的文案与 `ok=0` 由 `internal/gateway` 的 `TestConversionStreamTruncatedToolArgsNote` 与三个编码器的单元用例验证。协议降级到模型的那部分由 `internal/gateway` 的 `TestProbeModel*` 与 `TestForwardUsesModelProtocol` 验证，迁移兼容由 `internal/store` 的 `TestMigration0005*`、`TestMigration0006*`、`TestMigration0007*` 与 `TestMigrationsRunToLatestFromEmptyDB` 验证；厂商路由的解析、探活收紧与模型列表回退由 `internal/store` 的 `TestProvider*` 与 `internal/gateway` 的 `TestForwardUsesProviderRoute`、`TestEndpointFallsBackWithoutProviderRoute`、`TestProbeModelNarrowsCandidatesByProvider`、`TestProbeModelStartsFromDiscoveredProtocol`、`TestSyncModelsUsesProviderModelsPath`、`TestSyncModelsWithoutModelsPath` 验证。厂商写入口与模型列表路径由 `internal/store` 的 `TestCreateProvider*`、`TestSetProvider*`、`TestDeriveModelsPath`、`TestResolveModelsPath`、`TestRouteModelsPathDerivedOnWrite`、`TestStoreWritePathsValidateBaseURL`、`TestMigration0008*` 与 `internal/gateway` 的 `TestSyncModelsAuthFollowsModelsPathRoute`、`TestSyncModelsProviderModelsPathOverride`、`TestSyncModelsWithEndpointOverride`、`TestSyncModelsNoModelsPathAnywhere` 验证；路径与地址的规整由 `internal/store` 的 `TestNormalizePath`、`TestNormalizeBaseURL`、`TestCreateProviderNormalizesPaths`、`TestSetProviderNormalizesPaths` 与 `internal/gateway` 的 `TestJoinEndpoint` 验证；端点取值的两种写法（相对路径与整条地址）由 `internal/store` 的 `TestIsFullAddress`、`TestNormalizeEndpoint`、`TestDeriveModelsPathFullAddress`、`TestCreateProviderStoresFullAddressRoutes`、`TestSetProviderFullAddressRoutesAreIndependent`、`TestStoreWritePathsRejectBadFullAddress` 与 `internal/gateway` 的 `TestForwardUsesFullAddressRoute`、`TestForwardMixesFullAddressAndRelativeRoutes`、`TestSyncModelsFullAddressModelsPath`、`TestSyncModelsWithEndpointFullAddress`、`TestSyncModelsWithEndpointRejectsBadFullAddress` 验证；一次尝试的账与结论一起提交由 `internal/store` 的 `TestRecordAttemptWritesRowAndStateTogether` 验证；直通路径的断流结尾由 `internal/gateway` 的 `TestPassthroughStreamDisconnectKeepsLegalEnding`、`TestPassthroughCRLFTailStartsAtFrameBoundary` 逐协议验证，转换路径的干净截断与 responses 入站的 `response.failed` 由 `TestConversionStreamCleanTruncationIsFailure`、`TestConversionStreamResponsesInboundEndsFailed` 验证，收尾帧按 `type` 或 `event` 名判定（带空格、多行缩进、只写事件名）由 `TestPassthroughEndFrameShapeDoesNotMatter` 验证，完整流不被追加字节由 `TestProtocolMatrixStreaming` 的逐字节断言保证；端点两种写法在命令面上的行为与 `account set --key` 由 `internal/cli` 的 `TestProviderPathsAcceptFullAddress`、`TestProviderPathsRejectBadFullAddress`、`TestModelSyncEndpointFullAddress`、`TestModelSyncEndpointBadValues`、`TestAccountSetRotatesKey`、`TestAccountSetKeyFromStdin`、`TestAccountSetErrors`、`TestAccountSetJSONMasksKey`、`TestAccountUpdateIsSynonymForSet`、`TestAccountTestWithoutModels` 与 `internal/gateway` 的 `TestProbeEmptyModelsUsesFallbackModel`、`TestProbeEmptyModelsKeepsNoteOnFailure` 验证；模型清单接口由 `internal/gateway` 的 `TestModelsListDedupesSortsAndPicksOwner`、`TestModelsListSkipsDisabledKeepsCooling`、`TestModelsListEmpty`、`TestModelByIDHitAndMiss`、`TestModelByIDPathIsCleanedBeforeMatching`、`TestModelByIDDisabledOnlyModelIs404`、`TestModelsRejectNonGet`、`TestModelsEndpointsAreReadOnly`、`TestModelsEndpointsLeaveExistingRoutesAlone` 验证，三条入站路径 405 的 `Allow: POST` 由 `TestInboundRejectsOtherMethodsWithAllowPost` 验证。上游是 `httptest` 假服务，M5、M6、M7、M8、M9 与 M10 里涉及真实厂商的那部分需要拿到 key 后手工验收。
+| M12 | gemini 出站（第一步，非流式）：`translate.ProtocolGemini` 与 `gemini.go` 的请求/响应编解码、用量读取，路由 `path` 的 `{model}` 占位符（相对路径与整条地址都支持），凭据改走 `x-goog-api-key`，`store.IsWireProtocol` 成为唯一协议白名单（账号的 `--protocol` 接受 gemini） | chat 与 anthropic 入站各打一条到 gemini 账号：上游路径含模型名、头是 `x-goog-api-key`、请求体没有 `model` 字段、响应转回入站协议且 `usageMetadata` 落到用量；`{model}` 在相对路径与整条地址两种写法里都被替换且模型名按路径段转义，不含占位符的路由字节不变；gemini 出站的 `stream=true` 在打上游之前拒成 400 且不冷却账号；对拍用例覆盖 system、图片、工具定义、工具调用与结果、`generationConfig`、`tool_choice`、`finishReason`、`usageMetadata` 的映射 |
+M0 到 M12 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkeleton` 用假上游验证：初始化、加账号、`call`、`log tail`、`usage`、`doctor` 全链路走通。协议矩阵由 `internal/gateway/matrix_test.go` 与 `matrix_stream_test.go` 验证：三条入站 × 三条出站共 9 种组合的非流式与流式各跑一遍（出站 gemini 的三条另由下面 gemini 那批用例覆盖），同协议直通的「不改字节」「保留陌生字段」与跨协议的「丢弃陌生字段」单独有用例。思考内容的映射与它的代价由 `internal/translate` 的 `TestGolden` 按 `testdata/in` 与 `testdata/out` 对拍：三对协议的请求、响应与流式都有用例，含带签名的往返、无签名时丢弃与请求方向不回填（`anthropic_thinking_request_to_chat_dropped`、`responses_reasoning_request_to_chat_dropped` 等）。工具调用的五条规则同样各有用例：`chat_tool_results_to_anthropic_user_message` 与 `responses_tool_results_to_anthropic_user_message` 钉住工具结果折叠进 user 消息，`chat_tool_result_then_user_followup_to_anthropic_merged_user` 与 `responses_tool_result_then_user_followup_to_anthropic_merged_user` 钉住工具结果之后的追问并进同一条 user 消息，`anthropic_parallel_tools_stream_to_chat_dense_index` 钉住 chat 的稠密工具序号，`chat_tool_stream_to_responses_done_events` 与 `responses_output_item_done_stream_to_anthropic` 钉住 responses 的 done 事件与 output 回填、只发 done 的上游，`anthropic_builtin_tool_to_chat_dropped` 钉住内置工具丢弃；思考与工具参数交替时的块开关由 `chat_reasoning_between_tool_args_stream_to_anthropic_reopen_block` 与 `TestAnthropicStreamEncoderKeepsDeltasOnOpenBlocks` 验证，缺 `parameters` 的工具补空 schema 由 `responses_tool_without_parameters_to_anthropic_empty_input_schema` 验证；断流时工具参数不完整的文案与 `ok=0` 由 `internal/gateway` 的 `TestConversionStreamTruncatedToolArgsNote` 与三个编码器的单元用例验证。协议降级到模型的那部分由 `internal/gateway` 的 `TestProbeModel*` 与 `TestForwardUsesModelProtocol` 验证，迁移兼容由 `internal/store` 的 `TestMigration0005*`、`TestMigration0006*`、`TestMigration0007*` 与 `TestMigrationsRunToLatestFromEmptyDB` 验证；厂商路由的解析、探活收紧与模型列表回退由 `internal/store` 的 `TestProvider*` 与 `internal/gateway` 的 `TestForwardUsesProviderRoute`、`TestEndpointFallsBackWithoutProviderRoute`、`TestProbeModelNarrowsCandidatesByProvider`、`TestProbeModelStartsFromDiscoveredProtocol`、`TestSyncModelsUsesProviderModelsPath`、`TestSyncModelsWithoutModelsPath` 验证。厂商写入口与模型列表路径由 `internal/store` 的 `TestCreateProvider*`、`TestSetProvider*`、`TestDeriveModelsPath`、`TestResolveModelsPath`、`TestRouteModelsPathDerivedOnWrite`、`TestStoreWritePathsValidateBaseURL`、`TestMigration0008*` 与 `internal/gateway` 的 `TestSyncModelsAuthFollowsModelsPathRoute`、`TestSyncModelsProviderModelsPathOverride`、`TestSyncModelsWithEndpointOverride`、`TestSyncModelsNoModelsPathAnywhere` 验证；路径与地址的规整由 `internal/store` 的 `TestNormalizePath`、`TestNormalizeBaseURL`、`TestCreateProviderNormalizesPaths`、`TestSetProviderNormalizesPaths` 与 `internal/gateway` 的 `TestJoinEndpoint` 验证；端点取值的两种写法（相对路径与整条地址）由 `internal/store` 的 `TestIsFullAddress`、`TestNormalizeEndpoint`、`TestDeriveModelsPathFullAddress`、`TestCreateProviderStoresFullAddressRoutes`、`TestSetProviderFullAddressRoutesAreIndependent`、`TestStoreWritePathsRejectBadFullAddress` 与 `internal/gateway` 的 `TestForwardUsesFullAddressRoute`、`TestForwardMixesFullAddressAndRelativeRoutes`、`TestSyncModelsFullAddressModelsPath`、`TestSyncModelsWithEndpointFullAddress`、`TestSyncModelsWithEndpointRejectsBadFullAddress` 验证；一次尝试的账与结论一起提交由 `internal/store` 的 `TestRecordAttemptWritesRowAndStateTogether` 验证；直通路径的断流结尾由 `internal/gateway` 的 `TestPassthroughStreamDisconnectKeepsLegalEnding`、`TestPassthroughCRLFTailStartsAtFrameBoundary` 逐协议验证，转换路径的干净截断与 responses 入站的 `response.failed` 由 `TestConversionStreamCleanTruncationIsFailure`、`TestConversionStreamResponsesInboundEndsFailed` 验证，收尾帧按 `type` 或 `event` 名判定（带空格、多行缩进、只写事件名）由 `TestPassthroughEndFrameShapeDoesNotMatter` 验证，完整流不被追加字节由 `TestProtocolMatrixStreaming` 的逐字节断言保证；端点两种写法在命令面上的行为与 `account set --key` 由 `internal/cli` 的 `TestProviderPathsAcceptFullAddress`、`TestProviderPathsRejectBadFullAddress`、`TestModelSyncEndpointFullAddress`、`TestModelSyncEndpointBadValues`、`TestAccountSetRotatesKey`、`TestAccountSetKeyFromStdin`、`TestAccountSetErrors`、`TestAccountSetJSONMasksKey`、`TestAccountUpdateIsSynonymForSet`、`TestAccountTestWithoutModels` 与 `internal/gateway` 的 `TestProbeEmptyModelsUsesFallbackModel`、`TestProbeEmptyModelsKeepsNoteOnFailure` 验证；模型清单接口由 `internal/gateway` 的 `TestModelsListDedupesSortsAndPicksOwner`、`TestModelsListSkipsDisabledKeepsCooling`、`TestModelsListEmpty`、`TestModelByIDHitAndMiss`、`TestModelByIDPathIsCleanedBeforeMatching`、`TestModelByIDDisabledOnlyModelIs404`、`TestModelsRejectNonGet`、`TestModelsEndpointsAreReadOnly`、`TestModelsEndpointsLeaveExistingRoutesAlone` 验证，三条入站路径 405 的 `Allow: POST` 由 `TestInboundRejectsOtherMethodsWithAllowPost` 验证。gemini 出站的映射由 `internal/translate` 的对拍用例 `chat_tools_to_gemini_function_declarations`、`anthropic_image_request_to_gemini_inline_data`、`gemini_tool_call_response_to_chat_tool_calls`、`gemini_tool_call_response_to_anthropic_tool_use`、`gemini_max_tokens_response_to_anthropic`、`gemini_contents_request_to_chat` 钉住，边界（流式拒绝、孤立工具结果丢弃、非对象 `args` 省略、`promptFeedback.blockReason`、用量读取、没有入站与流式编解码器）由 `internal/translate` 的 `TestGemini*` 与 `TestEncodeGemini*` 钉住，转发路径（路径里的模型名、`x-goog-api-key`、两种路由写法与占位符共存、模型名转义、不含占位符的路由不变、流式请求拒成 400、探活）由 `internal/gateway` 的 `TestForwardChatToGemini`、`TestForwardAnthropicToGemini`、`TestGeminiRoutePlaceholderInFullAddress`、`TestGeminiModelNameIsPathEscaped`、`TestRouteWithoutPlaceholderUnchanged`、`TestGeminiOutboundRejectsStream`、`TestProbeGeminiRoute`、`TestModelEndpoint` 与 `internal/store` 的 `TestGeminiRouteKeepsModelPlaceholder` 验证。上游是 `httptest` 假服务，M5、M6、M7、M8、M9 与 M10 里涉及真实厂商的那部分需要拿到 key 后手工验收。
 
 已知未做，按已知行为处理：
 
@@ -551,7 +623,9 @@ M0 到 M11 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkel
 - 模型名不做别名归一，请求里的 `model` 必须与账号 `--models` 里的名字完全一致。
 - 不带任何客户端配置改写：客户端里的 base URL、token、模型名都靠自己填。
 - 探活并发默认 4，`--concurrency` 可以改，只是默认值，不会根据上游限速自适应。
-- gemini 协议进出都没有实现：既没有入站路径，也不在账号的 `protocol` 可选值里，`provider add/set` 也没有 `--gemini`——留一条永远用不上的路由只会误导。
+- gemini 只作出站且只做非流式（见 5.9）：没有入站路径（`PathProtocol` 不认 `:generateContent`），`stream=true` 的请求在写出任何字节之前被拒成 400，不冷却账号、也不写 `requests` 行；`NewStreamDecoder`、`NewStreamEncoder`、`EncodeResponse` 对 gemini 仍然报错。
+- gemini 的模型列表同步、`--gemini` provider flag、厂商行与模型名清单都还没做：`GET /v1beta/models` 的形状（`{"models":[{"name":"models/…"}]}`）不在 5.7 认的三种之内，gemini 账号暂时用 `--models` 手填；库里没有 gemini 路由时按 `base_url` 兜底拼 `{base}/v1beta/models/{model}:generateContent`。
+- gemini 的思考内容（`thought` 标记与 `thoughtSignature`）与 `thinkingConfig` 不搬，`ParallelToolCalls` 与 `tool_result.is_error` 丢弃；工具结果的 `response` 固定写成 `{"result": <文本>}`，非对象的 `args` 整段省略（见 5.9）。
 - 思考配置参数不进中间表示：anthropic 顶层的 `thinking`、chat 的 `reasoning_effort`（以及 `reasoning` 对象）只在同协议直通时原样保留，跨协议时丢弃。请求侧参数决定「要不要思考」，与某条消息里已有的思考内容不是一件事，映射表只搬后者。
 - 思考内容只在响应方向搬运：跨协议时请求里的思考内容（chat 的 `reasoning_content`、responses 的 `reasoning` item）整块丢弃，因为主流推理上游对回填这两种字段会直接回 400。代价是多轮对话里客户端带着的那段思考不再进入上下文；anthropic 带 `signature` 的思考块例外，回填是它要求的写法（见 5.4）。
 - 流式转换下发给 anthropic 客户端的 `thinking` 块没有 `signature`：上游不是 anthropic 时给不出签名。客户端若把这些块回填到下一轮请求，anthropic 上游会以 400 拒绝；非流式不写无签名的思考块（见 5.4），两条路径的代价不一样，因为流式的增量写出后撤不回来。
@@ -567,7 +641,7 @@ M0 到 M11 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkel
 - 模型列表的响应形状只认三种已知形状（见 5.7）：`{data:[…]}`、`{models:[…]}` 与顶层数组。三者都不匹配时报错并列出这三种形状，包了一层的响应（例如 `{"result":{"data":[…]}}`）同样算不匹配，这类上游仍只能用 `--models` 手填。
 - 两个模型清单接口每次 GET 都重新全表扫描 `accounts`（`ListAccounts` 之后逐行取 `accounts.models`），没有缓存。库只有一条连接，客户端若在每个请求之前拉一次清单，这次读会与转发写 `requests` 的写入排队，高并发时清单请求会拖慢对话请求。第一版不加缓存：缓存要一套失效规则（账号启停、`model probe` 回写 `accounts.models`、用户直接改库），错一次的代价比多一次读高。
 
-之后（不在第一版）：gemini 入站与出站，订阅账号登录，隐私遮蔽，配置档案（profiles），价格表内置。
+之后（不在第一版）：gemini 入站、gemini 出站流式与模型列表同步，订阅账号登录，隐私遮蔽，配置档案（profiles），价格表内置。
 
 ## 8 代码结构
 
@@ -579,13 +653,13 @@ internal/store/         SQLite 连接、迁移、账号与请求记录的读写
 internal/secret/        凭据加解密
 internal/account/       账号池、冷却、选号
 internal/gateway/       HTTP 入站处理、上游转发、错误映射
-internal/translate/     中间表示（ir.go）与三个协议的编解码（anthropic.go、chat.go、responses.go）
+internal/translate/     中间表示（ir.go）、三条入站协议的编解码（anthropic.go、chat.go、responses.go）与 gemini 出站（gemini.go）
 internal/usage/         用量汇总与花费估算
 ```
 
 约束：`translate` 只做结构体到结构体的转换，不读环境、不发请求，便于用对拍用例覆盖；`gateway` 是唯一发上游请求的地方（`account test` 的探活也走 `gateway.Probe`）；`cli` 不直接连数据库，只调 `store` 与 `account`。
 
-包之间的依赖：`store` 为协议常量（`translate.ProtocolAnthropic`、`translate.ProtocolChat`、`translate.ProtocolResponses`）import `internal/translate`，只取常量，不调用编解码；`gateway`、`cli`、`account` 都经 `store` 与 `translate` 拿协议取值，不各自复制一份字符串。
+包之间的依赖：`store` 为协议常量（`translate.ProtocolAnthropic`、`translate.ProtocolChat`、`translate.ProtocolResponses`、`translate.ProtocolGemini`）import `internal/translate`，只取常量，不调用编解码；`gateway`、`cli`、`account` 都经 `store` 与 `translate` 拿协议取值，不各自复制一份字符串。
 
 外部依赖：只有 `modernc.org/sqlite`（纯 Go 实现，不需要 cgo，交叉编译不受影响），其余全部用标准库。命令行解析用 `flag`，不引入第三方 CLI 框架。
 
@@ -601,5 +675,6 @@ internal/usage/         用量汇总与花费估算
 
 - 各家上游的默认 base-url 与各协议的路径不再需要外部信息：迁移 `0006` 把已知厂商种进 `providers` 与 `provider_routes`，以后用 `provider ls|add|set|rm` 维护，新增厂商不必改代码重编译。新厂商的 `path` 要以它的文档为准：它是完整路径，程序只在 `base_url` 去掉末尾斜杠后直接拼接，不做补全；也可以写整条地址（含 `://`），此时直接用它、不再拼 `base_url`，同一厂商的不同协议因此可以落在不同域名上；模型列表路径没给时只给 openai-chat 路由按 `/chat/completions` → `/models` 推导；写法不同的上游用 `provider set --models-path` 给厂商级覆盖，路由级的值只由写入时推导产生，命令面不提供手工写入口。
 - 各家模型名清单，以及某家是否兼容 `openai-chat`。
+- gemini 的两处形状要在拿到真实 key 后确认：`functionResponse.response` 我们固定写成 `{"result": <文本>}`（5.9 的取舍），真实上游是否按这个键名理解语义还没实测；`fileData.fileUri` 只接受 Files API 给出的 URI，把普通 http(s) 图片地址写进去很可能被拒。这两条都不影响已覆盖的文本与工具调用映射，改起来只动 `gemini.go`。
 - 各家价格，用于估算花费。缺价格就记 null。
 - 各家推理上游是否接受请求里回填的思考内容：现在一律不回填（见 5.4），所以这条不影响转发。若以后要放宽，需要拿带推理的模型的真实 key 分别打 `/v1/chat/completions` 与 `/v1/responses`，试 `reasoning_content` 与 `reasoning` item（带 `summary`、带 `content`、两者都带）哪些返回 200。

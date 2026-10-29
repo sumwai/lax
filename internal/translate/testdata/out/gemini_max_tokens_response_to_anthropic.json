@@ -1,0 +1,18 @@
+{
+  "content": [
+    {
+      "text": "半截",
+      "type": "text"
+    }
+  ],
+  "id": "msg_switchboard",
+  "model": "gemini-2.5-flash",
+  "role": "assistant",
+  "stop_reason": "max_tokens",
+  "stop_sequence": null,
+  "type": "message",
+  "usage": {
+    "input_tokens": 5,
+    "output_tokens": 2
+  }
+}

@@ -590,6 +590,11 @@ func TestEndpoint(t *testing.T) {
 		{"https://api.deepseek.com/v1", gateway.ProtocolChat, "https://api.deepseek.com/v1/chat/completions"},
 		{"https://api.anthropic.com", gateway.ProtocolAnthropic, "https://api.anthropic.com/v1/messages"},
 		{"https://proxy.example.com/v1", gateway.ProtocolAnthropic, "https://proxy.example.com/v1/messages"},
+		// gemini 的模型名在路径里，兜底同样留占位符，转发前才替换（DESIGN 5.9）。
+		{"https://generativelanguage.googleapis.com", gateway.ProtocolGemini,
+			"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"},
+		{"https://generativelanguage.googleapis.com/v1beta/", gateway.ProtocolGemini,
+			"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"},
 	}
 	for _, c := range cases {
 		if got := gateway.Endpoint(c.base, c.protocol); got != c.want {

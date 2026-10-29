@@ -1,0 +1,22 @@
+{
+  "content": [
+    {
+      "id": "gemini_call_1",
+      "input": {
+        "city": "上海"
+      },
+      "name": "weather",
+      "type": "tool_use"
+    }
+  ],
+  "id": "msg_switchboard",
+  "model": "gemini-2.5-flash",
+  "role": "assistant",
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "type": "message",
+  "usage": {
+    "input_tokens": 9,
+    "output_tokens": 2
+  }
+}

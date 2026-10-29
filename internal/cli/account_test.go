@@ -81,12 +81,22 @@ func TestAccountAddUsesProviderTable(t *testing.T) {
 		t.Fatalf("openai-responses 账号 = %+v", oa1)
 	}
 
-	// 不认识的协议仍是用法错误，文案要列出三种可选值。
-	code, _, stderr = run(t, "account", "add", "bad", "--provider", "openai", "--protocol", "gemini", "--key", "sk-5")
+	// gemini 只作出站（DESIGN 5.9），账号上可以选它。
+	code, out, stderr = run(t, "account", "add", "g1",
+		"--provider", "openai", "--protocol", "gemini", "--key", "sk-5", "--json")
+	if code != 0 {
+		t.Fatalf("gemini 账号的退出码 = %d，stderr = %s", code, stderr)
+	}
+	if g1 := mustAccountAdd(t, out); g1.Protocol != "gemini" {
+		t.Fatalf("gemini 账号 = %+v", g1)
+	}
+
+	// 不认识的协议仍是用法错误，文案要列出全部可选值。
+	code, _, stderr = run(t, "account", "add", "bad", "--provider", "openai", "--protocol", "nope", "--key", "sk-6")
 	if code != 2 {
 		t.Fatalf("不支持的协议退出码 = %d，期望 2", code)
 	}
-	for _, want := range []string{"anthropic", "openai-chat", "openai-responses"} {
+	for _, want := range []string{"anthropic", "openai-chat", "openai-responses", "gemini"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("协议错误的文案应列出 %q: %s", want, stderr)
 		}

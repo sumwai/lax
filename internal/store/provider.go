@@ -165,15 +165,30 @@ func (s *Store) ProviderProtocols(provider string) ([]string, error) {
 	return out, nil
 }
 
-// wireProtocol 判断是不是三种线协议之一。gemini 还没实现，不在这个名单里：留一条永远用不上的
-// 路由只会误导（见 DESIGN 的已知未做）。
-func wireProtocol(protocol string) bool {
+// IsWireProtocol 判断一个取值是不是线协议。四个值都认：三条入站协议加 gemini。
+// gemini 只作出站且只做非流式（DESIGN 5.9），但它同样是线上的协议取值，账号的 --protocol、
+// 厂商路由与默认协议、探活候选都用这一个判定：cli 不另写一份名单，两处名单迟早会对不上。
+func IsWireProtocol(protocol string) bool {
 	switch protocol {
-	case translate.ProtocolAnthropic, translate.ProtocolChat, translate.ProtocolResponses:
+	case translate.ProtocolAnthropic, translate.ProtocolChat, translate.ProtocolResponses, translate.ProtocolGemini:
 		return true
 	}
 	return false
 }
+
+// WireProtocols 是全部线协议，按文档里列的顺序（入站三条在前，gemini 在后）。
+// 错误文案只从这一份清单拼，不另写一串字面量。
+func WireProtocols() []string {
+	return []string{
+		translate.ProtocolAnthropic,
+		translate.ProtocolChat,
+		translate.ProtocolResponses,
+		translate.ProtocolGemini,
+	}
+}
+
+// wireProtocolNames 把线协议清单拼成一句「A、B、C、D」，供错误文案用。
+func wireProtocolNames() string { return strings.Join(WireProtocols(), "、") }
 
 // NormalizePath 是相对路径规整的唯一入口：写入侧（CreateProvider、SetProvider、AddProvider 的
 // path 与 models_path）与读取侧（拼转发地址、拼模型列表地址、`model sync --endpoint`）都走它
@@ -185,6 +200,9 @@ func wireProtocol(protocol string) bool {
 // 都当同一个地址。路径来自用户抄上游文档，多一个或少一个斜杠是写法差异，不是用法错误；
 // 报错只会让人先改命令再重敲一遍，得到的仍然是同一个地址。真正的用法错误是取值为空
 // （删除语义归 `provider unset`），那一条由调用方判断。
+//
+// 路径里的 `{model}` 是出站模型名占位符（见 DESIGN 5.9）：它不是斜杠，规整不动它，
+// 花括号与冒号原样保留，转发时由 gateway 替换。
 func NormalizePath(raw string) string {
 	path := collapseSlashes(strings.TrimSpace(raw))
 	path = strings.TrimRight(path, "/")
@@ -333,9 +351,9 @@ func prepareRoutes(provider string, in []ProviderRoute) ([]ProviderRoute, error)
 	out := make([]ProviderRoute, 0, len(in))
 	for _, r := range in {
 		protocol := strings.TrimSpace(r.Protocol)
-		if !wireProtocol(protocol) {
-			return nil, fmt.Errorf("厂商 %s 的路由协议 %q 不认识，只能是 %s、%s、%s",
-				provider, r.Protocol, translate.ProtocolAnthropic, translate.ProtocolChat, translate.ProtocolResponses)
+		if !IsWireProtocol(protocol) {
+			return nil, fmt.Errorf("厂商 %s 的路由协议 %q 不认识，只能是 %s",
+				provider, r.Protocol, wireProtocolNames())
 		}
 		path, err := NormalizeEndpoint(r.Path)
 		if err != nil {
@@ -432,8 +450,8 @@ func (s *Store) CreateProvider(p Provider, routes []ProviderRoute) error {
 		return err
 	}
 	if len(prepared) == 0 {
-		return fmt.Errorf("厂商 %s 至少要声明一条协议路由（%s、%s、%s 里任一条），否则账号只能按 base_url 后缀猜路径",
-			name, translate.ProtocolChat, translate.ProtocolResponses, translate.ProtocolAnthropic)
+		return fmt.Errorf("厂商 %s 至少要声明一条协议路由（%s 里任一条），否则账号只能按 base_url 后缀猜路径",
+			name, wireProtocolNames())
 	}
 	modelsPath, err := NormalizeEndpoint(p.ModelsPath)
 	if err != nil {
@@ -518,9 +536,9 @@ func (s *Store) SetProvider(name string, patch ProviderPatch) error {
 	}
 	if patch.DefaultProtocol != nil {
 		def := strings.TrimSpace(*patch.DefaultProtocol)
-		if def != "" && !wireProtocol(def) {
-			return fmt.Errorf("厂商 %s 的默认协议 %q 不认识，只能是 %s、%s、%s；清掉显式值、回到按固定顺序取第一条用 switchboard provider unset %s default-protocol",
-				name, def, translate.ProtocolChat, translate.ProtocolResponses, translate.ProtocolAnthropic, name)
+		if def != "" && !IsWireProtocol(def) {
+			return fmt.Errorf("厂商 %s 的默认协议 %q 不认识，只能是 %s；清掉显式值、回到按固定顺序取第一条用 switchboard provider unset %s default-protocol",
+				name, def, wireProtocolNames(), name)
 		}
 		p.DefaultProtocol = def
 	}
@@ -579,6 +597,8 @@ func (s *Store) SetProvider(name string, patch ProviderPatch) error {
 }
 
 // protocolFlagName 把协议名换成 `provider set` 上对应的那个 flag，错误文案直接给出下一步能敲的命令。
+// gemini 的 `--gemini` flag 还没进命令面（DESIGN 第 7 节已知未做），这里照旧给出 flag 名：
+// 有了 flag 之后文案不用改；没有的时候，只靠 CLI 也写不进 gemini 路由。
 func protocolFlagName(protocol string) string {
 	switch protocol {
 	case translate.ProtocolChat:
@@ -587,6 +607,8 @@ func protocolFlagName(protocol string) string {
 		return "responses"
 	case translate.ProtocolAnthropic:
 		return "anthropic"
+	case translate.ProtocolGemini:
+		return "gemini"
 	}
 	return protocol
 }

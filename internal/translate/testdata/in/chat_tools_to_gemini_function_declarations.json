@@ -1,0 +1,28 @@
+{
+  "from": "openai-chat",
+  "to": "gemini",
+  "kind": "request",
+  "model": "gemini-2.5-flash",
+  "body": {
+    "model": "up-chat",
+    "max_tokens": 128,
+    "temperature": 0.4,
+    "top_p": 0.9,
+    "stop": ["END"],
+    "messages": [
+      {"role": "system", "content": "你是助手"},
+      {"role": "user", "content": "北京天气"},
+      {"role": "assistant", "content": null, "tool_calls": [
+        {"id": "call_1", "type": "function", "function": {"name": "weather", "arguments": "{\"city\":\"北京\"}"}}
+      ]},
+      {"role": "tool", "tool_call_id": "call_1", "content": "晴"},
+      {"role": "user", "content": "那上海呢"}
+    ],
+    "tools": [
+      {"type": "function", "function": {"name": "weather", "description": "查天气",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}}
+    ],
+    "tool_choice": "required",
+    "x_vendor_field": {"drop": true}
+  }
+}

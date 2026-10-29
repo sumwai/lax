@@ -1,0 +1,17 @@
+{
+  "from": "gemini",
+  "to": "openai-chat",
+  "kind": "request",
+  "model": "up-chat",
+  "body": {
+    "systemInstruction": {"parts": [{"text": "只答一句"}]},
+    "contents": [
+      {"role": "user", "parts": [{"text": "北京天气"}]},
+      {"role": "model", "parts": [{"functionCall": {"name": "weather", "args": {"city": "北京"}}}]},
+      {"role": "user", "parts": [{"functionResponse": {"name": "weather", "response": {"result": "晴"}}}]}
+    ],
+    "tools": [{"functionDeclarations": [{"name": "weather", "description": "查天气", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}]}],
+    "toolConfig": {"functionCallingConfig": {"mode": "NONE"}},
+    "generationConfig": {"maxOutputTokens": 32, "temperature": 0.2}
+  }
+}

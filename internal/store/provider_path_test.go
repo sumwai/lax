@@ -25,6 +25,9 @@ func TestNormalizePath(t *testing.T) {
 		{"///", ""},
 		{"   ", ""},
 		{"chat/completions", "/chat/completions"},
+		// gemini 的模型名占位符不是斜杠：花括号与冒号原样保留，转发时才替换（DESIGN 5.9）。
+		{"/v1beta/models/{model}:generateContent", "/v1beta/models/{model}:generateContent"},
+		{"v1beta//models//{model}:generateContent/", "/v1beta/models/{model}:generateContent"},
 	}
 	for _, c := range cases {
 		if got := store.NormalizePath(c.raw); got != c.want {
@@ -182,3 +185,50 @@ func TestSetProviderNormalizesPaths(t *testing.T) {
 
 // strPtr 是取字段指针的小工具，ProviderPatch 用 nil 表示「这一项不动」。
 func strPtr(v string) *string { return &v }
+
+// TestGeminiRouteKeepsModelPlaceholder 钉住 gemini 路由的写法：`{model}` 占位符在写入与读取
+// 两侧都原样保留（相对路径与整条地址都一样），路径规整只合并斜杠、不吃掉花括号与冒号；
+// gemini 也没有模型列表推导，`models_path` 留空表示回退到同厂商其它协议（DESIGN 5.9）。
+func TestGeminiRouteKeepsModelPlaceholder(t *testing.T) {
+	st := openTemp(t)
+
+	if err := st.CreateProvider(store.Provider{Name: "gem", BaseURL: "https://generativelanguage.googleapis.com"},
+		[]store.ProviderRoute{
+			{Protocol: "gemini", Path: "v1beta//models//{model}:generateContent"},
+			{Protocol: "openai-chat", Path: "/v1/chat/completions"},
+		}); err != nil {
+		t.Fatalf("新建厂商: %v", err)
+	}
+	route, ok, err := st.LookupProviderRoute("gem", "gemini")
+	if err != nil || !ok {
+		t.Fatalf("取 gemini 路由: ok=%v err=%v", ok, err)
+	}
+	if route.Path != "/v1beta/models/{model}:generateContent" {
+		t.Fatalf("gemini 路由路径 = %q，占位符与冒号应当原样保留", route.Path)
+	}
+	if route.ModelsPath != "" {
+		t.Fatalf("gemini 不该有推导出来的模型列表路径，实际 %q", route.ModelsPath)
+	}
+
+	// 整条地址同样保留占位符：规整只作用在斜杠上。
+	if err := st.SetProvider("gem", store.ProviderPatch{Routes: map[string]string{
+		"gemini": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent/",
+	}}); err != nil {
+		t.Fatalf("改 gemini 路由: %v", err)
+	}
+	route, ok, err = st.LookupProviderRoute("gem", "gemini")
+	if err != nil || !ok {
+		t.Fatalf("取 gemini 路由: ok=%v err=%v", ok, err)
+	}
+	if route.Path != "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent" {
+		t.Fatalf("整条地址里的占位符 = %q", route.Path)
+	}
+
+	// 线协议的判定只有一份，gemini 在里面（只作出站），不认识的取值仍然是错的。
+	if !store.IsWireProtocol("gemini") {
+		t.Fatal("gemini 是线协议：账号的 --protocol 与厂商路由都要认它")
+	}
+	if store.IsWireProtocol("cohere") {
+		t.Fatal("不认识的取值不该被当成线协议")
+	}
+}

@@ -1,0 +1,20 @@
+{
+  "from": "anthropic",
+  "to": "gemini",
+  "kind": "response",
+  "model": "gemini-2.5-flash",
+  "body": {
+    "candidates": [
+      {
+        "content": {
+          "role": "model",
+          "parts": [
+            {"functionCall": {"name": "weather", "args": {"city": "上海"}}}
+          ]
+        },
+        "finishReason": "STOP"
+      }
+    ],
+    "usageMetadata": {"promptTokenCount": 9, "candidatesTokenCount": 2, "totalTokenCount": 11}
+  }
+}

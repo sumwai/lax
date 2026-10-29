@@ -6,6 +6,7 @@ import (
 )
 
 // 线协议名称。入站按路径区分，出站按账号的 protocol 字段区分。
+// gemini 只作出站（非流式，见 DESIGN 5.9）：没有入站路径，也没有流式编解码。
 const (
 	ProtocolAnthropic = "anthropic"
 	ProtocolChat      = "openai-chat"
@@ -223,6 +224,9 @@ func DecodeRequest(protocol string, raw []byte) (*Request, error) {
 		return DecodeChatRequest(raw)
 	case ProtocolResponses:
 		return DecodeResponsesRequest(raw)
+	case ProtocolGemini:
+		// gemini 还没有入站路径（DESIGN 第 7 节已知未做），解码器留着给将来用。
+		return DecodeGeminiRequest(raw)
 	default:
 		return nil, fmt.Errorf("不支持的入站协议 %q", protocol)
 	}
@@ -237,6 +241,8 @@ func EncodeRequest(protocol string, r *Request, model string) ([]byte, error) {
 		return EncodeChatRequest(r, model)
 	case ProtocolResponses:
 		return EncodeResponsesRequest(r, model)
+	case ProtocolGemini:
+		return EncodeGeminiRequest(r, model)
 	default:
 		return nil, fmt.Errorf("不支持的出站协议 %q", protocol)
 	}
@@ -251,12 +257,15 @@ func DecodeResponse(protocol string, raw []byte, requestedModel string) (*Respon
 		return DecodeChatResponse(raw, requestedModel)
 	case ProtocolResponses:
 		return DecodeResponsesResponse(raw, requestedModel)
+	case ProtocolGemini:
+		return DecodeGeminiResponse(raw, requestedModel)
 	default:
 		return nil, fmt.Errorf("不支持的出站协议 %q", protocol)
 	}
 }
 
-// EncodeResponse 按协议编码返回给客户端的响应。
+// EncodeResponse 按协议编码返回给客户端的响应。gemini 没有入站路径（DESIGN 5.9），
+// 这里不认它：客户端的响应形状只有 anthropic、openai-chat、openai-responses 三种。
 func EncodeResponse(protocol string, r *Response) ([]byte, error) {
 	switch protocol {
 	case ProtocolAnthropic:
@@ -270,7 +279,7 @@ func EncodeResponse(protocol string, r *Response) ([]byte, error) {
 	}
 }
 
-// NewStreamDecoder 按上游协议造流式解码器。
+// NewStreamDecoder 按上游协议造流式解码器。gemini 只做非流式出站，还没有解码器（DESIGN 5.9）。
 func NewStreamDecoder(protocol string) (StreamDecoder, error) {
 	switch protocol {
 	case ProtocolAnthropic:
@@ -285,6 +294,7 @@ func NewStreamDecoder(protocol string) (StreamDecoder, error) {
 }
 
 // NewStreamEncoder 按入站协议造流式编码器。model 是客户端请求的模型名，会写回响应。
+// gemini 没有入站路径，因此也没有编码器（DESIGN 5.9）。
 func NewStreamEncoder(protocol, model string) (StreamEncoder, error) {
 	switch protocol {
 	case ProtocolAnthropic:
@@ -327,6 +337,8 @@ func NewUsageScanner(protocol string) (UsageScanner, error) {
 		return &chatUsageScanner{}, nil
 	case ProtocolResponses:
 		return &responsesUsageScanner{}, nil
+	case ProtocolGemini:
+		return &geminiUsageScanner{}, nil
 	default:
 		return nil, fmt.Errorf("不支持的协议 %q", protocol)
 	}

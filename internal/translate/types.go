@@ -1,4 +1,5 @@
-// Package translate 在 anthropic 与 openai-chat 两套线协议之间转换报文。
+// Package translate 在入站协议（anthropic、openai-chat、openai-responses）与出站协议
+// （多一条 gemini，见 gemini.go）之间转换报文。
 // 这里全是纯函数：不读环境、不发请求、不碰时间。
 package translate
 

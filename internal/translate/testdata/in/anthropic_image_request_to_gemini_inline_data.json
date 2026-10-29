@@ -1,0 +1,23 @@
+{
+  "from": "anthropic",
+  "to": "gemini",
+  "kind": "request",
+  "model": "gemini-2.5-flash",
+  "body": {
+    "model": "claude-x",
+    "max_tokens": 64,
+    "system": [{"type": "text", "text": "先看图"}],
+    "messages": [
+      {"role": "user", "content": [
+        {"type": "text", "text": "这是什么"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}}
+      ]}
+    ],
+    "tools": [
+      {"name": "weather", "description": "查天气",
+        "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}},
+      {"type": "web_search_20250305", "name": "web_search"}
+    ],
+    "tool_choice": {"type": "tool", "name": "weather"}
+  }
+}

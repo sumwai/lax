@@ -30,3 +30,29 @@ func TestJoinEndpoint(t *testing.T) {
 		}
 	}
 }
+
+// TestModelEndpoint 钉住 {model} 占位符的替换规则（DESIGN 5.9）：只认这一个字面量，
+// 出现几次换几次，其余字节不动；模型名按路径段转义，含 `/` 的名字仍是一段路径。
+func TestModelEndpoint(t *testing.T) {
+	cases := []struct{ endpoint, model, want string }{
+		{
+			"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+			"gemini-2.5-flash",
+			"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+		},
+		{
+			"https://host/v1beta/models/{model}:generateContent?alt=json&m={model}",
+			"m1",
+			"https://host/v1beta/models/m1:generateContent?alt=json&m=m1",
+		},
+		{"https://host/v1beta/models/org/gemini:generateContent", "org/gemini",
+			"https://host/v1beta/models/org/gemini:generateContent"},
+		{"https://host/{model}", "org/gemini", "https://host/org%2Fgemini"},
+		{"https://host/v1/chat/completions", "m1", "https://host/v1/chat/completions"},
+	}
+	for _, c := range cases {
+		if got := modelEndpoint(c.endpoint, c.model); got != c.want {
+			t.Fatalf("modelEndpoint(%q, %q) = %q，期望 %q", c.endpoint, c.model, got, c.want)
+		}
+	}
+}

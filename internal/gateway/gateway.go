@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -21,11 +22,12 @@ import (
 )
 
 // 协议常量。入站按路径区分，出站按该模型的有效协议（account_models.protocol 优先，
-// 否则账号的 protocol）。
+// 否则账号的 protocol）。gemini 只作出站且只做非流式（DESIGN 5.9）。
 const (
 	ProtocolAnthropic = translate.ProtocolAnthropic
 	ProtocolChat      = translate.ProtocolChat
 	ProtocolResponses = translate.ProtocolResponses
+	ProtocolGemini    = translate.ProtocolGemini
 
 	// InboundAnthropic 保留给旧调用方，等价于 ProtocolAnthropic。
 	InboundAnthropic = translate.ProtocolAnthropic
@@ -141,7 +143,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"enabled":  enabled,
 		"models":   len(models),
 		"inbound":  []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses},
-		"outbound": []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses},
+		"outbound": []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini},
 		"passthru": "同协议直通，跨协议经中间表示转换",
 	})
 }
@@ -225,6 +227,14 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			s.logf("读账号 %s 模型 %s 的有效协议失败，改按账号协议 %s: %v",
 				cand.Name, req.Model, cand.Protocol, err)
 			outbound = cand.Protocol
+		}
+
+		if req.Stream && outbound == ProtocolGemini {
+			// gemini 出站的第一步只做非流式（DESIGN 5.9）。在写出任何字节、也不打上游之前报错，
+			// 并且不把这个账号打入冷却：这是本机还没实现这种组合，不是上游的错。
+			writeError(w, http.StatusBadRequest, "invalid_request_error",
+				"gemini 出站暂不支持流式请求（第一步只做非流式）：客户端关掉 stream，或改用另一条协议的账号")
+			return
 		}
 
 		attemptStart := s.now()
@@ -371,7 +381,9 @@ func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store
 func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, inbound string, raw []byte,
 	req *translate.Request, key string) (*http.Request, error) {
 
-	endpoint := s.endpoint(a, outbound)
+	// 路由的 path 里可以有 {model} 占位符（gemini 的模型名在路径里，见 DESIGN 5.9）：
+	// 先拼好地址再替换，替换后才是真正要访问的 URL。
+	endpoint := modelEndpoint(s.endpoint(a, outbound), req.Model)
 
 	var body []byte
 	var err error
@@ -770,8 +782,14 @@ func appendStreamTail(w io.Writer, flush func(), written []byte, events []transl
 // Endpoint 是 base_url 加协议后缀的兜底猜测，作为没有厂商路由时的兜底：末尾带不带 /v1 都行。
 // 正常路径上的地址走 Server.endpoint（按 (厂商, 协议) 查 provider_routes，路由的值可以是
 // 相对路径，也可以是整条地址，见 joinEndpoint）。
+// gemini 的路径里带模型名，兜底同样留 {model} 占位符，由 modelEndpoint 在转发前替换。
 func Endpoint(base, protocol string) string {
 	base = normalizedBase(base)
+	if protocol == ProtocolGemini {
+		// gemini 的原生路径是 /v1beta/models/{model}:generateContent：没有 /v1 这种后缀猜想，
+		// 写 base_url 时带上 /v1beta 也不会拼出两层。
+		return strings.TrimSuffix(base, "/v1beta") + geminiGeneratePath
+	}
 	suffix := "/chat/completions"
 	switch protocol {
 	case ProtocolAnthropic:
@@ -827,14 +845,36 @@ func joinEndpoint(base, path string) string {
 	return normalizedBase(base) + store.NormalizePath(path)
 }
 
-// setAuth 按协议给上游请求配好凭据头。
+// geminiGeneratePath 是 gemini 非流式生成的路径形状（相对 base_url，含模型名占位符）。
+// 模型名在路径里是 gemini 的原生写法，因此路由的 path 支持 {model} 占位符（DESIGN 5.9）。
+const geminiGeneratePath = "/v1beta/models/{model}:generateContent"
+
+// modelPlaceholder 是路由 path 里代表本次请求模型名的占位符。
+const modelPlaceholder = "{model}"
+
+// modelEndpoint 把拼好的上游地址里的 {model} 换成模型名：只认这一个字面量，出现几次就换几次，
+// 其余字节（包括路径里的 `:` 与查询串）一个字不改。模型名按路径段转义（url.PathEscape），
+// 含 `/` 的名字因此不会被拆成两段路径。地址里没有占位符时原样返回，别的协议行为不变。
+func modelEndpoint(endpoint, model string) string {
+	if !strings.Contains(endpoint, modelPlaceholder) {
+		return endpoint
+	}
+	return strings.ReplaceAll(endpoint, modelPlaceholder, url.PathEscape(model))
+}
+
+// setAuth 按协议给上游请求配好凭据头：gemini 用 x-goog-api-key，anthropic 用 x-api-key
+// 加 anthropic-version，两条 openai 协议用 Bearer。凭据头按协议而不是按厂商选
+// （同一家上游的不同协议也可能用不同写法，见 DESIGN 5.8）。
 func setAuth(req *http.Request, protocol, key string) {
-	if protocol == ProtocolAnthropic {
+	switch protocol {
+	case ProtocolAnthropic:
 		req.Header.Set("x-api-key", key)
 		req.Header.Set("anthropic-version", "2023-06-01")
-		return
+	case ProtocolGemini:
+		req.Header.Set("x-goog-api-key", key)
+	default:
+		req.Header.Set("Authorization", "Bearer "+key)
 	}
-	req.Header.Set("Authorization", "Bearer "+key)
 }
 
 func readErrorBody(r io.Reader) string {

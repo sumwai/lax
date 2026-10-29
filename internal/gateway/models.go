@@ -290,19 +290,18 @@ type probeAttempt struct {
 }
 
 // defaultProbeProtocols 是探活候选的兜底顺序：账号没有厂商行（或该厂商一个路由都没声明）
-// 时三种全试。厂商声明过路由的只试那些（见 routeProtocolOrder），循环本身不认识厂商。
+// 时三条入站协议全试。厂商声明过路由的只试那些（见 routeProtocolOrder），循环本身不认识厂商。
+// 兜底里不含 gemini：它只作出站，没有厂商声明 gemini 路由时不该拿它去打一个猜出来的地址。
 var defaultProbeProtocols = []string{
 	translate.ProtocolAnthropic, translate.ProtocolChat, translate.ProtocolResponses,
 }
 
-// isWireProtocol 判断一个取值是不是三种线协议之一。别的值不能进探活：编码器遇见未知协议
-// 会报错，静默落进 chat 分支更糟——那会把一条配置错误变成对错误地址的上游调用。
+// isWireProtocol 判断一个取值是不是线协议。判定只有 store.IsWireProtocol 一份：gemini
+// 也是线协议（只作出站，见 DESIGN 5.9），厂商声明了 gemini 路由时探活要能用它。
+// 别的值不能进探活：编码器遇见未知协议会报错，静默落进 chat 分支更糟——那会把一条配置
+// 错误变成对错误地址的上游调用。
 func isWireProtocol(p string) bool {
-	switch p {
-	case translate.ProtocolAnthropic, translate.ProtocolChat, translate.ProtocolResponses:
-		return true
-	}
-	return false
+	return store.IsWireProtocol(p)
 }
 
 // routeProtocolOrder 给出探活一个模型的完整有序候选，顺序与去重都在这里定：
@@ -322,8 +321,8 @@ func (s *Server) routeProtocolOrder(a store.Account, model string, override []st
 			return nil
 		}
 		if !isWireProtocol(protocol) {
-			return fmt.Errorf("%s 给出的协议 %q 不是线协议，可用 %s、%s、%s",
-				from, protocol, translate.ProtocolAnthropic, translate.ProtocolChat, translate.ProtocolResponses)
+			return fmt.Errorf("%s 给出的协议 %q 不是线协议，可用 %s",
+				from, protocol, strings.Join(store.WireProtocols(), "、"))
 		}
 		seen[protocol] = true
 		order = append(order, protocol)
@@ -364,7 +363,7 @@ func (s *Server) routeProtocolOrder(a store.Account, model string, override []st
 
 // providerProtocols 是 resolver 的默认实现：该厂商在 provider_routes 里声明过的协议。
 // 注入 Options.RouteProtocols 时以注入的为准。读库失败时报错而不是返回 nil：返回 nil 会让
-// 探活放宽成三种协议全试，等于去打这家没声明的路径，把一次读库故障变成对错误地址的上游调用。
+// 探活放宽成三条入站协议全试，等于去打这家没声明的路径，把一次读库故障变成对错误地址的上游调用。
 func (s *Server) providerProtocols(a store.Account, model string) ([]string, error) {
 	if s.routeProtocols != nil {
 		return s.routeProtocols(a.Provider, model), nil

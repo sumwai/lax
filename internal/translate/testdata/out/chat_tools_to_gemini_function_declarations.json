@@ -1,0 +1,79 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "北京天气"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "parts": [
+        {
+          "functionCall": {
+            "args": {
+              "city": "北京"
+            },
+            "name": "weather"
+          }
+        }
+      ],
+      "role": "model"
+    },
+    {
+      "parts": [
+        {
+          "functionResponse": {
+            "name": "weather",
+            "response": {
+              "result": "晴"
+            }
+          }
+        },
+        {
+          "text": "那上海呢"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "generationConfig": {
+    "maxOutputTokens": 128,
+    "stopSequences": [
+      "END"
+    ],
+    "temperature": 0.4,
+    "topP": 0.9
+  },
+  "systemInstruction": {
+    "parts": [
+      {
+        "text": "你是助手"
+      }
+    ]
+  },
+  "toolConfig": {
+    "functionCallingConfig": {
+      "mode": "ANY"
+    }
+  },
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "description": "查天气",
+          "name": "weather",
+          "parameters": {
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

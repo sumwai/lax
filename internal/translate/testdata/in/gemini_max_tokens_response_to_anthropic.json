@@ -1,0 +1,12 @@
+{
+  "from": "anthropic",
+  "to": "gemini",
+  "kind": "response",
+  "model": "gemini-2.5-flash",
+  "body": {
+    "candidates": [
+      {"content": {"role": "model", "parts": [{"text": "半截"}]}, "finishReason": "MAX_TOKENS"}
+    ],
+    "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 2, "totalTokenCount": 7}
+  }
+}

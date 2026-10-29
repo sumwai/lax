@@ -26,7 +26,8 @@ var providerSubs = []groupItem{
 // `v1/chat/completions`、`//v1//chat/completions`、`/v1/chat/completions/` 落成同一个地址；
 // 整条地址交给 store.NormalizeEndpoint 校验 scheme 与主机名，因此 `https://`、`https:///x`、
 // `ftp://host/x` 都是用法错误。cli 只判两件事：「规整之后为空」与「整条地址校验不过」，
-// 删除语义归 provider unset。没有 --gemini：gemini 协议尚未实现，留一条永远用不上的路由只会误导。
+// 删除语义归 provider unset。还没有 --gemini：gemini 只作出站且只做非流式（DESIGN 5.9），
+// 声明 gemini 路由的 flag 与厂商行下一批一起加。
 
 // 三份用法行，所有用法错误都把它打出来，不让用户看着一句「参数错误」去猜参数（见 AGENTS.md）。
 const (
@@ -747,13 +748,11 @@ func cmdProviderRm(e *Env, args []string) error {
 	return nil
 }
 
-// isWireProtocol 判断是不是三种线协议之一。账号的 --protocol 与厂商的默认协议共用这一个判断。
+// isWireProtocol 判断一个取值是不是线协议。判定只有 store.IsWireProtocol 一份（入站三条加
+// 只作出站的 gemini，见 DESIGN 5.9）：账号的 --protocol 与厂商的默认协议共用这一个判断，
+// 两处各写一份名单迟早会对不上。
 func isWireProtocol(proto string) bool {
-	switch proto {
-	case gateway.ProtocolAnthropic, gateway.ProtocolChat, gateway.ProtocolResponses:
-		return true
-	}
-	return false
+	return store.IsWireProtocol(proto)
 }
 
 // flagWasSet 判断某个参数有没有在命令行上出现过：用来区分「给了空值」与「没给」。

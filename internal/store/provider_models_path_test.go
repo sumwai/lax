@@ -188,8 +188,9 @@ func TestCreateProviderValidatesAddressAndRoutes(t *testing.T) {
 		{"没有路由", store.Provider{Name: "c", BaseURL: "https://c.example.com"}, nil, "至少要声明一条协议路由"},
 		{"路径是空白", store.Provider{Name: "d", BaseURL: "https://d.example.com"},
 			[]store.ProviderRoute{{Protocol: "openai-chat", Path: "   "}}, "缺路径"},
+		// gemini 是线协议（只作出站，见 DESIGN 5.9），不认识的取值要用别人。
 		{"协议不认识", store.Provider{Name: "e", BaseURL: "https://e.example.com"},
-			[]store.ProviderRoute{{Protocol: "gemini", Path: "/v1/chat/completions"}}, "不认识"},
+			[]store.ProviderRoute{{Protocol: "cohere", Path: "/v1/chat/completions"}}, "不认识"},
 		{"默认协议不在这次路由里", store.Provider{Name: "f", BaseURL: "https://f.example.com", DefaultProtocol: "anthropic"},
 			chat, "没有声明这个协议的路由"},
 	}
@@ -378,7 +379,7 @@ func TestSetProviderRejectsEmptyRoutesAndDanglingDefault(t *testing.T) {
 	}
 
 	// 不认识的协议名与指向不存在路由的默认协议都拒绝。
-	if err := st.SetProvider("deepseek", store.ProviderPatch{Routes: map[string]string{"gemini": "/v1/generate"}}); err == nil {
+	if err := st.SetProvider("deepseek", store.ProviderPatch{Routes: map[string]string{"cohere": "/v1/generate"}}); err == nil {
 		t.Fatal("不认识的协议应报错")
 	}
 	bad := "openai-responses"

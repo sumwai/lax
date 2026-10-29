@@ -206,7 +206,9 @@ func cmdAccountAdd(e *Env, args []string) error {
 	}
 
 	if *protocol != "" && !isWireProtocol(*protocol) {
-		return usagef("不支持的协议 %q，可用 anthropic、openai-chat、openai-responses", *protocol)
+		// 白名单只有 store.IsWireProtocol 一份（见 DESIGN 5.9）：gemini 只作出站，
+		// 但账号上可以选它做有效出站协议。
+		return usagef("不支持的协议 %q，可用 %s", *protocol, strings.Join(store.WireProtocols(), "、"))
 	}
 
 	a, err := openApp(e, true)

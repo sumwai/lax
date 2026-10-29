@@ -1,0 +1,54 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "这是什么"
+        },
+        {
+          "inlineData": {
+            "data": "QUJD",
+            "mimeType": "image/png"
+          }
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "generationConfig": {
+    "maxOutputTokens": 64
+  },
+  "systemInstruction": {
+    "parts": [
+      {
+        "text": "先看图"
+      }
+    ]
+  },
+  "toolConfig": {
+    "functionCallingConfig": {
+      "allowedFunctionNames": [
+        "weather"
+      ],
+      "mode": "ANY"
+    }
+  },
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "description": "查天气",
+          "name": "weather",
+          "parameters": {
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}
