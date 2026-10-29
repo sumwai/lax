@@ -559,11 +559,11 @@ gemini 的原生接口（Generative Language API 的 `generateContent`）与另�
 
 | 增量 | gemini 帧 |
 | --- | --- |
-| 流开始 | 一帧带 `role=model`、`parts` 为空的候选（gemini 没有「消息开始」事件，先给一帧让客户端立刻拿到东西） |
+| 流开始 | 一帧只带 `role=model` 的候选（gemini 没有「消息开始」事件，先给一帧让客户端立刻拿到东西）；`parts` 为空时整个字段不写（`[]` 与字段缺失的读法不一样，空数组会让严一些的客户端以为这是一段空内容） |
 | `text` | 一帧 `parts[].text` |
 | `thinking` | 丢弃（gemini 的报文里没有落点） |
 | `tool_start` / `tool_args` | 攒起来，收尾时一次编成 `parts[].functionCall`；空参数照发不带 `args` 的调用，断在中间的参数整块丢弃 |
-| `stop` | 先发攒下的工具帧（若有）；带 `finishReason` 与 `usageMetadata` 的结束帧留到流结束（`Finish`），用量晚到也带得上 |
+| `stop` | 先发攒下的工具帧（若有）；带 `finishReason` 与 `usageMetadata` 的结束帧留到流结束（`Finish`），用量晚到也带得上；没有内容的收尾帧同样不写 `parts` |
 | `error` | 一帧 `{"error":{"code":500,"message":…,"status":"INTERNAL"}}` |
 
 - gemini 的流式在两个方向上都不是真增量：它当上游时 `functionCall` 一帧给全参数（不像 chat 那样逐帧给片段），它当客户端时工具调用要攒到收尾才发。代价是 gemini 客户端在最后一帧才看到 `functionCall`，好处是不伪造「半截参数」这种 gemini 表达不了的形状；文本仍然逐帧下发，不受影响。断流时攒下来的参数如果只到一半（不是合法 JSON 对象），这一次调用整块丢掉、只发错误帧：带一个空 `args` 发出去等于让客户端拿空参数调一次函数，比少一次调用更糟。

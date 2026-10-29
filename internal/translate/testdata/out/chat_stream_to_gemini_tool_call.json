@@ -4,7 +4,6 @@
       "candidates": [
         {
           "content": {
-            "parts": [],
             "role": "model"
           },
           "index": 0
@@ -59,7 +58,6 @@
       "candidates": [
         {
           "content": {
-            "parts": [],
             "role": "model"
           },
           "finishReason": "STOP",

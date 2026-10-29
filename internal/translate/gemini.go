@@ -71,7 +71,7 @@ type GeminiRequest struct {
 // GeminiContent 是一条对话内容，role 只有 user 与 model 两种。
 type GeminiContent struct {
 	Role  string       `json:"role,omitempty"`
-	Parts []GeminiPart `json:"parts"`
+	Parts []GeminiPart `json:"parts,omitempty"`
 }
 
 // GeminiPart 是内容里的一块。五种形状互斥，按需填一个。
@@ -582,7 +582,7 @@ func (e *geminiStreamEncoder) Start() []SSEEvent {
 	return []SSEEvent{e.frame(&GeminiResponse{
 		ModelVersion: e.model,
 		Candidates: []GeminiCandidate{{
-			Content: GeminiContent{Role: "model", Parts: []GeminiPart{}},
+			Content: GeminiContent{Role: "model"},
 		}},
 	})}
 }
@@ -702,7 +702,7 @@ func (e *geminiStreamEncoder) finishEvent() SSEEvent {
 	wire := GeminiResponse{
 		ModelVersion: e.model,
 		Candidates: []GeminiCandidate{{
-			Content:      GeminiContent{Role: "model", Parts: []GeminiPart{}},
+			Content:      GeminiContent{Role: "model"},
 			FinishReason: geminiFinishFromIR(reason),
 		}},
 	}
