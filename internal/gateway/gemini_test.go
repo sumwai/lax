@@ -203,7 +203,7 @@ func TestForwardAnthropicToGemini(t *testing.T) {
 }
 
 // TestGeminiRoutePlaceholderInFullAddress 钉住两种写法与占位符共存：路由写整条地址时
-// 仍然直接访问那个地址、不再拼 base_url，占位符同样被替换；账号 base_url 那台一次都不该收到请求。
+// 仍然直接访问那个地址、不再拼 base_url，占位符同样被替换；厂商 base_url 那台一次都不该收到请求。
 func TestGeminiRoutePlaceholderInFullAddress(t *testing.T) {
 	f := newFixture(t)
 	const key = "sk-gemini-full"
@@ -232,7 +232,7 @@ func TestGeminiRoutePlaceholderInFullAddress(t *testing.T) {
 		t.Fatalf("上游 RequestURI = %q", up.uri)
 	}
 	if decoy.hits != 0 {
-		t.Fatalf("账号 base_url 那个域名收到 %d 次请求，整条地址路由不该碰它", decoy.hits)
+		t.Fatalf("厂商 base_url 那个域名收到 %d 次请求，整条地址路由不该碰它", decoy.hits)
 	}
 	if up.apiKey != "" || up.bearer != "" {
 		t.Fatalf("gemini 不该发 x-api-key 或 Authorization，实际 %q / %q", up.apiKey, up.bearer)

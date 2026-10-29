@@ -32,18 +32,18 @@ func ModelsEndpoint(base string) string {
 
 // modelsEndpoint 解析账号的模型列表地址，同时返回这条地址该用哪种协议发凭据头（见 DESIGN 5.7）：
 //
-//  1. override 非空（`model sync --endpoint`）时用它，压过下面全部，协议取账号协议；取值可以是
+//  1. override 非空（`model sync --endpoint`）时用它，压过下面全部，协议取厂商的有效默认协议；取值可以是
 //     相对 base_url 的路径，也可以是整条地址（整条地址直接访问，不再拼 base_url）；
-//  2. 厂商行不存在（自建地址）、或厂商行在但既没有路由也没有 models_path 覆盖时，按 base_url 后缀猜，
-//     与升级前一致；
-//  3. 厂商级 models_path 非空时用它，协议取账号协议（覆盖是厂商级设置，没有自己的协议）；
-//  4. 否则从路由取：账号协议那条的 models_path，为空再退到同厂商按协议名排序的第一条非空值；
+//  2. 厂商行不存在（历史孤儿行）、或厂商行在但既没有路由也没有 models_path 覆盖时，按 base_url 后缀猜，
+//     与升级前一致；孤儿行的地址也是空串，拼不出任何可用地址，这里直接报错并给出下一步命令；
+//  3. 厂商级 models_path 非空时用它，协议取厂商的有效默认协议（覆盖是厂商级设置，没有自己的协议）；
+//  4. 否则从路由取：厂商默认协议那条的 models_path，为空再退到同厂商按协议名排序的第一条非空值；
 //  5. 厂商声明了路由但一个非空 models_path 都没有时报错，提示手填或 `provider set --models-path`。
 //
 // 第 2 步之后的取值都可能是整条地址：地址来自路由时由 joinEndpoint 判断就不拼 base_url。
 // 协议必须与路径一起回去：凭据头按协议选（anthropic 用 x-api-key，另两家用 Bearer），
 // 地址来自哪条路由就用哪条路由的协议。deepseek 的 anthropic 账号取到的是 chat 的 /v1/models，
-// 用账号协议发 x-api-key 上去只会换回一个 401/403，却把错误指到「凭据无效」上。
+// 用厂商默认协议发 x-api-key 上去只会换回一个 401/403，却把错误指到「凭据无效」上。
 func (s *Server) modelsEndpoint(a store.Account, override string) (endpoint, protocol string, err error) {
 	// --endpoint 的取值与路由取值同一套解释（store.NormalizeEndpoint）：相对路径只规整、不拒绝，
 	// 整条地址校验后直接使用。规整之后为空视为这次没给，回到厂商覆盖与路由。
@@ -59,6 +59,11 @@ func (s *Server) modelsEndpoint(a store.Account, override string) (endpoint, pro
 
 	p, err := s.store.GetProvider(a.Provider)
 	if errors.Is(err, store.ErrProviderNotFound) {
+		// 地址只有厂商行上有（见 DESIGN 5.8）：孤儿行的 a.BaseURL 是空串，拼出来的
+		// 只会是 /v1/models 这种没有协议的路径。报配置缺什么，不报成「列表地址不合法」。
+		if a.BaseURL == "" {
+			return "", "", s.noAddressError(a, ProtocolChat)
+		}
 		return ModelsEndpoint(a.BaseURL), a.Protocol, nil
 	}
 	if err != nil {
@@ -70,6 +75,9 @@ func (s *Server) modelsEndpoint(a store.Account, override string) (endpoint, pro
 	}
 	// 厂商行在、但一条路由都没声明，也没有厂商级覆盖：按 base_url 兜底，与升级前一致。
 	if len(routes) == 0 && strings.TrimSpace(p.ModelsPath) == "" {
+		if a.BaseURL == "" {
+			return "", "", s.noAddressError(a, ProtocolChat)
+		}
 		return ModelsEndpoint(a.BaseURL), a.Protocol, nil
 	}
 
@@ -128,7 +136,7 @@ func (s *Server) SyncModelsWithEndpoint(ctx context.Context, a store.Account, en
 	for page := 1; ; page++ {
 		pageURL, err := modelListPageURL(target, pageToken, paginated)
 		if err != nil {
-			return nil, fmt.Errorf("模型列表地址 %q 不合法，检查账号 %s 的 base-url: %w", target, a.Name, err)
+			return nil, fmt.Errorf("模型列表地址 %q 不合法，检查厂商 %s 的 base-url: %w", target, a.Provider, err)
 		}
 		raw, err := s.fetchModelPage(ctx, pageURL, target, protocol, a, secretValue)
 		if err != nil {
@@ -205,10 +213,10 @@ func (s *Server) fetchModelPage(ctx context.Context, pageURL, target, protocol s
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("模型列表地址 %q 不合法，检查账号 %s 的 base-url: %w", pageURL, a.Name, err)
+		return nil, fmt.Errorf("模型列表地址 %q 不合法，检查厂商 %s 的 base-url: %w", pageURL, a.Provider, err)
 	}
 	req.Header.Set("Accept", "application/json")
-	// 凭据头跟着取到这条路径的协议走，不是账号协议。
+	// 凭据头跟着取到这条路径的协议走，不是厂商默认协议。
 	setAuth(req, protocol, secretValue)
 	// 模型列表请求没有模型名（{model} 展开为空时不发那条头），会话键也没有：
 	// {session} 在这里每次请求现生成一个（见 DESIGN 5.10）。
@@ -223,7 +231,7 @@ func (s *Server) fetchModelPage(ctx context.Context, pageURL, target, protocol s
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("上游返回 %d（GET %s，按 %s 发凭据）：%s；检查该账号的 base-url 与凭据",
+		return nil, fmt.Errorf("上游返回 %d（GET %s，按 %s 发凭据）：%s；检查该账号所属厂商的 base-url 与凭据",
 			resp.StatusCode, target, protocol, scrubSecret(readErrorBody(resp.Body), secretValue))
 	}
 
@@ -443,7 +451,7 @@ func readModelList(r io.Reader) ([]string, bool) {
 }
 
 // ModelProbe 是单个模型在一次探活里的结论。
-// Protocol 是这次实际用到的协议：发现成功时是发现到的那个，其余情况下是账号协议。
+// Protocol 是这次实际用到的协议：发现成功时是发现到的那个，其余情况下是厂商默认协议。
 type ModelProbe struct {
 	Model      string
 	Status     string
@@ -480,11 +488,13 @@ func isWireProtocol(p string) bool {
 //
 //  1. 库里已经发现过这个模型的协议排最前，它是「按事实打」的那次，省掉每次 --refresh
 //     白打的一次 404；
-//  2. 账号协议紧接其后，它既是对账号配置的验证，也是 401 判定与全失败结论的依据；
+//  2. 厂商的有效默认协议紧接其后，它既是对厂商配置的验证，也是 401 判定与全失败结论的依据；
 //  3. 其余按 resolver 给的顺序：Options.RouteProtocols 注入时用它，否则用该厂商在
 //     provider_routes 里声明过的协议（按协议名排序），都没有则三种全试。
 //
-// override 非 nil 时顶替第 3 步的来源（探活自己指定候选时用）。出现线协议以外的值直接报错。
+// 账号行不再存协议（迁移 0014），a.Protocol 是厂商默认协议的派生值：厂商没有路由时它是空串，
+// 候选就只剩第 3 步的三种全试。override 非 nil 时顶替第 3 步的来源（探活自己指定候选时用）。
+// 出现线协议以外的值直接报错。
 func (s *Server) routeProtocolOrder(a store.Account, model string, override []string) ([]string, error) {
 	var order []string
 	seen := map[string]bool{}
@@ -510,7 +520,7 @@ func (s *Server) routeProtocolOrder(a store.Account, model string, override []st
 	if err := add(discovered, "account_models.protocol"); err != nil {
 		return nil, err
 	}
-	if err := add(a.Protocol, fmt.Sprintf("账号 %s 的 protocol", a.Name)); err != nil {
+	if err := add(a.Protocol, fmt.Sprintf("厂商 %s 的默认协议", a.Provider)); err != nil {
 		return nil, err
 	}
 
@@ -577,14 +587,14 @@ func (s *Server) ProbeModel(ctx context.Context, a store.Account, model string) 
 }
 
 // ProbeModelWithProtocols 探活一个模型。candidates 顶替 resolver 给的中间一串协议（nil 表示
-// 用 resolver，也就是该厂商声明过的那些），账号协议与已发现的协议仍由 routeProtocolOrder 排好。
+// 用 resolver，也就是该厂商声明过的那些），厂商默认协议与已发现的协议仍由 routeProtocolOrder 排好。
 //
-// 先用账号协议试一次：2xx 就是结论；401 是凭据问题，不换协议，停用账号并停下；
+// 先用厂商默认协议试一次：2xx 就是结论；401 是凭据问题，不换协议，停用账号并停下；
 // 只有可能只是路径不对时才换下一个候选（见 retryOtherProtocol）。
 // 换协议后的第一次 2xx 即结论，把该协议写进 account_models.protocol，剩下的候选不再试。
 // 换协议后的失败都不是结论：那里的 401 只能说明这个协议不认这套凭据头（anthropic 用
 // x-api-key，另两家用 Bearer），其它失败也只是这条路不通，所以接着试下一个候选；
-// 全部试完仍失败时，结论取账号协议那一次。
+// 全部试完仍失败时，结论取厂商默认协议那一次。
 //
 // 每次上游调用都在 requests 里记一行，换协议前的中间尝试也记（见 recordProbeAttempts）：
 // 一次 403 触发三次调用就应当是三行，账实一致比行数好看重要。
@@ -602,7 +612,7 @@ func (s *Server) ProbeModelWithProtocols(ctx context.Context, a store.Account, m
 		return ModelProbe{Model: model, Protocol: a.Protocol, Status: store.ModelError, Message: err.Error()}, err
 	}
 
-	// 账号协议那一次是「按账号配置打」的真相：401 判定与全失败时的结论都取它。
+	// 厂商默认协议那一次是「按厂商配置打」的真相：401 判定与全失败时的结论都取它。
 	// 它不一定排在第一位（已发现的协议会排在前面），所以按下标记下来。
 	primaryIdx := 0
 	for i, protocol := range order {
@@ -638,7 +648,7 @@ func (s *Server) ProbeModelWithProtocols(ctx context.Context, a store.Account, m
 		}
 
 		if i == primaryIdx && !retryOtherProtocol(att.res) {
-			// 账号协议那次的明确结论（模型不存在、5xx、网络错误）与协议无关，不必再花调用。
+			// 厂商默认协议那次的明确结论（模型不存在、5xx、网络错误）与协议无关，不必再花调用。
 			s.recordProbeAttempts(a, model, attempts, i)
 			return att.res, nil
 		}
@@ -646,7 +656,7 @@ func (s *Server) ProbeModelWithProtocols(ctx context.Context, a store.Account, m
 		// 其余情况一律接着试下一个候选：可能只是路径不对，也可能换协议后的这条不通。
 	}
 
-	// 候选协议都试过还是失败：账号协议那次的判定就是结论，protocol 保持原值。
+	// 候选协议都试过还是失败：厂商默认协议那次的判定就是结论，protocol 保持原值。
 	s.recordProbeAttempts(a, model, attempts, primaryIdx)
 	return attempts[primaryIdx].res, storeErr
 }

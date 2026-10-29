@@ -77,7 +77,7 @@ func TestSyncModelsGeminiShape(t *testing.T) {
 }
 
 // TestSyncModelsGeminiAuthHeader 钉住 gemini 的列表请求发 x-goog-api-key：地址来自 gemini 路由，
-// 凭据头就按 gemini 选，不是账号协议那一套之外的猜法（见 DESIGN 5.7）。
+// 凭据头就按 gemini 选，不是厂商默认协议那一套之外的猜法（见 DESIGN 5.7）。
 func TestSyncModelsGeminiAuthHeader(t *testing.T) {
 	f := newFixture(t)
 	var apiKey, bearer string

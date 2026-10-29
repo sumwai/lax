@@ -20,6 +20,9 @@ import (
 type fixture struct {
 	st  *store.Store
 	key []byte
+	// fakeProviders 记下 add 自己建的假厂商：同一对 (协议, 地址) 只建一次，后面的账号复用它。
+	// 迁移 0014 之后账号行只存厂商名，地址与默认协议都在厂商行上（见 DESIGN 5.8）。
+	fakeProviders map[string]string
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -34,10 +37,71 @@ func newFixture(t *testing.T) *fixture {
 	if _, err := rand.Read(key); err != nil {
 		t.Fatalf("生成密钥: %v", err)
 	}
-	return &fixture{st: st, key: key}
+	return &fixture{st: st, key: key, fakeProviders: map[string]string{}}
 }
 
+// add 建一个账号。地址与默认协议只在厂商行上，所以先保证有一家厂商：同一对 (协议, 地址) 复用同一家，
+// 账号行只留厂商名。假厂商声明三条入站协议各一条按后缀规整出来的路由（协议是 gemini 时再加 gemini
+// 那条），默认协议就是传进来的协议，因此转发、探活与模型同步看到的地址与升级前一致。
 func (f *fixture) add(t *testing.T, name, protocol, baseURL, secretValue string, models []string, priority int) store.Account {
+	t.Helper()
+	provider := f.fakeProvider(t, protocol, baseURL)
+	return f.createAccount(t, name, provider, secretValue, models, priority)
+}
+
+// fakeProvider 返回一对 (协议, 地址) 对应的假厂商名，第一次调用时建行。
+func (f *fixture) fakeProvider(t *testing.T, protocol, baseURL string) string {
+	t.Helper()
+	cacheKey := protocol + " " + baseURL
+	if name, ok := f.fakeProviders[cacheKey]; ok {
+		return name
+	}
+	name := fmt.Sprintf("fake%d", len(f.fakeProviders)+1)
+	if err := f.st.AddProvider(store.Provider{Name: name, BaseURL: baseURL, DefaultProtocol: protocol},
+		fakeRoutes(baseURL, protocol)); err != nil {
+		t.Fatalf("建假厂商 %s（%s，%s）: %v", name, protocol, baseURL, err)
+	}
+	f.fakeProviders[cacheKey] = name
+	return name
+}
+
+// fakeRoutes 给假厂商声明路由，取值就是升级前从 base_url 后缀猜出来的那些地址：
+// 三条入站协议各一条，protocol 是 gemini 时再加上 gemini（没有 gemini 路由时默认协议指不到它）。
+// 路径能写成相对路径就写相对的（这样 base_url 仍是地址来源），地址里带脏写法拼不出来时
+// 退回整条地址：路由收整条地址时不拼 base_url，最终请求地址一样（见 DESIGN 5.8）。
+func fakeRoutes(baseURL, protocol string) []store.ProviderRoute {
+	protocols := []string{gateway.ProtocolAnthropic, gateway.ProtocolChat, gateway.ProtocolResponses}
+	if protocol == gateway.ProtocolGemini {
+		protocols = append(protocols, gateway.ProtocolGemini)
+	}
+	modelsPath := relativeToBase(baseURL, gateway.ModelsEndpoint(baseURL))
+	routes := make([]store.ProviderRoute, 0, len(protocols))
+	for _, p := range protocols {
+		routes = append(routes, store.ProviderRoute{
+			Protocol:   p,
+			Path:       relativeToBase(baseURL, gateway.Endpoint(baseURL, p)),
+			ModelsPath: modelsPath,
+		})
+	}
+	return routes
+}
+
+// relativeToBase 把完整地址换成相对 base_url 的路径。去前缀失败（base_url 有重复斜杠一类的脏写法）
+// 时原样返回整条地址，调用方存成路由的 path 或 models_path。
+func relativeToBase(baseURL, full string) string {
+	base := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if base != "" && strings.HasPrefix(full, base) {
+		if rest := strings.TrimPrefix(full, base); rest != "" {
+			return rest
+		}
+	}
+	return full
+}
+
+// createAccount 只写账号自己能存的东西：名字、厂商、凭据、模型与优先级。
+// 返回读回来的那一行，因为 BaseURL 与 Protocol 是派生值（见 store.Account），
+// 写入侧不看也不回写它们。
+func (f *fixture) createAccount(t *testing.T, name, provider, secretValue string, models []string, priority int) store.Account {
 	t.Helper()
 	cipher, err := secret.Encrypt(f.key, []byte(secretValue))
 	if err != nil {
@@ -45,9 +109,7 @@ func (f *fixture) add(t *testing.T, name, protocol, baseURL, secretValue string,
 	}
 	acc := store.Account{
 		Name:      name,
-		Provider:  "test",
-		Protocol:  protocol,
-		BaseURL:   baseURL,
+		Provider:  provider,
 		KeyCipher: cipher,
 		Models:    models,
 		Priority:  priority,
@@ -56,7 +118,18 @@ func (f *fixture) add(t *testing.T, name, protocol, baseURL, secretValue string,
 	if err := f.st.CreateAccount(&acc); err != nil {
 		t.Fatalf("建账号: %v", err)
 	}
-	return acc
+	got, err := f.st.GetAccount(name)
+	if err != nil {
+		t.Fatalf("读账号 %s: %v", name, err)
+	}
+	return got
+}
+
+// addOrphan 建一个指向不存在的厂商的账号：迁移 0014 之前留下的孤儿行，
+// 地址与默认协议都是空串（见 DESIGN 5.8）。
+func (f *fixture) addOrphan(t *testing.T, name, provider, secretValue string, models []string) store.Account {
+	t.Helper()
+	return f.createAccount(t, name, provider, secretValue, models, 100)
 }
 
 func (f *fixture) server(t *testing.T) *httptest.Server {

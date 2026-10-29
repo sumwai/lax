@@ -137,7 +137,7 @@ func TestProbeListOKStillChecksKey(t *testing.T) {
 			body: `{"error":{"message":"Invalid 'Authorization' header or token"}}`},
 	})
 
-	// 自建地址（provider 不在厂商表里）：列表地址按 base_url 后缀猜成 <base>/v1/models。
+	// 假厂商（不在种子表里，由 addAs 建行）的每条路由都带 /v1/models：列表地址就是 <base>/v1/models。
 	acc := f.addAs(t, "list1", "custom", gateway.ProtocolChat, up.srv.URL, "sk-test", []string{"m-a"})
 	gs := newGateway(t, f)
 
@@ -312,7 +312,7 @@ func TestProbeEmptyModelsUsesFallbackModel(t *testing.T) {
 	}
 	calls := up.mustCalls(t, 2)
 	if calls[1].path != "/v1/messages" || calls[1].apiKey != "sk-test" {
-		t.Fatalf("最小请求 = %+v，期望按账号协议打 /v1/messages 并带 x-api-key", calls[1])
+		t.Fatalf("最小请求 = %+v，期望按厂商默认协议打 /v1/messages 并带 x-api-key", calls[1])
 	}
 }
 

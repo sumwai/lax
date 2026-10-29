@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -134,7 +135,7 @@ func (s *Server) probeModelsEndpoint(ctx context.Context, a store.Account) (step
 	}
 	req.Header.Set("Accept", "application/json")
 	// 凭据头跟着取到这条地址的协议走，与 `model sync` 一致：deepseek 的 anthropic 账号
-	// 取到的是 chat 路由上的 /v1/models，得发 Bearer，按账号协议发 x-api-key 只会换回 401。
+	// 取到的是 chat 路由上的 /v1/models，得发 Bearer，按厂商默认协议发 x-api-key 只会换回 401。
 	setAuth(req, protocol, secretValue)
 	// 模型列表请求也带厂商附加头（见 DESIGN 5.7、5.10）。读库失败在这里算作错误而不是退回
 	// 最小请求：那是数据库或配置的故障，不是这家没有列表接口。
@@ -238,6 +239,12 @@ func (s *Server) probeMinimalCall(ctx context.Context, a store.Account, listNote
 			Blocks: []translate.Block{{Kind: translate.BlockText, Text: "ping"}},
 		}},
 	}
+	// 账号探活按账号所属厂商的有效默认协议打：它检验的是凭据与账号整体可用性，
+	// 不跟模型上的协议发现结果走（那个由 model probe 负责）。账号行不再存协议，
+	// a.Protocol 就是这个派生值；算不出来时先报配置缺什么，不拿默认分支去打 chat。
+	if a.Protocol == "" {
+		return step, errors.New(s.noProtocolMessage(a, model))
+	}
 	raw, err := translate.EncodeRequest(a.Protocol, ir, model)
 	if err != nil {
 		return step, err
@@ -248,8 +255,7 @@ func (s *Server) probeMinimalCall(ctx context.Context, a store.Account, listNote
 		return step, err
 	}
 	secretValue := string(key)
-	// 账号探活按账号自己的协议打：它检验的是凭据与账号整体可用性，
-	// 不跟模型上的协议发现结果走（那个由 model probe 负责）。附加头由 buildRequest 叠上；
+	// 入站与出站都取这个派生协议：探活检验的是凭据与账号整体可用性。附加头由 buildRequest 叠上；
 	// 探活没有客户端请求，入站头传 nil（客户端头透传只作用于转发路径，DESIGN 5.11）。
 	upReq, err := s.buildRequest(ctx, a, a.Protocol, a.Protocol, nil, raw, ir, secretValue, "")
 	if err != nil {

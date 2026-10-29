@@ -74,7 +74,7 @@ func probeVerdict(t *testing.T, recs []store.RequestRecord) store.RequestRecord 
 const probeAnthropicOK = `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"pong"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":1}}`
 
 // TestProbeModelDiscoversProtocol 确认探活能发现模型该用的协议：
-// 账号协议那一次失败（404、403、400 指向端点三种各一例）、换协议之后成功，
+// 厂商默认协议那一次失败（404、403、400 指向端点三种各一例）、换协议之后成功，
 // 结论是 usable，协议记成成功那个，上游收到的路径与凭据头都对。
 func TestProbeModelDiscoversProtocol(t *testing.T) {
 	cases := []struct {
@@ -112,7 +112,7 @@ func TestProbeModelDiscoversProtocol(t *testing.T) {
 				t.Fatalf("探活: %v", err)
 			}
 			if res.Status != store.ModelUsable {
-				t.Fatalf("状态 = %q，期望 usable（账号协议失败后换协议成功）", res.Status)
+				t.Fatalf("状态 = %q，期望 usable（厂商默认协议失败后换协议成功）", res.Status)
 			}
 			if res.Protocol != gateway.ProtocolAnthropic {
 				t.Fatalf("结论里的协议 = %q，期望 %q", res.Protocol, gateway.ProtocolAnthropic)
@@ -121,13 +121,13 @@ func TestProbeModelDiscoversProtocol(t *testing.T) {
 				t.Fatalf("HTTP 状态 = %d，期望成功那次的 200", res.HTTPStatus)
 			}
 
-			// 两次调用：账号协议一次、发现到的协议一次，没有更多。
+			// 两次调用：厂商默认协议一次、发现到的协议一次，没有更多。
 			calls := rec.all()
 			if len(calls) != 2 {
 				t.Fatalf("上游收到 %d 次调用，期望 2 次：%v", len(calls), rec.paths())
 			}
 			if calls[0].path != "/v1/chat/completions" {
-				t.Fatalf("第一次应打账号协议 chat 的路径，实际 %q", calls[0].path)
+				t.Fatalf("第一次应打厂商默认协议 chat 的路径，实际 %q", calls[0].path)
 			}
 			if calls[0].bearer != "Bearer "+key {
 				t.Fatalf("第一次的凭据头应是 Bearer，实际 %q", calls[0].bearer)
@@ -170,7 +170,7 @@ func TestProbeModelDiscoversProtocol(t *testing.T) {
 	}
 }
 
-// TestProbeModelPrimaryProtocolSucceedsOnce 确认账号协议直接成功时只花一次调用，
+// TestProbeModelPrimaryProtocolSucceedsOnce 确认厂商默认协议直接成功时只花一次调用，
 // 并把这次用的协议记下来。
 func TestProbeModelPrimaryProtocolSucceedsOnce(t *testing.T) {
 	f := newFixture(t)
@@ -195,7 +195,7 @@ func TestProbeModelPrimaryProtocolSucceedsOnce(t *testing.T) {
 		t.Fatalf("结论 = %+v，期望 usable/chat", res)
 	}
 	if paths := rec.paths(); len(paths) != 1 || paths[0] != "/v1/chat/completions" {
-		t.Fatalf("上游调用 = %v，期望只打一次账号协议的路径", paths)
+		t.Fatalf("上游调用 = %v，期望只打一次厂商默认协议的路径", paths)
 	}
 
 	rows, err := f.st.AccountModels(acc.ID)
@@ -252,7 +252,7 @@ func TestProbeModelUnauthorizedSkipsDiscovery(t *testing.T) {
 }
 
 // TestProbeModelAllProtocolsFailKeepsAccountVerdict 确认三种协议都失败时，
-// 结论取账号协议那次，协议列保持空（继承），只记一行请求记录。
+// 结论取厂商默认协议那次，协议列保持空（继承），只记一行请求记录。
 func TestProbeModelAllProtocolsFailKeepsAccountVerdict(t *testing.T) {
 	f := newFixture(t)
 	const key = "sk-nope"
@@ -273,10 +273,10 @@ func TestProbeModelAllProtocolsFailKeepsAccountVerdict(t *testing.T) {
 		t.Fatalf("探活: %v", err)
 	}
 	if res.Status != store.ModelNotFound || res.HTTPStatus != http.StatusNotFound {
-		t.Fatalf("结论 = %+v，期望账号协议那次的 notfound/404", res)
+		t.Fatalf("结论 = %+v，期望厂商默认协议那次的 notfound/404", res)
 	}
 	if res.Protocol != gateway.ProtocolChat {
-		t.Fatalf("结论里的协议 = %q，期望账号协议 chat", res.Protocol)
+		t.Fatalf("结论里的协议 = %q，期望厂商默认协议 chat", res.Protocol)
 	}
 	paths := rec.paths()
 	if len(paths) != 3 {
@@ -285,7 +285,7 @@ func TestProbeModelAllProtocolsFailKeepsAccountVerdict(t *testing.T) {
 	want := []string{"/v1/chat/completions", "/v1/messages", "/v1/responses"}
 	for i, p := range want {
 		if paths[i] != p {
-			t.Fatalf("第 %d 次调用路径 = %q，期望 %q（账号协议优先，其余按固定顺序）", i+1, paths[i], p)
+			t.Fatalf("第 %d 次调用路径 = %q，期望 %q（厂商默认协议优先，其余按固定顺序）", i+1, paths[i], p)
 		}
 	}
 

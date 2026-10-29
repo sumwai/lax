@@ -22,7 +22,7 @@ import (
 )
 
 // 协议常量。入站按路径区分，出站按该模型的有效协议（account_models.protocol 优先，
-// 否则账号的 protocol）。gemini 入站与出站都支持（DESIGN 5.9）。
+// 否则账号所属厂商的有效默认协议，见 store.EffectiveProtocol）。gemini 入站与出站都支持（DESIGN 5.9）。
 const (
 	ProtocolAnthropic = translate.ProtocolAnthropic
 	ProtocolChat      = translate.ProtocolChat
@@ -44,7 +44,7 @@ type Options struct {
 	DumpBodies bool
 	// RouteProtocols 给出探活一个模型时该试哪些协议：入参是账号的厂商与模型名，返回按优先
 	// 次序排好的候选（nil 表示没有意见）。不注入时用该厂商在 provider_routes 里声明过的协议
-	// （见 DESIGN 5.8），厂商没声明就三种全试。账号协议与库里已发现的协议由网关排在候选前面
+	// （见 DESIGN 5.8），厂商没声明就三种全试。厂商默认协议与库里已发现的协议由网关排在候选前面
 	// （见 routeProtocolOrder），取值只认三种线协议，出现别的值直接报错，不会静默落进 chat 分支。
 	RouteProtocols func(provider, model string) []string
 }
@@ -255,13 +255,22 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// 协议归属在模型上：模型行有发现结果就用它，否则用账号的 protocol。
-		// 读不出来时退回账号协议，不让一次读库失败把请求打死。
-		outbound, err := s.store.EffectiveProtocol(cand.ID, cand.Protocol, req.Model)
+		// 有效出站协议只有一处算：模型上的发现结果优先，否则厂商的有效默认协议
+		// （store.EffectiveProtocol）。账号行不再存协议，cand.Protocol 只是厂商默认协议的展示值。
+		outbound, err := s.store.EffectiveProtocol(cand.ID, req.Model)
 		if err != nil {
-			s.logf("读账号 %s 模型 %s 的有效协议失败，改按账号协议 %s: %v",
-				cand.Name, req.Model, cand.Protocol, err)
-			outbound = cand.Protocol
+			// 读库失败不猜协议：猜出来的协议会打到这家没声明的路径上，报错比打错地址好。
+			s.logf("读账号 %s 模型 %s 的有效协议失败: %v", cand.Name, req.Model, err)
+			lastErr = fmt.Sprintf("账号 %s：读有效出站协议失败（%v），先运行 switchboard doctor 检查数据库",
+				cand.Name, err)
+			continue
+		}
+		if outbound == "" {
+			// 算不出协议说明配置缺一条路由，不是这个账号这一次打不通：不落冷却，
+			// 只换下一个候选继续试（别的账号可能配好了），文案给下一步命令。
+			lastErr = s.noProtocolMessage(cand, req.Model)
+			s.logf("账号 %s 的模型 %s 算不出有效出站协议", cand.Name, req.Model)
+			continue
 		}
 
 		attemptStart := s.now()
@@ -441,13 +450,17 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, in
 	// 路由的 path 里可以有 {model} 占位符（gemini 的模型名在路径里，见 DESIGN 5.9）：
 	// 先拼好地址再替换，替换后才是真正要访问的 URL。gemini 的流式另走
 	// :streamGenerateContent 与 alt=sse（见 geminiStreamEndpoint）。
-	endpoint := modelEndpoint(s.endpoint(a, outbound), req.Model)
+	// 拼不出地址时直接报错：拿一个空 base_url 猜出来的路径只会换回「unsupported protocol scheme」。
+	upstream, err := s.endpoint(a, outbound)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := modelEndpoint(upstream, req.Model)
 	if outbound == ProtocolGemini && req.Stream {
 		endpoint = geminiStreamEndpoint(endpoint)
 	}
 
 	var body []byte
-	var err error
 	switch {
 	case inbound != outbound:
 		body, err = translate.EncodeRequest(outbound, req, req.Model)
@@ -949,17 +962,85 @@ func Endpoint(base, protocol string) string {
 
 // endpoint 解析账号在某种协议上的上游地址：厂商在 provider_routes 里声明过这条协议就用它的取值——
 // 相对路径拼 base_url、整条地址直接用（见 joinEndpoint）；没有厂商行、或这家没有该协议的路由时
-// 退回后缀猜测（见 DESIGN 5.8）。自建地址的账号（provider 不在表里）因此仍然可用。
-func (s *Server) endpoint(a store.Account, protocol string) string {
+// 退回后缀猜测（见 DESIGN 5.8）。
+//
+// 地址只有一份，在厂商行上（`a.BaseURL` 是 providers.base_url 的派生值）。后缀猜测要 base_url
+// 才能拼，拿不到时不是猜出一个畸形地址去打，而是报错并给出下一步命令：历史孤儿行（厂商行已不存在）
+// 得先 provider add 重建，厂商在但没有这条路由得先 provider set 声明它。
+func (s *Server) endpoint(a store.Account, protocol string) (string, error) {
 	route, ok, err := s.store.LookupProviderRoute(a.Provider, protocol)
 	if err != nil {
 		s.logf("读厂商 %s 的 %s 路由失败，按 base-url 猜路径: %v", a.Provider, protocol, err)
-		return Endpoint(a.BaseURL, protocol)
+	} else if ok && strings.TrimSpace(route.Path) != "" {
+		return joinEndpoint(a.BaseURL, route.Path), nil
 	}
-	if !ok || strings.TrimSpace(route.Path) == "" {
-		return Endpoint(a.BaseURL, protocol)
+	if a.BaseURL == "" {
+		return "", s.noAddressError(a, protocol)
 	}
-	return joinEndpoint(a.BaseURL, route.Path)
+	return Endpoint(a.BaseURL, protocol), nil
+}
+
+// noAddressError 说明为什么拼不出上游地址，并给出下一步命令。
+// 两种情况：账号指向的厂商行不存在（历史孤儿行，地址与路由都随厂商一起没了），
+// 与厂商在但没有这条协议的路由、厂商又没有 base_url 可供后缀猜测（路由与 models_path 都是整条地址）。
+func (s *Server) noAddressError(a store.Account, protocol string) error {
+	if _, err := s.store.GetProvider(a.Provider); errors.Is(err, store.ErrProviderNotFound) {
+		return fmt.Errorf("账号 %s 的厂商 %q 在 providers 里不存在，地址只能从厂商行取：%s",
+			a.Name, a.Provider, providerAddHint(a, protocol))
+	}
+	return fmt.Errorf("厂商 %s 没有 %s 路由，也没有 base_url 可供后缀猜测：用 switchboard provider set %s %s 声明这条路由，或在同一条命令里补上 --base-url",
+		a.Provider, protocol, a.Provider, providerPathHint(protocol))
+}
+
+// providerAddHint 是「厂商行不存在」时的下一步：地址与默认协议都只能从厂商行取，
+// 所以要么重建这家厂商，要么把账号改指到已有厂商。两条都写出来，因为重建厂商要用原来的名字与地址，
+// 而用户手上未必还有那个地址。
+func providerAddHint(a store.Account, protocol string) string {
+	return fmt.Sprintf("先运行 switchboard provider add %s --base-url <地址> %s 重建厂商（用 switchboard provider ls 看现有厂商），或用 switchboard account set %s --provider <厂商> 把账号指到已有厂商",
+		a.Provider, providerPathHint(protocol), a.Name)
+}
+
+// providerPathHint 给出某条协议在 provider 子命令里的写法，用于错误文案里的下一步命令。
+// 只是提示，不是第二条校验：真正的合法取值仍由 store 判定。
+func providerPathHint(protocol string) string {
+	switch protocol {
+	case ProtocolAnthropic:
+		return "--anthropic /v1/messages"
+	case ProtocolResponses:
+		return "--responses /v1/responses"
+	case ProtocolGemini:
+		return "--gemini /v1beta/models/{model}:generateContent"
+	default:
+		return "--openai /v1/chat/completions"
+	}
+}
+
+// noProtocolMessage 说明这个账号为什么算不出有效出站协议，并给出下一步命令。
+// 没有协议可用有三种成因，下一步各不相同：厂商行不存在（历史孤儿行）得先 provider add；
+// 厂商在但没有路由（或默认协议落到空）得先 provider set 声明一条路由；
+// 账号没有厂商名得先给账号选一家厂商。不说清是哪一种，用户只会去查模型名。
+func (s *Server) noProtocolMessage(a store.Account, model string) string {
+	switch {
+	case a.Provider == "":
+		return fmt.Sprintf("账号 %s 没有厂商，算不出出站协议：先运行 switchboard account set %s --provider <厂商>（用 switchboard provider ls 看现有厂商）",
+			a.Name, a.Name)
+	case s.providerMissing(a.Provider):
+		return fmt.Sprintf("账号 %s 的厂商 %q 不存在（历史孤儿行），地址与默认协议都只能从厂商行取：%s",
+			a.Name, a.Provider, providerAddHint(a, ProtocolChat))
+	default:
+		return fmt.Sprintf("账号 %s 在模型 %s 上没有可用的出站协议（厂商 %s 没有路由或默认协议为空）：先运行 switchboard provider set %s %s 声明一条路由，或 switchboard model probe --account %s 探出这个模型的协议",
+			a.Name, model, a.Provider, a.Provider, providerPathHint(ProtocolChat), a.Name)
+	}
+}
+
+// providerMissing 判断厂商行是否不存在。读库失败当作存在：那种情况下要报的是读库错误，
+// 不是「厂商没了」——把一次数据库故障说成配置缺失，会把人引到错误的下一步。
+func (s *Server) providerMissing(provider string) bool {
+	if provider == "" {
+		return true
+	}
+	_, err := s.store.GetProvider(provider)
+	return errors.Is(err, store.ErrProviderNotFound)
 }
 
 // normalizedBase 规整 base_url：只合并路径里的重复斜杠、去掉末尾斜杠（见 store.NormalizeBaseURL）。

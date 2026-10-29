@@ -13,8 +13,8 @@ import (
 
 // 这个文件钉住「路由收紧之后」探活的两条结论：
 // 401 是凭据问题，不换协议、停用账号；403 只是这条路径不收，按厂商声明过的路由接着试，
-// 没有下一条时才按结论记录。厂商行、路由与账号协议都取迁移 0006 种进去的真表，
-// 账号的 base_url 指到 httptest 假上游，因此断言的是「打了几次、打到哪条路由」。
+// 没有下一条时才按结论记录。厂商行、路由与厂商默认协议都取迁移 0006 种进去的真表，
+// 厂商的 base_url 指到 httptest 假上游，因此断言的是「打了几次、打到哪条路由」。
 
 // TestProbeModelUnauthorizedSingleRouteStops 覆盖只有一条 anthropic 路由的厂商上探活遇到 401：
 // 只发一次上游请求（不去试这家没声明的 chat / responses 路径），账号被停用，
@@ -106,7 +106,12 @@ func TestProbeModelForbiddenFollowsDeclaredRoutes(t *testing.T) {
 	}))
 	defer up.Close()
 
-	// 账号协议是 anthropic：账号协议那次先试，403 之后才轮到厂商声明的 chat 路由。
+	// 这一家的默认协议是 anthropic（默认协议只有厂商行上这一份）：厂商默认协议那次先试，
+	// 403 之后才轮到同样声明过的 chat 路由。
+	def := gateway.ProtocolAnthropic
+	if err := f.st.SetProvider("deepseek", store.ProviderPatch{DefaultProtocol: &def}); err != nil {
+		t.Fatalf("改默认协议: %v", err)
+	}
 	acc := f.addAs(t, "ds1", "deepseek", gateway.ProtocolAnthropic, up.URL, key, []string{"claude-x"})
 	gs := newGateway(t, f)
 
@@ -183,7 +188,7 @@ func TestProbeModelForbiddenLastRouteRecordsVerdict(t *testing.T) {
 		t.Fatalf("结论 = %+v，期望 forbidden/403", res)
 	}
 	if res.Protocol != gateway.ProtocolAnthropic {
-		t.Fatalf("没有下一次尝试时协议应保持账号协议，实际 %q", res.Protocol)
+		t.Fatalf("没有下一次尝试时协议应保持厂商默认协议，实际 %q", res.Protocol)
 	}
 
 	if paths := rec.paths(); len(paths) != 1 || paths[0] != "/v1/messages" {

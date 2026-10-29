@@ -3,6 +3,7 @@ package gateway_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,31 +13,60 @@ import (
 	"testing"
 
 	"switchboard/internal/gateway"
-	"switchboard/internal/secret"
 	"switchboard/internal/store"
 )
 
-// addAs 建一个指定厂商的账号。厂商不在 providers 表里就是「自建地址」那条兜底路径。
+// addAs 建一个指定厂商的账号。账号行只存厂商名，地址与默认协议都在厂商行上（见 DESIGN 5.8），所以：
+//
+//   - 厂商行已存在（种子厂商或用例自己建的）：把它的 base_url 指到 baseURL；这家还没设默认协议、
+//     而这次传进来的协议正好是一条已声明的路由时，也把默认协议设成它（用例的 protocol 现在只能落在
+//     厂商行上）。种子厂商的默认协议已经在迁移 0007/0009 里写好，这里不会改动它们。
+//   - 厂商行不存在：按 add 的规则建一家假厂商（三条入站协议各一条按后缀规整出来的路由）。
 func (f *fixture) addAs(t *testing.T, name, provider, protocol, baseURL, secretValue string, models []string) store.Account {
 	t.Helper()
-	cipher, err := secret.Encrypt(f.key, []byte(secretValue))
+	p, err := f.st.GetProvider(provider)
+	switch {
+	case err == nil:
+		patch := store.ProviderPatch{}
+		changed := false
+		if p.BaseURL != baseURL {
+			patch.BaseURL = &baseURL
+			changed = true
+		}
+		if p.DefaultProtocol == "" && f.hasRoute(t, provider, protocol) {
+			patch.DefaultProtocol = &protocol
+			changed = true
+		}
+		if changed {
+			if err := f.st.SetProvider(provider, patch); err != nil {
+				t.Fatalf("把厂商 %s 的地址指到 %s: %v", provider, baseURL, err)
+			}
+		}
+	case errors.Is(err, store.ErrProviderNotFound):
+		if err := f.st.AddProvider(store.Provider{Name: provider, BaseURL: baseURL, DefaultProtocol: protocol},
+			fakeRoutes(baseURL, protocol)); err != nil {
+			t.Fatalf("建假厂商 %s: %v", provider, err)
+		}
+	default:
+		t.Fatalf("读厂商 %s: %v", provider, err)
+	}
+	return f.createAccount(t, name, provider, secretValue, models, 100)
+}
+
+// hasRoute 判断厂商是否声明了这条协议的路由。默认协议只能指向已声明的路由（见 store.SetProvider），
+// 所以设之前先查一次。
+func (f *fixture) hasRoute(t *testing.T, provider, protocol string) bool {
+	t.Helper()
+	routes, err := f.st.ProviderRoutes(provider)
 	if err != nil {
-		t.Fatalf("加密凭据: %v", err)
+		t.Fatalf("读厂商 %s 的路由: %v", provider, err)
 	}
-	acc := store.Account{
-		Name:      name,
-		Provider:  provider,
-		Protocol:  protocol,
-		BaseURL:   baseURL,
-		KeyCipher: cipher,
-		Models:    models,
-		Priority:  100,
-		Enabled:   true,
+	for _, r := range routes {
+		if r.Protocol == protocol {
+			return true
+		}
 	}
-	if err := f.st.CreateAccount(&acc); err != nil {
-		t.Fatalf("建账号: %v", err)
-	}
-	return acc
+	return false
 }
 
 // newGatewayWith 构造可注入选项的网关，并收集它打出的日志。
@@ -143,41 +173,35 @@ func TestForwardUsesProviderRoute(t *testing.T) {
 	}
 }
 
-// TestEndpointFallsBackWithoutProviderRoute 确认兜底：厂商不在表里（自建地址）时按 base_url
-// 后缀猜；厂商在表里但没有该协议的路由时同样按后缀猜。
+// TestEndpointFallsBackWithoutProviderRoute 确认兜底：厂商在表里但没有该协议的路由时按 base_url
+// 后缀猜（模型上的发现结果压过厂商默认协议时才走到这里）。账号的 provider 不在表里是另一种情况：
+// 那样的账号既没有地址也没有默认协议，拼不出任何可用地址，见 TestOrphanAccountHintsProviderAdd。
 func TestEndpointFallsBackWithoutProviderRoute(t *testing.T) {
-	cases := []struct {
-		name     string
-		provider string
-		protocol string
-		want     string
-	}{
-		{"未知厂商", "custom", gateway.ProtocolChat, "/v1/chat/completions"},
-		{"厂商没有该协议", "anthropic", gateway.ProtocolChat, "/v1/chat/completions"},
+	f := newFixture(t)
+	rec := &callRecorder{}
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		rec.add(r.URL.Path, r.Header.Get("x-api-key"), r.Header.Get("Authorization"), string(body))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-1","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer up.Close()
+
+	// anthropic 厂商只声明了 anthropic 一条路由；这个模型探活发现该用 chat，路由里没有这条协议，
+	// 于是按 base_url 后缀猜。
+	acc := f.addAs(t, "a1", "anthropic", gateway.ProtocolAnthropic, up.URL, "sk-fallback", []string{"m1"})
+	if err := f.st.SetModelProtocol(acc.ID, "m1", gateway.ProtocolChat); err != nil {
+		t.Fatalf("写协议发现结果: %v", err)
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			f := newFixture(t)
-			rec := &callRecorder{}
-			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				body, _ := io.ReadAll(r.Body)
-				rec.add(r.URL.Path, r.Header.Get("x-api-key"), r.Header.Get("Authorization"), string(body))
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = io.WriteString(w, `{"id":"chatcmpl-1","choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
-			}))
-			defer up.Close()
+	srv := f.server(t)
 
-			f.addAs(t, "a1", c.provider, c.protocol, up.URL, "sk-fallback", []string{"m1"})
-			srv := f.server(t)
-
-			status, body := postMessages(t, srv, `{"model":"m1","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
-			if status != http.StatusOK {
-				t.Fatalf("状态 = %d，响应 %s", status, body)
-			}
-			if paths := rec.paths(); len(paths) != 1 || paths[0] != c.want {
-				t.Fatalf("上游路径 = %v，期望按后缀猜的 %q", paths, c.want)
-			}
-		})
+	status, body := postMessages(t, srv, `{"model":"m1","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	if status != http.StatusOK {
+		t.Fatalf("状态 = %d，响应 %s", status, body)
+	}
+	want := "/v1/chat/completions"
+	if paths := rec.paths(); len(paths) != 1 || paths[0] != want {
+		t.Fatalf("上游路径 = %v，期望按后缀猜的 %q", paths, want)
 	}
 }
 
@@ -207,7 +231,7 @@ func TestProbeModelNarrowsCandidatesByProvider(t *testing.T) {
 			}))
 			defer up.Close()
 
-			// 账号的 base_url 指向假上游，厂商与协议走真表里的路由。
+			// 厂商的 base_url 指向假上游，厂商与协议走真表里的路由。
 			acc := f.addAs(t, "a1", c.provider, c.protocol, up.URL, "sk-narrow", []string{"m1"})
 			gs := newGateway(t, f)
 
@@ -232,7 +256,7 @@ func TestProbeModelNarrowsCandidatesByProvider(t *testing.T) {
 }
 
 // TestProbeModelStartsFromDiscoveredProtocol 确认已经发现过协议的模型不再每次都白打一次 404：
-// 库里的结论排在账号协议之前，直接命中就只花一次调用。
+// 库里的结论排在厂商默认协议之前，直接命中就只花一次调用。
 func TestProbeModelStartsFromDiscoveredProtocol(t *testing.T) {
 	f := newFixture(t)
 	rec := &callRecorder{}
@@ -249,7 +273,7 @@ func TestProbeModelStartsFromDiscoveredProtocol(t *testing.T) {
 	}))
 	defer up.Close()
 
-	// 账号协议是 chat，但 claude-x 已经发现成 anthropic。
+	// 厂商默认协议是 chat，但 claude-x 已经发现成 anthropic。
 	acc := f.addAs(t, "ds1", "deepseek", gateway.ProtocolChat, up.URL, "sk-discovered", []string{"claude-x"})
 	if err := f.st.SetModelProtocol(acc.ID, "claude-x", gateway.ProtocolAnthropic); err != nil {
 		t.Fatalf("写协议发现结果: %v", err)
@@ -269,7 +293,7 @@ func TestProbeModelStartsFromDiscoveredProtocol(t *testing.T) {
 }
 
 // TestProbeModelTriesEveryCandidate 确认换协议之后遇到非重试类失败也不停手：
-// 第三个候选仍要试到（原来的 break 会让它永远试不到），结论仍取账号协议那次。
+// 第三个候选仍要试到（原来的 break 会让它永远试不到），结论仍取厂商默认协议那次。
 func TestProbeModelTriesEveryCandidate(t *testing.T) {
 	f := newFixture(t)
 	rec := &callRecorder{}
@@ -291,7 +315,7 @@ func TestProbeModelTriesEveryCandidate(t *testing.T) {
 	}))
 	defer up.Close()
 
-	// 厂商不在表里：三种协议全试。
+	// 假厂商声明了三条入站协议的路由（厂商不在种子表里，由 addAs 建行）：三种协议全试。
 	acc := f.addAs(t, "ds1", "custom", gateway.ProtocolChat, up.URL, "sk-all-candidates", []string{"m1"})
 	gs := newGateway(t, f)
 
@@ -304,7 +328,7 @@ func TestProbeModelTriesEveryCandidate(t *testing.T) {
 		t.Fatalf("上游收到 %d 次调用 %v，期望三个候选都试到", len(paths), paths)
 	}
 	if res.HTTPStatus != http.StatusForbidden || res.Status != store.ModelForbidden {
-		t.Fatalf("结论 = %+v，期望取账号协议那次的 403", res)
+		t.Fatalf("结论 = %+v，期望取厂商默认协议那次的 403", res)
 	}
 }
 
@@ -332,8 +356,8 @@ func TestProbeModelRouteProtocolsOption(t *testing.T) {
 		if _, err := gs.ProbeModel(context.Background(), acc, "m1"); err != nil {
 			t.Fatalf("探活: %v", err)
 		}
-		// 注入的候选只有 responses，加上账号协议 chat，正好两次。
-		want := []string{"/v1/chat/completions", "/v1/responses"}
+		// 注入的候选只有 responses，加上这家厂商的默认协议 anthropic，正好两次（anthropic 在前）。
+		want := []string{"/v1/messages", "/v1/responses"}
 		paths := rec.paths()
 		if len(paths) != len(want) {
 			t.Fatalf("上游调用 = %v，期望 %v", paths, want)
@@ -419,7 +443,7 @@ func TestSyncModelsUsesProviderModelsPath(t *testing.T) {
 }
 
 // TestSyncModelsWithoutModelsPath 确认厂商有路由但一个非空 models_path 都没有时报错，
-// 并提示手填；厂商行不存在（自建地址）时仍按后缀猜。
+// 并提示手填；厂商只有地址、一条路由都没声明时仍按 base_url 后缀猜。
 func TestSyncModelsWithoutModelsPath(t *testing.T) {
 	t.Run("全部为空", func(t *testing.T) {
 		f := newFixture(t)
@@ -452,7 +476,7 @@ func TestSyncModelsWithoutModelsPath(t *testing.T) {
 		}
 	})
 
-	t.Run("自建地址兜底", func(t *testing.T) {
+	t.Run("一条路由都没有时按后缀猜", func(t *testing.T) {
 		f := newFixture(t)
 		var gotPath string
 		up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -462,11 +486,15 @@ func TestSyncModelsWithoutModelsPath(t *testing.T) {
 		}))
 		defer up.Close()
 
-		acc := f.addAs(t, "a1", "custom", gateway.ProtocolChat, up.URL, "sk-custom", nil)
+		// 厂商只有地址：一条路由、一个 models_path 都没有，列表地址回到 base_url 后缀兜底。
+		if err := f.st.AddProvider(store.Provider{Name: "addr-only", BaseURL: up.URL}, nil); err != nil {
+			t.Fatalf("建厂商: %v", err)
+		}
+		acc := f.createAccount(t, "a1", "addr-only", "sk-custom", nil, 100)
 		gs := newGateway(t, f)
 
 		if _, err := gs.SyncModels(context.Background(), acc); err != nil {
-			t.Fatalf("自建地址应仍能同步: %v", err)
+			t.Fatalf("只有地址时仍该能同步: %v", err)
 		}
 		if gotPath != "/v1/models" {
 			t.Fatalf("模型列表路径 = %q，期望按后缀猜的 /v1/models", gotPath)

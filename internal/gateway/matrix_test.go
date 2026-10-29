@@ -86,7 +86,7 @@ func (r *recordedRequest) set(path, bearer, apiKey, body string) {
 	r.path, r.bearer, r.apiKey, r.body = path, bearer, apiKey, body
 }
 
-// TestProtocolMatrix 逐一验证「入站协议 × 账号协议」十六种组合，断言形状、凭据头、用量与请求记录。
+// TestProtocolMatrix 逐一验证「入站协议 × 厂商默认协议」十六种组合，断言形状、凭据头、用量与请求记录。
 func TestProtocolMatrix(t *testing.T) {
 	for _, inbound := range fourProtocols {
 		for _, outbound := range fourProtocols {

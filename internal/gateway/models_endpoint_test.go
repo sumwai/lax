@@ -40,7 +40,7 @@ func newModelsServer(t *testing.T) *modelsServer {
 
 // TestSyncModelsAuthFollowsModelsPathRoute 钉住凭据头跟「实际取到 models_path 的那条路由」的协议走：
 // deepseek 的 anthropic 账号取到的是 openai-chat 路由上的 /v1/models，就必须发 Bearer，
-// 而不是账号协议的 x-api-key——否则第一个真实账号就会在 /models 上换回 401/403，
+// 而不是厂商默认协议的 x-api-key——否则第一个真实账号就会在 /models 上换回 401/403，
 // 错误还会指到「凭据无效」上。凭据不进错误文本。
 func TestSyncModelsAuthFollowsModelsPathRoute(t *testing.T) {
 	t.Run("回退到 chat 路由时用 Bearer", func(t *testing.T) {

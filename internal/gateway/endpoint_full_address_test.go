@@ -49,7 +49,7 @@ func newURIUpstream(t *testing.T, respond string) *uriUpstream {
 }
 
 // TestForwardUsesFullAddressRoute 钉住整条地址路由：路由的取值是整条地址时直接访问它，
-// 不再拼账号的 base_url——同一厂商的不同协议因此可以落在不同域名上。
+// 不再拼厂商的 base_url——同一厂商的不同协议因此可以落在不同域名上。
 // 凭据头仍按协议选：anthropic 走 x-api-key，另两家走 Bearer。凭据不进日志。
 func TestForwardUsesFullAddressRoute(t *testing.T) {
 	cases := []struct {
@@ -65,7 +65,7 @@ func TestForwardUsesFullAddressRoute(t *testing.T) {
 			f := newFixture(t)
 			const key = "sk-full-address-route"
 			up := newURIUpstream(t, upstreamBodies[c.protocol])
-			// 账号的 base_url 指向另一个域名：整条地址路由不该被它带跑。
+			// 厂商的 base_url 指向另一个域名：整条地址路由不该被它带跑。
 			decoy := newURIUpstream(t, upstreamBodies[c.protocol])
 
 			if err := f.st.CreateProvider(store.Provider{Name: "split", BaseURL: decoy.url},
@@ -92,7 +92,7 @@ func TestForwardUsesFullAddressRoute(t *testing.T) {
 				t.Fatalf("上游 Host = %q，与假上游地址 %q 对不上", up.host, up.url)
 			}
 			if decoy.hits != 0 {
-				t.Fatalf("账号 base_url 那个域名收到 %d 次请求，整条地址路由不该碰它", decoy.hits)
+				t.Fatalf("厂商 base_url 那个域名收到 %d 次请求，整条地址路由不该碰它", decoy.hits)
 			}
 			if c.protocol == translate.ProtocolAnthropic {
 				if up.apiKey != key {
@@ -118,7 +118,7 @@ func TestForwardUsesFullAddressRoute(t *testing.T) {
 }
 
 // TestForwardMixesFullAddressAndRelativeRoutes 钉住同厂商两条协议各写一种写法时互不影响：
-// 整条地址那条落到自己的域名，相对路径那条照旧拼账号的 base_url。
+// 整条地址那条落到自己的域名，相对路径那条照旧拼厂商的 base_url。
 func TestForwardMixesFullAddressAndRelativeRoutes(t *testing.T) {
 	// 一条协议用整条地址（另一个域名），另一条用相对路径（拼 base_url）。
 	newSplit := func(t *testing.T) (*fixture, *uriUpstream, *uriUpstream) {
@@ -268,7 +268,7 @@ func TestSyncModelsFullAddressModelsPath(t *testing.T) {
 }
 
 // TestSyncModelsWithEndpointFullAddress 钉住 `model sync --endpoint` 收整条地址：
-// 给了就不再拼账号 base_url，规整后直接访问；相对路径照旧拼 base_url，两种写法各管一次调用。
+// 给了就不再拼厂商 base_url，规整后直接访问；相对路径照旧拼 base_url，两种写法各管一次调用。
 func TestSyncModelsWithEndpointFullAddress(t *testing.T) {
 	f := newFixture(t)
 	const key = "sk-endpoint-full-address"
@@ -296,13 +296,13 @@ func TestSyncModelsWithEndpointFullAddress(t *testing.T) {
 		t.Fatalf("RequestURI = %q，期望 %q", other.uri, want)
 	}
 	if other.bearer != "Bearer "+key {
-		t.Fatalf("Authorization = %q，--endpoint 的凭据头按账号协议发", other.bearer)
+		t.Fatalf("Authorization = %q，--endpoint 的凭据头按厂商默认协议发", other.bearer)
 	}
 	if base.hits != 0 {
 		t.Fatalf("base_url 域名收到 %d 次请求，整条地址的 --endpoint 不该拼它", base.hits)
 	}
 
-	// 相对路径：仍拼账号的 base_url，与升级前一致。
+	// 相对路径：仍拼厂商的 base_url，与升级前一致。
 	if _, err := gs.SyncModelsWithEndpoint(context.Background(), acc, "v1/models"); err != nil {
 		t.Fatalf("同步: %v", err)
 	}

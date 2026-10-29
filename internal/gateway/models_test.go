@@ -387,7 +387,7 @@ func TestProbeModelRecordsRequestRow(t *testing.T) {
 	}
 	rec := recs[0]
 	if rec.Inbound != gateway.ProtocolAnthropic || rec.Outbound != gateway.ProtocolAnthropic {
-		t.Fatalf("入站与出站都应取账号协议，实际 %s→%s", rec.Inbound, rec.Outbound)
+		t.Fatalf("入站与出站都应取厂商默认协议，实际 %s→%s", rec.Inbound, rec.Outbound)
 	}
 	if rec.ModelRequested != "claude-x" || rec.ModelUsed != "claude-x" {
 		t.Fatalf("模型字段 = %q / %q", rec.ModelRequested, rec.ModelUsed)
@@ -435,7 +435,7 @@ func TestProbeModelRecordsFailedRequest(t *testing.T) {
 			t.Fatalf("状态 = %d，ok = %v", rec.HTTPStatus, rec.OK)
 		}
 		if rec.Outbound != gateway.ProtocolChat {
-			t.Fatalf("判定行应是账号协议那次，实际出站 %q", rec.Outbound)
+			t.Fatalf("判定行应是厂商默认协议那次，实际出站 %q", rec.Outbound)
 		}
 		if rec.InTokens != 0 || rec.OutTokens != 0 {
 			t.Fatalf("非 2xx 的 token 应记 0，实际 %d/%d", rec.InTokens, rec.OutTokens)
@@ -590,7 +590,7 @@ func TestProbeModelResponsesRowReadsTopLevelUsage(t *testing.T) {
 	}
 	rec := recs[0]
 	if rec.Inbound != gateway.ProtocolResponses || rec.Outbound != gateway.ProtocolResponses {
-		t.Fatalf("入站与出站都应取账号协议，实际 %s→%s", rec.Inbound, rec.Outbound)
+		t.Fatalf("入站与出站都应取厂商默认协议，实际 %s→%s", rec.Inbound, rec.Outbound)
 	}
 	if rec.InTokens != 9 || rec.OutTokens != 1 {
 		t.Fatalf("token = %d/%d，期望 9/1（顶层 usage 的 input_tokens / output_tokens）",
