@@ -125,6 +125,11 @@ func (s *Server) probeModelsEndpoint(ctx context.Context, a store.Account) (step
 	// 凭据头跟着取到这条地址的协议走，与 `model sync` 一致：deepseek 的 anthropic 账号
 	// 取到的是 chat 路由上的 /v1/models，得发 Bearer，按账号协议发 x-api-key 只会换回 401。
 	setAuth(req, protocol, secretValue)
+	// 模型列表请求也带厂商附加头（见 DESIGN 5.7、5.10）。读库失败在这里算作错误而不是退回
+	// 最小请求：那是数据库或配置的故障，不是这家没有列表接口。
+	if err := s.applyProviderHeaders(req, a, protocol, "", ""); err != nil {
+		return step, "", false, err
+	}
 
 	start := s.now()
 	resp, err := s.client.Do(req)
@@ -211,8 +216,8 @@ func (s *Server) probeMinimalCall(ctx context.Context, a store.Account, listNote
 	}
 	secretValue := string(key)
 	// 账号探活按账号自己的协议打：它检验的是凭据与账号整体可用性，
-	// 不跟模型上的协议发现结果走（那个由 model probe 负责）。
-	upReq, err := s.buildRequest(ctx, a, a.Protocol, a.Protocol, raw, ir, secretValue)
+	// 不跟模型上的协议发现结果走（那个由 model probe 负责）。附加头由 buildRequest 叠上。
+	upReq, err := s.buildRequest(ctx, a, a.Protocol, a.Protocol, raw, ir, secretValue, "")
 	if err != nil {
 		return step, err
 	}

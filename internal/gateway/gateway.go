@@ -212,10 +212,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session := r.Header.Get("x-switchboard-session")
-	if session == "" {
-		session = sessionFromBody(raw)
-	}
+	session := requestSession(r, raw)
 
 	accounts, err := s.store.ListAccounts()
 	if err != nil {
@@ -251,7 +248,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		}
 
 		attemptStart := s.now()
-		res := s.tryUpstream(r.Context(), w, cand, outbound, inbound, raw, req)
+		res := s.tryUpstream(r.Context(), w, cand, outbound, inbound, raw, req, session)
 		latency := s.now().Sub(attemptStart)
 
 		rec := &store.RequestRecord{
@@ -337,6 +334,16 @@ func modelNotFoundMessage(model string) string {
 		"再用 switchboard model probe 探活", model)
 }
 
+// requestSession 取本次入站请求的会话键（见 DESIGN 5.3）：`x-switchboard-session` 头优先，
+// 其次请求体里的 metadata.user_id。选号粘性与附加头的 {session} 都走这一个函数，不写第二份——
+// 两处取到不同的值会让「同一个对话」在选号与上游看来不是同一个会话。
+func requestSession(r *http.Request, raw []byte) string {
+	if v := r.Header.Get("x-switchboard-session"); v != "" {
+		return v
+	}
+	return sessionFromBody(raw)
+}
+
 // sessionFromBody 从请求体里取会话标识，用于粘同一个账号。
 func sessionFromBody(raw []byte) string {
 	var env struct {
@@ -360,14 +367,14 @@ func sessionFromBody(raw []byte) string {
 }
 
 func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store.Account, outbound string,
-	inbound string, raw []byte, req *translate.Request) attempt {
+	inbound string, raw []byte, req *translate.Request, session string) attempt {
 
 	key, err := secret.Decrypt(s.key, a.KeyCipher)
 	if err != nil {
 		return attempt{status: http.StatusInternalServerError, message: "解密账号凭据失败"}
 	}
 
-	upReq, err := s.buildRequest(ctx, a, outbound, inbound, raw, req, string(key))
+	upReq, err := s.buildRequest(ctx, a, outbound, inbound, raw, req, string(key), session)
 	if err != nil {
 		return attempt{status: http.StatusBadGateway, message: err.Error(), err: err}
 	}
@@ -389,10 +396,11 @@ func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store
 	return s.jsonSuccess(w, resp, inbound, outbound, req)
 }
 
-// buildRequest 按有效出站协议构造上游请求：路径、凭据头与请求体编码都跟它走。
+// buildRequest 按有效出站协议构造上游请求：路径、凭据头、附加头与请求体编码都跟它走。
 // 入站协议与它相同时直通（只改 model），不同时经中间表示转换。
+// session 是本次请求的会话键（必要时是空串），供附加头的 {session} 用；模型名取 req.Model。
 func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, inbound string, raw []byte,
-	req *translate.Request, key string) (*http.Request, error) {
+	req *translate.Request, key, session string) (*http.Request, error) {
 
 	// 路由的 path 里可以有 {model} 占位符（gemini 的模型名在路径里，见 DESIGN 5.9）：
 	// 先拼好地址再替换，替换后才是真正要访问的 URL。gemini 的流式另走
@@ -428,6 +436,10 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, in
 		httpReq.Header.Set("Accept", "text/event-stream")
 	}
 	setAuth(httpReq, outbound, key)
+	// 附加头压后叠加：同名时声明覆盖 setAuth 给的默认凭据头（DESIGN 5.10 的「声明优先」）。
+	if err := s.applyProviderHeaders(httpReq, a, outbound, req.Model, session); err != nil {
+		return nil, err
+	}
 	if s.dumpBodies {
 		s.logf("→ 上游 %s 请求体: %s", endpoint, truncateForLog(string(body)))
 	}

@@ -374,7 +374,7 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 `model sync [--provider 厂商] [--account 账号] [--endpoint <路径>]` 只解决前者：
 
 - 模型列表地址按这个顺序取，纯规则在 `store.ResolveModelsPath`：`--endpoint` 给的地址（只作用于这一次调用，压过下面全部）→ 厂商级 `providers.models_path` 覆盖 → 账号协议那条路由的 `models_path` → 同厂商按协议名排序的第一条非空 `models_path`；每一项都可能是相对路径或整条地址（见 5.8），整条地址直接访问、不再拼账号的 `base_url`；厂商行存在且声明了路由、但一个非空 `models_path` 都没有时报错，提示用 `--models` 手填或 `provider set --models-path <地址>` 补上；厂商行不存在或一条路由都没声明时按 `base_url` 后缀猜（见 5.8）。
-- 凭据头与地址一起定：地址来自哪条路由，就用那条路由的协议选凭据头（anthropic 用 `x-api-key`，gemini 用 `x-goog-api-key`，两条 openai 协议用 `Bearer`）；厂商级覆盖与 `--endpoint` 没有自己的协议，按账号协议发。deepseek 的 anthropic 账号取到的是 chat 路由上的 `/v1/models`，所以必须发 `Bearer`——按账号协议发 `x-api-key` 只会换回 401/403，还把错误指到「凭据无效」上。
+- 凭据头与地址一起定：地址来自哪条路由，就用那条路由的协议选凭据头（anthropic 用 `x-api-key`，gemini 用 `x-goog-api-key`，两条 openai 协议用 `Bearer`）；厂商级覆盖与 `--endpoint` 没有自己的协议，按账号协议发。deepseek 的 anthropic 账号取到的是 chat 路由上的 `/v1/models`，所以必须发 `Bearer`——按账号协议发 `x-api-key` 只会换回 401/403，还把错误指到「凭据无效」上。模型列表请求也带厂商附加头：`setAuth` 设完凭据头再叠声明，`{model}` 在这里没有模型名，所以那条头不发（见 5.10）。
 - `model sync --endpoint <地址>` 只影响这一次调用：值是相对账号的 `base_url` 的完整路径，也可以是整条地址（账号行固化地址，见 5.8），相对路径按 5.8 的规则规整（`v1/models`、`//v1//models/` 都落成 `/v1/models`）、整条地址校验后直接访问、不再拼 `base_url`；给了就忽略厂商覆盖、路由的 `models_path` 与 `base_url` 兜底，作用于被选中的每个账号。
 - 响应形状自动识别，不加配置、不加 flag，按这个顺序试，第一个命中生效：`{data:[…]}`（OpenAI 兼容，主流）→ `{models:[…]}`（ollama 的 `/api/tags` 这类，gemini 也用它）→ 顶层数组（`["m1"]` 或 `[{"id":…}]`）。每个条目按 `id` → `name` → `model` 取第一个非空字符串，去空白、去重、排序，缺这些字段的条目跳过。判定只看字段在不在：只有字段不存在时才试下一种形状，字段存在但为空（`{"data":[]}`、`{"models":[]}`，或该字段是 `null`）就是「上游返回空列表」，算该账号失败，不拿后面的形状兜底——空列表与形状不对是两件事。三种形状都不匹配时报错，文案列出这三种形状并提示检查 `base-url`（也可以用 `--models` 手填）。
 - gemini 的清单是第二种形状：`{"models":[{"name":"models/gemini-2.5-pro","supportedGenerationMethods":["generateContent","countTokens"]}],"nextPageToken":"…"}`。形状判定与上面完全一样，`{"models":[…]}` 就是 `{"models":[…]}`；另加两条后处理，只在这一次解析里生效（纯函数 `parseModelListPage` 与 `modelNames`，见 `internal/gateway/models.go`）：
@@ -586,16 +586,19 @@ gemini 的原生接口（Generative Language API 的 `generateContent`）与另�
 
 头名在库里只有小写一种写法，因此覆盖、删除与「这个头有没有声明」都按头名比，写 `X-Opencode-Session` 与写 `x-opencode-session` 是同一行。`ProviderHeader` 的 `String` 只出「头名=前四位加省略号」，`slog.Any`、`%v` 与整片 `%v` 都走它，所以把一行或一片附加头交给日志不会带出值；要看原值直接读 `Value` 字段。
 
-值的四种写法（转发前展开，展开后为空则该头不发，并在网关日志里记一行）：
+值的四种写法（转发前展开，展开后为空则该头不发，并在网关日志里记一行）：占位符按整值匹配，值就是下面四种之一时才展开；掺了别的文字（例如 `Bearer {env:TOKEN}`）一律当字面量原样发出去，不做局部替换。
 
 | 写法 | 展开成 | 用途 |
 | --- | --- | --- |
 | 字面量 | 原样 | `api-version: 2024-10-21` 这类固定值 |
-| `{env:NAME}` | 进程环境变量的值 | 会话 token、自定义鉴权头这类不该落库的东西 |
-| `{session}` | 本次请求的会话键（见 5.3：`x-switchboard-session` 或 `metadata.user_id`），都没有时每次请求新生成一个 UUID | opencode 的 `x-opencode-session`：同一对话一个稳定值 |
-| `{model}` | 本次请求的模型名（裸名，不转义） | 少数按模型路由的网关 |
+| `{env:NAME}` | 进程环境变量的值；变量没设置、或设置了但是空串时这条头不发，日志写明是哪个变量 | 会话 token、自定义鉴权头这类不该落库的东西 |
+| `{session}` | 本次请求的会话键（见 5.3：`x-switchboard-session` 或 `metadata.user_id`），与选号粘性取同一个值；都没有时每次请求现生成一个 UUID | opencode 的 `x-opencode-session`：同一对话一个稳定值 |
+| `{model}` | 本次请求的模型名（裸名，不转义）；模型列表请求没有模型名，这条头在那里不发 | 少数按模型路由的网关 |
 
-- 只影响上游请求，不影响入站响应与 `/v1/models` 这类只读接口；也不进 `requests` 记录（头里可能是密钥，落库等于把它们写进请求记录）。日志里打印头名，不打印值。
+- 注入范围是所有发往上游的请求：转发、`model sync` 的模型列表请求、`account test` 的两段（列表与最小调用）、`model probe` 的单模型请求。顺序固定为「先 `setAuth` 设默认凭据头，再叠声明」。`/v1/models` 这类入站只读接口不带附加头。
+- 展开后为空串时不发这个头，也不发一个空值头；展开后含回车、换行或 NUL 时同样不发（环境变量的值可能带折行，原样拼进请求头等于拼出第二条头）。
+- 读声明失败（读库失败）时转发报错，不静默跳过：少一条附加头上游就回 400，静默跳过等于把一次配置故障变成一句看不懂的协议错误。文案提示先跑 `switchboard doctor`。
+- 只影响上游请求，不影响入站响应与 `/v1/models` 这类只读接口；也不进 `requests` 记录（头里可能是密钥，落库等于把它们写进请求记录）。日志里只出头名与「已发送 / 未发送」以及没发的原因，不打印值。
 - 与协议凭据头冲突时按「声明优先」：显式写的头覆盖 `setAuth` 给的默认值（比如某些网关要 `Authorization: Bearer` 换成自定义 scheme）。冲突在写入时不管，只由转发时的「先设默认、再套声明」顺序决定，避免两层都做判断。
 - 命名：`provider header set <名称> <头名> <值> [--protocol <协议>]`、`provider header unset <名称> <头名> [--protocol <协议>]`、`provider header ls [<名称>]`（`--json` 输出；`set` 是覆盖语义，不存在时新建）。
 

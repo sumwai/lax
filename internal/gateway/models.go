@@ -130,7 +130,7 @@ func (s *Server) SyncModelsWithEndpoint(ctx context.Context, a store.Account, en
 		if err != nil {
 			return nil, fmt.Errorf("模型列表地址 %q 不合法，检查账号 %s 的 base-url: %w", target, a.Name, err)
 		}
-		raw, err := fetchModelPage(ctx, s.client, pageURL, target, protocol, a, secretValue)
+		raw, err := s.fetchModelPage(ctx, pageURL, target, protocol, a, secretValue)
 		if err != nil {
 			return nil, err
 		}
@@ -199,7 +199,8 @@ func modelListPageURL(target, pageToken string, paginated bool) (string, error) 
 // fetchModelPage 取一页模型列表的原始响应体。凭据只在这里作为参数出现，错误文本一并过
 // scrubSecret，明文不进错误信息与日志（见 DESIGN 5.6）。错误信息里写的是 target（配置里的地址），
 // 不带这次追加的分页参数，便于照着命令里的取值排查。
-func fetchModelPage(ctx context.Context, client *http.Client, pageURL, target, protocol string,
+// 模型列表请求与转发同一套头：先 setAuth 设凭据头，再叠厂商附加头（见 DESIGN 5.7、5.10）。
+func (s *Server) fetchModelPage(ctx context.Context, pageURL, target, protocol string,
 	a store.Account, secretValue string) ([]byte, error) {
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
@@ -209,8 +210,13 @@ func fetchModelPage(ctx context.Context, client *http.Client, pageURL, target, p
 	req.Header.Set("Accept", "application/json")
 	// 凭据头跟着取到这条路径的协议走，不是账号协议。
 	setAuth(req, protocol, secretValue)
+	// 模型列表请求没有模型名（{model} 展开为空时不发那条头），会话键也没有：
+	// {session} 在这里每次请求现生成一个（见 DESIGN 5.10）。
+	if err := s.applyProviderHeaders(req, a, protocol, "", ""); err != nil {
+		return nil, err
+	}
 
-	resp, err := client.Do(req)
+	resp, err := s.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("拉取模型列表失败（GET %s）：%s", target, scrubSecret(err.Error(), secretValue))
 	}
@@ -664,7 +670,7 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 		res.Message = "按协议 " + protocol + " 编码探活请求失败: " + err.Error()
 		return att
 	}
-	upReq, err := s.buildRequest(ctx, a, protocol, protocol, raw, ir, key)
+	upReq, err := s.buildRequest(ctx, a, protocol, protocol, raw, ir, key, "")
 	if err != nil {
 		res.Status = store.ModelError
 		res.Message = "构造探活请求失败: " + err.Error()
