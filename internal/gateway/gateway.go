@@ -165,7 +165,11 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "只接受 POST")
+		// 405 带上 `Allow: POST`，与两个只读清单接口的 `Allow: GET` 对称：
+		// 客户端据此能判断是方法用错了，而不是路径不存在（见 DESIGN 5.2.1）。
+		w.Header().Set("Allow", http.MethodPost)
+		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error",
+			"这条入站路径只接受 POST；对话请求用 POST 发到 "+r.URL.Path+"，查模型清单用 GET /v1/models")
 		return
 	}
 

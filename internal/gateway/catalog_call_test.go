@@ -114,7 +114,9 @@ func TestCatalogAndInboundAgreeOnUnlistedName(t *testing.T) {
 	if status != http.StatusNotFound {
 		t.Fatalf("单模型接口状态 = %d，响应 %s", status, body)
 	}
-	if !strings.Contains(body, "没有账号提供模型 "+missing) {
+	// 单模型接口讲「清单里没有」（只算启用账号），三条入站路径讲「没有账号提供」。
+	// 两者都点名同一个名字，但口径不同，见 DESIGN 5.2.1。
+	if !strings.Contains(body, "清单里没有模型 "+missing) {
 		t.Fatalf("单模型接口文案 = %s，期望点名 %s", body, missing)
 	}
 

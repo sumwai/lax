@@ -38,10 +38,12 @@ func callWithMethod(t *testing.T, method, url string) (int, string, http.Header)
 
 // TestModelsListDedupesSortsAndPicksOwner 钉住清单的三个规则：只列 enabled 账号的
 // accounts.models、按模型名去重升序、同名模型被多家支持时 owned_by 取厂商名字典序
-// 第一个。响应体按整个字符串比对：字段顺序与 created 固定 0 都是契约的一部分。
+// 第一个；空白名字不算模型。响应体按整个字符串比对：字段顺序与 created 固定 0
+// 都是契约的一部分。
 func TestModelsListDedupesSortsAndPicksOwner(t *testing.T) {
 	f := newFixture(t)
-	f.addAs(t, "z1", "zeta", gateway.ProtocolChat, "http://127.0.0.1:1", "sk-z-1", []string{"m-b", "m-a"})
+	// 末项只有空格：库里存的是原样，过滤在清单这一层做，它不能出现在响应里。
+	f.addAs(t, "z1", "zeta", gateway.ProtocolChat, "http://127.0.0.1:1", "sk-z-1", []string{"m-b", "m-a", " "})
 	f.addAs(t, "a1", "alpha", gateway.ProtocolAnthropic, "http://127.0.0.1:1", "sk-a-1", []string{"m-a"})
 	srv := f.server(t)
 
@@ -169,7 +171,7 @@ func TestModelByIDHitAndMiss(t *testing.T) {
 	if errBody.Error.Type != "not_found_error" {
 		t.Fatalf("错误类型 = %q", errBody.Error.Type)
 	}
-	for _, want := range []string{"没有账号提供模型 no-such-model", "switchboard model ls", "model probe"} {
+	for _, want := range []string{"清单里没有模型 no-such-model", "switchboard model ls", "model probe"} {
 		if !strings.Contains(errBody.Error.Message, want) {
 			t.Fatalf("错误文案 %q 缺少 %q", errBody.Error.Message, want)
 		}
@@ -179,6 +181,85 @@ func TestModelByIDHitAndMiss(t *testing.T) {
 	status, body, _ = getJSON(t, srv.URL+"/v1/models/")
 	if status != http.StatusNotFound || !strings.Contains(body, "URL 里没有模型名") {
 		t.Fatalf("空模型名：状态 = %d，响应 = %s", status, body)
+	}
+}
+
+// TestModelByIDPathIsCleanedBeforeMatching 钉住「前缀之后全部字符都算模型名」的例外：
+// http.ServeMux 先 cleanPath 再匹配前缀，所以 `//`、`.`、`..` 这类不规整的写法拿不到
+// handleModelByID，而是先被 307 到规整后的路径（Go 的 mux 用 307 而不是 301，
+// 方法与非 GET 的请求体因此不会被改写）。含这些片段的模型名在真实上游里不存在，
+// 不为此绕开 mux。
+func TestModelByIDPathIsCleanedBeforeMatching(t *testing.T) {
+	f := newFixture(t)
+	f.addAs(t, "ds1", "deepseek", gateway.ProtocolChat, "http://127.0.0.1:1", "sk-ds", []string{"m1", "m2"})
+	srv := f.server(t)
+
+	// 不让测试客户端跟随重定向，看的就是第一次响应的状态与 Location。
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	for _, c := range []struct{ path, location string }{
+		{"/v1/models//m1", "/v1/models/m1"},
+		{"/v1/models/a/./b", "/v1/models/a/b"},
+		{"/v1/models/m1/../m2", "/v1/models/m2"},
+	} {
+		resp, err := client.Get(srv.URL + c.path)
+		if err != nil {
+			t.Fatalf("请求 %s: %v", c.path, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusTemporaryRedirect {
+			t.Fatalf("%s 状态 = %d，期望 307", c.path, resp.StatusCode)
+		}
+		if got := resp.Header.Get("Location"); got != c.location {
+			t.Fatalf("%s Location = %q，期望 %q", c.path, got, c.location)
+		}
+	}
+
+	// 跟上重定向之后当作规整后的名字来查：`/v1/models//m1` 最终还是命中 m1。
+	status, body, _ := getJSON(t, srv.URL+"/v1/models//m1")
+	if status != http.StatusOK || !strings.Contains(body, `"id":"m1"`) {
+		t.Fatalf("跟随重定向：状态 = %d，响应 = %s", status, body)
+	}
+}
+
+// TestModelByIDDisabledOnlyModelIs404 钉住清单与转发的分界：只由停用账号提供的名字
+// 在清单里是 404（停用账号不计），同一个名字走转发却是 503（账号存在但当前不可用）。
+func TestModelByIDDisabledOnlyModelIs404(t *testing.T) {
+	f := newFixture(t)
+	off := f.addAs(t, "off", "alpha", gateway.ProtocolChat, "http://127.0.0.1:1", "sk-off", []string{"m-off"})
+	if err := f.st.SetEnabled(off.ID, false, "手工停用"); err != nil {
+		t.Fatalf("停用账号: %v", err)
+	}
+	srv := f.server(t)
+
+	status, body, _ := getJSON(t, srv.URL+"/v1/models/m-off")
+	if status != http.StatusNotFound {
+		t.Fatalf("状态 = %d，响应 %s", status, body)
+	}
+	var errBody struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(body), &errBody); err != nil {
+		t.Fatalf("错误响应不是合法 JSON: %v，原文 %s", err, body)
+	}
+	if errBody.Error.Type != "not_found_error" {
+		t.Fatalf("错误类型 = %q", errBody.Error.Type)
+	}
+	for _, want := range []string{"清单里没有模型 m-off", "停用账号不计", "冷却中的账号仍然计入", "switchboard model ls", "model probe"} {
+		if !strings.Contains(errBody.Error.Message, want) {
+			t.Fatalf("错误文案 %q 缺少 %q", errBody.Error.Message, want)
+		}
+	}
+
+	// 同一个名字走转发：账号存在但被停用，是 503 而不是 404。
+	postStatus, postBody := postMessages(t, srv, `{"model":"m-off","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`)
+	if postStatus != http.StatusServiceUnavailable || !strings.Contains(postBody, "都在冷却或被停用") {
+		t.Fatalf("转发：状态 = %d，响应 = %s", postStatus, postBody)
 	}
 }
 

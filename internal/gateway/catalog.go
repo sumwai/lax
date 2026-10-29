@@ -100,8 +100,10 @@ func (s *Server) handleModelList(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleModelByID 是 `GET /v1/models/{id}`：单个模型名。未命中返回 404 与
-// `not_found_error`，文案给出两条下一步命令（看清单、探活），与 5.2 第 2 步
-// 「没有账号提供模型」同一个口吻。
+// `not_found_error`，文案给出两条下一步命令（看清单、探活）。文案讲的是「清单里没有」
+// 而不是「没有账号提供」：清单只算 `enabled=1` 的账号、冷却中的账号照样算，所以只由停用
+// 账号提供的名字在这里是 404，转发时却是 503（账号存在但当前不可用），两者的分界写在
+// DESIGN 5.2.1。
 func (s *Server) handleModelByID(w http.ResponseWriter, r *http.Request) {
 	if !allowGet(w, r) {
 		return
@@ -126,7 +128,7 @@ func (s *Server) handleModelByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeError(w, http.StatusNotFound, "not_found_error",
-		fmt.Sprintf("没有账号提供模型 %s；用 switchboard model ls 看现有清单，或先运行 model probe", id))
+		fmt.Sprintf("清单里没有模型 %s（停用账号不计，冷却中的账号仍然计入）；用 switchboard model ls 看现有清单，或先运行 model probe", id))
 }
 
 // allowGet 校验只读接口的方法。非 GET 一律 405 并带 `Allow: GET`：

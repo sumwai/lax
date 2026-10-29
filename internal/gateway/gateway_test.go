@@ -341,6 +341,52 @@ func TestForbiddenDoesNotDisableAccount(t *testing.T) {
 }
 
 // 没有任何账号声明提供这个模型时返回 404，并说明下一步命令；不是 503。
+// TestInboundRejectsOtherMethodsWithAllowPost 钉住三条入站路径的 405 带 `Allow: POST`：
+// 两个只读清单接口的 405 带 `Allow: GET`，两边对称，客户端据此能区分「方法用错了」
+// 与「路径不存在」。路径认不出来时仍是 404，不带 `Allow`。
+func TestInboundRejectsOtherMethodsWithAllowPost(t *testing.T) {
+	f := newFixture(t)
+	f.add(t, "ds1", gateway.ProtocolChat, "http://127.0.0.1:1", "sk-1", []string{"m1"}, 100)
+	srv := f.server(t)
+
+	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
+		for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete, http.MethodHead, http.MethodPatch} {
+			req, err := http.NewRequest(method, srv.URL+path, nil)
+			if err != nil {
+				t.Fatalf("构造请求: %v", err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("%s %s: %v", method, path, err)
+			}
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusMethodNotAllowed {
+				t.Fatalf("%s %s 状态 = %d，期望 405（响应 %s）", method, path, resp.StatusCode, string(b))
+			}
+			if allow := resp.Header.Get("Allow"); allow != http.MethodPost {
+				t.Fatalf("%s %s Allow = %q，期望 POST", method, path, allow)
+			}
+			// HEAD 的响应体由 net/http 按协议丢掉，只校验状态与 Allow。
+			if method == http.MethodHead {
+				continue
+			}
+			if !strings.Contains(string(b), "只接受 POST") {
+				t.Fatalf("%s %s 响应 = %s，期望说明只接受 POST", method, path, string(b))
+			}
+		}
+	}
+
+	// 未知路径是 404（没有这个地址），不是 405。
+	status, _, header := callWithMethod(t, http.MethodGet, srv.URL+"/v1/unknown")
+	if status != http.StatusNotFound {
+		t.Fatalf("未知路径状态 = %d，期望 404", status)
+	}
+	if allow := header.Get("Allow"); allow != "" {
+		t.Fatalf("未知路径 Allow = %q，期望不带这个头", allow)
+	}
+}
+
 func TestModelWithoutProviderIsNotFound(t *testing.T) {
 	f := newFixture(t)
 	// 只放一个模型列表为空的账号：它刚建号、不提供任何模型，不该接住任意模型名。
