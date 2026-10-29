@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -79,6 +80,8 @@ func (s *Server) modelsEndpoint(a store.Account, override string) (endpoint, pro
 }
 
 // SyncModels 按厂商覆盖与路由的 models_path 拉取上游的模型列表，按名字排序去重。
+// 响应形状三种都认（见 parseModelList 与 DESIGN 5.7）：`{data:[…]}`、`{models:[…]}`
+// 与顶层数组，形状不同的上游（例如 ollama 的 /api/tags）不必再靠 --models 手填。
 func (s *Server) SyncModels(ctx context.Context, a store.Account) ([]string, error) {
 	return s.SyncModelsWithEndpoint(ctx, a, "")
 }
@@ -115,38 +118,130 @@ func (s *Server) SyncModelsWithEndpoint(ctx context.Context, a store.Account, en
 			resp.StatusCode, target, protocol, scrubSecret(readErrorBody(resp.Body), string(key)))
 	}
 
-	var payload struct {
-		Data []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&payload); err != nil {
+	var raw json.RawMessage
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("模型列表不是合法 JSON: %w", err)
 	}
-
-	seen := map[string]bool{}
-	var models []string
-	for _, m := range payload.Data {
-		id := strings.TrimSpace(m.ID)
-		if id == "" {
-			id = strings.TrimSpace(m.Name)
-		}
-		if id == "" || seen[id] {
-			continue
-		}
-		seen[id] = true
-		models = append(models, id)
+	models, isModelList := parseModelList(raw)
+	if !isModelList {
+		return nil, fmt.Errorf("上游返回的不是模型列表：认 %s 三种形状，检查 base-url %s 是否指向模型列表接口（三种形状都不匹配时用 --models 手填）",
+			modelShapeList(), a.BaseURL)
 	}
 	if len(models) == 0 {
 		return nil, fmt.Errorf("上游没有返回模型，检查 base-url %s 是否正确", a.BaseURL)
 	}
-	sort.Strings(models)
 	return models, nil
 }
 
+// modelListShape 是模型列表响应的一种已知形状，按数组里的顺序依次尝试（见 DESIGN 5.7）。
+// field 为空串表示顶层本身就是条目数组，desc 是报错文案里给用户看的写法。
+type modelListShape struct {
+	field string
+	desc  string
+}
+
+// modelListShapes 是三种已知形状：OpenAI 兼容的 `{data:[…]}`、ollama 风格的 `{models:[…]}`、
+// 顶层数组。data 排在 models 前面，两种字段同时出现时认 data。
+var modelListShapes = []modelListShape{
+	{field: "data", desc: `{"data":[{"id":"…"}]}`},
+	{field: "models", desc: `{"models":[{"name":"…"}]}`},
+	{field: "", desc: `顶层数组 ["m1","m2"]`},
+}
+
+// modelShapeList 把三种形状的写法拼成一句报错文案，形状只在 modelListShapes 里定义一份。
+func modelShapeList() string {
+	desc := make([]string, len(modelListShapes))
+	for i, shape := range modelListShapes {
+		desc[i] = shape.desc
+	}
+	return strings.Join(desc, "、")
+}
+
+// parseModelList 按 modelListShapes 的顺序解析上游的模型列表响应，返回按名字排序去重后的模型名。
+// 第二个返回值为 false 表示三种形状的字段都不存在，响应不是模型列表。
+// 只有字段不存在才试下一种形状：字段在但不是数组、或数组为空，都算「上游返回空列表」（返回空
+// 切片与 true），不再拿下一个形状兜底——`{"data":[]}` 与 `{"models":[]}` 都是空列表，不是形状不对。
+func parseModelList(raw []byte) ([]string, bool) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return nil, false
+	}
+	// 顶层数组：整个响应就是条目列表，可以混着写字符串与对象。
+	if raw[0] == '[' {
+		var entries []json.RawMessage
+		if err := json.Unmarshal(raw, &entries); err != nil {
+			return nil, false
+		}
+		return modelNames(entries), true
+	}
+	if raw[0] != '{' {
+		return nil, false
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return nil, false
+	}
+	for _, shape := range modelListShapes {
+		if shape.field == "" {
+			continue
+		}
+		value, ok := top[shape.field]
+		if !ok {
+			continue
+		}
+		// 字段存在但解不成数组（null、对象、字符串）按空列表处理：这种形状已经命中，不再往下试。
+		var entries []json.RawMessage
+		_ = json.Unmarshal(value, &entries)
+		return modelNames(entries), true
+	}
+	return nil, false
+}
+
+// modelNames 从条目列表里取模型名，按名字排序去重。缺名字的条目（一个字段都没有、或全是空白）跳过。
+func modelNames(entries []json.RawMessage) []string {
+	seen := map[string]bool{}
+	var models []string
+	for _, entry := range entries {
+		name := modelEntryName(entry)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		models = append(models, name)
+	}
+	sort.Strings(models)
+	return models
+}
+
+// modelEntryName 取一个条目的模型名：按 id → name → model 的顺序取第一个非空字符串。
+// 条目本身是字符串时直接用它（顶层数组的 `["m1"]` 写法）。
+func modelEntryName(entry json.RawMessage) string {
+	var s string
+	if err := json.Unmarshal(entry, &s); err == nil {
+		return strings.TrimSpace(s)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(entry, &obj); err != nil {
+		return ""
+	}
+	for _, key := range []string{"id", "name", "model"} {
+		value, ok := obj[key]
+		if !ok {
+			continue
+		}
+		var v string
+		if err := json.Unmarshal(value, &v); err != nil {
+			continue
+		}
+		if v = strings.TrimSpace(v); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // countModels 数出模型列表响应里的上游模型个数，形状按 `{data:[{id}]}` 解析（id 为空时认 name），
-// 与 SyncModels 同一套取值规则，按名字去重。第二个返回值为 false 表示上游返回的不是模型列表：
+// 与 SyncModels 的 `{data}` 那一种形状同一套取值规则，按名字去重。第二个返回值为 false 表示上游返回的不是模型列表：
 // `account test` 只用它报个数，形状不对不判失败——凭据与连通性已经从 2xx 上看出来了。
 func countModels(r io.Reader) (int, bool) {
 	var payload struct {
