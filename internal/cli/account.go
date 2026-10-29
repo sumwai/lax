@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +23,7 @@ var accountSubs = []groupItem{
 	{"ls", "列出账号、模型数与当前状态"},
 	{"set", "换掉账号的凭据，冷却与失败计数随之清零并重新启用"},
 	{"rm", "删除账号，历史请求记录保留"},
-	{"test", "用最小请求探活一个账号"},
+	{"test", "先 GET 模型列表、不通时用最小请求，探活一个账号"},
 	{"enable", "启用账号并清掉冷却"},
 	{"disable", "停用账号，不再参与选号"},
 }
@@ -512,8 +513,11 @@ func cmdAccountRm(e *Env, args []string) error {
 	return nil
 }
 
+// cmdAccountTest 探活一个账号。判定分两步：先 GET 模型列表（地址与凭据头跟 `model sync` 同一套规则），
+// 2xx 就说明凭据与连通性正常，顺带报出上游模型数，这一条不花 token；列表接口不可用时
+// 退回一条 max_tokens=1 的请求。它只判凭据与连通性，某个模型能不能用由 `model probe` 决定（见 DESIGN 4、5.7）。
 func cmdAccountTest(e *Env, args []string) error {
-	fs := newFlagSet(e, "account test", "用最小请求探活一个账号")
+	fs := newFlagSet(e, "account test", "先 GET 模型列表，不通时用最小请求探活一个账号")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -548,8 +552,11 @@ func cmdAccountTest(e *Env, args []string) error {
 	if e.JSON {
 		if err := e.printJSON(map[string]any{
 			"account": res.Account,
+			// stage 是得出结论的那一步：models 是模型列表接口，call 是最小请求。
+			"stage":   res.Stage,
 			"status":  res.Status,
 			"ok":      res.OK,
+			"models":  res.Models,
 			"latency": res.Latency.String(),
 			"message": res.Message,
 		}); err != nil {
@@ -560,13 +567,35 @@ func cmdAccountTest(e *Env, args []string) error {
 		if res.OK {
 			state = "正常"
 		}
-		fmt.Fprintf(e.Stdout, "%s %s %d %s %s\n", res.Account, state, res.Status, res.Latency.Round(time.Millisecond), res.Message)
+		// 上游模型数只在列表接口真报出数目时写数字；没走列表接口、或上游返回的不是模型列表时写 -，
+		// 免得把「不知道」读成「零个模型」。
+		models := "-"
+		if res.ModelsKnown {
+			models = strconv.Itoa(res.Models)
+		}
+		rows := [][]string{{
+			res.Account,
+			state,
+			strconv.Itoa(res.Status),
+			res.Latency.Round(time.Millisecond).String(),
+			models,
+			res.Message,
+		}}
+		fmt.Fprint(e.Stdout, renderTable([]string{"账号", "状态", "HTTP", "耗时", "上游模型数", "备注"}, rows))
 	}
 
 	if !res.OK {
-		return fmt.Errorf("账号 %s 探活失败（%d）：%s", res.Account, res.Status, res.Message)
+		return fmt.Errorf("账号 %s 探活失败（%s，%d）：%s", res.Account, probeStageLabel(res.Stage), res.Status, res.Message)
 	}
 	return nil
+}
+
+// probeStageLabel 把阶段标识翻成给人看的说法：备注与错误文案里说清结论出自哪一步。
+func probeStageLabel(stage string) string {
+	if stage == gateway.ProbeStageModels {
+		return "列表接口"
+	}
+	return "模型调用"
 }
 
 // modelSubs 是 model 一组的子命令清单。

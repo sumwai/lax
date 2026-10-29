@@ -145,6 +145,37 @@ func (s *Server) SyncModelsWithEndpoint(ctx context.Context, a store.Account, en
 	return models, nil
 }
 
+// countModels 数出模型列表响应里的上游模型个数，形状按 `{data:[{id}]}` 解析（id 为空时认 name），
+// 与 SyncModels 同一套取值规则，按名字去重。第二个返回值为 false 表示上游返回的不是模型列表：
+// `account test` 只用它报个数，形状不对不判失败——凭据与连通性已经从 2xx 上看出来了。
+func countModels(r io.Reader) (int, bool) {
+	var payload struct {
+		Data []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r, 8<<10)).Decode(&payload); err != nil {
+		return 0, false
+	}
+	// 没有 data 字段的响应体（例如 {"ok":true}）不是模型列表；显式给空数组是「0 个模型」，算数得出来。
+	if payload.Data == nil {
+		return 0, false
+	}
+	seen := map[string]bool{}
+	for _, m := range payload.Data {
+		id := strings.TrimSpace(m.ID)
+		if id == "" {
+			id = strings.TrimSpace(m.Name)
+		}
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+	}
+	return len(seen), true
+}
+
 // ModelProbe 是单个模型在一次探活里的结论。
 // Protocol 是这次实际用到的协议：发现成功时是发现到的那个，其余情况下是账号协议。
 type ModelProbe struct {

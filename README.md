@@ -78,6 +78,14 @@ SWITCHBOARD_KEY=sk-yyy switchboard account set ds # 留空则读环境变量 SWI
 
 `update` 是 `set` 的同义词。`--json` 只回显掩码，明文不进输出；换完 key 不用再跑 `account add`，也不影响已经探出来的模型状态。
 
+`account test` 判的是凭据与连通性，不是某个模型能不能用。它先 `GET` 模型列表：地址与凭据头跟 `model sync` 同一套规则（厂商覆盖 → 账号协议那条路由的 `models_path`，整条地址直接访问，凭据头跟取到地址的那条路由的协议），2xx 就说明 key 没问题、上游连得上，顺带报出上游模型数，这一条不花 token。这家没有列表接口（404、405）或列表被网关拦住（403）时，退回一条 `max_tokens=1` 的请求，模型取账号模型列表第一项，为空时用默认模型名 `default` 并在备注里说明。备注与 `--json` 的 `stage` 写清结论出自列表接口还是模型调用；某个模型到底能不能用由 `model probe` 决定。
+
+```bash
+switchboard account test ds
+账号  状态  HTTP  耗时   上游模型数  备注
+ds    正常  200   412ms  47          列表接口可用
+```
+
 ## 模型从上游拉，再探活
 
 模型列表不用手填。`model sync` 拉上游的模型清单，`model probe` 逐个试一遍，能用的才进入选号。两条命令都接受 `--provider` 与 `--account`，不给就处理全部账号：

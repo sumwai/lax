@@ -478,7 +478,8 @@ func TestAccountUpdateIsSynonymForSet(t *testing.T) {
 }
 
 // TestAccountTestWithoutModels 确认刚建好、还没同步过模型的账号也能探活：
-// 模型列表为空时回退到默认模型名，退出码 0，备注说明用的是哪个模型名，不再 panic。
+// 列表接口不可用时退回最小请求，模型列表为空时回退到默认模型名、备注说明用的是哪个，
+// 两阶段的结果都记在 stage 与模型数列上，不再 panic。
 func TestAccountTestWithoutModels(t *testing.T) {
 	sandbox(t)
 	up := newRecorderUpstream(t, map[string]fakeResponse{
@@ -491,15 +492,167 @@ func TestAccountTestWithoutModels(t *testing.T) {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	code, out, stderr := run(t, "account", "test", "fresh")
+	code, out, stderr := run(t, "account", "test", "fresh", "--json")
 	if code != 0 {
 		t.Fatalf("模型列表为空的账号探活退出码 = %d，stderr = %s", code, stderr)
 	}
-	if !strings.Contains(out, "正常") || !strings.Contains(out, "还没有模型") || !strings.Contains(out, "default") {
-		t.Fatalf("探活输出 = %s，期望写明用默认模型名", out)
+	var got accountTestJSON
+	mustJSON(t, out, &got)
+	if !got.OK || got.Stage != "call" || got.Models != 0 {
+		t.Fatalf("探活结果 = %+v，期望退回模型调用、没有模型数", got)
 	}
-	call := up.mustSingleCall(t)
-	if want := up.srv.URL + "/v1/chat/completions"; call.url != want {
-		t.Fatalf("探活地址 = %q，期望 %q", call.url, want)
+	for _, want := range []string{"还没有模型", "default", "模型调用"} {
+		if !strings.Contains(got.Message, want) {
+			t.Fatalf("备注 = %q，期望包含 %q", got.Message, want)
+		}
+	}
+	calls := up.all()
+	if len(calls) != 2 || calls[0].path != "/v1/models" || calls[1].path != "/v1/chat/completions" {
+		t.Fatalf("上游调用 = %+v，期望先 GET 列表再打最小请求", calls)
+	}
+
+	// 人读输出：列表接口没通时模型数是 -，不是 0。
+	up.reset()
+	code, out, stderr = run(t, "account", "test", "fresh")
+	if code != 0 {
+		t.Fatalf("探活退出码 = %d，stderr = %s", code, stderr)
+	}
+	if !strings.Contains(out, "正常") || !strings.Contains(out, "上游模型数") {
+		t.Fatalf("探活输出 = %s，期望表格带状态与模型数列", out)
+	}
+	if !strings.Contains(out, " -") {
+		t.Fatalf("探活输出 = %s，列表接口没通时模型数应显示 -", out)
+	}
+}
+
+// accountTestJSON 是 account test --json 输出里用例关心的字段。
+// 旧字段（account、status、ok、latency、message）必须还在，新字段是 stage 与 models。
+type accountTestJSON struct {
+	Account string `json:"account"`
+	Stage   string `json:"stage"`
+	Status  int    `json:"status"`
+	OK      bool   `json:"ok"`
+	Models  int    `json:"models"`
+	Latency string `json:"latency"`
+	Message string `json:"message"`
+}
+
+// TestAccountTestModelsStageIsFree 钉住第一步就够：模型列表 2xx 时只发一次 GET，
+// 一条模型调用都不发（那一笔是要花钱的），输出报出上游模型数。
+func TestAccountTestModelsStageIsFree(t *testing.T) {
+	sandbox(t)
+	up := newRecorderUpstream(t, map[string]fakeResponse{
+		"GET /v1/models": {status: http.StatusOK, body: modelsListM1},
+	})
+	mustInit(t)
+
+	if code, _, stderr := run(t, "account", "add", "free",
+		"--provider", "custom", "--base-url", up.srv.URL, "--key", "sk-test",
+		"--models", "m1"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	code, out, stderr := run(t, "account", "test", "free", "--json")
+	if code != 0 {
+		t.Fatalf("探活退出码 = %d，stderr = %s", code, stderr)
+	}
+	var got accountTestJSON
+	mustJSON(t, out, &got)
+	if got.Account != "free" || got.Stage != "models" || got.Status != http.StatusOK || !got.OK {
+		t.Fatalf("探活结果 = %+v，期望 stage=models、200 且 ok", got)
+	}
+	if got.Models != 1 {
+		t.Fatalf("上游模型数 = %d，期望 1", got.Models)
+	}
+	if got.Latency == "" || !strings.Contains(got.Message, "列表接口") {
+		t.Fatalf("探活结果 = %+v，期望带上耗时与列表接口的备注", got)
+	}
+
+	calls := up.all()
+	if len(calls) != 1 || calls[0].method != http.MethodGet || calls[0].path != "/v1/models" {
+		t.Fatalf("上游调用 = %+v，期望只有一次 GET /v1/models（列表接口不该顺带花一次模型调用）", calls)
+	}
+
+	// 人读输出：模型数是真数字，不是 -。
+	up.reset()
+	code, out, stderr = run(t, "account", "test", "free")
+	if code != 0 {
+		t.Fatalf("探活退出码 = %d，stderr = %s", code, stderr)
+	}
+	if !strings.Contains(out, " 1 ") {
+		t.Fatalf("探活输出 = %s，期望模型数列写出 1", out)
+	}
+}
+
+// TestAccountTestFallsBackToCallStage 钉住退回最小请求时 stage 记成 call，
+// 两阶段都失败时备注能把「列表接口」与「模型调用」分开。
+func TestAccountTestFallsBackToCallStage(t *testing.T) {
+	sandbox(t)
+	up := newRecorderUpstream(t, map[string]fakeResponse{
+		"POST /v1/chat/completions": {status: http.StatusOK, body: chatCompletionOK},
+	})
+	mustInit(t)
+
+	if code, _, stderr := run(t, "account", "add", "fb",
+		"--provider", "custom", "--base-url", up.srv.URL, "--key", "sk-test",
+		"--models", "m1"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	code, out, stderr := run(t, "account", "test", "fb", "--json")
+	if code != 0 {
+		t.Fatalf("探活退出码 = %d，stderr = %s", code, stderr)
+	}
+	var got accountTestJSON
+	mustJSON(t, out, &got)
+	if !got.OK || got.Stage != "call" || got.Models != 0 {
+		t.Fatalf("探活结果 = %+v，期望 stage=call、模型数未知", got)
+	}
+	if !strings.Contains(got.Message, "列表接口返回") || !strings.Contains(got.Message, "模型调用") {
+		t.Fatalf("备注 = %q，期望写清两阶段各自的结果", got.Message)
+	}
+	calls := up.all()
+	if len(calls) != 2 || calls[0].method != http.MethodGet || calls[1].method != http.MethodPost {
+		t.Fatalf("上游调用 = %+v，期望先 GET 列表再 POST 最小请求", calls)
+	}
+}
+
+// TestAccountTestNeverPrintsKey 确认上游把凭据回显到错误里时，输出里也没有明文：
+// stderr、`--json` 的 message 与库里存的 last_error 三处都要干净。
+func TestAccountTestNeverPrintsKey(t *testing.T) {
+	sandbox(t)
+	// 运行期拼出来，避免测试文件里出现像个真 key 的字符串。
+	key := "sk-" + strings.Repeat("t", 20)
+	up := newRecorderUpstream(t, map[string]fakeResponse{
+		"POST /v1/chat/completions": {status: http.StatusUnauthorized,
+			body: `{"error":{"message":"invalid api key=` + key + `"}}`},
+	})
+	mustInit(t)
+
+	if code, _, stderr := run(t, "account", "add", "leak",
+		"--provider", "custom", "--base-url", up.srv.URL, "--key", key, "--models", "m1"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	code, out, stderr := run(t, "account", "test", "leak", "--json")
+	if code == 0 {
+		t.Fatalf("401 应当是失败，退出码 = %d", code)
+	}
+	if strings.Contains(out, key) || strings.Contains(stderr, key) {
+		t.Fatalf("探活输出泄漏了凭据：stdout=%s stderr=%s", out, stderr)
+	}
+	var got accountTestJSON
+	mustJSON(t, out, &got)
+	if !strings.Contains(got.Message, "***") {
+		t.Fatalf("证据不足：message 里的凭据应被替换成 ***，实际 %q", got.Message)
+	}
+
+	// last_error 会出现在 account ls --json 里，同样不能有明文。
+	code, out, stderr = run(t, "account", "ls", "--json")
+	if code != 0 {
+		t.Fatalf("account ls 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if strings.Contains(out, key) {
+		t.Fatalf("account ls --json 泄漏了凭据: %s", out)
 	}
 }
