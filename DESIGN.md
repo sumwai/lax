@@ -777,7 +777,7 @@ M0 到 M13 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkel
 - `account test` 报的上游模型数与 `model sync` 用同一套解析（三种形状都认，见 5.7），但两者共用同一个读取上限（8MB）：超过上限的清单两边都读不出来，`account test` 的模型数列是 `-`、备注写「上游返回的不是模型列表」，同步则直接报错。凭据与连通性的结论不受影响。
 - 模型列表的响应形状只认三种已知形状（见 5.7）：`{data:[…]}`、`{models:[…]}` 与顶层数组。三者都不匹配时报错并列出这三种形状，包了一层的响应（例如 `{"result":{"data":[…]}}`）同样算不匹配，这类上游仍只能用 `--models` 手填。
 - 两个模型清单接口每次 GET 都重新全表扫描 `accounts`（`ListAccounts` 之后逐行取 `accounts.models`），没有缓存。库只有一条连接，客户端若在每个请求之前拉一次清单，这次读会与转发写 `requests` 的写入排队，高并发时清单请求会拖慢对话请求。第一版不加缓存：缓存要一套失效规则（账号启停、`model probe` 回写 `accounts.models`、用户直接改库），错一次的代价比多一次读高。
-- 需要非标准请求头的上游不支持：opencode 的 Go 端点要求带 `x-opencode-session` 头才路由，缺了这个头直接回 `400 Request is missing x-opencode-session`（实测）。这是非标准 OpenAI 兼容接口，本程序不伪造该头，也不为单个厂商加头发送逻辑，把它的地址填进 `base_url` 只会在探活与转发时拿到这条 400。客户端也不能靠自己带这个头绕过：转发只透传 5.11 白名单里的头，白名单之外一律丢弃。同类还有要求额外签名头的厂商（按时间戳或请求体算一个签名头），同样不支持，需要时用 5.10 的附加头声明手工配。能接的是只认 `Authorization`、`x-api-key`、`x-goog-api-key` 三种凭据头的 OpenAI 兼容、anthropic 与 gemini 端点（见 5.8 最后一条）。
+- 需要固定附加头的上游靠 5.10 的声明接：opencode 的 Go 端点要求带 `x-opencode-session` 才路由，缺了这个头直接回 `400 Request is missing x-opencode-session`（实测）；`provider header set opencode x-opencode-session '{session}'` 之后再打同一个地址，错误变成该 key 没有这个模型的 400，说明路由这一关已经过了。客户端自己带的同名头不算数：转发只透传 5.11 白名单里的头，白名单之外一律丢弃，要加头只能声明。仍然接不了的是**按请求算出来的头**：要求按时间戳、请求体或密钥算一个签名的厂商（签名算法不在声明能表达的范围内），以及需要多步换取会话 token 才能调用的端点。
 
 之后（不在第一版）：订阅账号登录，隐私遮蔽，配置档案（profiles），价格表内置。
 
