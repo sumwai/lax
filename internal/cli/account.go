@@ -168,7 +168,10 @@ func cmdAccountAdd(e *Env, args []string) error {
 	provider := fs.String("provider", "", "上游厂商标识，如 deepseek")
 	key := fs.String("key", "", "上游 API key；给 - 从标准输入读，留空则读环境变量 SWITCHBOARD_KEY")
 	name := fs.String("name", "", "账号名称，也可以用位置参数给出")
-	protocol := fs.String("protocol", "", "上游线协议：anthropic | openai-chat | openai-responses，留空按厂商默认")
+	// gemini 只作出站，账号上可以把它当有效出站协议；帮助文案里写清楚它没有入站路径。
+	// TODO: gemini 入站做完之后，把下面这句「没有入站路径」改成
+	// 「入站按 /v1beta/models/{model}:generateContent」，并同步改 DESIGN 第 4 节的 account add 行。
+	protocol := fs.String("protocol", "", "上游线协议：anthropic | openai-chat | openai-responses | gemini，留空按厂商默认。gemini 目前只作出站：没有入站路径，客户端仍以 /v1/messages、/v1/chat/completions、/v1/responses 三条入站")
 	baseURL := fs.String("base-url", "", "上游地址，留空按厂商默认（必须是带主机名的完整地址，如 https://api.deepseek.com）")
 	models := fs.String("models", "", "该账号可提供的模型，逗号分隔")
 	priceIn := fs.Float64("price-in", 0, "输入价，每百万 token")
