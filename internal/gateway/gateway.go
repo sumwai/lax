@@ -81,13 +81,17 @@ func New(o Options) (*Server, error) {
 	return s, nil
 }
 
-// Handler 返回 http 处理器。
+// Handler 返回 http 处理器。三条入站路径按路径定协议（见 5.2），另有两个只读的模型清单
+// 接口给客户端发现模型名用（见 5.2.1）；`/v1/models/{id}` 用前缀注册，其后全部算模型名，
+// 含 `/` 的模型名也照取。其余路径由 mux 返回 404。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
 	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
 		mux.HandleFunc(path, s.handleInbound)
 	}
+	mux.HandleFunc(modelsPath, s.handleModelList)
+	mux.HandleFunc(modelsPathPrefix, s.handleModelByID)
 	return mux
 }
 

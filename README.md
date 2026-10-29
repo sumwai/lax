@@ -35,7 +35,7 @@ switchboard log tail                                        # 看请求记录
 
 ## 入站协议
 
-路径决定入站协议，三条路径同时可用，一个网关可以同时接三种客户端：
+路径决定入站协议，三条路径同时可用，一个网关可以同时接三种客户端（另有两条只读的模型清单接口 `GET /v1/models` 与 `GET /v1/models/{id}`，见下面「客户端怎么接」）：
 
 | 入站路径 | 入站协议 | 常见客户端 |
 | --- | --- | --- |
@@ -112,6 +112,17 @@ ANTHROPIC_MODEL=deepseek-v4-pro           # 必须是探活出来的可用模型
 ```
 
 说 openai-chat 与 openai-responses 的客户端把 base URL 填成 `http://127.0.0.1:4567/v1`，模型名同样取探活出来的可用值；凭据值本机不校验，填一个非空值即可。
+
+不知道有哪些模型名可用时直接问网关，清单来自启用账号的模型列表，按名字去重升序，`owned_by` 是厂商名：
+
+```bash
+curl -s http://127.0.0.1:4567/v1/models
+{"object":"list","data":[{"id":"deepseek-v4-fast","object":"model","created":0,"owned_by":"deepseek"},{"id":"deepseek-v4-pro","object":"model","created":0,"owned_by":"deepseek"}]}
+
+curl -s http://127.0.0.1:4567/v1/models/deepseek-v4-pro   # 单个模型，未命中返回 404
+```
+
+这两个接口只读、只收 GET（其它方法 405 并带 `Allow: GET`），不写请求记录，也不影响冷却与选号；冷却中的账号的模型照样列出来，停用账号的模型不列。`/healthz` 是运维视角的账号与模型计数，模型名清单看这两个接口。
 
 ## 构建
 
