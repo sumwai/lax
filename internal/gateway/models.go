@@ -325,13 +325,14 @@ var endpointProtocols = map[string]string{
 	"/messages":         ProtocolAnthropic,
 	"/chat/completions": ProtocolChat,
 	"/responses":        ProtocolResponses,
+	"/systemone":        ProtocolSystemOne,
 	"/generateContent":  ProtocolGemini,
 	"generateContent":   ProtocolGemini,
 }
 
 // wireProtocolOrder 是协议集合落库与排候选的固定顺序（见 DESIGN 5.13）：同一份上游数据多跑几次
 // 得到同一串，与上游列出端点的先后无关。
-var wireProtocolOrder = []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini}
+var wireProtocolOrder = []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini, ProtocolSystemOne}
 
 // endpointProtocol 查端点名对应的线协议。表里没有的写法返回 false，调用方直接不计这个取值。
 func endpointProtocol(name string) (string, bool) {
@@ -887,15 +888,21 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 	att := probeAttempt{res: ModelProbe{Model: model, Protocol: protocol}, start: s.now()}
 	res := &att.res
 
-	ir := &translate.Request{
-		Model:     model,
-		MaxTokens: 1,
-		Messages: []translate.Message{{
+	ir := &translate.Request{Model: model}
+	var raw []byte
+	var err error
+	if protocol == ProtocolSystemOne {
+		// 决策模型的探活不是 max_tokens=1 的对话请求：决策端点不认 messages，发了只会换回 404，
+		// 把「模型可用」误判成「模型不存在」（DESIGN 5.14 的「探活」）。
+		raw, err = systemOneProbeBody(model)
+	} else {
+		ir.MaxTokens = 1
+		ir.Messages = []translate.Message{{
 			Role:   translate.RoleUser,
 			Blocks: []translate.Block{{Kind: translate.BlockText, Text: "ping"}},
-		}},
+		}}
+		raw, err = translate.EncodeRequest(protocol, ir, model)
 	}
-	raw, err := translate.EncodeRequest(protocol, ir, model)
 	if err != nil {
 		res.setAccess(store.AccessError)
 		res.Message = "按协议 " + protocol + " 编码探活请求失败: " + err.Error()
@@ -965,6 +972,12 @@ type probeUsage struct {
 
 // readProbeUsage 用该协议的 usage scanner 从响应体里读用量，读不到时为 0。
 func readProbeUsage(protocol string, body []byte) probeUsage {
+	if protocol == ProtocolSystemOne {
+		// 决策协议没有 usage scanner（translate 的四套编解码器不认它）：两个字段直读，
+		// 没有缓存与思考两项（DESIGN 5.14）。
+		in, out := systemOneUsage(body)
+		return probeUsage{in: in, out: out}
+	}
 	scanner, err := translate.NewUsageScanner(protocol)
 	if err != nil {
 		return probeUsage{}

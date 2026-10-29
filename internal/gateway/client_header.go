@@ -23,8 +23,9 @@ type clientHeaderRule struct {
 	names    []string
 }
 
-// clientHeaderRules 是 DESIGN 5.11 的白名单表。表里没有的协议（gemini）不透传任何头：
-// gemini 的特性开关在查询串与请求体里，不在头里。
+// clientHeaderRules 是 DESIGN 5.11 的白名单表。表里没有的协议（gemini 与 systemone）
+// 不透传任何头：gemini 的特性开关在查询串与请求体里，不在头里；systemone 是一份决策请求，
+// 没有靠头开关的特性，一个头都不透传（见 DESIGN 5.14 与 5.11）。
 var clientHeaderRules = []clientHeaderRule{
 	{protocol: ProtocolAnthropic, names: []string{"anthropic-beta", "anthropic-version"}},
 	{protocol: ProtocolChat, names: []string{"openai-beta", "openai-organization", "openai-project"}},

@@ -28,6 +28,9 @@ const (
 	ProtocolChat      = translate.ProtocolChat
 	ProtocolResponses = translate.ProtocolResponses
 	ProtocolGemini    = translate.ProtocolGemini
+	// ProtocolSystemOne 是第五条线协议：一个 state 加一组 questions，不出文本、没有流式。
+	// 它只与自己互通，也不进中间表示（DESIGN 5.14）。
+	ProtocolSystemOne = translate.ProtocolSystemOne
 
 	// InboundAnthropic 保留给旧调用方，等价于 ProtocolAnthropic。
 	InboundAnthropic = translate.ProtocolAnthropic
@@ -89,7 +92,7 @@ func New(o Options) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
-	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
+	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses", systemOnePath} {
 		mux.HandleFunc(path, s.handleInbound)
 	}
 	// gemini 的模型名在路径里（/v1beta/models/{model}:generateContent），按前缀注册，
@@ -145,8 +148,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"accounts": len(accounts),
 		"enabled":  enabled,
 		"models":   len(models),
-		"inbound":  []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini},
-		"outbound": []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini},
+		"inbound":  []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini, ProtocolSystemOne},
+		"outbound": []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini, ProtocolSystemOne},
 		"passthru": "同协议直通，跨协议经中间表示转换",
 	})
 }
@@ -165,11 +168,19 @@ type attempt struct {
 	wrote     bool
 	message   string
 	err       error
+	// upstreamBody 是上游错误响应的原始正文，只在入站是 systemone 且正文里不含凭据时保留：
+	// 这条协议的客户端直接读上游自己的错误形状（例如一条 422 的 detail 数组），
+	// 包成我们的 detail 对象反而会让它读不懂（DESIGN 5.14 的「错误体」）。
+	upstreamBody []byte
 	// transport 表示这一次没有拿到任何 HTTP 响应：连接没建立、请求没发出去、响应体没读完。
 	// status 对这类失败仍记 502（表示「网关没能拿到上游响应」），冷却却按连接层那一档算
 	// （见 DESIGN 5.3）。已经向客户端写出字节之后的断流不在此列，见 handleInbound 的冷却分支。
 	transport bool
 }
+
+// upstreamErrorBodyMax 是一次上游错误的正文读取上限。超过它的正文不原样透传：
+// 半截 JSON 比一句摘要更难用，仍然按解出来的那一句话报错。
+const upstreamErrorBodyMax = 64 << 10
 
 // cooldownKind 把一次失败的来源折成冷却档位：没拿到 HTTP 响应的是连接层，拿到了状态的按
 // 状态码分限流与服务端失败。转发与探活两个入口都只经这一个函数定档，不各自算（见 DESIGN 5.3）。
@@ -181,7 +192,7 @@ func cooldownKind(status int, noResponse bool) account.FailureKind {
 }
 
 func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
-	inbound, ok := translate.PathProtocol(r.URL.Path)
+	inbound, ok := inboundProtocol(r.URL.Path)
 	if !ok {
 		writeError(w, http.StatusNotFound, "not_found_error", "未知路径 "+r.URL.Path)
 		return
@@ -209,16 +220,38 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 从这里开始入站协议已经定下来，错误体按它给形状（writeInboundError）。
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 32<<20))
+	// 请求体上限按协议取：systemone 是 8 MiB（DESIGN 5.14），其余四条仍是 32 MiB。
+	// 多读一个字节是为了在 systemone 上认出「超了」而不是静默截断成一条解析失败。
+	limit := int64(32 << 20)
+	if inbound == ProtocolSystemOne {
+		limit = systemOneMaxBody
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
 	if err != nil {
 		writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", "读取请求体失败: "+err.Error())
 		return
 	}
-
-	req, err := translate.DecodeRequest(inbound, raw)
-	if err != nil {
-		writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", inbound+": "+err.Error())
+	if inbound == ProtocolSystemOne && int64(len(raw)) > systemOneMaxBody {
+		writeInboundError(w, inbound, http.StatusRequestEntityTooLarge, "invalid_request_error",
+			fmt.Sprintf("请求体超过 %d 字节的上限：systemone 的请求体上限是 8 MiB（32 MiB 与 64 层嵌套这些规则在上游），"+
+				"把请求体里的 assets 压小一些再发", systemOneMaxBody))
 		return
+	}
+
+	var req *translate.Request
+	if inbound == ProtocolSystemOne {
+		// 这条协议的编解码器不存在（它不进中间表示），最少校验也只在本机做那三条（DESIGN 5.14）。
+		req, err = decodeSystemOneRequest(raw)
+		if err != nil {
+			writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", "systemone: "+err.Error())
+			return
+		}
+	} else {
+		req, err = translate.DecodeRequest(inbound, raw)
+		if err != nil {
+			writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", inbound+": "+err.Error())
+			return
+		}
 	}
 	if inbound == ProtocolGemini {
 		req.Model = pathModel
@@ -268,6 +301,11 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	lastErr := "没有可用账号"
+	// interopRejected 记第一次「入站协议与有效出站协议不相通」的文案，onlyInterop 表示每一个候选
+	// 都停在这一条上（没有谁因为别的理由被跳过，也没发出过上游调用）：那是一次请求本身的 400，
+	// 不是「所有账号都失败」的 503（DESIGN 5.14）。
+	interopRejected := ""
+	onlyInterop := true
 	for _, cand := range candidates {
 		if r.Context().Err() != nil {
 			return
@@ -282,6 +320,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			s.logf("读账号 %s 模型 %s 的有效协议失败: %v", cand.Name, req.Model, err)
 			lastErr = fmt.Sprintf("账号 %s：读有效出站协议失败（%v），先运行 switchboard doctor 检查数据库",
 				cand.Name, err)
+			onlyInterop = false
 			continue
 		}
 		if outbound == "" {
@@ -289,8 +328,18 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			// 只换下一个候选继续试（别的账号可能配好了），文案给下一步命令。
 			lastErr = s.noProtocolMessage(cand, req.Model)
 			s.logf("账号 %s 的模型 %s 算不出有效出站协议", cand.Name, req.Model)
+			onlyInterop = false
 			continue
 		}
+
+		if msg := protocolInteropError(inbound, outbound, req.Model); msg != "" {
+			// 协议不相通与账号无关：不落冷却、不写请求记录（一次上游调用都没发），
+			// 只记下文案并换下一个候选看一眼它算出的协议（不同账号可能算出不同协议）。
+			interopRejected = msg
+			s.logf("账号 %s 的模型 %s 走 %s 协议，与入站协议 %s 不相通", cand.Name, req.Model, outbound, inbound)
+			continue
+		}
+		onlyInterop = false
 
 		attemptStart := s.now()
 		res := s.tryUpstream(r.Context(), w, cand, outbound, inbound, r.Header, raw, req, session)
@@ -371,18 +420,33 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		case res.wrote:
 			return
 		default:
+			if inbound == ProtocolSystemOne && len(res.upstreamBody) > 0 {
+				// 上游自己的错误正文原样透传：状态码与正文都照旧，不重新包装，也不把 422 的
+				// detail 数组转成对象（DESIGN 5.14 的「错误体」）。请求记录与日志里用的仍是
+				// 解出来并脱敏过的那一句话，不是这份原文。
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(res.status)
+				_, _ = w.Write(res.upstreamBody)
+				return
+			}
 			writeInboundError(w, inbound, mapErrorStatus(res.status), errorKind(res.status), res.message)
 			return
 		}
 	}
 
+	if onlyInterop && interopRejected != "" {
+		writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", interopRejected)
+		return
+	}
 	writeInboundError(w, inbound, http.StatusServiceUnavailable, "api_error", "所有候选账号都失败："+lastErr)
 }
 
 // modelNotFoundKind 给出「没有账号提供该模型」在入站协议里的错误类型：anthropic 用它自己的
 // not_found_error，两条 openai 路径用 invalid_request_error（都没有专门的「模型未配置」类型）。
 func modelNotFoundKind(inbound string) string {
-	if inbound == ProtocolAnthropic {
+	// systemone 的错误类型取值与 anthropic 同名（DESIGN 5.2 的表格），「清单里没有这个模型」
+	// 在那一套里就是 not_found_error。
+	if inbound == ProtocolAnthropic || inbound == ProtocolSystemOne {
 		return "not_found_error"
 	}
 	return "invalid_request_error"
@@ -463,8 +527,20 @@ func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		msg := readErrorBody(resp.Body)
-		return attempt{status: resp.StatusCode, message: scrubSecret(msg, string(key))}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, upstreamErrorBodyMax+1))
+		whole := len(body) <= upstreamErrorBodyMax
+		if !whole {
+			body = body[:upstreamErrorBodyMax]
+		}
+		res := attempt{status: resp.StatusCode, message: scrubSecret(errorMessageFromBody(body), string(key))}
+		// 入站是 systemone 时把上游错误正文也留着原样透传，两个前提：正文读全了，且里面没有
+		// 我们的凭据（原样转发不得把上游回显的 key 带给客户端；那种情况退回我们的 detail 对象，
+		// 那份正文已经过 scrubSecret）。
+		if inbound == ProtocolSystemOne && whole && len(body) > 0 &&
+			!(len(key) >= 8 && bytes.Contains(body, key)) {
+			res.upstreamBody = body
+		}
+		return res
 	}
 
 	if req.Stream {
@@ -571,10 +647,16 @@ func (s *Server) jsonSuccess(w http.ResponseWriter, resp *http.Response,
 	// 直通：字节原样返回，只用对应协议解析一次用量。
 	if inbound == outbound {
 		res := attempt{status: http.StatusOK, wrote: true}
-		if parsed, err := translate.DecodeResponse(outbound, body, req.Model); err == nil {
-			res.inTok, res.outTok = parsed.Usage.In, parsed.Usage.Out
-			res.cacheRead, res.cacheWrite = parsed.Usage.CacheRead, parsed.Usage.CacheWrite
-			res.reasoning, res.total = parsed.Usage.Reasoning, parsed.Usage.Total
+		switch {
+		case outbound == ProtocolSystemOne:
+			// 决策协议没有编解码器（它不进中间表示），用量两个字段直读；响应体不改写。
+			res.inTok, res.outTok = systemOneUsage(body)
+		default:
+			if parsed, err := translate.DecodeResponse(outbound, body, req.Model); err == nil {
+				res.inTok, res.outTok = parsed.Usage.In, parsed.Usage.Out
+				res.cacheRead, res.cacheWrite = parsed.Usage.CacheRead, parsed.Usage.CacheWrite
+				res.reasoning, res.total = parsed.Usage.Reasoning, parsed.Usage.Total
+			}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -988,6 +1070,9 @@ func Endpoint(base, protocol string) string {
 		suffix = "/messages"
 	case ProtocolResponses:
 		suffix = "/responses"
+	case ProtocolSystemOne:
+		// 决策协议的出站路径与入站路径同名（DESIGN 5.14）；漏了这一格，猜出来的会是对话路径。
+		suffix = "/systemone"
 	}
 	if strings.HasSuffix(base, "/v1") {
 		return base + suffix
@@ -1045,6 +1130,8 @@ func providerPathHint(protocol string) string {
 		return "--responses /v1/responses"
 	case ProtocolGemini:
 		return "--gemini /v1beta/models/{model}:generateContent"
+	case ProtocolSystemOne:
+		return "--systemone /v1/systemone"
 	default:
 		return "--openai /v1/chat/completions"
 	}
@@ -1160,7 +1247,8 @@ func geminiStreamEndpoint(endpoint string) string {
 }
 
 // setAuth 按协议给上游请求配好凭据头：gemini 用 x-goog-api-key，anthropic 用 x-api-key
-// 加 anthropic-version，两条 openai 协议用 Bearer。凭据头按协议而不是按厂商选
+// 加 anthropic-version，两条 openai 协议与 systemone 用 Bearer（TypeSafe 本家与 commandcode 的
+// 决策端点都读 Authorization）。凭据头按协议而不是按厂商选
 // （同一家上游的不同协议也可能用不同写法，见 DESIGN 5.8）。
 func setAuth(req *http.Request, protocol, key string) {
 	switch protocol {
@@ -1257,13 +1345,16 @@ func writeError(w http.ResponseWriter, status int, kind, message string) {
 	})
 }
 
-// writeInboundError 按入站协议写出错误体（DESIGN 5.2）：四条入站路径的客户端读的字段不同，
+// writeInboundError 按入站协议写出错误体（DESIGN 5.2）：五条入站路径的客户端读的字段不同，
 // 形状由入站协议决定，不由上游协议决定。入站协议为空或认不出时退回统一形状。
 //
 //   - anthropic：规定形状，与 writeError 一致；
 //   - openai-chat 与 openai-responses：顶层只有 error，type 用 OpenAI 的取值，param 与 code
 //     显式给 null（SDK 会读这两个键在不在）；
-//   - gemini：code 是 HTTP 状态码的整数，status 是 google 的状态名。
+//   - gemini：code 是 HTTP 状态码的整数，status 是 google 的状态名；
+//   - systemone：顶层只有 detail，里面是 message 与 error_type（不是 type）。真实的客户端是
+//     TypeSafe 的 SDK，它读这两个字段，用对象而不是纯字符串是为了留下类型又不改 SDK 的读法；
+//     error_type 的取值与 anthropic 那套同名（DESIGN 5.14）。
 //
 // message 由调用方给：上游原话在 tryUpstream 里已经过 scrubSecret（DESIGN 5.6）。
 func writeInboundError(w http.ResponseWriter, inbound string, status int, kind, message string) {
@@ -1280,6 +1371,13 @@ func writeInboundError(w http.ResponseWriter, inbound string, status int, kind, 
 			"code":    status,
 			"message": message,
 			"status":  googleErrorStatus(status),
+		}})
+	case ProtocolSystemOne:
+		// 字段名是 error_type 而不是 type：TypeSafe SDK 读 detail.error_type 与 detail.message
+		// （DESIGN 5.14 的「错误体」）。用对象而不是纯字符串，好在留下类型的同时不改 SDK 的读法。
+		writeJSON(w, status, map[string]any{"detail": map[string]any{
+			"message":    message,
+			"error_type": kind,
 		}})
 	default:
 		writeError(w, status, kind, message)
