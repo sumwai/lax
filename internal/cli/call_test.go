@@ -66,3 +66,28 @@ func TestCallJSONShapeFollowsInboundProtocol(t *testing.T) {
 		}
 	}
 }
+
+// TestCallNoModelsHint 盯住 call 找不到可用模型时的提示：说清空模型列表的账号不参与选号，
+// 下一步给得出来、跑得起来（model sync 与 model probe），而不是只让人去手填。
+func TestCallNoModelsHint(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+	if code, _, stderr := run(t, "account", "add", "bare",
+		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", "sk-1",
+		"--protocol", "openai-chat"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	code, out, stderr := run(t, "call", "hi")
+	if code != 2 {
+		t.Fatalf("没有可用模型时 call 退出码 = %d，期望 2（用法错误）", code)
+	}
+	if out != "" {
+		t.Fatalf("用法错误不该写 stdout: %s", out)
+	}
+	for _, want := range []string{"switchboard model sync", "switchboard model probe", "不参与选号"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+		}
+	}
+}

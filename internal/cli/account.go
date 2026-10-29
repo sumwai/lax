@@ -470,12 +470,22 @@ func protocolCell(accountProtocol string, discovered []string) string {
 	return fmt.Sprintf("%s + 另 %d 种", accountProtocol, len(all)-1)
 }
 
+// modelsCell 是 account ls 的模型列，三种情况都能自解释：
+//
+//   - account_models 有数据时写「N 可用 / M 同步」，与 --json 的 models_usable、models_synced 同一组数；
+//     同步过但零可用同样走这条分支，「0 可用 / M 同步」说明这个账号眼下接不了任何模型；
+//   - 完全没有模型信息（没同步过、也没手填 --models）时写「无模型（先 model sync）」，
+//     与 --json 里 models 为空数组且 models_synced 为 0 对应；
+//   - 只有 accounts.models 里的名字（account add --models 手填、从未同步）时直接列名字。
+//
+// 不能写成像「不限」那样表示「什么模型都收」的文案：空模型列表表示该账号不提供任何模型、
+// 不参与选号（见 lessons/2026-10-29-empty-model-list.md），文案与行为必须一致。
 func modelsCell(models []string, c modelCount) string {
 	if c.Total > 0 {
 		return fmt.Sprintf("%d 可用 / %d 同步", c.Usable, c.Total)
 	}
 	if len(models) == 0 {
-		return "(不限)"
+		return "无模型（先 model sync）"
 	}
 	if len(models) == 1 {
 		return models[0]
@@ -724,7 +734,7 @@ func cmdModelLs(e *Env, args []string) error {
 	}
 
 	if len(order) == 0 {
-		fmt.Fprintln(e.Stdout, "还没有可用模型。先 switchboard account add，再 switchboard account probe <名称>")
+		fmt.Fprintln(e.Stdout, "还没有模型信息：先 switchboard model sync 拉上游模型列表，再 switchboard model probe 逐个探活；也可以用 switchboard account add --models 手填")
 		return nil
 	}
 

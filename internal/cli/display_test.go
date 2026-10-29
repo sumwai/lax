@@ -150,3 +150,122 @@ func TestAccountLsProtocolSummary(t *testing.T) {
 		}
 	}
 }
+
+// addBareAccount 加一个没有任何模型信息的账号：不给 --models，也没有 account_models 行。
+func addBareAccount(t *testing.T, name, key string) {
+	t.Helper()
+	if code, _, stderr := run(t, "account", "add", name,
+		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", key,
+		"--protocol", "openai-chat"); code != 0 {
+		t.Fatalf("account add %s 退出码 = %d，stderr = %s", name, code, stderr)
+	}
+}
+
+// TestAccountLsModelsColumnNeverSaysUnlimited 盯住模型列在空模型列表时的文案：
+// 空列表表示该账号不提供任何模型、不参与选号（见 lessons/2026-10-29-empty-model-list.md），
+// 所以文案不能写成看起来表示「什么模型都收」的样子；--json 用同一份事实表达同一个意思。
+func TestAccountLsModelsColumnNeverSaysUnlimited(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+	addBareAccount(t, "bare", "sk-1")
+	if code, _, stderr := run(t, "account", "add", "filled",
+		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", "sk-2",
+		"--protocol", "openai-chat", "--models", "m1,m2"); code != 0 {
+		t.Fatalf("account add filled 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	code, out, stderr := run(t, "account", "ls")
+	if code != 0 {
+		t.Fatalf("account ls 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if strings.Contains(out, "不限") {
+		t.Fatalf("空模型列表不该写成「不限」: %s", out)
+	}
+	if !strings.Contains(out, "无模型（先 model sync）") {
+		t.Fatalf("没有任何模型信息时应写明下一步: %s", out)
+	}
+	// 手填了名字的账号照旧直接列出模型名，文案不变。
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "filled") && !strings.Contains(line, "m1 等 2 个") {
+			t.Fatalf("手填了模型的账号应列出模型名: %q", line)
+		}
+	}
+
+	// --json 与文本说的是同一件事：没有任何模型信息 = models 为空且 models_synced 为 0。
+	code, out, stderr = run(t, "account", "ls", "--json")
+	if code != 0 {
+		t.Fatalf("account ls --json 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var rows []accountRow
+	mustJSON(t, out, &rows)
+	byName := make(map[string]accountRow, len(rows))
+	for _, r := range rows {
+		byName[r.Name] = r
+	}
+	if b := byName["bare"]; len(b.Models) != 0 || b.ModelsSynced != 0 || b.ModelsUsable != 0 {
+		t.Fatalf("没有任何模型信息的账号 = %+v，期望 models 为空、两个计数都是 0", b)
+	}
+	if f := byName["filled"]; len(f.Models) != 2 || f.ModelsSynced != 0 || f.ModelsUsable != 0 {
+		t.Fatalf("手填模型名的账号 = %+v，期望 models 有两个名字、两个计数都是 0", f)
+	}
+}
+
+// TestAccountLsSyncedZeroUsable 覆盖「同步过但零可用」：模型列走「0 可用 / N 同步」，
+// 不落到「无模型」，--json 的 models_synced 大于 0 能把这种情况与没同步过分开。
+func TestAccountLsSyncedZeroUsable(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+	addBareAccount(t, "ds1", "sk-1")
+
+	db := storetest.Open(t)
+	acc, err := db.GetAccount("ds1")
+	if err != nil {
+		t.Fatalf("读账号 ds1: %v", err)
+	}
+	// model sync 写进来的是 synced：列表拉到了，但一个都还没探过。
+	for _, m := range []string{"m1", "m2"} {
+		if err := db.SetModelStatus(acc.ID, m, "synced", 0, ""); err != nil {
+			t.Fatalf("写 %s 状态: %v", m, err)
+		}
+	}
+
+	code, out, stderr := run(t, "account", "ls")
+	if code != 0 {
+		t.Fatalf("account ls 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if strings.Contains(out, "不限") || strings.Contains(out, "无模型") {
+		t.Fatalf("同步过的账号应写「0 可用 / 2 同步」: %s", out)
+	}
+	if !strings.Contains(out, "0 可用 / 2 同步") {
+		t.Fatalf("同步过但零可用时应写「0 可用 / 2 同步」: %s", out)
+	}
+
+	code, out, stderr = run(t, "account", "ls", "--json")
+	if code != 0 {
+		t.Fatalf("account ls --json 退出码 = %d，stderr = %s", code, stderr)
+	}
+	row := mustAccountRow(t, out)
+	if len(row.Models) != 0 || row.ModelsSynced != 2 || row.ModelsUsable != 0 {
+		t.Fatalf("同步过但零可用的账号 = %+v，期望 models 为空、models_synced 2、models_usable 0", row)
+	}
+}
+
+// TestModelLsEmptyHintNamesRunnableCommands 盯住 model ls 空清单时的下一步提示：
+// 提示里的命令必须真的存在，并且指向把模型列表拉进来的两步（sync 与 probe）。
+func TestModelLsEmptyHintNamesRunnableCommands(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	code, out, stderr := run(t, "model", "ls")
+	if code != 0 {
+		t.Fatalf("model ls 退出码 = %d，stderr = %s", code, stderr)
+	}
+	for _, want := range []string{"switchboard model sync", "switchboard model probe"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("空清单的提示应给出下一步 %q: %s", want, out)
+		}
+	}
+	if strings.Contains(out, "account probe") {
+		t.Fatalf("提示里不该出现不存在的 account probe: %s", out)
+	}
+}

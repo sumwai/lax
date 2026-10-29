@@ -301,7 +301,7 @@ func cmdCall(e *Env, args []string) error {
 			}
 		}
 		if usedModel == "" {
-			return usagef("没有可用模型，先运行 switchboard account add 并给出 --models")
+			return usagef("没有可用模型：先 switchboard account add 加账号，再 switchboard model sync 拉上游模型列表、switchboard model probe 探活（模型列表为空的账号不参与选号）")
 		}
 	}
 
