@@ -57,11 +57,40 @@
   },
   {
     "data": {
+      "item": {
+        "status": "completed",
+        "summary": [
+          {
+            "text": "先算 6×7。",
+            "type": "summary_text"
+          }
+        ],
+        "type": "reasoning"
+      },
+      "output_index": 0,
+      "sequence_number": 5,
+      "type": "response.output_item.done"
+    },
+    "event": "response.output_item.done"
+  },
+  {
+    "data": {
       "response": {
         "id": "resp_switchboard",
         "model": "m1",
         "object": "response",
-        "output": [],
+        "output": [
+          {
+            "status": "completed",
+            "summary": [
+              {
+                "text": "先算 6×7。",
+                "type": "summary_text"
+              }
+            ],
+            "type": "reasoning"
+          }
+        ],
         "status": "completed",
         "usage": {
           "input_tokens": 12,
@@ -69,7 +98,7 @@
           "total_tokens": 17
         }
       },
-      "sequence_number": 5,
+      "sequence_number": 6,
       "type": "response.completed"
     },
     "event": "response.completed"

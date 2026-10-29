@@ -103,6 +103,19 @@ func isClientTool(t Tool) bool {
 	return t.Type == "" || t.Type == "custom"
 }
 
+// emptyToolSchema 是工具参数结构缺失时补的空对象。三条协议都把参数结构当作必填：
+// anthropic 的 input_schema、chat 的 function.parameters、responses 的 parameters
+// 缺了会被上游拒收，补空对象只是让「没有参数」这件事表达得出来（DESIGN 5.4）。
+var emptyToolSchema = json.RawMessage(`{"type":"object","properties":{}}`)
+
+// schemaOrEmpty 给缺失的参数结构补上空对象，已有内容一个字节都不改。
+func schemaOrEmpty(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return emptyToolSchema
+	}
+	return raw
+}
+
 // 工具选择模式。
 const (
 	ToolChoiceAuto     = "auto"

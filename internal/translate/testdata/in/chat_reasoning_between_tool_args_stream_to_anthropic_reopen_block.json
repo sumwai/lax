@@ -1,0 +1,15 @@
+{
+  "from": "anthropic",
+  "to": "openai-chat",
+  "kind": "stream",
+  "model": "claude-x",
+  "frames": [
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "weather", "arguments": "{\"city\":"}}]}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"reasoning_content": "再确认一下城市名。"}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "\"北京\"}"}}]}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 1, "id": "call_2", "type": "function", "function": {"name": "weather", "arguments": "{\"city\":\"上海\"}"}}]}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 12, "completion_tokens": 5}},
+    "[DONE]"
+  ]
+}

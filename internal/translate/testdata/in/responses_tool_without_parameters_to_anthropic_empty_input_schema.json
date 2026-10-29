@@ -1,0 +1,15 @@
+{
+  "from": "openai-responses",
+  "to": "anthropic",
+  "kind": "request",
+  "model": "claude-x",
+  "body": {
+    "model": "up-responses",
+    "max_output_tokens": 256,
+    "input": "你好",
+    "tools": [
+      {"type": "function", "name": "ping"},
+      {"type": "function", "name": "weather", "description": "天气", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}
+    ]
+  }
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -201,7 +202,7 @@ func DecodeResponsesRequest(raw []byte) (*Request, error) {
 		req.Tools = append(req.Tools, Tool{
 			Name:        t.Name,
 			Description: t.Description,
-			Schema:      t.Parameters,
+			Schema:      schemaOrEmpty(t.Parameters),
 		})
 	}
 
@@ -510,10 +511,7 @@ func EncodeResponsesRequest(r *Request, model string) ([]byte, error) {
 			// anthropic 的服务端内置工具在 responses 里没有对应形状，只认 function。
 			continue
 		}
-		schema := t.Schema
-		if len(schema) == 0 {
-			schema = json.RawMessage(`{"type":"object","properties":{}}`)
-		}
+		schema := schemaOrEmpty(t.Schema)
 		out.Tools = append(out.Tools, responsesTool{
 			Type:        "function",
 			Name:        t.Name,
@@ -561,11 +559,9 @@ func responsesEncodeMessage(m Message) ([]any, error) {
 		case BlockText:
 			parts = append(parts, map[string]any{"type": textType, "text": b.Text})
 		case BlockThinking:
-			if b.Thinking == nil || b.Thinking.Text == "" {
-				continue
-			}
-			flush()
-			items = append(items, responsesEncodeReasoning(*b.Thinking))
+			// 请求方向不回填思考内容：responses 的 input 里的 reasoning item 只属于发出它的
+			// 上游，客户端把它回填进下一轮请求会被上游拒收（DESIGN 5.4）。
+			continue
 		case BlockImage:
 			if b.Image == nil || b.Image.URL == "" {
 				continue
@@ -1052,22 +1048,33 @@ func responsesStreamErrorText(resp *responsesResponse) string {
 
 // responsesStreamEncoder 把 IR 增量编成 Responses 的 SSE 事件。
 type responsesStreamEncoder struct {
-	model         string
-	id            string
-	seq           int
-	next          int
-	started       bool
-	finished      bool
-	sentStop      bool
-	thinkingIndex int
-	textIndex     int
-	toolIndex     map[int]int
+	model    string
+	id       string
+	seq      int
+	next     int
+	started  bool
+	finished bool
+	sentStop bool
+	// reasoningIndex 是思考 item 的 output 序号，reasoning 是已经按增量下发的正文：
+	// 收尾要补 output_item.done 并把 item 回填进 output（DESIGN 5.4）。
+	reasoningIndex int
+	reasoning      strings.Builder
+	textIndex      int
+	toolIndex      map[int]int
 	// toolBuffers 按 output 序号缓存工具 item 的名称、call_id 与已转发的参数：
 	// 收尾要补 function_call_arguments.done 与 output_item.done，并把 output 回填（DESIGN 5.4）。
 	toolBuffers map[int]*responsesToolBuffer
 	toolOrder   []int
 	// toolOpen 记「有工具块开了还没收」，断流时用来补说明。
 	toolOpen bool
+}
+
+// streamItem 是已经发过增量的一个 output item，按 output 序号排序用。t 非空表示
+// 这是工具 item，收尾前要先补 function_call_arguments.done。
+type streamItem struct {
+	index int
+	item  map[string]any
+	t     *responsesToolBuffer
 }
 
 // responsesToolBuffer 是一个正在流式下发的工具 item。
@@ -1111,12 +1118,12 @@ func (b *responsesToolBuffer) argumentsJSON() string {
 // newResponsesStreamEncoder 构造编码器。model 是客户端请求的模型名，会写回事件。
 func newResponsesStreamEncoder(model string) *responsesStreamEncoder {
 	return &responsesStreamEncoder{
-		model:         model,
-		id:            "resp_switchboard",
-		thinkingIndex: -1,
-		textIndex:     -1,
-		toolIndex:     map[int]int{},
-		toolBuffers:   map[int]*responsesToolBuffer{},
+		model:          model,
+		id:             "resp_switchboard",
+		reasoningIndex: -1,
+		textIndex:      -1,
+		toolIndex:      map[int]int{},
+		toolBuffers:    map[int]*responsesToolBuffer{},
 	}
 }
 
@@ -1147,18 +1154,20 @@ func (e *responsesStreamEncoder) Emit(d Delta) []SSEEvent {
 	switch d.Kind {
 	case DeltaThinking:
 		// 思考正文单独占一个 output item，正文为空（只有签名）时没有可写的东西。
+		// 与非流式响应一样写在 summary 的 summary_text 里，收尾时补 output_item.done。
 		if d.Text == "" {
 			break
 		}
-		if e.thinkingIndex < 0 {
-			e.thinkingIndex = e.allocIndex()
+		if e.reasoningIndex < 0 {
+			e.reasoningIndex = e.allocIndex()
 			events = append(events, e.event("response.output_item.added", map[string]any{
-				"output_index": e.thinkingIndex,
+				"output_index": e.reasoningIndex,
 				"item":         map[string]any{"type": "reasoning", "summary": []any{}},
 			}))
 		}
+		e.reasoning.WriteString(d.Text)
 		events = append(events, e.event("response.reasoning_summary_text.delta", map[string]any{
-			"output_index":  e.thinkingIndex,
+			"output_index":  e.reasoningIndex,
 			"summary_index": 0,
 			"delta":         d.Text,
 		}))
@@ -1224,8 +1233,8 @@ func (e *responsesStreamEncoder) Finish() []SSEEvent {
 }
 
 // completed 发 response.completed，带上状态与用量。
-// 发之前把每个工具 item 的 arguments.done 与 output_item.done 补齐，并把完整的
-// function_call 回填进 output：只发 added 与 delta 的流会让客户端拿不到收尾。
+// 发之前给每个发过增量的 item 补 output_item.done（工具 item 先补 arguments.done），
+// 并把完整的 item 回填进 output：只发 added 与 delta 的流会让客户端拿不到收尾。
 func (e *responsesStreamEncoder) completed(reason string, usage *Usage) []SSEEvent {
 	if e.sentStop {
 		return nil
@@ -1233,7 +1242,7 @@ func (e *responsesStreamEncoder) completed(reason string, usage *Usage) []SSEEve
 	e.sentStop = true
 	e.toolOpen = false
 
-	events := e.toolDoneEvents()
+	events := e.doneEvents()
 
 	status := "completed"
 	resp := map[string]any{
@@ -1241,7 +1250,7 @@ func (e *responsesStreamEncoder) completed(reason string, usage *Usage) []SSEEve
 		"object": "response",
 		"status": status,
 		"model":  e.model,
-		"output": e.toolOutputItems(),
+		"output": e.outputItems(),
 		"usage":  responsesUsageOut{},
 	}
 	if reason == StopMaxTokens {
@@ -1259,41 +1268,65 @@ func (e *responsesStreamEncoder) completed(reason string, usage *Usage) []SSEEve
 	return events
 }
 
-// toolDoneEvents 给每个工具 item 补 arguments.done 与 output_item.done，按 output 序号顺序发。
-func (e *responsesStreamEncoder) toolDoneEvents() []SSEEvent {
+// doneEvents 按 output 序号给出收尾事件：工具 item 先补 function_call_arguments.done，
+// 再给每个发过增量的 item 补 output_item.done。
+func (e *responsesStreamEncoder) doneEvents() []SSEEvent {
 	var events []SSEEvent
-	for _, idx := range e.toolOrder {
-		buf := e.toolBuffers[idx]
-		if buf == nil {
-			continue
+	for _, it := range e.streamItems() {
+		if it.t != nil {
+			events = append(events, e.event("response.function_call_arguments.done", map[string]any{
+				"output_index": it.index,
+				"item_id":      it.t.itemID,
+				"name":         it.t.name,
+				"arguments":    it.t.argumentsJSON(),
+			}))
 		}
-		args := buf.argumentsJSON()
-		events = append(events, e.event("response.function_call_arguments.done", map[string]any{
-			"output_index": idx,
-			"item_id":      buf.itemID,
-			"name":         buf.name,
-			"arguments":    args,
-		}))
 		events = append(events, e.event("response.output_item.done", map[string]any{
-			"output_index": idx,
-			"item":         buf.doneItem(args),
+			"output_index": it.index,
+			"item":         it.item,
 		}))
 	}
 	return events
 }
 
-// toolOutputItems 拼出收尾事件里的 output 数组，只含工具 item：文本与思考 item 的正文
-// 已经按增量发过，这里不攒，输出数组因此只列 function_call（DESIGN 5.4 已知边界）。
-func (e *responsesStreamEncoder) toolOutputItems() []any {
+// outputItems 拼出收尾事件里的 output 数组，内容与 done 事件里的 item 相同。
+func (e *responsesStreamEncoder) outputItems() []any {
 	out := []any{}
+	for _, it := range e.streamItems() {
+		out = append(out, it.item)
+	}
+	return out
+}
+
+// streamItems 按 output 序号列出已经发过增量的 item 及其收尾形状：思考 item 与工具
+// item 都有收尾，文本 item 只发增量、不攒正文（DESIGN 5.4）。
+func (e *responsesStreamEncoder) streamItems() []streamItem {
+	var items []streamItem
+	if e.reasoningIndex >= 0 {
+		items = append(items, streamItem{index: e.reasoningIndex, item: e.reasoningItem()})
+	}
 	for _, idx := range e.toolOrder {
 		buf := e.toolBuffers[idx]
 		if buf == nil {
 			continue
 		}
-		out = append(out, buf.doneItem(buf.argumentsJSON()))
+		items = append(items, streamItem{index: idx, item: buf.doneItem(buf.argumentsJSON()), t: buf})
 	}
-	return out
+	sort.Slice(items, func(i, j int) bool { return items[i].index < items[j].index })
+	return items
+}
+
+// reasoningItem 是思考 item 的收尾形状：正文落在 summary 的 summary_text 里（与非流式
+// 响应同一位置），status 是流式 item 的收尾状态（DESIGN 5.4）。
+func (e *responsesStreamEncoder) reasoningItem() map[string]any {
+	return map[string]any{
+		"type":   "reasoning",
+		"status": "completed",
+		"summary": []any{map[string]any{
+			"type": "summary_text",
+			"text": e.reasoning.String(),
+		}},
+	}
 }
 
 // toolBuffer 取某个上游块号对应的工具缓冲；没有就新开一个（先来参数后到开始也算）。

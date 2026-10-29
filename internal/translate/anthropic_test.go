@@ -362,6 +362,78 @@ func TestAnthropicToolTypeRoundTrip(t *testing.T) {
 	}
 }
 
+// TestAnthropicStreamEncoderKeepsDeltasOnOpenBlocks 确认思考增量与工具参数交替时，
+// 每个 content_block_delta 都落在未关闭的块上：块被关掉之后要重开一个新块，不能往
+// 已经发过 content_block_stop 的块继续写（DESIGN 5.4）。
+func TestAnthropicStreamEncoderKeepsDeltasOnOpenBlocks(t *testing.T) {
+	enc := newAnthropicStreamEncoder("claude-x")
+	events := enc.Start()
+	deltas := []Delta{
+		{Kind: DeltaToolStart, Index: 1, ToolID: "toolu_1", ToolName: "weather"},
+		{Kind: DeltaToolArgs, Index: 1, ArgsJSON: `{"city":`},
+		{Kind: DeltaThinking, Text: "再确认一下城市名"},
+		{Kind: DeltaToolArgs, Index: 1, ArgsJSON: `"北京"}`},
+		{Kind: DeltaToolStart, Index: 2, ToolID: "toolu_2", ToolName: "weather"},
+		{Kind: DeltaToolArgs, Index: 2, ArgsJSON: `{"city":"上海"}`},
+		{Kind: DeltaStop, StopReason: StopToolUse},
+	}
+	for _, d := range deltas {
+		events = append(events, enc.Emit(d)...)
+	}
+	events = append(events, enc.Finish()...)
+
+	open := map[int]bool{}
+	toolBlocks := map[int]string{}
+	for i, e := range events {
+		var frame struct {
+			Type         string `json:"type"`
+			Index        int    `json:"index"`
+			ContentBlock struct {
+				ID string `json:"id"`
+			} `json:"content_block"`
+		}
+		if e.Event == "" || json.Unmarshal(e.Data, &frame) != nil {
+			continue
+		}
+		switch frame.Type {
+		case "content_block_start":
+			if open[frame.Index] {
+				t.Fatalf("第 %d 个事件重开了块 %d", i+1, frame.Index)
+			}
+			open[frame.Index] = true
+			if frame.ContentBlock.ID != "" {
+				toolBlocks[frame.Index] = frame.ContentBlock.ID
+			}
+		case "content_block_delta":
+			if !open[frame.Index] {
+				t.Fatalf("第 %d 个事件往已关闭的块 %d 发增量", i+1, frame.Index)
+			}
+		case "content_block_stop":
+			if !open[frame.Index] {
+				t.Fatalf("第 %d 个事件停了没开的块 %d", i+1, frame.Index)
+			}
+			delete(open, frame.Index)
+		}
+	}
+	if len(open) != 0 {
+		t.Fatalf("收尾之后还有块开着: %v", open)
+	}
+
+	// toolu_1 的块因思考增量被关过一次，重开后是另一个块号，id 保持原样。
+	want := map[int]string{0: "toolu_1", 1: "", 2: "toolu_1", 3: "toolu_2"}
+	if len(toolBlocks) != 3 {
+		t.Fatalf("工具块 = %v", toolBlocks)
+	}
+	for idx, id := range want {
+		if id == "" {
+			continue
+		}
+		if got := toolBlocks[idx]; got != id {
+			t.Fatalf("块 %d 的 id = %q，期望 %q", idx, got, id)
+		}
+	}
+}
+
 // TestAnthropicStreamEncoderTruncatedToolArgs 确认断流时错误事件说明工具参数不完整。
 func TestAnthropicStreamEncoderTruncatedToolArgs(t *testing.T) {
 	enc := newAnthropicStreamEncoder("claude-x")

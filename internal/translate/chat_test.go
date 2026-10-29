@@ -937,7 +937,10 @@ func TestChatUsageScannerEmpty(t *testing.T) {
 	}
 }
 
-func TestEncodeChatWritesReasoningContentOnly(t *testing.T) {
+// TestEncodeChatRequestDropsThinking 确认请求方向不回填思考内容：chat 的
+// reasoning_content 是上游自己产生的字段，客户端把它回填给推理模型会被以 400 拒掉
+// 整条请求，响应方向照旧搬运（DESIGN 5.4）。
+func TestEncodeChatRequestDropsThinking(t *testing.T) {
 	req := &Request{
 		Model: "m1",
 		Messages: []Message{
@@ -953,19 +956,27 @@ func TestEncodeChatWritesReasoningContentOnly(t *testing.T) {
 		t.Fatalf("编码请求: %v", err)
 	}
 	out := string(raw)
-	if !strings.Contains(out, `"reasoning_content":"想一下"`) {
-		t.Fatalf("思考正文应写进 reasoning_content：%s", out)
-	}
-	// 编码只认识 reasoning_content：reasoning、signature、redacted data 都不能出现在报文里。
-	for _, bad := range []string{`"reasoning":`, "sig-abc", "opaque"} {
+	for _, bad := range []string{`"reasoning_content"`, `"reasoning":`, "想一下", "sig-abc", "opaque"} {
 		if strings.Contains(out, bad) {
-			t.Fatalf("报文里不该出现 %q：%s", bad, out)
+			t.Fatalf("请求报文里不该出现 %q：%s", bad, out)
 		}
+	}
+
+	// 响应方向仍然把思考正文写进 reasoning_content，两条方向不一样。
+	resp, err := EncodeChatResponse(&Response{
+		Model:  "m1",
+		Blocks: []Block{{Kind: BlockThinking, Thinking: &Thinking{Text: "想一下", Signature: "sig-abc"}}},
+	})
+	if err != nil {
+		t.Fatalf("编码响应: %v", err)
+	}
+	if !strings.Contains(string(resp), `"reasoning_content":"想一下"`) {
+		t.Fatalf("响应报文里应有 reasoning_content：%s", resp)
 	}
 }
 
 func TestDecodeChatReasoningOnlyMessage(t *testing.T) {
-	// 只有思考内容、没有正文的 assistant 消息也要保留，否则多轮里那段思考整块丢失。
+	// 解码时只有思考内容、没有正文的 assistant 消息仍保留，否则响应方向的搬运会丢掉它。
 	raw := `{"model":"m1","messages":[
 	  {"role":"user","content":"问题"},
 	  {"role":"assistant","reasoning_content":"想一下"}
@@ -982,13 +993,16 @@ func TestDecodeChatReasoningOnlyMessage(t *testing.T) {
 		t.Fatalf("块 = %+v", b)
 	}
 
-	// 再编回 chat：仍然只有 reasoning_content。
+	// 再编回请求：思考内容不回填，这条 assistant 消息什么都不剩，整条不写。
 	out, err := EncodeChatRequest(req, "")
 	if err != nil {
 		t.Fatalf("编码请求: %v", err)
 	}
-	if !strings.Contains(string(out), `"reasoning_content":"想一下"`) {
-		t.Fatalf("报文 = %s", out)
+	if strings.Contains(string(out), "reasoning_content") {
+		t.Fatalf("请求报文里不该有 reasoning_content：%s", out)
+	}
+	if strings.Contains(string(out), `"role":"assistant"`) {
+		t.Fatalf("只剩思考内容的 assistant 消息不该写出去：%s", out)
 	}
 }
 

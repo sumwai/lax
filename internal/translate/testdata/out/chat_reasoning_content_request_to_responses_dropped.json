@@ -11,15 +11,6 @@
       "type": "message"
     },
     {
-      "summary": [
-        {
-          "text": "用户问乘法，先算 6×7=42。",
-          "type": "summary_text"
-        }
-      ],
-      "type": "reasoning"
-    },
-    {
       "content": [
         {
           "text": "42",

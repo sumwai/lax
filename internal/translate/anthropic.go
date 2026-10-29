@@ -80,45 +80,55 @@ func EncodeAnthropicRequest(r *Request, model string) ([]byte, error) {
 		wire.System = b
 	}
 
-	// 工具结果必须并进 user 消息里的 tool_result 块：anthropic 没有 role=tool，
-	// 原样写过去会被上游以 400 拒绝。同一个 assistant 消息之后的多条结果并成一条
-	// user 消息，顺序不变（DESIGN 5.4）。
-	var pendingToolResults *AnthropicMessage
-	flushToolResults := func() {
-		if pendingToolResults == nil {
+	// anthropic 没有 role=tool，工具结果必须落进 user 消息里的 tool_result 块，原样写过去
+	// 会被上游以 400 拒绝。anthropic 也不接受两条相邻的 user 消息，所以连续的 user 侧内容
+	// （工具结果与普通 user 消息）并成一条：tool_result 块在前，普通内容按原顺序跟随
+	// （DESIGN 5.4）。
+	var pendingResults, pendingBlocks []ContentBlock
+	flushUser := func() {
+		if len(pendingResults) == 0 && len(pendingBlocks) == 0 {
 			return
 		}
-		wire.Messages = append(wire.Messages, *pendingToolResults)
-		pendingToolResults = nil
+		blocks := make([]ContentBlock, 0, len(pendingResults)+len(pendingBlocks))
+		blocks = append(blocks, pendingResults...)
+		blocks = append(blocks, pendingBlocks...)
+		wire.Messages = append(wire.Messages, AnthropicMessage{Role: "user", Content: Content{Blocks: blocks}})
+		pendingResults, pendingBlocks = nil, nil
 	}
 	for _, m := range r.Messages {
 		if m.Role == RoleTool {
-			blocks := toolResultBlocks(m)
-			if len(blocks) == 0 {
-				continue
-			}
-			if pendingToolResults == nil {
-				pendingToolResults = &AnthropicMessage{Role: "user", Content: Content{Blocks: blocks}}
-				continue
-			}
-			pendingToolResults.Content.Blocks = append(pendingToolResults.Content.Blocks, blocks...)
+			pendingResults = append(pendingResults, toolResultBlocks(m)...)
 			continue
 		}
-		flushToolResults()
+		if m.Role == RoleUser {
+			msg, err := toAnthropicMessage(m)
+			if err != nil {
+				return nil, err
+			}
+			pendingBlocks = append(pendingBlocks, msg.Content.Blocks...)
+			continue
+		}
+		flushUser()
 		msg, err := toAnthropicMessage(m)
 		if err != nil {
 			return nil, err
 		}
 		wire.Messages = append(wire.Messages, msg)
 	}
-	flushToolResults()
+	flushUser()
 
 	for _, t := range r.Tools {
+		// `input_schema` 是必填项，客户端函数缺它时补空对象；内置工具本来就没有 schema，
+		// 补一个出来就是伪造上游事实（DESIGN 5.4）。
+		schema := t.Schema
+		if isClientTool(t) {
+			schema = schemaOrEmpty(schema)
+		}
 		wire.Tools = append(wire.Tools, AnthropicTool{
 			Type:        t.Type,
 			Name:        t.Name,
 			Description: t.Description,
-			InputSchema: t.Schema,
+			InputSchema: schema,
 		})
 	}
 
@@ -330,19 +340,33 @@ func (d *anthropicStreamDecoder) Close() []Delta {
 
 // anthropicStreamEncoder 把增量编成 anthropic 的 SSE 事件。
 type anthropicStreamEncoder struct {
-	model      string
-	started    bool
-	nextIndex  int
-	openIndex  int
-	openKind   BlockKind
+	model     string
+	started   bool
+	nextIndex int
+	openIndex int
+	openKind  BlockKind
+	// closedBlocks 记哪些块号已经发过 content_block_stop：收过 stop 的块不能再收
+	// content_block_delta，需要重开一个新块（DESIGN 5.4）。
+	closedBlocks map[int]bool
+	// toolBlocks 是上游块号 → 最近一次开的 anthropic 块号，toolSpecs 记重开时要写的
+	// id 与 name，两个并行工具各自映射到自己的块。
 	toolBlocks map[int]int
+	toolSpecs  map[int]ContentBlock
+	// toolOpen 记「有工具块收了还没收尾」，断流时用来补说明。
+	toolOpen   bool
 	stopReason string
 	usage      Usage
 	stopped    bool
 }
 
 func newAnthropicStreamEncoder(model string) *anthropicStreamEncoder {
-	return &anthropicStreamEncoder{model: model, openIndex: -1, toolBlocks: map[int]int{}}
+	return &anthropicStreamEncoder{
+		model:        model,
+		openIndex:    -1,
+		closedBlocks: map[int]bool{},
+		toolBlocks:   map[int]int{},
+		toolSpecs:    map[int]ContentBlock{},
+	}
 }
 
 func (e *anthropicStreamEncoder) Start() []SSEEvent {
@@ -367,63 +391,53 @@ func (e *anthropicStreamEncoder) Emit(d Delta) []SSEEvent {
 		if d.Text == "" && d.Signature == "" {
 			break
 		}
-		if e.openKind != BlockThinking {
-			e.closeBlock(&events)
-			e.startBlock(&events, ContentBlock{Type: "thinking"})
-		}
+		idx := e.ensureOpen(&events, BlockThinking, ContentBlock{Type: "thinking"})
 		if d.Text != "" {
 			events = append(events, e.event("content_block_delta", map[string]any{
 				"type":  "content_block_delta",
-				"index": e.openIndex,
+				"index": idx,
 				"delta": map[string]string{"type": "thinking_delta", "thinking": d.Text},
 			}))
 		}
 		if d.Signature != "" {
 			events = append(events, e.event("content_block_delta", map[string]any{
 				"type":  "content_block_delta",
-				"index": e.openIndex,
+				"index": idx,
 				"delta": map[string]string{"type": "signature_delta", "signature": d.Signature},
 			}))
 		}
 	case DeltaText:
-		if e.openKind != BlockText {
-			e.closeBlock(&events)
-			e.startBlock(&events, ContentBlock{Type: "text", Text: ""})
-		}
+		idx := e.ensureOpen(&events, BlockText, ContentBlock{Type: "text", Text: ""})
 		events = append(events, e.event("content_block_delta", map[string]any{
 			"type":  "content_block_delta",
-			"index": e.openIndex,
+			"index": idx,
 			"delta": map[string]string{"type": "text_delta", "text": d.Text},
 		}))
 	case DeltaToolStart:
-		idx, ok := e.toolBlocks[d.Index]
-		if !ok {
-			e.closeBlock(&events)
-			e.startBlock(&events, ContentBlock{
-				Type: "tool_use", ID: d.ToolID, Name: d.ToolName, Input: json.RawMessage(`{}`),
-			})
-			idx = e.openIndex
-			e.toolBlocks[d.Index] = idx
+		if d.ToolID != "" || d.ToolName != "" {
+			spec := e.toolSpecs[d.Index]
+			spec.Type = "tool_use"
+			if d.ToolID != "" {
+				spec.ID = d.ToolID
+			}
+			if d.ToolName != "" {
+				spec.Name = d.ToolName
+			}
+			spec.Input = json.RawMessage(`{}`)
+			e.toolSpecs[d.Index] = spec
 		}
-		e.openIndex = idx
-		e.openKind = BlockToolUse
+		e.toolBlock(&events, d.Index)
+		e.toolOpen = true
 	case DeltaToolArgs:
-		idx, ok := e.toolBlocks[d.Index]
-		if !ok {
-			// 没收到 start 就来了参数，补一个只有 id 的块，避免丢内容。
-			e.closeBlock(&events)
-			e.startBlock(&events, ContentBlock{
-				Type: "tool_use", ID: fmt.Sprintf("toolu_%d", d.Index), Input: json.RawMessage(`{}`),
-			})
-			idx = e.openIndex
-			e.toolBlocks[d.Index] = idx
-		}
+		idx := e.toolBlock(&events, d.Index)
+		e.toolOpen = true
 		events = append(events, e.event("content_block_delta", map[string]any{
 			"type":  "content_block_delta",
 			"index": idx,
 			"delta": map[string]string{"type": "input_json_delta", "partial_json": d.ArgsJSON},
 		}))
 	case DeltaStop:
+		e.toolOpen = false
 		if d.Usage != nil {
 			e.usage = *d.Usage
 		}
@@ -432,7 +446,7 @@ func (e *anthropicStreamEncoder) Emit(d Delta) []SSEEvent {
 		}
 		events = append(events, e.stopEvents()...)
 	case DeltaError:
-		events = append(events, ErrorEvent("api_error", withIncompleteToolArgs(d.Text, e.openKind == BlockToolUse)))
+		events = append(events, ErrorEvent("api_error", withIncompleteToolArgs(d.Text, e.toolOpen)))
 	}
 	return events
 }
@@ -468,13 +482,47 @@ func (e *anthropicStreamEncoder) stopEvents() []SSEEvent {
 	return events
 }
 
-func (e *anthropicStreamEncoder) startBlock(events *[]SSEEvent, block ContentBlock) {
+// ensureOpen 保证当前开着一个 kind 类型的块，返回它的块号。需要换块或重开时，把
+// 关闭与开块的帧追加到 events。
+func (e *anthropicStreamEncoder) ensureOpen(events *[]SSEEvent, kind BlockKind, tmpl ContentBlock) int {
+	if e.openIndex >= 0 && e.openKind == kind {
+		return e.openIndex
+	}
+	e.closeBlock(events)
+	return e.startBlock(events, tmpl)
+}
+
+// toolBlock 返回某个上游工具块在本协议里的块号，必要时开块。块已经被关掉（例如中间
+// 插进了一段思考增量）时重开一个新块：往已经发过 content_block_stop 的块发
+// input_json_delta 是非法事件序列，客户端会把它当成另一个块的内容。
+func (e *anthropicStreamEncoder) toolBlock(events *[]SSEEvent, upstream int) int {
+	if idx, ok := e.toolBlocks[upstream]; ok {
+		if !e.closedBlocks[idx] {
+			return idx
+		}
+	}
+	spec, ok := e.toolSpecs[upstream]
+	if !ok {
+		// 没收到 start 就来了参数，补一个只有 id 的块，避免丢内容。
+		spec = ContentBlock{Type: "tool_use", ID: fmt.Sprintf("toolu_%d", upstream)}
+	}
+	if len(spec.Input) == 0 {
+		spec.Input = json.RawMessage(`{}`)
+	}
+	e.closeBlock(events)
+	idx := e.startBlock(events, spec)
+	e.toolBlocks[upstream] = idx
+	return idx
+}
+
+// startBlock 开一个新块，返回它的块号。
+func (e *anthropicStreamEncoder) startBlock(events *[]SSEEvent, tmpl ContentBlock) int {
 	idx := e.nextIndex
 	e.nextIndex++
 	e.openIndex = idx
-	e.openKind = BlockKind(block.Type)
-	var payload any = block
-	switch block.Type {
+	e.openKind = BlockKind(tmpl.Type)
+	var payload any = tmpl
+	switch tmpl.Type {
 	case "text":
 		payload = map[string]any{"type": "text", "text": ""}
 	case "thinking":
@@ -485,6 +533,8 @@ func (e *anthropicStreamEncoder) startBlock(events *[]SSEEvent, block ContentBlo
 		"index":         idx,
 		"content_block": payload,
 	}))
+	delete(e.closedBlocks, idx)
+	return idx
 }
 
 func (e *anthropicStreamEncoder) closeBlock(events *[]SSEEvent) {
@@ -495,6 +545,7 @@ func (e *anthropicStreamEncoder) closeBlock(events *[]SSEEvent) {
 		"type":  "content_block_stop",
 		"index": e.openIndex,
 	}))
+	e.closedBlocks[e.openIndex] = true
 	e.openIndex = -1
 	e.openKind = ""
 }
@@ -597,6 +648,8 @@ func toAnthropicMessage(m Message) (AnthropicMessage, error) {
 			if b.Thinking == nil {
 				continue
 			}
+			// anthropic 是唯一认签名的协议，带签名的思考块回填给它才是它要求的样子；
+			// 没有签名的块由 anthropicThinkingBlock 丢弃（DESIGN 5.4）。
 			if blk, ok := anthropicThinkingBlock(*b.Thinking); ok {
 				blocks = append(blocks, blk)
 			}

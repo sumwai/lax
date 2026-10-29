@@ -212,8 +212,8 @@ func TestResponsesReasoningStreamToChatClient(t *testing.T) {
 }
 
 // TestResponsesReasoningItemToChatUpstream 覆盖 responses 入站请求里的 reasoning item：
-// 客户端把上一轮的思考回填进 input 时，编到 chat 上游要落在 assistant 消息的
-// reasoning_content 上，顺序在它后面的用户消息之前。
+// 客户端把上一轮的思考回填进 input 时，编到 chat 上游不回填 reasoning_content——
+// 主流推理模型对回填该字段直接回 400，所以请求里只剩它后面的用户消息。
 func TestResponsesReasoningItemToChatUpstream(t *testing.T) {
 	f := newFixture(t)
 	up, rec := fakeProtocolUpstream(t, gateway.ProtocolChat)
@@ -230,21 +230,20 @@ func TestResponsesReasoningItemToChatUpstream(t *testing.T) {
 
 	var sent struct {
 		Messages []struct {
-			Role             string `json:"role"`
-			ReasoningContent string `json:"reasoning_content"`
-			Content          string `json:"content"`
+			Role    string `json:"role"`
+			Content string `json:"content"`
 		} `json:"messages"`
 	}
 	if err := json.Unmarshal([]byte(rec.body), &sent); err != nil {
 		t.Fatalf("上游请求体不是合法 JSON: %v，%s", err, rec.body)
 	}
-	if len(sent.Messages) != 2 {
-		t.Fatalf("消息条数 = %d，期望 2（思考并进 assistant，用户消息在后）: %s", len(sent.Messages), rec.body)
+	if len(sent.Messages) != 1 {
+		t.Fatalf("消息条数 = %d，期望 1（思考不回填，只剩用户消息）: %s", len(sent.Messages), rec.body)
 	}
-	if sent.Messages[0].Role != "assistant" || sent.Messages[0].ReasoningContent != "先想一下" {
-		t.Fatalf("第一条消息 = %+v，期望 role=assistant、reasoning_content=先想一下", sent.Messages[0])
+	if strings.Contains(rec.body, "reasoning_content") {
+		t.Fatalf("上游请求里不该出现 reasoning_content: %s", rec.body)
 	}
-	if sent.Messages[1].Role != "user" || sent.Messages[1].Content != "继续" {
-		t.Fatalf("第二条消息 = %+v，期望 role=user、content=继续", sent.Messages[1])
+	if sent.Messages[0].Role != "user" || sent.Messages[0].Content != "继续" {
+		t.Fatalf("第一条消息 = %+v，期望 role=user、content=继续", sent.Messages[0])
 	}
 }

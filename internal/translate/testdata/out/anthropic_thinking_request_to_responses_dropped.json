@@ -11,15 +11,6 @@
       "type": "message"
     },
     {
-      "summary": [
-        {
-          "text": "少数实现把思考正文写在 reasoning 字段。",
-          "type": "summary_text"
-        }
-      ],
-      "type": "reasoning"
-    },
-    {
       "content": [
         {
           "text": "42",

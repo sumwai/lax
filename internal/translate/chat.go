@@ -70,7 +70,7 @@ func DecodeChatRequest(raw []byte) (*Request, error) {
 		out.Tools = append(out.Tools, Tool{
 			Name:        t.Function.Name,
 			Description: t.Function.Description,
-			Schema:      chatSchemaOrEmpty(t.Function.Parameters),
+			Schema:      schemaOrEmpty(t.Function.Parameters),
 		})
 	}
 
@@ -127,7 +127,7 @@ func EncodeChatRequest(r *Request, model string) ([]byte, error) {
 			Function: ChatToolFunc{
 				Name:        t.Name,
 				Description: t.Description,
-				Parameters:  chatSchemaOrEmpty(t.Schema),
+				Parameters:  schemaOrEmpty(t.Schema),
 			},
 		})
 	}
@@ -720,17 +720,15 @@ func chatMessagesFor(m Message) ([]ChatMessage, error) {
 
 	case RoleAssistant:
 		var text strings.Builder
-		var reasoning strings.Builder
 		var calls []ChatToolCall
 		for i, b := range m.Blocks {
 			switch b.Kind {
 			case BlockText:
 				text.WriteString(b.Text)
 			case BlockThinking:
-				// chat 只有 reasoning_content 一个落点，签名与 redacted 没有地方放，丢弃。
-				if b.Thinking != nil && b.Thinking.Text != "" {
-					reasoning.WriteString(b.Thinking.Text)
-				}
+				// 请求方向不回填思考内容：chat 的 reasoning_content 是上游自己产生的字段，
+				// 客户端回填它在主流推理模型上会被以 400 拒掉整条请求（DESIGN 5.4）。
+				continue
 			case BlockToolUse:
 				if b.ToolUse == nil {
 					continue
@@ -752,10 +750,10 @@ func chatMessagesFor(m Message) ([]ChatMessage, error) {
 				})
 			}
 		}
-		if text.Len() == 0 && len(calls) == 0 && reasoning.Len() == 0 {
+		if text.Len() == 0 && len(calls) == 0 {
 			return nil, nil
 		}
-		msg := ChatMessage{Role: "assistant", ToolCalls: calls, ReasoningContent: reasoning.String()}
+		msg := ChatMessage{Role: "assistant", ToolCalls: calls}
 		if t := text.String(); t != "" {
 			msg.Content = t
 		}
@@ -870,14 +868,6 @@ func chatArgumentsJSON(args string) (json.RawMessage, error) {
 		return nil, errors.New("参数不是合法 JSON")
 	}
 	return json.RawMessage(args), nil
-}
-
-// chatSchemaOrEmpty 给缺失的参数结构补上空对象。
-func chatSchemaOrEmpty(raw json.RawMessage) json.RawMessage {
-	if len(raw) == 0 {
-		return json.RawMessage(`{"type":"object","properties":{}}`)
-	}
-	return raw
 }
 
 // chatToolChoiceFromWire 解析入站的 tool_choice。

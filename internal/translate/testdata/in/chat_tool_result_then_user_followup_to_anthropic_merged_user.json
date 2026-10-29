@@ -1,0 +1,18 @@
+{
+  "from": "openai-chat",
+  "to": "anthropic",
+  "kind": "request",
+  "model": "claude-x",
+  "body": {
+    "model": "up-chat",
+    "max_tokens": 256,
+    "messages": [
+      {"role": "user", "content": "北京天气"},
+      {"role": "assistant", "content": null, "tool_calls": [
+        {"id": "call_1", "type": "function", "function": {"name": "weather", "arguments": "{\"city\":\"北京\"}"}}
+      ]},
+      {"role": "tool", "tool_call_id": "call_1", "content": "晴"},
+      {"role": "user", "content": "那上海呢"}
+    ]
+  }
+}
