@@ -30,14 +30,17 @@ var providerSubs = []groupItem{
 // `{model}` 占位符原样落库，由网关在发请求之前换成模型名：cli 不展开、不校验、也不改写它。
 
 // 三份用法行，所有用法错误都把它打出来，不让用户看着一句「参数错误」去猜参数（见 AGENTS.md）。
+// `--base-url` 在 add 里是可选的：三条路由与 models_path 都是整条地址时它拼不进任何地址，
+// 写它只是为了过校验（见 DESIGN 5.8）。
 const (
-	providerAddUsage   = "用法：switchboard provider add <名称> --base-url <地址> [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]"
+	providerAddUsage   = "用法：switchboard provider add <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]"
 	providerSetUsage   = "用法：switchboard provider set <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--models-path <路径>] [--default-protocol <协议>] [--note <备注>]"
 	providerUnsetUsage = "用法：switchboard provider unset <名称> <字段> [<字段>...]\n可用字段：anthropic、openai、responses、gemini、models-path、default-protocol、note"
 )
 
 // providerUnsetField 是一个可以被 `provider unset` 清掉的字段。字段名用 flag 名，
-// 删路由的几项带上线协议；base-url 与厂商名不在这里：前者是必填地址，后者是主键（见 DESIGN 4）。
+// 删路由的几项带上线协议；base-url 与厂商名不在这里：前者只能改成另一个地址（清掉之后相对路径
+// 的路由就拼不出完整地址），后者是主键（见 DESIGN 4）。
 type providerUnsetField struct {
 	name     string // 位置参数上的字段名
 	what     string // 人读输出里的说法
@@ -220,6 +223,23 @@ func defaultProtocolCell(s providerSnapshot) string {
 	return s.json.DefaultProtocol
 }
 
+// baseURLCell 是地址列：base_url 可以为空（每条路由与 models_path 都是整条地址时它拼不进
+// 任何地址，见 DESIGN 5.8），空值显示 -，与默认协议列同一种写法，不打出一个空单元格。
+func baseURLCell(base string) string {
+	if base == "" {
+		return "-"
+	}
+	return base
+}
+
+// baseURLSummary 是确认行里的地址：空值写清「无 base_url」，比一个空括号有用。
+func baseURLSummary(base string) string {
+	if base == "" {
+		return "无 base_url，路由都是整条地址"
+	}
+	return base
+}
+
 func cmdProviderLs(e *Env, args []string) error {
 	fs := newFlagSet(e, "provider ls", "列出厂商、路由与模型列表路径")
 	if err := fs.Parse(args); err != nil {
@@ -260,7 +280,7 @@ func cmdProviderLs(e *Env, args []string) error {
 	rows := make([][]string, 0, len(snaps))
 	for _, s := range snaps {
 		rows = append(rows, []string{
-			s.row.Name, s.json.BaseURL, defaultProtocolCell(s),
+			s.row.Name, baseURLCell(s.json.BaseURL), defaultProtocolCell(s),
 			routeCell(s.routes), providerModelsCell(s.row, s.routes), s.json.Note,
 		})
 	}
@@ -379,7 +399,7 @@ func lookupUnsetField(raw string) (providerUnsetField, error) {
 	}
 	switch name {
 	case "base-url":
-		return providerUnsetField{}, usagef("base-url 不能 unset：它是厂商的必填地址，清掉就无处转发；改地址用 switchboard provider set <名称> --base-url <地址>")
+		return providerUnsetField{}, usagef("base-url 不能 unset：清掉之后相对路径的路由就拼不出完整地址；改地址用 switchboard provider set <名称> --base-url <地址>，不需要地址的厂商从一开始就该省掉这个参数（见 DESIGN 5.8）")
 	case "name", "名称", "厂商名":
 		return providerUnsetField{}, usagef("厂商名不能 unset：它是主键，清不掉；不再需要这家厂商就用 switchboard provider rm <名称>")
 	}
@@ -399,7 +419,7 @@ func lookupUnsetField(raw string) (providerUnsetField, error) {
 // cmdProviderAdd 只新建一家厂商。重名时报错并指向 provider set，不顺手改已有的行。
 func cmdProviderAdd(e *Env, args []string) error {
 	fs := newFlagSet(e, "provider add", "新建一家厂商与它的协议路由（支持 anthropic、openai、responses、gemini 四种协议）")
-	baseURL := fs.String("base-url", "", "厂商的默认地址，必填，如 https://api.deepseek.com（必须是带主机名的完整地址）")
+	baseURL := fs.String("base-url", "", "厂商的默认地址，如 https://api.deepseek.com（可省略：每条路由与 --models-path 都是整条地址时不需要它）")
 	paths := newProviderPathFlags(fs)
 	defProtocol := fs.String("default-protocol", "", "这家的默认协议：anthropic | openai | responses | gemini，必须落在这次声明的路由上；不给按 openai → responses → anthropic 取第一条")
 	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖，相对 --base-url 的路径（如 /v1/models）或整条地址；不给按各路由的 models_path 取（相对路径的斜杠写法由程序规整）")
@@ -414,19 +434,20 @@ func cmdProviderAdd(e *Env, args []string) error {
 	name := fs.Arg(0)
 
 	// 空值一律是用法错误：删除与清空走 `provider unset`，不做「空串即删除」的约定（见 DESIGN 4）。
+	// 不给 --base-url 则是合法的：三条路由与 models_path 都是整条地址时它拼不进任何地址，
+	// 这个前提由 store.CreateProvider 判（store 是唯一一份校验），cli 只把它包成用法错误。
 	if flagWasSet(fs, "base-url") && strings.TrimSpace(*baseURL) == "" {
-		return usagef("--base-url 传了空值：新建厂商必须给地址，例如 --base-url https://api.example.com\n%s", providerAddUsage)
-	}
-	if *baseURL == "" {
-		return usagef("缺少 --base-url：新建厂商必须给地址，例如 switchboard provider add %s --base-url https://api.example.com --openai /v1/chat/completions\n%s", name, providerAddUsage)
+		return usagef("--base-url 传了空值：要么给一个带主机名的完整地址（例如 --base-url https://api.example.com），要么整个去掉这个参数\n%s", providerAddUsage)
 	}
 	// 地址交给 store.NormalizeBaseURL 判定与规整，cli 不另写一份 scheme/主机名预检；
 	// 落库用的就是它返回的形态，与 provider set、account add 同一份规则（见 DESIGN 5.8）。
-	norm, err := checkBaseURL(*baseURL, providerAddUsage)
-	if err != nil {
-		return err
+	if *baseURL != "" {
+		norm, err := checkBaseURL(*baseURL, providerAddUsage)
+		if err != nil {
+			return err
+		}
+		*baseURL = norm
 	}
-	*baseURL = norm
 	for _, f := range paths.pairs(fs) {
 		if err := checkRoutePathFlag(f, false, providerAddUsage); err != nil {
 			return err
@@ -474,10 +495,13 @@ func cmdProviderAdd(e *Env, args []string) error {
 	defer a.Close()
 
 	p := store.Provider{Name: name, BaseURL: *baseURL, Note: *note, DefaultProtocol: def, ModelsPath: models}
-	// 默认协议指不到这次声明的路由时 store 整笔拒绝，错误文案已经写清缺哪条、下一步敲什么。
+	// 默认协议指不到这次声明的路由、或有相对路径而缺 base_url 时 store 整笔拒绝，
+	// 错误文案已经写清缺哪条、下一步敲什么；缺 base_url 是命令写法的问题，包成用法错误（退出码 2）。
 	switch err := a.st.CreateProvider(p, routes); {
 	case errors.Is(err, store.ErrProviderExists):
 		return fmt.Errorf("厂商 %s 已存在，改用 switchboard provider set %s 修改", name, name)
+	case errors.Is(err, store.ErrBaseURLRequired):
+		return usagef("%v\n%s", err, providerAddUsage)
 	case err != nil:
 		return err
 	}
@@ -489,7 +513,7 @@ func cmdProviderAdd(e *Env, args []string) error {
 	if e.JSON {
 		return e.printJSON(snap.json)
 	}
-	fmt.Fprintf(e.Stdout, "已添加厂商 %s（%s），%d 条路由，默认协议 %s\n", snap.row.Name, snap.json.BaseURL, len(snap.routes), defaultProtocolCell(snap))
+	fmt.Fprintf(e.Stdout, "已添加厂商 %s（%s），%d 条路由，默认协议 %s\n", snap.row.Name, baseURLSummary(snap.row.BaseURL), len(snap.routes), defaultProtocolCell(snap))
 	fmt.Fprintf(e.Stdout, "下一步：switchboard account add <名称> --provider %s --key <key> 用它加账号\n", name)
 	return nil
 }
@@ -498,7 +522,7 @@ func cmdProviderAdd(e *Env, args []string) error {
 // 删除一条路由、清掉覆盖或备注走 `provider unset`（见 DESIGN 4）。
 func cmdProviderSet(e *Env, args []string) error {
 	fs := newFlagSet(e, "provider set", "改一家厂商的地址、路由、默认协议或备注（支持 anthropic、openai、responses、gemini 四种协议）")
-	baseURL := fs.String("base-url", "", "改厂商的默认地址（必须是带主机名的完整地址）")
+	baseURL := fs.String("base-url", "", "改厂商的默认地址（带主机名的完整地址；每条路由都是整条地址时不需要它）")
 	paths := newProviderPathFlags(fs)
 	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖，相对 --base-url 的路径（如 /v1/models）或整条地址（相对路径的斜杠写法由程序规整）")
 	defProtocol := fs.String("default-protocol", "", "这家的默认协议：anthropic | openai | responses | gemini，必须落在已声明的路由上")
@@ -517,7 +541,7 @@ func cmdProviderSet(e *Env, args []string) error {
 
 	if flagWasSet(fs, "base-url") {
 		if strings.TrimSpace(*baseURL) == "" {
-			return usagef("--base-url 传了空值：地址是必填项，给完整地址，例如 --base-url https://api.example.com")
+			return usagef("--base-url 传了空值：改地址要给带主机名的完整地址，例如 --base-url https://api.example.com；不需要地址的厂商本来就该省略这一项（见 DESIGN 5.8）")
 		}
 		// 与 provider add、account add 同一份校验与规整（见 DESIGN 5.8）。
 		norm, err := checkBaseURL(*baseURL, providerSetUsage)
@@ -575,6 +599,11 @@ func cmdProviderSet(e *Env, args []string) error {
 	defer a.Close()
 
 	if err := a.st.SetProvider(name, patch); err != nil {
+		// 把一条路由从整条地址改成相对路径、又没给 --base-url、库里也没有时，store 整笔拒绕：
+		// 这是命令写法的问题，包成用法错误（退出码 2），文案保留 store 的原话。
+		if errors.Is(err, store.ErrBaseURLRequired) {
+			return usagef("%v\n%s", err, providerSetUsage)
+		}
 		return err
 	}
 

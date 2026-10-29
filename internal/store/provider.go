@@ -23,6 +23,12 @@ var (
 	// ErrProviderNoRoutes 表示厂商行在、但一条路由都没声明，因此算不出默认协议。
 	// EffectiveProviderProtocol 返回它，具体文案交给调用方决定。
 	ErrProviderNoRoutes = errors.New("厂商没有声明任何路由")
+
+	// ErrBaseURLRequired 表示 base_url 为空，而这次要落库的路由或模型列表地址里有相对路径。
+	// 空的 base_url 只有一种形态是合法的：每一条路由的 path 与要落库的 models_path 都是整条地址，
+	// 那时 base_url 拼不进任何地址，写一个只为过校验的地址只是无效配置（见 DESIGN 5.8）。
+	// cli 用 errors.Is 判它，把错误包成用法错误（退出码 2），文案保留这里的原话。
+	ErrBaseURLRequired = errors.New("缺少 base_url")
 )
 
 // defaultProtocolOrder 是默认协议的回退顺序：openai-chat 先，openai-responses 次之，anthropic 最后。
@@ -275,6 +281,43 @@ func NormalizeBaseURL(raw string) (string, error) {
 	return normalizeAddress(raw, "base_url")
 }
 
+// optionalBaseURL 是写入口用的 base_url 解释：空值合法（返回空串，能不能接受由
+// requireBaseURLCoverage 判），非空值仍走 NormalizeBaseURL 的校验与规整。
+// 空值本身不在这里报错：缺地址只在一个前提下算错——有相对路径要拼它。
+func optionalBaseURL(raw string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", nil
+	}
+	return NormalizeBaseURL(raw)
+}
+
+// requireBaseURLCoverage 校验 base_url 为空时的唯一合法形态：每一条路由的 path 与要落库的
+// models_path 都是整条地址（含 `://`），一条相对路径都没有。有一条相对路径时缺 base_url 就拼不出
+// 完整地址，整笔拒绝，文案说清是哪条路由或哪项设置，以及两条出路：给 --base-url，或把这一项
+// 写成整条地址。base_url 非空时这个函数什么都不做：相对路径照旧拼它（见 DESIGN 5.8）。
+// 一条路由都没有时同样拒绝：既没有地址又没有路由的厂商转发不了任何请求。
+func requireBaseURLCoverage(provider, base string, routes []ProviderRoute, modelsPath string) error {
+	if base != "" {
+		return nil
+	}
+	if len(routes) == 0 {
+		return fmt.Errorf("%w：厂商 %s 既没有地址也没有任何路由；加一条整条地址的路由（例如 --openai https://api.example.com/v1/chat/completions），或给 --base-url <地址>",
+			ErrBaseURLRequired, provider)
+	}
+	for _, r := range routes {
+		if IsFullAddress(r.Path) {
+			continue
+		}
+		return fmt.Errorf("%w：厂商 %s 的 %s 路由是相对路径（%s），它需要 --base-url 才能拼成完整地址；给 --base-url <地址>，或把这条路由写成整条地址（例如 https://api.example.com%s）",
+			ErrBaseURLRequired, provider, r.Protocol, r.Path, r.Path)
+	}
+	if modelsPath != "" && !IsFullAddress(modelsPath) {
+		return fmt.Errorf("%w：厂商 %s 的模型列表地址是相对路径（%s），它需要 --base-url 才能拼成完整地址；给 --base-url <地址>，或把它写成整条地址（例如 https://api.example.com%s），也可以用 switchboard provider unset %s models-path 回到按路由取",
+			ErrBaseURLRequired, provider, modelsPath, modelsPath, provider)
+	}
+	return nil
+}
+
 // normalizeAddress 校验并规整一条带 scheme 的整条地址。
 //
 // 校验用 url.Parse 做：scheme 只认 http 与 https（大小写不敏感，落库时归一成小写），
@@ -436,12 +479,14 @@ func routeProtocols(routes []ProviderRoute) string {
 // 名称已存在时报 ErrProviderExists（改已有的厂商用 SetProvider），至少要声明一条协议路由，
 // 默认协议非空时必须落在这次声明的路由上，否则整笔拒绝，不留下半条记录。
 // 写库时 models_path 为空的路由按 DeriveModelsPath 补默认值。
+// base_url 可以不给，条件是这次声明的每一条路由与要落库的 models_path 都是整条地址；
+// 有一条相对路径时缺 base_url 报 ErrBaseURLRequired（见 requireBaseURLCoverage）。
 func (s *Store) CreateProvider(p Provider, routes []ProviderRoute) error {
 	name := strings.TrimSpace(p.Name)
 	if name == "" {
 		return errors.New("厂商名不能为空")
 	}
-	base, err := NormalizeBaseURL(p.BaseURL)
+	base, err := optionalBaseURL(p.BaseURL)
 	if err != nil {
 		return fmt.Errorf("厂商 %s：%w", name, err)
 	}
@@ -456,6 +501,10 @@ func (s *Store) CreateProvider(p Provider, routes []ProviderRoute) error {
 	modelsPath, err := NormalizeEndpoint(p.ModelsPath)
 	if err != nil {
 		return fmt.Errorf("厂商 %s 的 models_path：%w", name, err)
+	}
+	// 缺 base_url 只在一个前提下算错：有相对路径要拼它。拒绝时一个字段都不落库。
+	if err := requireBaseURLCoverage(name, base, prepared, modelsPath); err != nil {
+		return err
 	}
 	def := strings.TrimSpace(p.DefaultProtocol)
 	if def != "" && !hasRoute(prepared, def) {
@@ -493,6 +542,7 @@ func (s *Store) CreateProvider(p Provider, routes []ProviderRoute) error {
 // 这次动了路由或默认协议时，改完之后默认协议必须指向一条仍然存在的路由，否则整笔拒绝：
 // 留着一条指不到路由的默认协议，账号加进来之后默认协议要么报错要么落到后缀猜测上，
 // 都不如当场说清楚。只改备注或地址的调用不受历史悬空值影响，那类脏数据由读取侧按固定顺序回退。
+// 地址为空时改完的路由与 models_path 必须全是整条地址，否则报 ErrBaseURLRequired 并整笔拒绝。
 func (s *Store) SetProvider(name string, patch ProviderPatch) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -581,6 +631,12 @@ func (s *Store) SetProvider(name string, patch ProviderPatch) error {
 	if len(routes) == 0 && len(before) > 0 {
 		return fmt.Errorf("厂商 %s 至少要保留一条协议路由；不想再要这家厂商就用 switchboard provider rm %s", name, name)
 	}
+	// 改完之后地址与路由必须自洽：库里地址为空时，改完的路由与 models_path 都得是整条地址。
+	// 把一条路由从整条地址改成相对路径、又没给 base_url、库里也没有时，整笔拒绝：
+	// 这种行落库之后拼出来的是一个没有 scheme 的相对地址（见 DESIGN 5.8）。
+	if err := requireBaseURLCoverage(name, p.BaseURL, routes, p.ModelsPath); err != nil {
+		return err
+	}
 	// 只有这次动了路由或默认协议时才校验指向：历史库里遗留的悬空默认协议由读取侧按固定顺序回退，
 	// 不该挡住一次只改备注或地址的调用。
 	touchedRouting := len(patch.Routes) > 0 || patch.DefaultProtocol != nil
@@ -640,12 +696,13 @@ func providerRoutesTx(tx *sql.Tx, provider string) ([]ProviderRoute, error) {
 // 已经测过的入口里抹掉；真要收窄就整条删掉并同步删掉对应用例，不要把它当新建入口用。
 // p.DefaultProtocol 非空时必须落在「这次传入的路由」或「此前已声明的路由」上，否则整笔拒绝，
 // 不留下半条记录；传空字符串表示不改这一列（已有行保留原值）。
+// base_url 与 CreateProvider 同一规则：可以为空，但改完之后每条路由与 models_path 都得是整条地址。
 func (s *Store) AddProvider(p Provider, routes []ProviderRoute) error {
 	name := strings.TrimSpace(p.Name)
 	if name == "" {
 		return errors.New("厂商名不能为空")
 	}
-	base, err := NormalizeBaseURL(p.BaseURL)
+	base, err := optionalBaseURL(p.BaseURL)
 	if err != nil {
 		return fmt.Errorf("厂商 %s：%w", name, err)
 	}
@@ -686,6 +743,19 @@ func (s *Store) AddProvider(p Provider, routes []ProviderRoute) error {
 		if _, err := tx.Exec(`UPDATE providers SET default_protocol = ? WHERE name = ?`, def, name); err != nil {
 			return err
 		}
+	}
+
+	// 地址覆盖同样放在路由写完之后：已有的路由与这次传入的路由都要算进「是不是全是整条地址」。
+	finalRoutes, err := providerRoutesTx(tx, name)
+	if err != nil {
+		return err
+	}
+	var finalModels string
+	if err := tx.QueryRow(`SELECT models_path FROM providers WHERE name = ?`, name).Scan(&finalModels); err != nil {
+		return err
+	}
+	if err := requireBaseURLCoverage(name, base, finalRoutes, finalModels); err != nil {
+		return err
 	}
 	return tx.Commit()
 }

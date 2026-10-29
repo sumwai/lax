@@ -766,20 +766,35 @@ func TestProviderAddEmptyValues(t *testing.T) {
 	}
 }
 
-// TestProviderAddUsageErrors 覆盖 add 的用法错误：缺地址、地址形状不对、一条路由都没给、
-// 默认协议不认识。每条都要退出码 2 并给出正确用法。
+// TestProviderAddUsageErrors 覆盖 add 的用法错误：缺地址而路由是相对路径、地址形状不对、
+// 一条路由都没给、默认协议不认识。每条都要退出码 2 并给出正确用法。
 // 路径写法不在这里断言：拼接改成程序规整、不报错，`v1/chat/completions`、`//v1//x`、
 // `v1/models` 这类取值会被规整成完整地址（见 TestProviderPathWritesAreNormalized），而不是用错误。
 func TestProviderAddUsageErrors(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
 
-	t.Run("缺地址", func(t *testing.T) {
+	t.Run("缺地址且路由是相对路径", func(t *testing.T) {
 		code, out, stderr := run(t, "provider", "add", "mine", "--openai", "/v1/chat/completions")
 		if code != 2 || out != "" {
 			t.Fatalf("退出码 = %d，stdout = %q", code, out)
 		}
-		for _, want := range []string{"--base-url", "switchboard provider add <名称>"} {
+		// 缺 base_url 只在一个前提下算错：有相对路径要拼它。文案要说清是哪条路由与两条出路
+		//（给 --base-url，或把这条路由写成整条地址），判定与文案来自 store（见 DESIGN 5.8）。
+		for _, want := range []string{"openai-chat", "/v1/chat/completions", "相对路径", "需要 --base-url", "整条地址", "switchboard provider add <名称>"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+			}
+		}
+	})
+
+	t.Run("既没地址也没路由", func(t *testing.T) {
+		// 空的 base_url 加一条路由都不给，仍然是要一条路由的用法错误，行为不变。
+		code, _, stderr := run(t, "provider", "add", "mine")
+		if code != 2 {
+			t.Fatalf("退出码 = %d，期望 2", code)
+		}
+		for _, want := range []string{"至少给一条", "--openai"} {
 			if !strings.Contains(stderr, want) {
 				t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 			}
@@ -2083,5 +2098,231 @@ func TestModelSyncEndpointBadValues(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "switchboard init") {
 		t.Fatalf("合法整条地址应放行到打开数据库那一步: %s", stderr)
+	}
+}
+
+// bigmodelUpstreams 起两台假上游，模拟三套协议分属不同 host 的真实形状：
+// chat 与 responses 在第二台，anthropic 在第一台。两台互不通用，转发落到哪一台是可见的事实。
+// 第二台的模型列表放在 chat 路径的同级（`/api/coding/paas/v4/models`），与真实上游一致。
+func bigmodelUpstreams(t *testing.T) (anthropicUp, chatUp *recorderUpstream) {
+	t.Helper()
+	anthropicUp = newRecorderUpstream(t, map[string]fakeResponse{
+		"POST /api/anthropic/v1/messages": {status: http.StatusOK, body: anthropicMessageOK},
+		"POST /v1/messages":               {status: http.StatusOK, body: anthropicMessageOK},
+		"GET /v1/models":                  {status: http.StatusOK, body: modelsListM1},
+	})
+	chatUp = newRecorderUpstream(t, map[string]fakeResponse{
+		"POST /api/coding/paas/v4/chat/completions": {status: http.StatusOK, body: chatCompletionOK},
+		"GET /api/coding/paas/v4/models":            {status: http.StatusOK, body: modelsListM1},
+		"GET /api/v1/models":                        {status: http.StatusOK, body: modelsListM1},
+	})
+	return anthropicUp, chatUp
+}
+
+// TestProviderAddWithoutBaseURL 钉住 base_url 可以省略的完整链路：三条路由都是整条地址时
+// `provider add` 不要 --base-url，落库的 base_url 是空串；`provider ls --json` 带出的是三条
+// 整条地址，账号的地址也留空；转发与模型同步按整条地址打到各自那台上游，一条 base_url 都不拼。
+// 全程的 stdout、stderr 与 --json 输出都不含凭据明文。
+func TestProviderAddWithoutBaseURL(t *testing.T) {
+	sandbox(t)
+	anthropicUp, chatUp := bigmodelUpstreams(t)
+	mustInit(t)
+
+	const key = "sk-bigmodel-plain-9f2"
+	// 一条相对路径的路由会需要 base_url：这个前提由 store 判（见 DESIGN 5.8）。
+	if code, _, stderr := run(t, "provider", "add", "bigmodel",
+		"--anthropic", anthropicUp.srv.URL+"/api/anthropic/v1/messages",
+		"--openai", chatUp.srv.URL+"/api/coding/paas/v4/chat/completions",
+		"--responses", chatUp.srv.URL+"/api/v1/responses"); code != 0 {
+		t.Fatalf("provider add 无 base_url 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	code, lsOut, stderr := run(t, "provider", "ls", "--json")
+	if code != 0 {
+		t.Fatalf("provider ls --json 退出码 = %d，stderr = %s", code, stderr)
+	}
+	got := mustProviderRows(t, lsOut)["bigmodel"]
+	if got.BaseURL != "" {
+		t.Fatalf("provider ls --json 的 base_url = %q，期望空串", got.BaseURL)
+	}
+	routes := routeMap(got)
+	want := map[string]string{
+		"anthropic":        anthropicUp.srv.URL + "/api/anthropic/v1/messages",
+		"openai-chat":      chatUp.srv.URL + "/api/coding/paas/v4/chat/completions",
+		"openai-responses": chatUp.srv.URL + "/api/v1/responses",
+	}
+	for protocol, path := range want {
+		if routes[protocol].Path != path {
+			t.Fatalf("%s 路由 = %q，期望整条地址 %q", protocol, routes[protocol].Path, path)
+		}
+	}
+	// chat 路由的模型列表地址在同一台上游上推导出来，也是整条地址。
+	if want := chatUp.srv.URL + "/api/coding/paas/v4/models"; routes["openai-chat"].ModelsPath != want {
+		t.Fatalf("chat 路由的 models_path = %q，期望 %q", routes["openai-chat"].ModelsPath, want)
+	}
+
+	// 人读表格里地址列显示 -，不打出一个空单元格。
+	code, tableOut, stderr := run(t, "provider", "ls")
+	if code != 0 {
+		t.Fatalf("provider ls 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if line := providerLine(t, tableOut, "bigmodel"); line[1] != "-" {
+		t.Fatalf("provider ls 的地址列 = %q，期望 -", line[1])
+	}
+
+	// 账号的地址也留空：厂商没有 base_url 时不需要再塞一个占位地址。
+	if code, _, stderr := run(t, "account", "add", "bm1", "--provider", "bigmodel",
+		"--key", key, "--models", "m1"); code != 0 {
+		t.Fatalf("account add 无 --base-url 退出码 = %d，stderr = %s", code, stderr)
+	}
+	code, accOut, stderr := run(t, "account", "ls", "--json")
+	if code != 0 {
+		t.Fatalf("account ls --json 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var accRows []map[string]any
+	mustJSON(t, accOut, &accRows)
+	if len(accRows) != 1 || accRows[0]["base_url"] != "" {
+		t.Fatalf("account ls --json 里账号的 base_url 应为空: %s", accOut)
+	}
+
+	// 转发：chat 账户打到第二台的整条地址，第一台一条请求都不收。
+	code, callOut, stderr := run(t, "call", "hi", "--model", "m1")
+	if code != 0 {
+		t.Fatalf("call 退出码 = %d，stderr = %s", code, stderr)
+	}
+	call := chatUp.mustSingleCall(t)
+	if want := chatUp.srv.URL + "/api/coding/paas/v4/chat/completions"; call.url != want {
+		t.Fatalf("转发地址 = %q，期望 %q", call.url, want)
+	}
+	if calls := anthropicUp.all(); len(calls) != 0 {
+		t.Fatalf("anthropic 那台不该收到请求: %+v", calls)
+	}
+
+	// 同步：路由的 models_path 是整条地址，同样不需要 base_url。
+	chatUp.reset()
+	if code, _, stderr := run(t, "model", "sync", "--account", "bm1"); code != 0 {
+		t.Fatalf("model sync 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if got, want := chatUp.mustSingleCall(t).url, chatUp.srv.URL+"/api/coding/paas/v4/models"; got != want {
+		t.Fatalf("模型列表地址 = %q，期望 %q", got, want)
+	}
+
+	// 厂商级覆盖换成另一台上游的整条地址：照样同步到那里，说明空 base_url 下 models_path
+	// 只要是整条地址就够。
+	if code, _, stderr := run(t, "provider", "set", "bigmodel",
+		"--models-path", anthropicUp.srv.URL+"/v1/models"); code != 0 {
+		t.Fatalf("provider set --models-path 退出码 = %d，stderr = %s", code, stderr)
+	}
+	anthropicUp.reset()
+	chatUp.reset()
+	if code, _, stderr := run(t, "model", "sync", "--account", "bm1"); code != 0 {
+		t.Fatalf("改完覆盖之后 model sync 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if got, want := anthropicUp.mustSingleCall(t).url, anthropicUp.srv.URL+"/v1/models"; got != want {
+		t.Fatalf("厂商级覆盖的模型列表地址 = %q，期望 %q", got, want)
+	}
+	if calls := chatUp.all(); len(calls) != 0 {
+		t.Fatalf("覆盖生效后 chat 那台不该再收请求: %+v", calls)
+	}
+
+	// 凭据只以密文出现：整条链路的输出里没有 key 明文。
+	for _, out := range []string{lsOut, tableOut, accOut, callOut} {
+		if strings.Contains(out, key) || strings.Contains(out, "sk-bigmodel") {
+			t.Fatalf("输出里出现了凭据明文: %s", out)
+		}
+	}
+}
+
+// TestProviderAddWithoutBaseURLRejectsRelativeRoute 钉住缺 base_url 时唯一的拒绝条件：
+// 有一条路由是相对路径就拼不出完整地址，退出码 2，文案说清是哪条协议、两条出路都写出来，
+// 并且一条路由都不落库。cli 不自己算这条规则，判定与文案来自 store（见 DESIGN 5.8）。
+func TestProviderAddWithoutBaseURLRejectsRelativeRoute(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	args := []string{"provider", "add", "mixed", "--anthropic", "/v1/messages",
+		"--openai", "https://openai.example.com/v1/chat/completions"}
+	code, out, stderr := run(t, args...)
+	if code != 2 || out != "" {
+		t.Fatalf("%v 退出码 = %d，stdout = %q", args, code, out)
+	}
+	for _, want := range []string{"anthropic", "/v1/messages", "相对路径", "需要 --base-url", "整条地址", "用法：switchboard provider add"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr 应包含 %q: %s", want, stderr)
+		}
+	}
+	if _, ok := mustProviderLs(t)["mixed"]; ok {
+		t.Fatal("缺 base_url 且路由是相对路径时不该写入厂商")
+	}
+
+	// 相对路径的厂商级 models_path 同样拒绝：加 --base-url 之后才放行。
+	code, _, stderr = run(t, "provider", "add", "mixed",
+		"--openai", "https://openai.example.com/v1/chat/completions", "--models-path", "/v1/models")
+	if code != 2 || !strings.Contains(stderr, "模型列表地址") {
+		t.Fatalf("相对路径的 --models-path 应在无 --base-url 时退出码 2，实际 %d，stderr = %s", code, stderr)
+	}
+	if _, ok := mustProviderLs(t)["mixed"]; ok {
+		t.Fatal("被拒的新建不该留下厂商")
+	}
+}
+
+// TestProviderSetKeepsBaseURLCoverage 钉住 `provider set` 的整笔拒绝：库里没有 base_url 时把一条
+// 路由从整条地址改成相对路径，退出码 2 且原有那条整条地址还在；先补 --base-url 再改同一条就放行，
+// 转发改用相对路径拼这个 base_url——给了 base_url 的老写法一字不变。
+func TestProviderSetKeepsBaseURLCoverage(t *testing.T) {
+	sandbox(t)
+	anthropicUp, chatUp := bigmodelUpstreams(t)
+	mustInit(t)
+
+	if code, _, stderr := run(t, "provider", "add", "bigmodel",
+		"--anthropic", anthropicUp.srv.URL+"/api/anthropic/v1/messages",
+		"--openai", chatUp.srv.URL+"/api/coding/paas/v4/chat/completions"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	code, out, stderr := run(t, "provider", "set", "bigmodel", "--anthropic", "/v1/messages")
+	if code != 2 || out != "" {
+		t.Fatalf("改成相对路径的退出码 = %d，stdout = %q", code, out)
+	}
+	for _, want := range []string{"anthropic", "/v1/messages", "相对路径", "需要 --base-url", "用法：switchboard provider set"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr 应包含 %q: %s", want, stderr)
+		}
+	}
+	got := mustProviderLs(t)["bigmodel"]
+	if routeMap(got)["anthropic"].Path != anthropicUp.srv.URL+"/api/anthropic/v1/messages" {
+		t.Fatalf("被拒的改动不该落库: %+v", got)
+	}
+	if got.BaseURL != "" {
+		t.Fatalf("被拒的改动不该写入 base_url，实际 %q", got.BaseURL)
+	}
+
+	// 先补地址再给相对路径：两笔都成功，账号随后按 base_url 拼出完整地址。
+	if code, _, stderr := run(t, "provider", "set", "bigmodel",
+		"--base-url", anthropicUp.srv.URL); code != 0 {
+		t.Fatalf("provider set --base-url 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := run(t, "provider", "set", "bigmodel",
+		"--anthropic", "/v1/messages"); code != 0 {
+		t.Fatalf("有地址后改成相对路径退出码 = %d，stderr = %s", code, stderr)
+	}
+	if got := routeMap(mustProviderLs(t)["bigmodel"])["anthropic"].Path; got != "/v1/messages" {
+		t.Fatalf("anthropic 路由 = %q，期望相对路径落库", got)
+	}
+
+	if code, _, stderr := run(t, "account", "add", "bm2", "--provider", "bigmodel",
+		"--protocol", "anthropic", "--key", "sk-test", "--models", "m1"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	anthropicUp.reset()
+	if code, _, stderr := run(t, "call", "hi", "--model", "m1"); code != 0 {
+		t.Fatalf("call 退出码 = %d，stderr = %s", code, stderr)
+	}
+	call := anthropicUp.mustSingleCall(t)
+	if want := anthropicUp.srv.URL + "/v1/messages"; call.url != want {
+		t.Fatalf("转发地址 = %q，期望相对路径拼上一个 base_url（%q）", call.url, want)
+	}
+	if call.apiKey != "sk-test" {
+		t.Fatalf("anthropic 路由的凭据头 = %q，期望 x-api-key", call.apiKey)
 	}
 }
