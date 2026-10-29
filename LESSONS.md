@@ -12,3 +12,4 @@ commit in the row so a later reader can tell whether the note still applies.
 | 2026-10-29 | A stream suffix rewrite must anchor to the end of the path | [lessons/2026-10-29-gemini-stream-suffix.md](lessons/2026-10-29-gemini-stream-suffix.md) | fixed in 323c522 |
 | 2026-10-29 | Tool results must fold into a `user` message for anthropic upstreams | [lessons/2026-10-29-tool-result-role.md](lessons/2026-10-29-tool-result-role.md) | fixed in e7d29e7 |
 | 2026-10-29 | An empty model list must not mean "serves every model" | [lessons/2026-10-29-empty-model-list.md](lessons/2026-10-29-empty-model-list.md) | fixed in 30421bf |
+| 2026-10-29 | A public model list proves nothing about credentials | [lessons/2026-10-29-public-model-list.md](lessons/2026-10-29-public-model-list.md) | fixed in 2ed8c7c |
