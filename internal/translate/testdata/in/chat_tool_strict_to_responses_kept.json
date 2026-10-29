@@ -1,0 +1,14 @@
+{
+  "from": "openai-chat",
+  "to": "openai-responses",
+  "kind": "request",
+  "body": {
+    "model": "m1",
+    "messages": [{"role": "user", "content": "北京天气"}],
+    "tools": [
+      {"type": "function", "function": {"name": "weather", "description": "查天气", "strict": true,
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}},
+      {"type": "function", "function": {"name": "time", "parameters": {"type": "object", "properties": {}}}}
+    ]
+  }
+}

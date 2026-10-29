@@ -1,0 +1,10 @@
+{
+  "max_tokens": 256,
+  "messages": [
+    {
+      "content": "只答一句",
+      "role": "user"
+    }
+  ],
+  "model": "m1"
+}

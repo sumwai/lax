@@ -1,0 +1,53 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "北京天气"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "generationConfig": {
+    "maxOutputTokens": 256
+  },
+  "toolConfig": {
+    "functionCallingConfig": {
+      "allowedFunctionNames": [
+        "weather",
+        "search"
+      ],
+      "mode": "ANY"
+    }
+  },
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "description": "查天气",
+          "name": "weather",
+          "parameters": {
+            "properties": {
+              "city": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        },
+        {
+          "name": "search",
+          "parameters": {
+            "properties": {
+              "q": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -91,11 +91,15 @@ type Message struct {
 // Tool 是一个工具定义。
 // Type 只有 anthropic 的服务端内置工具才有值（例如 "web_search_20250305"）；空串与
 // "custom" 都表示客户端自己执行的函数，另两条协议的工具定义只认这种。
+// Strict 是两种 openai 协议共有的严格模式开关（参数按 schema 校验），nil 表示客户端没给
+// 这个字段，与给了 false 不是一回事：编回 openai 时只有非 nil 才写出去（DESIGN 5.4
+// 「工具定义与选择」）。
 type Tool struct {
 	Type        string
 	Name        string
 	Description string
 	Schema      json.RawMessage
+	Strict      *bool
 }
 
 // isClientTool 判断工具定义是不是客户端自己执行的函数（DESIGN 5.4）：anthropic 的
@@ -123,21 +127,110 @@ const (
 	ToolChoiceRequired = "required"
 	ToolChoiceNone     = "none"
 	ToolChoiceNamed    = "tool"
+	// ToolChoiceAllowedTools 是「只准调白名单里的这些工具」：anthropic 与 responses 有
+	// 原生形状，chat 没有（降级为 auto），gemini 用 ANY 加 allowedFunctionNames 表达
+	// （DESIGN 5.4「工具定义与选择」）。
+	ToolChoiceAllowedTools = "allowed_tools"
 )
 
-// ToolChoice 是工具选择。
+// ToolChoice 是工具选择。Name 只在 Mode 为 tool 时有值，Allowed 只在 Mode 为
+// allowed_tools 时有值。
 type ToolChoice struct {
-	Mode string
-	Name string
+	Mode    string
+	Name    string
+	Allowed []string
+}
+
+// ThinkingConfig 是请求侧的思考配置（DESIGN 5.4「思考配置参数」）：客户端要不要模型思考、
+// 允许它想多深。它与 BlockKind 为 thinking 的内容块是两件事——这里是请求参数，那边是
+// 上游在响应里给出的思考正文（类型名与 Thinking 分开，避免两件事共用一个名字）。
+// Budget 是 token 预算（anthropic 与 gemini 用），Effort 是档位（两条 openai 协议用），
+// 两者二选一：解码时按来源协议原样保留，编码时优先用目标协议能直接表达的那一个。
+type ThinkingConfig struct {
+	Enabled bool
+	Budget  int
+	Effort  string
+}
+
+// 档位与预算的换算（DESIGN 5.4「思考配置参数」的映射表）。换算是近似的：预算折成档位再折
+// 回来会丢精度，取舍是要让客户端设的值在另一条协议上起作用的代价。
+const (
+	thinkingBudgetMinimal = 1024
+	thinkingBudgetLow     = 2048
+	thinkingBudgetMedium  = 4096
+	thinkingBudgetHigh    = 8192
+)
+
+// thinkingBudgetFromEffort 把 openai 的档位折成 token 预算，认不出的档位返回 0。
+// 认不出的档位不猜：anthropic 与 gemini 那边宁可不写，也不编一个上游没说的深度。
+func thinkingBudgetFromEffort(effort string) int {
+	switch effort {
+	case "minimal":
+		return thinkingBudgetMinimal
+	case "low":
+		return thinkingBudgetLow
+	case "medium":
+		return thinkingBudgetMedium
+	case "high":
+		return thinkingBudgetHigh
+	default:
+		return 0
+	}
+}
+
+// thinkingEffortFromBudget 把 token 预算折成 openai 的档位（只调用于正预算）。
+func thinkingEffortFromBudget(budget int) string {
+	switch {
+	case budget >= thinkingBudgetHigh:
+		return "high"
+	case budget >= thinkingBudgetLow:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+// budgetTokens 返回编给按预算表达思考深度的协议（anthropic、gemini）时的预算：预算优先
+// （那是这两条协议原生的表达），没有预算时按档位折。ok=false 表示这次不写这个字段：
+// Enabled 为假、或既没有预算也没有认得出的档位。
+func (t *ThinkingConfig) budgetTokens() (int, bool) {
+	if t == nil || !t.Enabled {
+		return 0, false
+	}
+	if t.Budget > 0 {
+		return t.Budget, true
+	}
+	if budget := thinkingBudgetFromEffort(t.Effort); budget > 0 {
+		return budget, true
+	}
+	return 0, false
+}
+
+// openAIEffort 返回编给两条 openai 协议时的档位：档位优先（那是这两条协议原生的表达），
+// 没有档位时按预算折。空串表示这次不写这个字段：Enabled 为假时这两条协议没有「不思考」
+// 的档位可写（DESIGN 5.4）。
+func (t *ThinkingConfig) openAIEffort() string {
+	if t == nil || !t.Enabled {
+		return ""
+	}
+	if t.Effort != "" {
+		return t.Effort
+	}
+	if t.Budget > 0 {
+		return thinkingEffortFromBudget(t.Budget)
+	}
+	return ""
 }
 
 // Request 是中间表示里的请求。各协议解码后都变成它，编码上游时再展开。
+// Thinking 只在客户端显式给了思考配置参数时才有值（DESIGN 5.4）。
 type Request struct {
 	Model             string
 	System            []Block
 	Messages          []Message
 	Tools             []Tool
 	ToolChoice        *ToolChoice
+	Thinking          *ThinkingConfig
 	ParallelToolCalls *bool
 	MaxTokens         int
 	Temperature       *float64

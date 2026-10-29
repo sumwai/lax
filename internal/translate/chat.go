@@ -30,6 +30,16 @@ func DecodeChatRequest(raw []byte) (*Request, error) {
 		Stream:            in.Stream,
 	}
 
+	// 思考配置参数：reasoning_effort 是主流写法，reasoning.effort 是少数实现包一层的写法，
+	// 两个都有时以顶层那个为准（DESIGN 5.4「思考配置参数」）。
+	effort := strings.TrimSpace(in.ReasoningEffort)
+	if effort == "" && in.Reasoning != nil {
+		effort = strings.TrimSpace(in.Reasoning.Effort)
+	}
+	if effort != "" {
+		out.Thinking = &ThinkingConfig{Enabled: true, Effort: effort}
+	}
+
 	for i, m := range in.Messages {
 		switch strings.ToLower(m.Role) {
 		case "system", "developer":
@@ -71,6 +81,7 @@ func DecodeChatRequest(raw []byte) (*Request, error) {
 			Name:        t.Function.Name,
 			Description: t.Function.Description,
 			Schema:      schemaOrEmpty(t.Function.Parameters),
+			Strict:      t.Function.Strict,
 		})
 	}
 
@@ -105,6 +116,12 @@ func EncodeChatRequest(r *Request, model string) ([]byte, error) {
 		out.StreamOptions = &ChatStreamOptions{IncludeUsage: true}
 	}
 
+	// 思考配置参数：档位在这条协议上原生可写，因此档位优先、没档位时按预算折；
+	// Enabled 为假时一个字段都不写——chat 没有「不思考」的档位（DESIGN 5.4）。
+	if effort := r.Thinking.openAIEffort(); effort != "" {
+		out.ReasoningEffort = effort
+	}
+
 	if sys := chatJoinText(r.System); sys != "" {
 		out.Messages = append(out.Messages, ChatMessage{Role: "system", Content: sys})
 	}
@@ -128,6 +145,7 @@ func EncodeChatRequest(r *Request, model string) ([]byte, error) {
 				Name:        t.Name,
 				Description: t.Description,
 				Parameters:  schemaOrEmpty(t.Schema),
+				Strict:      t.Strict,
 			},
 		})
 	}
@@ -919,6 +937,13 @@ func chatToolChoiceToWire(tc *ToolChoice) (any, error) {
 		return "required", nil
 	case ToolChoiceNone:
 		return "none", nil
+	case ToolChoiceAllowedTools:
+		// chat 只有 auto、required、none 三档，没有白名单形状：降级为 auto，白名单丢掉
+		// （DESIGN 5.4）。空白名单整条不写：没有名字可降级，不写时上游默认就是 auto。
+		if len(tc.Allowed) == 0 {
+			return nil, nil
+		}
+		return "auto", nil
 	case ToolChoiceNamed:
 		if tc.Name == "" {
 			return nil, errors.New("tool_choice 为指定工具时必须给出 name")

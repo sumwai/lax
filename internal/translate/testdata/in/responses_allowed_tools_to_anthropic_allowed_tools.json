@@ -1,0 +1,14 @@
+{
+  "from": "openai-responses",
+  "to": "anthropic",
+  "kind": "request",
+  "body": {
+    "model": "m1",
+    "input": "北京天气",
+    "tools": [
+      {"type": "function", "name": "weather", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}},
+      {"type": "function", "name": "search", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}
+    ],
+    "tool_choice": {"type": "allowed_tools", "mode": "auto", "tools": [{"type": "function", "name": "weather"}, {"type": "function", "name": "search"}]}
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "from": "openai-chat",
+  "to": "openai-responses",
+  "kind": "request",
+  "body": {
+    "model": "m1",
+    "reasoning_effort": "high",
+    "reasoning": {"effort": "low"},
+    "messages": [{"role": "user", "content": "6 乘 7 是多少"}]
+  }
+}

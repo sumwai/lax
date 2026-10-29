@@ -1,0 +1,11 @@
+{
+  "max_tokens": 2048,
+  "messages": [
+    {
+      "content": "6 乘 7 是多少",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "reasoning_effort": "medium"
+}

@@ -1,0 +1,16 @@
+{
+  "input": [
+    {
+      "content": [
+        {
+          "text": "只答一句",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "max_output_tokens": 256,
+  "model": "m1"
+}

@@ -130,12 +130,19 @@ type GeminiFunctionCallingConfig struct {
 	AllowedFunctionNames []string `json:"allowedFunctionNames,omitempty"`
 }
 
-// GeminiGeneration 是采样参数。
+// GeminiGeneration 是采样参数。ThinkingConfig 是请求侧的思考配置参数（DESIGN 5.4）。
 type GeminiGeneration struct {
-	MaxOutputTokens int      `json:"maxOutputTokens,omitempty"`
-	Temperature     *float64 `json:"temperature,omitempty"`
-	TopP            *float64 `json:"topP,omitempty"`
-	StopSequences   []string `json:"stopSequences,omitempty"`
+	MaxOutputTokens int                   `json:"maxOutputTokens,omitempty"`
+	Temperature     *float64              `json:"temperature,omitempty"`
+	TopP            *float64              `json:"topP,omitempty"`
+	StopSequences   []string              `json:"stopSequences,omitempty"`
+	ThinkingConfig  *GeminiThinkingConfig `json:"thinkingConfig,omitempty"`
+}
+
+// GeminiThinkingConfig 是 thinkingConfig。thinkingBudget 用指针：0 是「不思考」这一档的
+// 写法，必须能写出去（DESIGN 5.4）。
+type GeminiThinkingConfig struct {
+	ThinkingBudget *int `json:"thinkingBudget,omitempty"`
 }
 
 // GeminiResponse 是 generateContent 的非流式响应。
@@ -240,7 +247,11 @@ func EncodeGeminiRequest(r *Request, model string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		out.ToolConfig = &GeminiToolConfig{FunctionCallingConfig: cfg}
+		// cfg 为空表示这一档在 gemini 里编不出来（空白名单），不写 toolConfig：写一个空对象
+		// 与不写不是一回事。
+		if cfg != nil {
+			out.ToolConfig = &GeminiToolConfig{FunctionCallingConfig: cfg}
+		}
 	}
 
 	if gen := geminiGeneration(r); gen != nil {
@@ -297,6 +308,12 @@ func DecodeGeminiRequest(raw []byte) (*Request, error) {
 		out.Temperature = gc.Temperature
 		out.TopP = gc.TopP
 		out.Stop = gc.StopSequences
+		// thinkingBudget 是请求侧的思考配置参数：0 视为关闭，其余（包括负数的「动态思考」）
+		// 都算开着，预算原样保留（DESIGN 5.4）。
+		if tc := gc.ThinkingConfig; tc != nil && tc.ThinkingBudget != nil {
+			budget := *tc.ThinkingBudget
+			out.Thinking = &ThinkingConfig{Enabled: budget != 0, Budget: budget}
+		}
 	}
 	return out, nil
 }
@@ -941,7 +958,18 @@ func geminiGeneration(r *Request) *GeminiGeneration {
 	if len(r.Stop) > 0 {
 		gen.StopSequences = append([]string(nil), r.Stop...)
 	}
-	if gen.MaxOutputTokens == 0 && gen.Temperature == nil && gen.TopP == nil && len(gen.StopSequences) == 0 {
+	// 思考配置参数：gemini 用预算表达，所以预算优先、没预算时按档位折；Enabled 为假时
+	// 写 thinkingBudget:0（这是 gemini 唯一能把「不思考」说清楚的写法）。
+	if th := r.Thinking; th != nil {
+		if !th.Enabled {
+			zero := 0
+			gen.ThinkingConfig = &GeminiThinkingConfig{ThinkingBudget: &zero}
+		} else if budget, ok := th.budgetTokens(); ok {
+			gen.ThinkingConfig = &GeminiThinkingConfig{ThinkingBudget: &budget}
+		}
+	}
+	if gen.MaxOutputTokens == 0 && gen.Temperature == nil && gen.TopP == nil &&
+		len(gen.StopSequences) == 0 && gen.ThinkingConfig == nil {
 		return nil
 	}
 	return gen
@@ -949,7 +977,8 @@ func geminiGeneration(r *Request) *GeminiGeneration {
 
 // geminiToolChoiceToWire 把中间表示的工具选择编成 gemini 的 functionCallingConfig。
 // gemini 只有 AUTO、ANY、NONE 三档，没有「只准调某一个函数」这一档：指定函数时写 ANY 加
-// allowedFunctionNames，那是最接近的写法（DESIGN 5.9 的取舍）。
+// allowedFunctionNames，那是最接近的写法（DESIGN 5.9 的取舍）；白名单（allowed_tools）同理，
+// 名字原样进 allowedFunctionNames（DESIGN 5.4）。
 func geminiToolChoiceToWire(tc *ToolChoice) (*GeminiFunctionCallingConfig, error) {
 	switch tc.Mode {
 	case "", ToolChoiceAuto:
@@ -963,6 +992,14 @@ func geminiToolChoiceToWire(tc *ToolChoice) (*GeminiFunctionCallingConfig, error
 			return nil, errors.New("tool_choice 为指定工具时必须给出 name")
 		}
 		return &GeminiFunctionCallingConfig{Mode: geminiModeAny, AllowedFunctionNames: []string{tc.Name}}, nil
+	case ToolChoiceAllowedTools:
+		// 空白名单整条不写：ANY 不带 allowedFunctionNames 等于「随便调哪个已声明的函数」，
+		// 那已经不再是白名单了（DESIGN 5.4）。
+		if len(tc.Allowed) == 0 {
+			return nil, nil
+		}
+		names := append([]string(nil), tc.Allowed...)
+		return &GeminiFunctionCallingConfig{Mode: geminiModeAny, AllowedFunctionNames: names}, nil
 	default:
 		return nil, fmt.Errorf("不支持的 tool_choice %q", tc.Mode)
 	}
@@ -977,16 +1014,27 @@ func geminiCallingConfig(cfg *GeminiToolConfig) *GeminiFunctionCallingConfig {
 }
 
 // geminiToolChoiceFromWire 把 gemini 的工具选择折回中间表示。
-// ANY 带白名单时按指定工具处理，白名单有多个名字时退成 required：中间表示只能表达一个名字。
+// ANY 带白名单时：一个名字按指定工具处理，多个名字进 allowed_tools（中间表示能装下整个
+// 白名单）；一个名字都没有的 ANY 退成 required（DESIGN 5.4）。
 func geminiToolChoiceFromWire(cfg *GeminiFunctionCallingConfig) *ToolChoice {
 	switch strings.ToUpper(strings.TrimSpace(cfg.Mode)) {
 	case geminiModeNone:
 		return &ToolChoice{Mode: ToolChoiceNone}
 	case geminiModeAny:
-		if len(cfg.AllowedFunctionNames) == 1 && cfg.AllowedFunctionNames[0] != "" {
-			return &ToolChoice{Mode: ToolChoiceNamed, Name: cfg.AllowedFunctionNames[0]}
+		names := make([]string, 0, len(cfg.AllowedFunctionNames))
+		for _, name := range cfg.AllowedFunctionNames {
+			if name != "" {
+				names = append(names, name)
+			}
 		}
-		return &ToolChoice{Mode: ToolChoiceRequired}
+		switch len(names) {
+		case 0:
+			return &ToolChoice{Mode: ToolChoiceRequired}
+		case 1:
+			return &ToolChoice{Mode: ToolChoiceNamed, Name: names[0]}
+		default:
+			return &ToolChoice{Mode: ToolChoiceAllowedTools, Allowed: names}
+		}
 	default:
 		return &ToolChoice{Mode: ToolChoiceAuto}
 	}

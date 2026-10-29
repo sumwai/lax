@@ -1,0 +1,10 @@
+{
+  "from": "gemini",
+  "to": "anthropic",
+  "kind": "request",
+  "model": "up-anthropic",
+  "body": {
+    "contents": [{"role": "user", "parts": [{"text": "只答一句"}]}],
+    "generationConfig": {"maxOutputTokens": 512, "thinkingConfig": {"thinkingBudget": 2048}}
+  }
+}

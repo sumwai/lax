@@ -1,0 +1,19 @@
+{
+  "max_tokens": 512,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "只答一句",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "up-anthropic",
+  "thinking": {
+    "budget_tokens": 2048,
+    "type": "enabled"
+  }
+}

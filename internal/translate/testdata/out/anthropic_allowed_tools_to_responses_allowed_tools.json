@@ -1,0 +1,57 @@
+{
+  "input": [
+    {
+      "content": [
+        {
+          "text": "北京天气",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "max_output_tokens": 256,
+  "model": "m1",
+  "tool_choice": {
+    "mode": "auto",
+    "tools": [
+      {
+        "name": "weather",
+        "type": "function"
+      },
+      {
+        "name": "search",
+        "type": "function"
+      }
+    ],
+    "type": "allowed_tools"
+  },
+  "tools": [
+    {
+      "description": "查天气",
+      "name": "weather",
+      "parameters": {
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "type": "function"
+    },
+    {
+      "name": "search",
+      "parameters": {
+        "properties": {
+          "q": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "type": "function"
+    }
+  ]
+}

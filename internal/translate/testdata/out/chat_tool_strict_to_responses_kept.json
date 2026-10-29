@@ -1,0 +1,39 @@
+{
+  "input": [
+    {
+      "content": [
+        {
+          "text": "北京天气",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "model": "m1",
+  "tools": [
+    {
+      "description": "查天气",
+      "name": "weather",
+      "parameters": {
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    },
+    {
+      "name": "time",
+      "parameters": {
+        "properties": {},
+        "type": "object"
+      },
+      "type": "function"
+    }
+  ]
+}

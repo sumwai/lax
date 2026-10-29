@@ -1,0 +1,11 @@
+{
+  "from": "openai-chat",
+  "to": "anthropic",
+  "kind": "request",
+  "body": {
+    "model": "m1",
+    "max_tokens": 1024,
+    "reasoning_effort": "high",
+    "messages": [{"role": "user", "content": "6 乘 7 是多少"}]
+  }
+}

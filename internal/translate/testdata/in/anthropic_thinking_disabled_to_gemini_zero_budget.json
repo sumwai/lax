@@ -1,0 +1,12 @@
+{
+  "from": "anthropic",
+  "to": "gemini",
+  "kind": "request",
+  "model": "gemini-2.5-flash",
+  "body": {
+    "model": "m1",
+    "max_tokens": 256,
+    "thinking": {"type": "disabled"},
+    "messages": [{"role": "user", "content": "只答一句"}]
+  }
+}

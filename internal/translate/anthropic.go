@@ -25,6 +25,16 @@ func DecodeAnthropicRequest(raw []byte) (*Request, error) {
 		Stop:        wire.StopSequences,
 		Stream:      wire.Stream,
 	}
+	// 顶层 thinking 是请求侧的思考配置参数，与消息里的 thinking 块无关（DESIGN 5.4）。
+	// 只认 enabled 与 disabled 两种 type，其余写法丢弃，不猜它的语义。
+	if th := wire.Thinking; th != nil {
+		switch th.Type {
+		case "enabled":
+			req.Thinking = &ThinkingConfig{Enabled: true, Budget: th.BudgetTokens}
+		case "disabled":
+			req.Thinking = &ThinkingConfig{}
+		}
+	}
 	req.System = anthropicSystemBlocks(wire.System)
 
 	for _, m := range wire.Messages {
@@ -70,6 +80,17 @@ func EncodeAnthropicRequest(r *Request, model string) ([]byte, error) {
 	// anthropic 要求 max_tokens 必填。
 	if wire.MaxTokens <= 0 {
 		wire.MaxTokens = 4096
+	}
+
+	// 思考配置参数：Enabled 为假写 disabled，有预算（或能折成预算的档位）写 enabled 加
+	// budget_tokens。既没有预算也没有认得出的档位时不写：anthropic 的 enabled 必须带预算，
+	// 编造一个数字等于替客户端下了它没说过的决心（DESIGN 5.4）。
+	if th := r.Thinking; th != nil {
+		if !th.Enabled {
+			wire.Thinking = &AnthropicThinking{Type: "disabled"}
+		} else if budget, ok := th.budgetTokens(); ok {
+			wire.Thinking = &AnthropicThinking{Type: "enabled", BudgetTokens: budget}
+		}
 	}
 
 	if sys := joinText(r.System); sys != "" {
@@ -765,6 +786,20 @@ func fromAnthropicToolChoice(tc *AnthropicToolChoice) (*ToolChoice, *bool) {
 		return &ToolChoice{Mode: ToolChoiceNone}, parallel
 	case "tool":
 		return &ToolChoice{Mode: ToolChoiceNamed, Name: tc.Name}, parallel
+	case ToolChoiceAllowedTools:
+		// 白名单只搬名字（DESIGN 5.4）。一项名字都没有的空白名单整条丢弃：这一档说的是
+		// 「只准调这些」，一个名字都没有时把它的意图改成 auto 或 none 都是替客户端说话，
+		// 不写出去时上游按自己的默认值走（与编码侧的空白名单同一个处理）。
+		names := make([]string, 0, len(tc.Tools))
+		for _, ref := range tc.Tools {
+			if ref.Name != "" {
+				names = append(names, ref.Name)
+			}
+		}
+		if len(names) == 0 {
+			return nil, parallel
+		}
+		return &ToolChoice{Mode: ToolChoiceAllowedTools, Allowed: names}, parallel
 	default:
 		return &ToolChoice{Mode: ToolChoiceAuto}, parallel
 	}
@@ -787,6 +822,17 @@ func toAnthropicToolChoice(tc *ToolChoice, parallel *bool) (*AnthropicToolChoice
 			return nil, errors.New("tool_choice 为 tool 时必须给出 name")
 		}
 		out.Type, out.Name = "tool", tc.Name
+	case ToolChoiceAllowedTools:
+		// 空白名单不编：写一个 {"type":"allowed_tools","tools":[]} 只能换回一个 400，
+		// 整条不写时上游按自己默认的 auto 走（DESIGN 5.4）。
+		if len(tc.Allowed) == 0 {
+			return nil, nil
+		}
+		out.Type = ToolChoiceAllowedTools
+		out.Tools = make([]AnthropicToolChoiceRef, 0, len(tc.Allowed))
+		for _, name := range tc.Allowed {
+			out.Tools = append(out.Tools, AnthropicToolChoiceRef{Type: "tool", Name: name})
+		}
 	default:
 		return nil, fmt.Errorf("不支持的 tool_choice %q", tc.Mode)
 	}

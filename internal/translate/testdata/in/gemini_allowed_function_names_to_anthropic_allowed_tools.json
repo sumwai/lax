@@ -1,0 +1,14 @@
+{
+  "from": "gemini",
+  "to": "anthropic",
+  "kind": "request",
+  "model": "up-anthropic",
+  "body": {
+    "contents": [{"role": "user", "parts": [{"text": "北京天气"}]}],
+    "tools": [{"functionDeclarations": [
+      {"name": "weather", "description": "查天气", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}},
+      {"name": "search", "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}}
+    ]}],
+    "toolConfig": {"functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["weather", "search"]}}
+  }
+}

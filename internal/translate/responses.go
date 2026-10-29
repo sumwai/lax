@@ -14,25 +14,35 @@ import (
 
 // responsesRequest 是 POST /v1/responses 的请求体。
 // input 是字符串或 item 数组，tool_choice 是字符串或对象，两者都先留原文再按需解析。
+// reasoning 是请求侧的思考配置参数，只读 effort，其余子字段（summary 等）没有落点（DESIGN 5.4）。
 type responsesRequest struct {
-	Model             string          `json:"model"`
-	Instructions      string          `json:"instructions,omitempty"`
-	Input             json.RawMessage `json:"input,omitempty"`
-	Tools             []responsesTool `json:"tools,omitempty"`
-	ToolChoice        json.RawMessage `json:"tool_choice,omitempty"`
-	MaxOutputTokens   int             `json:"max_output_tokens,omitempty"`
-	Temperature       *float64        `json:"temperature,omitempty"`
-	TopP              *float64        `json:"top_p,omitempty"`
-	Stream            bool            `json:"stream,omitempty"`
-	ParallelToolCalls *bool           `json:"parallel_tool_calls,omitempty"`
+	Model             string              `json:"model"`
+	Instructions      string              `json:"instructions,omitempty"`
+	Input             json.RawMessage     `json:"input,omitempty"`
+	Tools             []responsesTool     `json:"tools,omitempty"`
+	ToolChoice        json.RawMessage     `json:"tool_choice,omitempty"`
+	Reasoning         *responsesReasoning `json:"reasoning,omitempty"`
+	MaxOutputTokens   int                 `json:"max_output_tokens,omitempty"`
+	Temperature       *float64            `json:"temperature,omitempty"`
+	TopP              *float64            `json:"top_p,omitempty"`
+	Stream            bool                `json:"stream,omitempty"`
+	ParallelToolCalls *bool               `json:"parallel_tool_calls,omitempty"`
+}
+
+// responsesReasoning 是 reasoning 对象。effort 是思考档位；summary 等其它子字段在中间表示里
+// 没有落点，解码时忽略、跨协议编码时不写（同协议直通逐字节保留原报文）。
+type responsesReasoning struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 // responsesTool 是请求里的工具定义。第一版只认 function，其余 type 丢弃。
+// Strict 是严格模式开关（参数按 parameters 校验），nil 表示客户端没给（DESIGN 5.4）。
 type responsesTool struct {
 	Type        string          `json:"type"`
 	Name        string          `json:"name,omitempty"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Strict      *bool           `json:"strict,omitempty"`
 }
 
 // responsesInputItem 是 input 数组里的一项。content 可能是字符串或部件数组，
@@ -163,6 +173,12 @@ func DecodeResponsesRequest(raw []byte) (*Request, error) {
 		Stream:            in.Stream,
 		ParallelToolCalls: in.ParallelToolCalls,
 	}
+	// 思考配置参数在 reasoning.effort 上（DESIGN 5.4「思考配置参数」）。
+	if in.Reasoning != nil {
+		if effort := strings.TrimSpace(in.Reasoning.Effort); effort != "" {
+			req.Thinking = &ThinkingConfig{Enabled: true, Effort: effort}
+		}
+	}
 	if s := strings.TrimSpace(in.Instructions); s != "" {
 		req.System = append(req.System, Block{Kind: BlockText, Text: s})
 	}
@@ -203,6 +219,7 @@ func DecodeResponsesRequest(raw []byte) (*Request, error) {
 			Name:        t.Name,
 			Description: t.Description,
 			Schema:      schemaOrEmpty(t.Parameters),
+			Strict:      t.Strict,
 		})
 	}
 
@@ -423,7 +440,8 @@ func responsesOutputText(raw json.RawMessage) string {
 	return strings.Join(texts, "\n")
 }
 
-// responsesDecodeToolChoice 解析 tool_choice：字符串或 {type:"function",name:...}。
+// responsesDecodeToolChoice 解析 tool_choice：字符串、{type:"function",name:...} 或
+// {type:"allowed_tools",mode:"auto",tools:[{type:"function",name:...}]}。
 // 认不出的写法返回 nil，按「未在表内一律丢弃」处理。
 func responsesDecodeToolChoice(raw json.RawMessage) (*ToolChoice, error) {
 	raw = bytes.TrimSpace(raw)
@@ -444,14 +462,37 @@ func responsesDecodeToolChoice(raw json.RawMessage) (*ToolChoice, error) {
 	}
 
 	var obj struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
+		Type  string          `json:"type"`
+		Name  string          `json:"name"`
+		Tools json.RawMessage `json:"tools"`
 	}
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return nil, fmt.Errorf("tool_choice 不是合法对象: %w", err)
 	}
 	if (obj.Type == "function" || obj.Type == "tool") && obj.Name != "" {
 		return &ToolChoice{Mode: ToolChoiceNamed, Name: obj.Name}, nil
+	}
+	if obj.Type == ToolChoiceAllowedTools {
+		// 白名单只搬名字（DESIGN 5.4）。一项名字都没有时整条丢弃：这一档说的是「只准调
+		// 这些」，一个名字都没有时改成 auto 或 none 都是替客户端说话（与 anthropic 同一处理）。
+		var refs []struct {
+			Name string `json:"name"`
+		}
+		if len(obj.Tools) > 0 {
+			if err := json.Unmarshal(obj.Tools, &refs); err != nil {
+				return nil, fmt.Errorf("tool_choice.tools 不是合法数组: %w", err)
+			}
+		}
+		names := make([]string, 0, len(refs))
+		for _, ref := range refs {
+			if ref.Name != "" {
+				names = append(names, ref.Name)
+			}
+		}
+		if len(names) == 0 {
+			return nil, nil
+		}
+		return &ToolChoice{Mode: ToolChoiceAllowedTools, Allowed: names}, nil
 	}
 	return nil, nil
 }
@@ -472,6 +513,13 @@ func EncodeResponsesRequest(r *Request, model string) ([]byte, error) {
 		TopP:              r.TopP,
 		Stream:            r.Stream,
 		ParallelToolCalls: r.ParallelToolCalls,
+	}
+
+	// 思考配置参数写在 reasoning.effort 上：档位在这条协议上原生可写，所以档位优先、
+	// 没档位时按预算折；Enabled 为假时整块不写，这条协议没有「不思考」的档位
+	// （DESIGN 5.4「思考配置参数」）。
+	if effort := r.Thinking.openAIEffort(); effort != "" {
+		out.Reasoning = &responsesReasoning{Effort: effort}
 	}
 
 	var instructions []string
@@ -517,6 +565,7 @@ func EncodeResponsesRequest(r *Request, model string) ([]byte, error) {
 			Name:        t.Name,
 			Description: t.Description,
 			Parameters:  schema,
+			Strict:      t.Strict,
 		})
 	}
 
@@ -632,6 +681,26 @@ func responsesEncodeToolChoice(tc *ToolChoice) (json.RawMessage, error) {
 			return nil, errors.New("tool_choice 为命名工具时必须给出 name")
 		}
 		b, err := json.Marshal(map[string]string{"type": "function", "name": tc.Name})
+		if err != nil {
+			return nil, fmt.Errorf("编码 tool_choice 失败: %w", err)
+		}
+		return json.RawMessage(b), nil
+	case ToolChoiceAllowedTools:
+		// 白名单在本协议里有原生形状，名字与 mode 顺着中间表示写出去（DESIGN 5.4）。
+		// 空白名单整条不写：写一个空的 tools 数组只会让上游拒或当成「什么都不能调」，
+		// 而不写时上游按自己默认的 auto 走。
+		if len(tc.Allowed) == 0 {
+			return nil, nil
+		}
+		tools := make([]map[string]string, 0, len(tc.Allowed))
+		for _, name := range tc.Allowed {
+			tools = append(tools, map[string]string{"type": "function", "name": name})
+		}
+		b, err := json.Marshal(map[string]any{
+			"type":  ToolChoiceAllowedTools,
+			"mode":  "auto",
+			"tools": tools,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("编码 tool_choice 失败: %w", err)
 		}

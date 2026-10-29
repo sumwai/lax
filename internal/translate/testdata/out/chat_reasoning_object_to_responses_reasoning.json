@@ -1,0 +1,18 @@
+{
+  "input": [
+    {
+      "content": [
+        {
+          "text": "6 乘 7 是多少",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "model": "m1",
+  "reasoning": {
+    "effort": "high"
+  }
+}

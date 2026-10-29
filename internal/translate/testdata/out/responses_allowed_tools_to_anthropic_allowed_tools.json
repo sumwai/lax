@@ -1,0 +1,52 @@
+{
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "北京天气",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "tool_choice": {
+    "tools": [
+      {
+        "name": "weather",
+        "type": "tool"
+      },
+      {
+        "name": "search",
+        "type": "tool"
+      }
+    ],
+    "type": "allowed_tools"
+  },
+  "tools": [
+    {
+      "input_schema": {
+        "properties": {
+          "city": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "weather"
+    },
+    {
+      "input_schema": {
+        "properties": {
+          "q": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "search"
+    }
+  ]
+}

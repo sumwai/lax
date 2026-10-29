@@ -9,6 +9,8 @@ import (
 )
 
 // AnthropicRequest 是入站 /v1/messages 的请求体。
+// thinking 是请求侧的思考配置参数（DESIGN 5.4「思考配置参数」），与消息里的 thinking 块
+// 不是一件事：那边是上游给出的思考正文。
 type AnthropicRequest struct {
 	Model         string               `json:"model"`
 	MaxTokens     int                  `json:"max_tokens"`
@@ -16,11 +18,19 @@ type AnthropicRequest struct {
 	Messages      []AnthropicMessage   `json:"messages"`
 	Tools         []AnthropicTool      `json:"tools,omitempty"`
 	ToolChoice    *AnthropicToolChoice `json:"tool_choice,omitempty"`
+	Thinking      *AnthropicThinking   `json:"thinking,omitempty"`
 	Stream        bool                 `json:"stream,omitempty"`
 	Temperature   *float64             `json:"temperature,omitempty"`
 	TopP          *float64             `json:"top_p,omitempty"`
 	StopSequences []string             `json:"stop_sequences,omitempty"`
 	Metadata      json.RawMessage      `json:"metadata,omitempty"`
+}
+
+// AnthropicThinking 是顶层的 thinking 字段：type 为 enabled 时带预算，为 disabled 时
+// 只有 type（DESIGN 5.4）。
+type AnthropicThinking struct {
+	Type         string `json:"type"`
+	BudgetTokens int    `json:"budget_tokens,omitempty"`
 }
 
 // AnthropicMessage 是一条消息，content 可能是字符串或块数组。
@@ -70,10 +80,19 @@ type AnthropicTool struct {
 }
 
 // AnthropicToolChoice 是入站工具选择。
+// allowed_tools 这一档用 Tools 装白名单（每项形如 {"type":"tool","name":…}）；anthropic
+// 另有一个可选的 mode（auto 或 any），中间表示不搬它：编出去时一律按 auto 写（DESIGN 5.4）。
 type AnthropicToolChoice struct {
-	Type                   string `json:"type"`
-	Name                   string `json:"name,omitempty"`
-	DisableParallelToolUse bool   `json:"disable_parallel_tool_use,omitempty"`
+	Type                   string                   `json:"type"`
+	Name                   string                   `json:"name,omitempty"`
+	DisableParallelToolUse bool                     `json:"disable_parallel_tool_use,omitempty"`
+	Tools                  []AnthropicToolChoiceRef `json:"tools,omitempty"`
+}
+
+// AnthropicToolChoiceRef 是 allowed_tools 白名单里的一项。
+type AnthropicToolChoiceRef struct {
+	Type string `json:"type"`
+	Name string `json:"name"`
 }
 
 // AnthropicResponse 是返回给客户端 /v1/messages 的响应体。
@@ -150,7 +169,10 @@ func (c Content) Plain() string {
 	return buf.String()
 }
 
-// ChatRequest 是发往 openai-chat 上游的请求体。
+// ChatRequest 是发往 openai-chat 上游的请求体（入站与出站同一形状）。
+// ReasoningEffort 与 Reasoning 都是请求侧的思考配置参数：前者是主流写法，后者是少数实现
+// 把同一个值包在对象里的写法，解码时两者都读，编码时只写 ReasoningEffort
+// （DESIGN 5.4「思考配置参数」）。
 type ChatRequest struct {
 	Model             string             `json:"model"`
 	Messages          []ChatMessage      `json:"messages"`
@@ -160,9 +182,16 @@ type ChatRequest struct {
 	Stop              []string           `json:"stop,omitempty"`
 	Tools             []ChatTool         `json:"tools,omitempty"`
 	ToolChoice        any                `json:"tool_choice,omitempty"`
+	ReasoningEffort   string             `json:"reasoning_effort,omitempty"`
+	Reasoning         *ChatReasoning     `json:"reasoning,omitempty"`
 	ParallelToolCalls *bool              `json:"parallel_tool_calls,omitempty"`
 	Stream            bool               `json:"stream,omitempty"`
 	StreamOptions     *ChatStreamOptions `json:"stream_options,omitempty"`
+}
+
+// ChatReasoning 是少数实现把档位包一层的写法：只读 effort，其余子字段没有落点，丢弃。
+type ChatReasoning struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 // ChatStreamOptions 让上游在流式响应里带上用量。
@@ -204,10 +233,13 @@ type ChatTool struct {
 }
 
 // ChatToolFunc 是工具定义的函数部分。
+// Strict 是严格模式开关（参数按 parameters 校验）：nil 表示客户端没给，非 nil 时写出去
+// 与搬进中间表示（DESIGN 5.4「工具定义与选择」）。
 type ChatToolFunc struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Strict      *bool           `json:"strict,omitempty"`
 }
 
 // ChatResponse 是 openai-chat 的非流式响应。

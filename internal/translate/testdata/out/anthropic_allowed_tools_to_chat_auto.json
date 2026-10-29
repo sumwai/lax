@@ -1,0 +1,28 @@
+{
+  "max_tokens": 256,
+  "messages": [
+    {
+      "content": "北京天气",
+      "role": "user"
+    }
+  ],
+  "model": "m1",
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "function": {
+        "description": "查天气",
+        "name": "weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ]
+}
