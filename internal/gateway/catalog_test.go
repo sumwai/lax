@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"switchboard/internal/gateway"
+	"switchboard/internal/store"
 )
 
 // getJSON 发一个 GET，返回状态、响应体与响应头。
@@ -228,6 +229,14 @@ func TestModelsEndpointsAreReadOnly(t *testing.T) {
 		}
 		before[name] = [4]any{acc.Enabled, acc.CooldownUntil, acc.FailStreak, acc.LastError}
 	}
+	// 库本来就有账：空库断言 0 行分不出「没写」与「写了又删」，所以在调接口之前先塞一行。
+	if err := f.st.InsertRequest(&store.RequestRecord{
+		TS: time.Now().Unix(), Inbound: gateway.ProtocolChat, Outbound: gateway.ProtocolChat,
+		ModelRequested: "m-seed", ModelUsed: "m-seed", AccountID: cool.ID,
+		HTTPStatus: http.StatusOK, OK: true, InTokens: 7, OutTokens: 2,
+	}); err != nil {
+		t.Fatalf("塞一行请求记录: %v", err)
+	}
 	srv := f.server(t)
 
 	for i := 0; i < 3; i++ {
@@ -246,8 +255,9 @@ func TestModelsEndpointsAreReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读请求记录: %v", err)
 	}
-	if len(recs) != 0 {
-		t.Fatalf("只读接口不该写 requests，实际 %d 行", len(recs))
+	// 行数不变：还是原先那一行，值与塞进去时一致。
+	if len(recs) != 1 || recs[0].ModelRequested != "m-seed" || recs[0].InTokens != 7 {
+		t.Fatalf("只读接口不该写 requests，实际 %d 行：%+v", len(recs), recs)
 	}
 	for name, want := range before {
 		acc, err := f.st.GetAccount(name)
@@ -258,6 +268,19 @@ func TestModelsEndpointsAreReadOnly(t *testing.T) {
 		if got != want {
 			t.Fatalf("账号 %s 状态被改动：%v → %v", name, want, got)
 		}
+	}
+	// 冷却与连续失败次数按具体值钉住：RecordFailure 那一次应当留下 fail_streak=1
+	// 与一个未来的冷却截止时间，接口调用前后都是这两个值。
+	cooled, err := f.st.GetAccount("cool")
+	if err != nil {
+		t.Fatalf("读账号: %v", err)
+	}
+	if cooled.FailStreak != 1 || cooled.CooldownUntil <= time.Now().Unix() {
+		t.Fatalf("冷却账号 fail_streak = %d、cooldown = %d，期望 1 与未来时间",
+			cooled.FailStreak, cooled.CooldownUntil)
+	}
+	if cooled.LastError != "上游 429" {
+		t.Fatalf("冷却账号 last_error = %q，期望保持原值", cooled.LastError)
 	}
 }
 
