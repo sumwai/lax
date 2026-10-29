@@ -5,3 +5,4 @@
 *.bak
 .pi/tasks/
 .pi/subagents.json
+.pi/fusion/

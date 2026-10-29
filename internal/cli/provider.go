@@ -26,8 +26,8 @@ var providerSubs = []groupItem{
 // `v1/chat/completions`、`//v1//chat/completions`、`/v1/chat/completions/` 落成同一个地址；
 // 整条地址交给 store.NormalizeEndpoint 校验 scheme 与主机名，因此 `https://`、`https:///x`、
 // `ftp://host/x` 都是用法错误。cli 只判两件事：「规整之后为空」与「整条地址校验不过」，
-// 删除语义归 provider unset。gemini 只作出站（DESIGN 5.9），路由路径里的 `{model}` 占位符
-// 原样落库，由网关在发请求之前换成模型名：cli 不展开、不校验、也不改写它。
+// 删除语义归 provider unset。gemini 的入站与出站都可用（DESIGN 5.9），路由路径里的
+// `{model}` 占位符原样落库，由网关在发请求之前换成模型名：cli 不展开、不校验、也不改写它。
 
 // 三份用法行，所有用法错误都把它打出来，不让用户看着一句「参数错误」去猜参数（见 AGENTS.md）。
 const (
@@ -757,9 +757,9 @@ func cmdProviderRm(e *Env, args []string) error {
 	return nil
 }
 
-// isWireProtocol 判断一个取值是不是线协议。判定只有 store.IsWireProtocol 一份（入站三条加
-// 只作出站的 gemini，见 DESIGN 5.9）：账号的 --protocol 与厂商的默认协议共用这一个判断，
-// 两处各写一份名单迟早会对不上。
+// isWireProtocol 判断一个取值是不是线协议。判定只有 store.IsWireProtocol 一份（四条线协议，
+// gemini 的入站与出站都可用，见 DESIGN 5.9）：账号的 --protocol 与厂商的默认协议共用这一个
+// 判断，两处各写一份名单迟早会对不上。
 func isWireProtocol(proto string) bool {
 	return store.IsWireProtocol(proto)
 }

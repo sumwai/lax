@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -98,7 +100,8 @@ func cmdUsage(e *Env, args []string) error {
 	return nil
 }
 
-// resolveInboundProtocol 把命令行上的简写换回协议名。
+// resolveInboundProtocol 把命令行上的简写换回协议名。四条线协议都能当入站用
+// （gemini 的两条入站路径见 DESIGN 5.9）。
 func resolveInboundProtocol(name string) (string, bool) {
 	switch name {
 	case "", translate.ProtocolAnthropic:
@@ -107,6 +110,8 @@ func resolveInboundProtocol(name string) (string, bool) {
 		return translate.ProtocolChat, true
 	case "responses", translate.ProtocolResponses:
 		return translate.ProtocolResponses, true
+	case translate.ProtocolGemini:
+		return translate.ProtocolGemini, true
 	default:
 		return "", false
 	}
@@ -265,7 +270,7 @@ func printRecords(e *Env, records []store.RequestRecord, names map[int64]string)
 func cmdCall(e *Env, args []string) error {
 	fs := newFlagSet(e, "call", "手工打一条请求，打印选号过程")
 	model := fs.String("model", "", "模型名，留空取第一个账号的第一个模型")
-	protocol := fs.String("protocol", "anthropic", "入站协议：anthropic | chat | responses")
+	protocol := fs.String("protocol", "anthropic", "入站协议：anthropic | chat | responses | gemini，gemini 的模型名走路径")
 	stream := fs.Bool("stream", false, "流式请求")
 	maxTokens := fs.Int("max-tokens", 256, "最大输出 token")
 	debug := fs.Bool("debug", false, "打印选号过程")
@@ -275,11 +280,12 @@ func cmdCall(e *Env, args []string) error {
 	}
 	inbound, ok := resolveInboundProtocol(*protocol)
 	if !ok {
-		return usagef("不支持的入站协议 %q，可用 anthropic、chat、responses", *protocol)
+		return usagef("不支持的入站协议 %q，可用 anthropic、chat、responses、gemini", *protocol)
 	}
 	prompt := strings.Join(fs.Args(), " ")
 	if prompt == "" {
-		return usagef(`用法：switchboard call "提示词" [--model 模型] [--debug]`)
+		return usagef(`用法：switchboard call "提示词" [--model 模型] [--protocol 协议] [--stream] [--debug] [--json]
+可用协议：anthropic、chat、responses、gemini`)
 	}
 
 	a, err := openApp(e, true)
@@ -342,14 +348,8 @@ func cmdCall(e *Env, args []string) error {
 		return err
 	}
 
-	path := map[string]string{
-		translate.ProtocolAnthropic: "/v1/messages",
-		translate.ProtocolChat:      "/v1/chat/completions",
-		translate.ProtocolResponses: "/v1/responses",
-	}[inbound]
-
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"http://"+ln.Addr().String()+path, bytes.NewReader(body))
+		"http://"+ln.Addr().String()+inboundPath(inbound, usedModel, *stream), bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -370,6 +370,11 @@ func cmdCall(e *Env, args []string) error {
 	}
 
 	if *stream {
+		// gemini 的流式帧要解码后才能给人看（帧里没有 event 名，一次响应就是若干 data 帧），
+		// 其余三条协议原样转出 SSE，与之前一致。
+		if inbound == translate.ProtocolGemini {
+			return printGeminiStream(e, resp.Body)
+		}
 		_, err := io.Copy(e.Stdout, resp.Body)
 		return err
 	}
@@ -400,6 +405,75 @@ func cmdCall(e *Env, args []string) error {
 	if *debug {
 		fmt.Fprintf(e.Stderr, "· 用量 输入 %d / 输出 %d（缓存 %d），结束原因 %s，模型 %s\n",
 			res.Usage.In, res.Usage.Out, res.Usage.CacheRead, res.StopReason, res.Model)
+	}
+	return nil
+}
+
+// inboundPath 给出这条请求要打的入站路径。gemini 的模型名在路径里、流式由后缀决定
+// （DESIGN 5.9）：模型名按路径段转义后拼进去，其余三条路径固定。
+func inboundPath(protocol, model string, stream bool) string {
+	if protocol != translate.ProtocolGemini {
+		return map[string]string{
+			translate.ProtocolAnthropic: "/v1/messages",
+			translate.ProtocolChat:      "/v1/chat/completions",
+			translate.ProtocolResponses: "/v1/responses",
+		}[protocol]
+	}
+	action := ":generateContent"
+	if stream {
+		action = ":streamGenerateContent"
+	}
+	return translate.GeminiInboundPathPrefix + url.PathEscape(model) + action
+}
+
+// printGeminiStream 读本进程下发的 gemini SSE 流并逐帧解码：文本增量逐段写到 stdout，
+// 工具调用按非流式输出的同一形状打一行。gemini 的帧没有 event 名，只认 `data:` 这一种行。
+// --json 时一个 data 帧打一行 JSON 原文：gemini 的帧里没有模型名，原文就是协议对客户端说的
+// 全部内容，jq 可以逐行解析。
+func printGeminiStream(e *Env, body io.Reader) error {
+	dec, err := translate.NewStreamDecoder(translate.ProtocolGemini)
+	if err != nil {
+		return err
+	}
+
+	sc := bufio.NewScanner(body)
+	// 一帧可能带整张图片的 inlineData，缓冲给到 8MB。
+	sc.Buffer(make([]byte, 0, 8<<10), 8<<20)
+	for sc.Scan() {
+		payload, ok := strings.CutPrefix(strings.TrimSpace(sc.Text()), "data:")
+		if !ok {
+			continue
+		}
+		payload = strings.TrimSpace(payload)
+		if payload == "" {
+			continue
+		}
+		if e.JSON {
+			fmt.Fprintln(e.Stdout, payload)
+			continue
+		}
+		deltas, err := dec.Decode([]byte(payload))
+		if err != nil {
+			return fmt.Errorf("gemini 流式帧解析失败（%v）；上游回来的可能不是 SSE，用 --debug 重跑一次看上游原文，或 switchboard log tail 看这一次的记录", err)
+		}
+		for _, d := range deltas {
+			switch d.Kind {
+			case translate.DeltaText:
+				fmt.Fprint(e.Stdout, d.Text)
+			case translate.DeltaToolStart:
+				fmt.Fprintf(e.Stdout, "[tool_use] %s ", d.ToolName)
+			case translate.DeltaToolArgs:
+				fmt.Fprint(e.Stdout, d.ArgsJSON)
+			case translate.DeltaError:
+				fmt.Fprintf(e.Stderr, "· 上游错误：%s\n", d.Text)
+			}
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return fmt.Errorf("读取 gemini 流式响应失败（%v）；连接可能中途断了，用 switchboard log tail 看这一次的记录", err)
+	}
+	if !e.JSON {
+		fmt.Fprintln(e.Stdout)
 	}
 	return nil
 }

@@ -28,7 +28,7 @@ switchboard log tail                                        # 看请求记录
 | `model probe` | 逐个模型探活，把能用的写进账号，可按厂商与账号筛选 |
 | `usage` | 按账号、模型或日期汇总用量 |
 | `log tail` | 最近的请求记录 |
-| `call` | 手工打一条请求，打印选号过程；默认 anthropic 入站，`--protocol` 可切换三种入站 |
+| `call` | 手工打一条请求，打印选号过程；默认 anthropic 入站，`--protocol` 可切换四种入站，gemini 也支持 `--stream` |
 | `doctor` | 自检配置、目录、密钥、端口、数据库 |
 
 每个命令都支持 `--json`，结果走 stdout，错误走 stderr。退出码：0 成功、1 运行失败、2 用法错误。
@@ -66,7 +66,7 @@ switchboard provider add myco --base-url https://api.deepseek.com \
 已添加厂商 myco（https://api.deepseek.com），2 条路由，默认协议 openai-chat
 ```
 
-gemini 只作出站，原生接口把模型名放在路径里，所以它的路由可以写 `{model}` 占位符：占位符原样落库，发请求之前才换成模型名（按路径段转义），相对路径与整条地址两种写法都行。`google-gemini` 这家（`https://generativelanguage.googleapis.com`）已经内置，模型列表在 `/v1beta/models`、转发在 `/v1beta/models/{model}:generateContent`，`provider ls` 能看到；要指向自己搭的代理就照同一个形状另加一家：
+gemini 的入站与出站都可用，原生接口把模型名放在路径里，所以它的路由可以写 `{model}` 占位符：占位符原样落库，发请求之前才换成模型名（按路径段转义），相对路径与整条地址两种写法都行。`google-gemini` 这家（`https://generativelanguage.googleapis.com`）已经内置，模型列表在 `/v1beta/models`、转发在 `/v1beta/models/{model}:generateContent`，`provider ls` 能看到；要指向自己搭的代理就照同一个形状另加一家：
 
 ```bash
 # 只声明 gemini 一条路由，默认协议跟着写成 gemini
@@ -76,7 +76,7 @@ switchboard provider add gem-proxy --base-url https://gemini-proxy.example.com \
 已添加厂商 gem-proxy（https://gemini-proxy.example.com），1 条路由，默认协议 gemini
 ```
 
-删掉这条路由是 `provider unset gem-proxy gemini`；这家只有这一条路由时会被拒绝，那是不想要这家厂商了，用 `provider rm`。账号一侧用 `account add --provider google-gemini --protocol gemini`（自建代理就把 `--provider` 换成那家的名字），gemini 只作出站，客户端的入站路径仍是那三条。
+删掉这条路由是 `provider unset gem-proxy gemini`；这家只有这一条路由时会被拒绝，那是不想要这家厂商了，用 `provider rm`。账号一侧用 `account add --provider google-gemini --protocol gemini`（自建代理就把 `--provider` 换成那家的名字），gemini 的入站是 `POST /v1beta/models/{model}:generateContent` 与 `:streamGenerateContent`，非流式与流式都能用。
 
 `provider set` 只设值：补一条路由、改默认协议或地址，没传的字段一律保留。传空值是用法错误，删除要显式声明：
 

@@ -81,7 +81,7 @@ func TestAccountAddUsesProviderTable(t *testing.T) {
 		t.Fatalf("openai-responses 账号 = %+v", oa1)
 	}
 
-	// gemini 只作出站（DESIGN 5.9），账号上可以选它。
+	// gemini 入站与出站都可用（DESIGN 5.9），账号上可以选它作出站协议。
 	code, out, stderr = run(t, "account", "add", "g1",
 		"--provider", "openai", "--protocol", "gemini", "--key", "sk-5", "--json")
 	if code != 0 {
@@ -104,7 +104,7 @@ func TestAccountAddUsesProviderTable(t *testing.T) {
 }
 
 // TestAccountAddHelpMentionsGemini 钉住 --protocol 的帮助文案：gemini 在可选值里，
-// 并且写明它目前只作出站、没有入站路径（见 DESIGN 4 的 account add 行）。
+// 并且写明入站与出站都可用、两条入站路径是什么（见 DESIGN 4 的 account add 行）。
 func TestAccountAddHelpMentionsGemini(t *testing.T) {
 	sandbox(t)
 
@@ -114,9 +114,9 @@ func TestAccountAddHelpMentionsGemini(t *testing.T) {
 	}
 	for _, want := range []string{
 		"anthropic | openai-chat | openai-responses | gemini",
-		"只作出站",
-		"没有入站路径",
-		"/v1/messages",
+		"入站与出站都可用",
+		"/v1beta/models/{model}:generateContent",
+		":streamGenerateContent",
 	} {
 		if !strings.Contains(errOut, want) {
 			t.Fatalf("account add --help 应提到 %q: %s", want, errOut)
