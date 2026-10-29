@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"switchboard/internal/account"
@@ -893,6 +894,9 @@ func cmdModelProbe(e *Env, args []string) error {
 	// 所以整轮累加探活数与跳过数，不只是当前账号的。
 	totalProbed, totalSkipped := 0, 0
 
+	// 实时进度只画在终端里的 stderr 上：结果照旧走 stdout，--json 时一行都不出。
+	progress := newProbeProgress(e.Stderr, !e.JSON)
+
 	for _, acc := range accounts {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -946,7 +950,16 @@ func cmdModelProbe(e *Env, args []string) error {
 
 		var results []gateway.ModelProbe
 		if len(targets) > 0 {
-			if results, err = probeModels(ctx, gs, a.st, acc, targets, *concurrency); err != nil {
+			// 待探模型为 0（全被跳过）时一帧都不画：没有可报的进度，也没必要留一行残影。
+			progress.update(acc.Name, 0, len(targets), targets[0])
+			results, err = func() ([]gateway.ModelProbe, error) {
+				// 出错返回也要收尾，否则「model probe: …」会接在进度行尾巴上。
+				defer progress.finish()
+				return probeModels(ctx, gs, a.st, acc, targets, *concurrency, func(done int, model string) {
+					progress.update(acc.Name, done, len(targets), model)
+				})
+			}()
+			if err != nil {
 				return err
 			}
 		}
@@ -1101,8 +1114,11 @@ func mergeProbeError(model string, res gateway.ModelProbe, err error) gateway.Mo
 }
 
 // probeModels 用固定大小的 worker pool 并发探活一个账号的模型。
+// onDone 非空时每探完一个模型调用一次，参数是已完成数与刚完成的模型名；
+// 调用来自任意 worker goroutine，实现要自己保证并发安全。
 func probeModels(ctx context.Context, gs *gateway.Server, st *store.Store,
-	acc store.Account, targets []string, concurrency int) ([]gateway.ModelProbe, error) {
+	acc store.Account, targets []string, concurrency int,
+	onDone func(done int, model string)) ([]gateway.ModelProbe, error) {
 
 	workers := concurrency
 	if workers < 1 {
@@ -1117,6 +1133,8 @@ func probeModels(ctx context.Context, gs *gateway.Server, st *store.Store,
 	writeErrs := make([]error, len(targets))
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
+	// 已完成数跨 goroutine 累加，原子加之后再回调，进度里的分子只会往上走。
+	var done atomic.Int64
 	for i, model := range targets {
 		wg.Add(1)
 		sem <- struct{}{}
@@ -1132,6 +1150,9 @@ func probeModels(ctx context.Context, gs *gateway.Server, st *store.Store,
 			results[i] = res
 			// 每个 goroutine 只写自己那一行，底层连接串行，不共享事务。
 			writeErrs[i] = st.SetModelStatus(acc.ID, model, res.Status, res.HTTPStatus, res.Message)
+			if onDone != nil {
+				onDone(int(done.Add(1)), model)
+			}
 		}(i, model)
 	}
 	wg.Wait()
