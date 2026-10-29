@@ -256,7 +256,7 @@ func TestGroupHelp(t *testing.T) {
 		name string
 		subs []string
 	}{
-		{"account", []string{"add", "ls", "rm", "test", "enable", "disable"}},
+		{"account", []string{"add", "ls", "set", "rm", "test", "enable", "disable"}},
 		{"model", []string{"ls", "sync", "probe"}},
 		{"provider", []string{"ls", "add", "set", "unset", "rm"}},
 		{"log", []string{"tail"}},

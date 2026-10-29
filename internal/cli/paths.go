@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"strings"
-
 	"switchboard/internal/store"
 )
 
@@ -22,18 +20,17 @@ func checkBaseURL(value, usageLine string) (string, error) {
 	return normalized, nil
 }
 
-// hasFullAddress 判断路径类取值里是不是写了整条地址。
-// 相对 base_url 的路径不含 `://`，只有把完整地址抄进路径参数才会出现它。
-func hasFullAddress(value string) bool {
-	return strings.Contains(value, "://")
-}
-
-// pathGotFullAddress 是路径类 flag 收到整条地址时的统一文案（见 DESIGN 4、5.8）。
-// `--openai https://api.x/v1/chat/completions` 会被 store.NormalizePath 规整成
-// `/https:/api.x/v1/chat/completions`：一个谁也打不通的地址，静默落库比当场报错难查得多。
-// where 说明整条地址该写在哪个参数上（中文开头时不加空格，参数名开头时加一个），
-// example 给出这个子命令的正确写法，usageLine 是用法行。
-func pathGotFullAddress(flagName, value, where, example, usageLine string) error {
-	return usagef("--%s 收到的是整条地址 %q：这里是相对 base_url 的路径，不是完整地址，写进来会被规整成 /https:/… 这种打不通的地址。%s，路径只写地址后面的部分，例如 %s\n%s",
-		flagName, value, joinCN("完整地址写在", where), example, usageLine)
+// checkEndpoint 是路径类取值（三个协议 flag、--models-path、`model sync --endpoint`）唯一的
+// 格式校验入口，判定交给 store.NormalizeEndpoint（见 DESIGN 5.8）：两种写法都收，含 `://` 的按
+// 整条地址校验 scheme 与主机名，其余按相对 base_url 的路径规整。cli 不另写一份 scheme 或
+// 主机名预检——两份判定迟早对不上（`https://`、`ftp://host/x`、`https:///x` 的判定只有 store 一份）。
+//
+// 校验不过时包成用法错误（退出码 2）：文案保留 store 的原话（它已经写明缺的是主机名还是
+// scheme 不对），再附这个子命令的用法行。取值本身仍按原样交给 store 的写入口，
+// 落库形态由 store 决定，cli 不做第二次规整。
+func checkEndpoint(value, usageLine string) error {
+	if _, err := store.NormalizeEndpoint(value); err != nil {
+		return usagef("%v\n%s", err, usageLine)
+	}
+	return nil
 }

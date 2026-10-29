@@ -538,6 +538,59 @@ func TestModelSyncEndpointNormalizedPathIsTemporary(t *testing.T) {
 	}
 }
 
+// TestModelSyncEndpointFullAddress 钉住 `model sync --endpoint` 的整条地址写法：
+// 它直接访问那个地址、不再拼账号的 base_url，且只影响这一次调用；下一轮回到路由的 models_path。
+func TestModelSyncEndpointFullAddress(t *testing.T) {
+	sandbox(t)
+	base := newRecorderUpstream(t, map[string]fakeResponse{
+		"GET /v1/models": {status: http.StatusOK, body: modelsListM1},
+	})
+	other := newRecorderUpstream(t, map[string]fakeResponse{
+		"GET /v3/models": {status: http.StatusOK, body: `{"data":[{"id":"m1"},{"id":"m2"}]}`},
+	})
+	mustInit(t)
+
+	if code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", base.srv.URL,
+		"--openai", "/v1/chat/completions"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := run(t, "account", "add", "mine1",
+		"--provider", "mine", "--protocol", "openai-chat", "--key", "sk-test"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	target := other.srv.URL + "/v3/models"
+	code, out, stderr := run(t, "model", "sync", "--account", "mine1", "--endpoint", target, "--json")
+	if code != 0 {
+		t.Fatalf("model sync --endpoint 整条地址退出码 = %d，stderr = %s", code, stderr)
+	}
+	var synced []struct {
+		Account string `json:"account"`
+		Models  int    `json:"models"`
+	}
+	mustJSON(t, out, &synced)
+	if len(synced) != 1 || synced[0].Models != 2 {
+		t.Fatalf("model sync --endpoint = %+v，期望从整条地址拉到 2 个模型", synced)
+	}
+	call := other.mustSingleCall(t)
+	if call.url != target {
+		t.Fatalf("--endpoint 的请求地址 = %q，期望 %q（不再拼 base_url）", call.url, target)
+	}
+	if calls := base.all(); len(calls) != 0 {
+		t.Fatalf("--endpoint 给了整条地址时不该再打 base_url: %+v", calls)
+	}
+
+	// 只影响这一次调用：下一轮回到路由的 models_path。
+	if code, _, stderr := run(t, "model", "sync", "--account", "mine1"); code != 0 {
+		t.Fatalf("不带 --endpoint 的 model sync 退出码 = %d，stderr = %s", code, stderr)
+	}
+	call = base.mustSingleCall(t)
+	if want := base.srv.URL + "/v1/models"; call.url != want {
+		t.Fatalf("不带 --endpoint 的请求地址 = %q，期望 %q", call.url, want)
+	}
+}
+
 // TestProviderBaseURLVariantsHitSameAddress 钉住 base_url 的规整落在地址上：
 // 只差末尾斜杠的两条 base_url 拼出同一个完整地址；重复斜杠被合并而真实存在的前缀
 // （/api/paas/v4）原样保留；带端口的地址一个字节都不改写。
@@ -1664,79 +1717,169 @@ func TestProviderBaseURLValidation(t *testing.T) {
 	}
 }
 
-// TestProviderPathsRejectFullAddress 钉住路径类取值的第二种用法错误：值里出现 `://`
-// 说明把整条地址抄进了路径参数，store.NormalizePath 会把它规整成 /https:/… 这种打不通的地址。
-// add 的三个协议 flag 与 --models-path、set 的两个入口一律退出码 2，文案说明这里是相对
-// base_url 的路径、完整地址写在 --base-url，并给一个正确示例；一条路由都不落库。
-func TestProviderPathsRejectFullAddress(t *testing.T) {
+// TestProviderPathsAcceptFullAddress 钉住路径类取值的两种写法：相对 base_url 的路径与整条地址都收。
+// 整条地址（含 `://`）用于同一厂商的不同协议落在不同域名上的情况：它直接使用、不再拼 base_url。
+// add 的三个协议 flag 与 --models-path、set 的四个入口都交给 store.NormalizeEndpoint。
+// 断言真实打到的完整地址而不只是库里的列值：存对了但拼错了（仍旧拼上 base_url）只看列值发现不了。
+func TestProviderPathsAcceptFullAddress(t *testing.T) {
+	sandbox(t)
+	base := newRecorderUpstream(t, map[string]fakeResponse{})
+	other := newRecorderUpstream(t, map[string]fakeResponse{
+		"POST /v1/chat/completions": {status: http.StatusOK, body: chatCompletionOK},
+		"GET /v1/models":            {status: http.StatusOK, body: modelsListM1},
+		"GET /v2/models":            {status: http.StatusOK, body: modelsListM1},
+	})
+	mustInit(t)
+
+	chatFull := other.srv.URL + "/v1/chat/completions"
+	if code, _, stderr := run(t, "provider", "add", "split",
+		"--base-url", base.srv.URL,
+		"--openai", chatFull,
+		"--anthropic", "/v1/messages"); code != 0 {
+		t.Fatalf("provider add 整条地址退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	// 整条地址原样落库（规整形态），相对路径仍是相对写法。
+	got := mustProviderLs(t)["split"]
+	routes := routeMap(got)
+	if routes["openai-chat"].Path != chatFull {
+		t.Fatalf("整条地址路由 = %q，期望 %q", routes["openai-chat"].Path, chatFull)
+	}
+	if routes["anthropic"].Path != "/v1/messages" {
+		t.Fatalf("相对路径路由 = %q，期望 /v1/messages", routes["anthropic"].Path)
+	}
+	// 模型列表路径按整条地址在同一 scheme + host 上推导，不换域名。
+	if want := other.srv.URL + "/v1/models"; routes["openai-chat"].ModelsPath != want {
+		t.Fatalf("路由的模型列表路径 = %q，期望 %q", routes["openai-chat"].ModelsPath, want)
+	}
+
+	// 账号仍固化厂商的 base_url；转发按路由的整条地址走到另一个 host。
+	if code, _, stderr := run(t, "account", "add", "split1",
+		"--provider", "split", "--key", "sk-test", "--models", "m1"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := run(t, "call", "hi", "--model", "m1"); code != 0 {
+		t.Fatalf("call 退出码 = %d，stderr = %s", code, stderr)
+	}
+	call := other.mustSingleCall(t)
+	if want := other.srv.URL + "/v1/chat/completions"; call.url != want {
+		t.Fatalf("转发地址 = %q，期望 %q", call.url, want)
+	}
+	if calls := base.all(); len(calls) != 0 {
+		t.Fatalf("base_url 那台不该收到请求: %+v", calls)
+	}
+
+	// 模型列表也走到整条地址那台：路由的 models_path 是整条地址。
+	other.reset()
+	if code, _, stderr := run(t, "model", "sync", "--account", "split1"); code != 0 {
+		t.Fatalf("model sync 退出码 = %d，stderr = %s", code, stderr)
+	}
+	call = other.mustSingleCall(t)
+	if want := other.srv.URL + "/v1/models"; call.url != want {
+		t.Fatalf("模型列表地址 = %q，期望 %q", call.url, want)
+	}
+
+	// provider set 同样收整条地址，改完仍是整条地址落库。
+	if code, _, stderr := run(t, "provider", "set", "split",
+		"--anthropic", other.srv.URL+"/v1/messages"); code != 0 {
+		t.Fatalf("provider set --anthropic 整条地址退出码 = %d，stderr = %s", code, stderr)
+	}
+	// --models-path 是厂商级覆盖，同样收整条地址，并压过路由自己的列表路径。
+	if code, _, stderr := run(t, "provider", "set", "split",
+		"--models-path", other.srv.URL+"/v2/models"); code != 0 {
+		t.Fatalf("provider set --models-path 整条地址退出码 = %d，stderr = %s", code, stderr)
+	}
+	other.reset()
+	if code, _, stderr := run(t, "model", "sync", "--account", "split1"); code != 0 {
+		t.Fatalf("model sync 退出码 = %d，stderr = %s", code, stderr)
+	}
+	call = other.mustSingleCall(t)
+	if want := other.srv.URL + "/v2/models"; call.url != want {
+		t.Fatalf("厂商级覆盖的模型列表地址 = %q，期望 %q", call.url, want)
+	}
+}
+
+// TestProviderPathsRejectBadFullAddress 钉住整条地址的一种用法错误与空值：
+// 只有 scheme 没有主机名（`https://`、`https:///x`）与不是 http(s) 的 scheme（`ftp://host/x`）
+// 由 store.NormalizeEndpoint 判定，cli 用 usagef 包一层保持退出码 2，文案保留 store 的原话；
+// 空值仍是用法错误（删除归 provider unset）。整条校验不过时一条路由、一项设置都不落库。
+func TestProviderPathsRejectBadFullAddress(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
 
-	full := "https://api.example.com/v1/chat/completions"
-	for _, c := range []struct {
-		name string
-		args []string
-		flag string
-	}{
-		{"add --anthropic", []string{"provider", "add", "mine", "--base-url", "https://api.example.com", "--anthropic", full}, "--anthropic"},
-		{"add --openai", []string{"provider", "add", "mine", "--base-url", "https://api.example.com", "--openai", full}, "--openai"},
-		{"add --responses", []string{"provider", "add", "mine", "--base-url", "https://api.example.com", "--responses", full}, "--responses"},
-		{"add --models-path", []string{"provider", "add", "mine", "--base-url", "https://api.example.com",
-			"--openai", "/v1/chat/completions", "--models-path", full}, "--models-path"},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			code, out, stderr := run(t, c.args...)
+	bad := []struct{ value, want string }{
+		{"https://", "里没有主机名"},
+		{"https:///x", "里没有主机名"},
+		{"ftp://host/x", "要以 http:// 或 https:// 开头"},
+		{"", "传了空值"},
+	}
+	for _, flag := range []string{"anthropic", "openai", "responses", "models-path"} {
+		for _, b := range bad {
+			args := []string{"provider", "add", "mine", "--base-url", "https://api.example.com",
+				"--openai", "/v1/chat/completions", "--" + flag, b.value}
+			code, out, stderr := run(t, args...)
 			if code != 2 || out != "" {
-				t.Fatalf("退出码 = %d，stdout = %q", code, out)
+				t.Fatalf("%v 退出码 = %d，stdout = %q", args, code, out)
 			}
-			for _, want := range []string{c.flag, "整条地址", "相对 base_url", "--base-url", "例如 switchboard provider add"} {
+			for _, want := range []string{b.want, "用法：switchboard provider add"} {
 				if !strings.Contains(stderr, want) {
-					t.Fatalf("stderr 应包含 %q: %s", want, stderr)
+					t.Fatalf("%v 的 stderr 应包含 %q: %s", args, want, stderr)
 				}
 			}
-		})
+		}
 	}
 	if _, ok := mustProviderLs(t)["mine"]; ok {
-		t.Fatal("路径校验失败时不该写入厂商")
+		t.Fatal("取值校验失败时不该写入厂商")
 	}
 
 	if code, _, stderr := run(t, "provider", "add", "mine",
 		"--base-url", "https://api.example.com", "--openai", "/v1/chat/completions"); code != 0 {
 		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, args := range [][]string{
-		{"provider", "set", "mine", "--openai", full},
-		{"provider", "set", "mine", "--models-path", full},
-	} {
-		code, out, stderr := run(t, args...)
+	for _, flag := range []string{"anthropic", "openai", "responses", "models-path"} {
+		code, out, stderr := run(t, "provider", "set", "mine", "--"+flag, "https:///x")
 		if code != 2 || out != "" {
-			t.Fatalf("%v 退出码 = %d，stdout = %q", args, code, out)
+			t.Fatalf("set --%s 退出码 = %d，stdout = %q", flag, code, out)
 		}
-		for _, want := range []string{"整条地址", "例如 switchboard provider set"} {
+		for _, want := range []string{"里没有主机名", "用法：switchboard provider set"} {
 			if !strings.Contains(stderr, want) {
-				t.Fatalf("%v 的 stderr 应包含 %q: %s", args, want, stderr)
+				t.Fatalf("set --%s 的 stderr 应包含 %q: %s", flag, want, stderr)
 			}
 		}
 	}
 	got := mustProviderLs(t)["mine"]
 	if got.ModelsPath != "" || routeMap(got)["openai-chat"].Path != "/v1/chat/completions" {
-		t.Fatalf("路径校验失败时不该改动厂商: %+v", got)
+		t.Fatalf("校验失败时不该改动厂商: %+v", got)
 	}
 }
 
-// TestModelSyncEndpointRejectsFullAddress 确认 `model sync --endpoint` 与协议 flag 同一条规则：
-// 整条地址是用法错误（退出码 2），完整地址属于账号的 base_url；缺前导斜杠、重复斜杠与末尾斜杠
-// 仍由 store.NormalizePath 规整，见 TestModelSyncEndpointNormalizedPathIsTemporary。
-func TestModelSyncEndpointRejectsFullAddress(t *testing.T) {
+// TestModelSyncEndpointBadValues 确认 `model sync --endpoint` 与协议 flag 同一套规则：
+// 整条地址收下并直接用，只有 scheme 没有主机名、scheme 不是 http(s) 与空值是用法错误（退出码 2），
+// 文案保留 store 的原话。空值、缺前导斜杠与重复斜杠的规整见 TestModelSyncEndpointNormalizedPathIsTemporary。
+func TestModelSyncEndpointBadValues(t *testing.T) {
 	sandbox(t)
 
-	code, out, stderr := run(t, "model", "sync", "--endpoint", "https://api.example.com/v1/models")
-	if code != 2 || out != "" {
-		t.Fatalf("退出码 = %d，stdout = %q", code, out)
-	}
-	for _, want := range []string{"--endpoint", "整条地址", "base_url", "例如 switchboard model sync --account ds --endpoint /v1/models"} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("stderr 应包含 %q: %s", want, stderr)
+	for _, c := range []struct{ value, want string }{
+		{"https://", "里没有主机名"},
+		{"https:///v1/models", "里没有主机名"},
+		{"ftp://api.example.com/v1/models", "要以 http:// 或 https:// 开头"},
+		{"", "里没有路径"},
+	} {
+		code, out, stderr := run(t, "model", "sync", "--endpoint", c.value)
+		if code != 2 || out != "" {
+			t.Fatalf("--endpoint %q 退出码 = %d，stdout = %q", c.value, code, out)
 		}
+		if !strings.Contains(stderr, c.want) {
+			t.Fatalf("--endpoint %q 的 stderr 应包含 %q: %s", c.value, c.want, stderr)
+		}
+	}
+	// 合法整条地址不需要先 init 就该走到「先 switchboard init」这条运行失败上，
+	// 说明格式校验放行了它（用法错误的退出码是 2，运行失败是 1）。
+	code, _, stderr := run(t, "model", "sync", "--endpoint", "https://api.example.com/v1/models")
+	if code != 1 {
+		t.Fatalf("合法整条地址的退出码 = %d，期望 1（未初始化），stderr = %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "switchboard init") {
+		t.Fatalf("合法整条地址应放行到打开数据库那一步: %s", stderr)
 	}
 }

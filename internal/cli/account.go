@@ -20,6 +20,7 @@ import (
 var accountSubs = []groupItem{
 	{"add", "新增一个上游账号，key 加密后入库"},
 	{"ls", "列出账号、模型数与当前状态"},
+	{"set", "换掉账号的凭据，冷却与失败计数随之清零并重新启用"},
 	{"rm", "删除账号，历史请求记录保留"},
 	{"test", "用最小请求探活一个账号"},
 	{"enable", "启用账号并清掉冷却"},
@@ -32,13 +33,16 @@ func cmdAccount(e *Env, args []string) error {
 		return nil
 	}
 	if len(args) == 0 {
-		return usagef("需要子命令：add | ls | rm | test | enable | disable\n用 switchboard account --help 查看子命令")
+		return usagef("需要子命令：add | ls | set | rm | test | enable | disable\n用 switchboard account --help 查看子命令")
 	}
 	switch args[0] {
 	case "add":
 		return cmdAccountAdd(e, args[1:])
 	case "ls":
 		return cmdAccountLs(e, args[1:])
+	case "set", "update":
+		// update 是 set 的同义词：帮助里只列 set，但两个写法都收（见 DESIGN 4）。
+		return cmdAccountSet(e, args[1:])
 	case "rm":
 		return cmdAccountRm(e, args[1:])
 	case "test":
@@ -48,7 +52,7 @@ func cmdAccount(e *Env, args []string) error {
 	case "disable":
 		return cmdAccountSetEnabled(e, args[1:], "disable", false)
 	default:
-		return usagef("未知子命令 %q，可用：add | ls | rm | test | enable | disable\n用 switchboard account --help 查看子命令", args[0])
+		return usagef("未知子命令 %q，可用：add | ls | set | rm | test | enable | disable\n用 switchboard account --help 查看子命令", args[0])
 	}
 }
 
@@ -97,6 +101,63 @@ func cmdAccountSetEnabled(e *Env, args []string, sub string, enabled bool) error
 	return nil
 }
 
+// accountSetUsage 是 account set 的用法行，用法错误与账号不存在时都打出来。
+const accountSetUsage = "用法：switchboard account set <名称> --key <key>\n--key 三种给法：直接写值、写 - 从标准输入读、留空读环境变量 SWITCHBOARD_KEY"
+
+// cmdAccountSet 换掉一个已有账号的凭据，不删号重建：删了会丢掉探活结果、协议发现与请求记录归属。
+// 换 key 之后旧凭据的结论作废，同一个事务里清掉冷却、最近错误与连续失败次数并重新启用账号（见 DESIGN 4、5.6）。
+// `account_models`、`accounts.models` 与协议发现结果一个字不动，也不碰厂商表。
+func cmdAccountSet(e *Env, args []string) error {
+	fs := newFlagSet(e, "account set", "换掉账号的凭据，冷却与失败计数随之清零并重新启用")
+	key := fs.String("key", "", "新的上游 API key；给 - 从标准输入读，留空则读环境变量 SWITCHBOARD_KEY")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 || fs.Arg(0) == "" {
+		return usagef("%s", accountSetUsage)
+	}
+	name := fs.Arg(0)
+
+	// 三种给法与 account add 完全一致，共用 resolveKey：两处判定不一致时，换 key 会突然多出一个坑。
+	keyValue, err := resolveKey(*key, "switchboard account set "+name+" --key - < key.txt", accountSetUsage)
+	if err != nil {
+		return err
+	}
+
+	a, err := openApp(e, true)
+	if err != nil {
+		return err
+	}
+	defer a.Close()
+
+	acc, err := a.st.GetAccount(name)
+	if err != nil {
+		// 换 key 针对已有账号：不存在时给下一步命令，不要只抛一句 sql.ErrNoRows。
+		return fmt.Errorf("账号 %q 不存在，先运行 switchboard account add %s --provider <厂商> --key <key>\n%s", name, name, accountSetUsage)
+	}
+
+	// 与 account add 走同一条加密路径；明文不进日志，也不进 --json 输出（那里只有掩码）。
+	cipher, err := secret.Encrypt(a.key, []byte(keyValue))
+	if err != nil {
+		return err
+	}
+	if err := a.st.RotateKey(acc.ID, cipher); err != nil {
+		return fmt.Errorf("更新 %s 的凭据失败: %w", name, err)
+	}
+
+	if e.JSON {
+		return e.printJSON(map[string]any{
+			"name":                name,
+			"key":                 secret.Mask(keyValue),
+			"cooldown_cleared":    true,
+			"fail_streak_cleared": true,
+			"enabled":             true,
+		})
+	}
+	fmt.Fprintf(e.Stdout, "已更新 %s 的凭据（%s）；冷却与失败计数已清零，账号已启用\n", name, secret.Mask(keyValue))
+	return nil
+}
+
 // accountAddUsage 是 account add 的用法行，用法错误与 --base-url 校验失败时都打出来。
 const accountAddUsage = "用法：switchboard account add <名称> --provider <厂商> --key <key> [--protocol <协议>] [--base-url <地址>] [--models <模型>] [--priority N]"
 
@@ -137,19 +198,9 @@ func cmdAccountAdd(e *Env, args []string) error {
 		*baseURL = norm
 	}
 
-	keyValue := *key
-	if keyValue == "" {
-		keyValue = envKey()
-	}
-	if keyValue == "-" || keyValue == "--" {
-		v, err := readKeyFromStdin()
-		if err != nil {
-			return err
-		}
-		keyValue = v
-	}
-	if keyValue == "" {
-		return usagef("缺少凭据：--key <key>、--key - 从标准输入读，或环境变量 SWITCHBOARD_KEY")
+	keyValue, err := resolveKey(*key, "switchboard account add x --provider p --key - < key.txt", accountAddUsage)
+	if err != nil {
+		return err
 	}
 
 	if *protocol != "" && !isWireProtocol(*protocol) {
@@ -247,12 +298,34 @@ func envKey() string {
 	return ""
 }
 
-// readKeyFromStdin 从标准输入读凭据，去掉首尾空白。
+// resolveKey 把 --key 的三种给法解成一个值：直接写值、`-`（或 `--`）从标准输入读、
+// 留空读环境变量 SWITCHBOARD_KEY（兼容 SWITCHBOARD_API_KEY）。account add 与 account set 共用一份，
+// 两处判定不一致时，换 key 会突然多出一个坑。stdinExample 是「从管道读」错误文案里的示例命令，
+// usageLine 是这个子命令的用法行：缺凭据是用法错误，输出要带上正确用法（见 AGENTS.md）。
+func resolveKey(flagValue, stdinExample, usageLine string) (string, error) {
+	value := flagValue
+	if value == "" {
+		value = envKey()
+	}
+	if value == "-" || value == "--" {
+		v, err := readKeyFromStdin(stdinExample)
+		if err != nil {
+			return "", err
+		}
+		value = v
+	}
+	if value == "" {
+		return "", usagef("缺少凭据：--key <key>、--key - 从标准输入读，或环境变量 SWITCHBOARD_KEY\n%s", usageLine)
+	}
+	return value, nil
+}
+
+// readKeyFromStdin 从标准输入读凭据，去掉首尾空白，example 是用在错误文案里的示例命令。
 // 直接在终端上运行且没有管道时报错，避免命令挂起等输入。
-func readKeyFromStdin() (string, error) {
+func readKeyFromStdin(example string) (string, error) {
 	info, statErr := os.Stdin.Stat()
 	if statErr == nil && info.Mode()&os.ModeCharDevice != 0 {
-		return "", usagef("--key - 需要从管道或文件读入，例如 switchboard account add x --provider p --key - < key.txt")
+		return "", usagef("--key - 需要从管道或文件读入，例如 %s", example)
 	}
 	b, err := io.ReadAll(io.LimitReader(os.Stdin, 8<<10))
 	if err != nil {
@@ -688,22 +761,19 @@ func cmdModelSync(e *Env, args []string) error {
 	fs := newFlagSet(e, "model sync", "从上游拉取模型列表")
 	provider := fs.String("provider", "", "只同步这个厂商的账号")
 	accountName := fs.String("account", "", "只同步这个账号")
-	endpoint := fs.String("endpoint", "", "临时覆盖模型列表路径，只影响这一次调用：相对账号 base_url 的完整路径，例如 /v1/models（写法由程序规整；整条地址写在账号的 base_url，不要写在这里）")
+	endpoint := fs.String("endpoint", "", "临时覆盖模型列表路径，只影响这一次调用：相对账号 base_url 的完整路径（例如 /v1/models），也可以写整条地址（相对路径的斜杠写法由程序规整）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	// 取值原样往下走：写法（前导斜杠、重复斜杠、末尾斜杠）由 store.NormalizePath 规整，
-	// cli 只判两种用法错误：「规整之后为空」——给了参数却没给路径，去掉这个参数再试；
-	// 与「写成了整条地址」——完整地址属于账号的 base_url，写进路径会被规整成 /https:/…（见 DESIGN 4、5.8）。
+	// 取值原样往下走：写法（前导斜杠、重复斜杠、末尾斜杠）由 store 规整，cli 只判两种用法错误：
+	// 「规整之后为空」——给了参数却没给路径，去掉这个参数再试；
+	// 与「整条地址校验不过」——缺主机名或 scheme 不是 http(s)，判定交给 store.NormalizeEndpoint。
 	if flagWasSet(fs, "endpoint") {
 		if !pathGiven(*endpoint) {
 			return usagef("--endpoint %q 里没有路径：它是相对该厂商 base_url 的完整路径，例如 switchboard model sync --endpoint /v1/models；不想临时覆盖就整个去掉这个参数", *endpoint)
 		}
-		if hasFullAddress(*endpoint) {
-			return pathGotFullAddress("endpoint", *endpoint,
-				"账号的 base_url（account add --base-url <地址>，或 provider set <名称> --base-url <地址>）",
-				"switchboard model sync --account ds --endpoint /v1/models",
-				"用法：switchboard model sync [--provider 厂商] [--account 账号] [--endpoint <路径>]")
+		if err := checkEndpoint(*endpoint, "用法：switchboard model sync [--provider 厂商] [--account 账号] [--endpoint <路径>]"); err != nil {
+			return err
 		}
 	}
 

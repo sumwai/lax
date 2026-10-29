@@ -21,9 +21,11 @@ var providerSubs = []groupItem{
 	{"rm", "删除厂商与它的全部路由，账号还在用时要求 --force"},
 }
 
-// 三个协议 flag 的取值都是相对厂商 base_url 的完整路径，写法由 store.NormalizePath 规整、
-// 不拒绝输入：`v1/chat/completions`、`//v1//chat/completions`、`/v1/chat/completions/` 落成
-// 同一个地址（见 DESIGN 5.8）。cli 只判两件事：「规整之后为空」与「写成了整条地址」，两者都是用法错误，
+// 三个协议 flag 的取值有两种写法（见 DESIGN 5.8）：相对厂商 base_url 的完整路径，或整条地址
+// （含 `://`，直接用、不再拼 base_url）。相对路径由 store.NormalizePath 规整、不拒绝输入：
+// `v1/chat/completions`、`//v1//chat/completions`、`/v1/chat/completions/` 落成同一个地址；
+// 整条地址交给 store.NormalizeEndpoint 校验 scheme 与主机名，因此 `https://`、`https:///x`、
+// `ftp://host/x` 都是用法错误。cli 只判两件事：「规整之后为空」与「整条地址校验不过」，
 // 删除语义归 provider unset。没有 --gemini：gemini 协议尚未实现，留一条永远用不上的路由只会误导。
 
 // 三份用法行，所有用法错误都把它打出来，不让用户看着一句「参数错误」去猜参数（见 AGENTS.md）。
@@ -273,9 +275,9 @@ type providerPathFlags struct {
 
 func newProviderPathFlags(fs *flagSet) providerPathFlags {
 	return providerPathFlags{
-		anthropic: fs.String("anthropic", "", "anthropic 协议的路由路径，相对 --base-url 的完整路径，例如 /v1/messages（写法由程序规整；整条地址写在 --base-url，不要写在这里）"),
-		openai:    fs.String("openai", "", "openai-chat 协议的路由路径，相对 --base-url 的完整路径，例如 /v1/chat/completions（写法由程序规整；整条地址写在 --base-url，不要写在这里）"),
-		responses: fs.String("responses", "", "openai-responses 协议的路由路径，相对 --base-url 的完整路径，例如 /v1/responses（写法由程序规整；整条地址写在 --base-url，不要写在这里）"),
+		anthropic: fs.String("anthropic", "", "anthropic 协议的路由路径：相对 --base-url 的完整路径，例如 /v1/messages；也可以写整条地址，例如 https://claude.example.com/v1/messages（相对路径的斜杠写法由程序规整）"),
+		openai:    fs.String("openai", "", "openai-chat 协议的路由路径：相对 --base-url 的完整路径，例如 /v1/chat/completions；也可以写整条地址，例如 https://openai.example.com/v1/chat/completions（相对路径的斜杠写法由程序规整）"),
+		responses: fs.String("responses", "", "openai-responses 协议的路由路径：相对 --base-url 的完整路径，例如 /v1/responses；也可以写整条地址（相对路径的斜杠写法由程序规整）"),
 	}
 }
 
@@ -297,48 +299,29 @@ func (p providerPathFlags) pairs(fs *flagSet) []providerPathFlag {
 }
 
 // pathGiven 判断一个路径类取值算不算给了值：空串、只有空白、只有斜杠都算没给。
-// 判定走 store.NormalizePath，cli 因此只多判「规整之后为空」与「写成了整条地址」两条，
-// 不另立一套斜杠写法校验（见 DESIGN 5.8）。
+// 判定走 store.NormalizePath，cli 因此只多判「规整之后为空」一条，不另立一套斜杠写法校验
+// （见 DESIGN 5.8）。整条地址的取值同样算给了值：它在 checkEndpoint 里单独判。
 func pathGiven(raw string) bool { return store.NormalizePath(raw) != "" }
 
-// pathExample 是一个协议路由的示例路径，只用在报错文案里。
-func pathExample(protocol string) string {
-	switch protocol {
-	case gateway.ProtocolAnthropic:
-		return "/v1/messages"
-	case gateway.ProtocolResponses:
-		return "/v1/responses"
-	}
-	return "/v1/chat/completions"
-}
-
 // checkRoutePathFlag 校验一个协议 flag 的取值。两条用法错误：空值（删除语义归 provider unset）、
-// 值里是整条地址（完整地址属于 --base-url）。其余写法——缺前导斜杠、重复斜杠、末尾斜杠——
-// 继续交给 store.NormalizePath 规整，cli 不拒绝（见 DESIGN 5.8）。
-func checkRoutePathFlag(f providerPathFlag, verb string, setCmd bool, usageLine string) error {
+// 整条地址校验不过（缺主机名、scheme 不是 http(s)，判定交给 store.NormalizeEndpoint）。
+// 其余写法——缺前导斜杠、重复斜杠、末尾斜杠——继续交给 store 规整，cli 不拒绝（见 DESIGN 5.8）。
+func checkRoutePathFlag(f providerPathFlag, setCmd bool, usageLine string) error {
 	if !f.given {
 		return nil
 	}
 	if !pathGiven(f.value) {
 		return emptyValueError(setCmd, f.flagName, usageLine)
 	}
-	if hasFullAddress(f.value) {
-		example := fmt.Sprintf("%s acme --base-url https://api.example.com --%s %s", verb, f.flagName, pathExample(f.protocol))
-		return pathGotFullAddress(f.flagName, f.value, "--base-url", example, usageLine)
-	}
-	return nil
+	return checkEndpoint(f.value, usageLine)
 }
 
-// checkModelsPathFlag 校验 --models-path 的取值，规则与协议 flag 相同。
-func checkModelsPathFlag(value, verb string, setCmd bool, usageLine string) error {
+// checkModelsPathFlag 校验 --models-path 的取值，规则与协议 flag 相同：相对路径与整条地址都收。
+func checkModelsPathFlag(value string, setCmd bool, usageLine string) error {
 	if !pathGiven(value) {
 		return emptyValueError(setCmd, "models-path", usageLine)
 	}
-	if hasFullAddress(value) {
-		example := fmt.Sprintf("%s acme --base-url https://api.example.com --openai /v1/chat/completions --models-path /v1/models", verb)
-		return pathGotFullAddress("models-path", value, "--base-url", example, usageLine)
-	}
-	return nil
+	return checkEndpoint(value, usageLine)
 }
 
 // protocolFromCLI 把 --default-protocol 的取值换成线协议。命令行写法是 anthropic、openai、responses，
@@ -409,7 +392,7 @@ func cmdProviderAdd(e *Env, args []string) error {
 	baseURL := fs.String("base-url", "", "厂商的默认地址，必填，如 https://api.deepseek.com（必须是带主机名的完整地址）")
 	paths := newProviderPathFlags(fs)
 	defProtocol := fs.String("default-protocol", "", "这家的默认协议：anthropic | openai | responses，必须落在这次声明的路由上；不给按 openai → responses → anthropic 取第一条")
-	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖，相对 --base-url，如 /v1/models（写法由程序规整；整条地址写在 --base-url，不要写在这里）；不给按各路由的 models_path 取")
+	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖，相对 --base-url 的路径（如 /v1/models）或整条地址；不给按各路由的 models_path 取（相对路径的斜杠写法由程序规整）")
 	note := fs.String("note", "", "备注")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -435,7 +418,7 @@ func cmdProviderAdd(e *Env, args []string) error {
 	}
 	*baseURL = norm
 	for _, f := range paths.pairs(fs) {
-		if err := checkRoutePathFlag(f, "switchboard provider add", false, providerAddUsage); err != nil {
+		if err := checkRoutePathFlag(f, false, providerAddUsage); err != nil {
 			return err
 		}
 	}
@@ -443,7 +426,7 @@ func cmdProviderAdd(e *Env, args []string) error {
 		return emptyValueError(false, "default-protocol", providerAddUsage)
 	}
 	if flagWasSet(fs, "models-path") {
-		if err := checkModelsPathFlag(*modelsPath, "switchboard provider add", false, providerAddUsage); err != nil {
+		if err := checkModelsPathFlag(*modelsPath, false, providerAddUsage); err != nil {
 			return err
 		}
 	}
@@ -507,7 +490,7 @@ func cmdProviderSet(e *Env, args []string) error {
 	fs := newFlagSet(e, "provider set", "改一家厂商的地址、路由、默认协议或备注（目前支持 anthropic、openai、responses 三种协议）")
 	baseURL := fs.String("base-url", "", "改厂商的默认地址（必须是带主机名的完整地址）")
 	paths := newProviderPathFlags(fs)
-	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖，如 /v1/models（写法由程序规整；整条地址写在 --base-url，不要写在这里）")
+	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖，相对 --base-url 的路径（如 /v1/models）或整条地址（相对路径的斜杠写法由程序规整）")
 	defProtocol := fs.String("default-protocol", "", "这家的默认协议：anthropic | openai | responses，必须落在已声明的路由上")
 	note := fs.String("note", "", "改备注")
 	if err := fs.Parse(args); err != nil {
@@ -536,7 +519,7 @@ func cmdProviderSet(e *Env, args []string) error {
 		changed = append(changed, "base-url")
 	}
 	if flagWasSet(fs, "models-path") {
-		if err := checkModelsPathFlag(*modelsPath, "switchboard provider set", true, providerSetUsage); err != nil {
+		if err := checkModelsPathFlag(*modelsPath, true, providerSetUsage); err != nil {
 			return err
 		}
 		patch.ModelsPath = modelsPath
@@ -564,7 +547,7 @@ func cmdProviderSet(e *Env, args []string) error {
 		if !f.given {
 			continue
 		}
-		if err := checkRoutePathFlag(f, "switchboard provider set", true, providerSetUsage); err != nil {
+		if err := checkRoutePathFlag(f, true, providerSetUsage); err != nil {
 			return err
 		}
 		// 写法交给 store 规整，不再要求以 / 开头（见 DESIGN 5.8）。

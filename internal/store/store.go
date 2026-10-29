@@ -319,6 +319,23 @@ func (s *Store) SetEnabled(id int64, enabled bool, lastErr string) error {
 	return s.withTx(func(tx *sql.Tx) error { return setEnabledTx(tx, id, enabled, lastErr) })
 }
 
+// RotateKey 换掉一个账号的凭据，并在同一个事务里清掉旧凭据留下的结论：
+// 清冷却、清最近错误与连续失败次数，并把账号重新启用（`account set --key`，见 DESIGN 4、5.6）。
+// 换 key 意味着之前那些失败都是上一个凭据的结果，留在库里会让新 key 一上来就排在候选之外：
+// 干净的凭据应该从干净的账号状态开始。冷却、清零与启停的 SQL 复用 clearFailureTx 与 setEnabledTx，
+// 不另拼一份；`account_models`、`accounts.models` 与协议发现结果一个字不动，只换凭据与失败状态。
+func (s *Store) RotateKey(id int64, cipher []byte) error {
+	return s.withTx(func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`UPDATE accounts SET key_cipher = ? WHERE id = ?`, cipher, id); err != nil {
+			return err
+		}
+		if err := clearFailureTx(tx, id); err != nil {
+			return err
+		}
+		return setEnabledTx(tx, id, true, "")
+	})
+}
+
 // recordFailureTx 是冷却的写入口（加一），只给事务内部用。
 func recordFailureTx(tx *sql.Tx, id int64, until int64, lastErr string) error {
 	_, err := tx.Exec(`UPDATE accounts

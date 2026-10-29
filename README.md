@@ -6,6 +6,7 @@
 switchboard init                                            # 建配置、数据库与密钥
 switchboard provider ls                                     # 看已知厂商与各协议的路径
 switchboard account add ds --provider deepseek --key sk-xxx  # 或用 --key - 从标准输入读
+switchboard account set ds --key sk-yyy                     # 换 key：不删号，冷却与失败计数清零
 switchboard model sync --account ds                         # 拉上游模型列表
 switchboard model probe --account ds                        # 逐个探活，能用的才进选号
 switchboard serve                                           # 起网关，127.0.0.1:4567
@@ -20,7 +21,7 @@ switchboard log tail                                        # 看请求记录
 | --- | --- |
 | `init` | 建配置目录、数据库、加密密钥 |
 | `serve` | 前台起网关 |
-| `account add\|ls\|rm\|test\|enable\|disable` | 加账号、列账号、删账号、探活、启用、停用 |
+| `account add\|ls\|set\|rm\|test\|enable\|disable` | 加账号、列账号、换凭据、删账号、探活、启用、停用 |
 | `provider ls\|add\|set\|unset\|rm` | 维护厂商默认地址、默认协议与各协议的路由；`add` 只新建，`set` 只设值，删除走 `unset` |
 | `model ls` | 列出模型、可用账号与状态，可按厂商与账号筛选 |
 | `model sync` | 从上游拉模型列表，写进本地，可按厂商与账号筛选 |
@@ -44,7 +45,7 @@ switchboard log tail                                        # 看请求记录
 
 出站协议由账号决定：`account add --protocol` 取值 `anthropic`、`openai-chat`、`openai-responses`，留空则取该厂商的默认协议（`provider add --default-protocol` 显式存的优先，没显式存则按 `openai-chat` → `openai-responses` → `anthropic` 取第一条路由）。厂商与各协议的路径在数据库里，`switchboard provider ls` 能看到，`provider add` / `set` / `unset` 可以增删改，不必重编译。入站协议与出站协议相同时直通，请求体只改 `model` 字段，其余字段与值原样带到上游，响应按字节原样返回；不同时经中间表示转换，请求与响应都只搬映射表里定义的字段，表外字段丢弃。未知路径返回 404，请求体解析失败返回 400，错误消息带协议名前缀。
 
-自己加一家厂商时，每个协议一条 flag（`--anthropic`、`--openai`、`--responses`，目前支持这三种），值是相对 `--base-url` 的完整路径，不要把整条地址写进路径参数：`--openai https://api.example.com/v1/chat/completions` 是用法错误（退出码 2），完整地址写在 `--base-url`，路径只写地址后面的部分。`--base-url` 必须是带主机名的完整地址，`https://` 这种只有 scheme 的写法会被拒；scheme 大小写不敏感，`HTTPS://api.example.com/` 能用，落库时归一成小写并去掉末尾斜杠。路径写法不用纠结：`v1/chat/completions`、`//v1//chat/completions`、`/v1/chat/completions/` 由程序规整成同一个地址，不报错；`--models-path` 与 `model sync --endpoint` 同理，`v1/models`、`//v1//models/` 都落到 `/v1/models`，但整条地址同样不行。只有规整之后为空的取值（`--openai ""`，或只有斜杠）算用法错误，删一条路由、清一项设置用 `provider unset`。`--default-protocol` 定下这家的默认协议，取值写 `anthropic`、`openai`、`responses`（也认线协议全名 `openai-chat`、`openai-responses`），必须落在已声明的路由上：
+自己加一家厂商时，每个协议一条 flag（`--anthropic`、`--openai`、`--responses`，目前支持这三种），值有两种写法：相对 `--base-url` 的完整路径，或者整条地址。整条地址给同一厂商不同协议分域名的情况用，写进去直接使用、不再拼 `--base-url`，例如 `--openai https://openai.example.com/v1/chat/completions --anthropic https://claude.example.com/v1/messages`；整条地址要带主机名，`https://` 这种只有 scheme、`https:///x` 缺主机名与 `ftp://host/x` 这类别的 scheme 都是用法错误（退出码 2）。`--base-url` 必须是带主机名的完整地址，`https://` 这种只有 scheme 的写法会被拒；scheme 大小写不敏感，`HTTPS://api.example.com/` 能用，落库时归一成小写并去掉末尾斜杠。路径写法不用纠结：`v1/chat/completions`、`//v1//chat/completions`、`/v1/chat/completions/` 由程序规整成同一个地址，不报错；`--models-path` 与 `model sync --endpoint` 同理：`v1/models`、`//v1//models/` 都落到 `/v1/models`，也可以写整条地址、直接访问那个地址。只有规整之后为空的取值（`--openai ""`，或只有斜杠）算用法错误，删一条路由、清一项设置用 `provider unset`。`--default-protocol` 定下这家的默认协议，取值写 `anthropic`、`openai`、`responses`（也认线协议全名 `openai-chat`、`openai-responses`），必须落在已声明的路由上：
 
 ```bash
 # 新建厂商：--base-url 必填，至少一条协议路由
@@ -66,6 +67,16 @@ switchboard provider unset myco anthropic
 ```
 
 `provider unset` 幂等：要删的项本来就不存在时不报错，只说明一句「myco 本来就没有 anthropic 路由」。删到一条路由都不剩会被拒绝，那是不想要这家厂商了，用 `provider rm`。`--models-path <路径>` 是厂商级的模型列表覆盖，`provider unset myco models-path` 清掉它、回到按各路由取。
+
+换 key 不删号重建：`account add` 时那份 key 失效了，用 `account set` 覆盖掉就行，探活结果、协议发现与请求记录的账号归属都留着。旧凭据留下的冷却与失败计数在同一个事务里清零，账号重新启用：
+
+```bash
+switchboard account set ds --key sk-yyy          # 直接写值
+switchboard account set ds --key - < key.txt     # 从标准输入读
+SWITCHBOARD_KEY=sk-yyy switchboard account set ds # 留空则读环境变量 SWITCHBOARD_KEY
+```
+
+`update` 是 `set` 的同义词。`--json` 只回显掩码，明文不进输出；换完 key 不用再跑 `account add`，也不影响已经探出来的模型状态。
 
 ## 模型从上游拉，再探活
 
