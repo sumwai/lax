@@ -15,7 +15,6 @@
 | `internal/gateway` | 入站 HTTP、上游转发 | 唯一发上游请求的地方 |
 | `internal/translate` | 协议编解码 | 纯函数，不读环境、不发网络 |
 | `internal/usage` | 汇总与花费估算 | 不写请求记录 |
-| `internal/agentcfg` | 客户端配置改写 | 写文件前必须先备份 |
 
 ## 代码
 

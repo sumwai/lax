@@ -174,7 +174,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | 路径 | 内容 |
 | --- | --- |
 | `$XDG_CONFIG_HOME/switchboard/config.json` | 监听地址、数据库路径，权限 0600 |
-| `$XDG_DATA_HOME/switchboard/switchboard.db` | 账号、请求记录、客户端配置状态 |
+| `$XDG_DATA_HOME/switchboard/switchboard.db` | 账号、请求记录 |
 | `$XDG_DATA_HOME/switchboard/secret.key` | 加密账号凭据的对称密钥，权限 0600 |
 
 配置只有两项，其余状态都在数据库里。改状态一律走子命令，不手改库。
@@ -695,7 +695,6 @@ M0 到 M13 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkel
 
 - 估算花费依赖账号上的 `--price-in` 与 `--price-out`，没有价格时记为 0 并在 `usage` 末尾提示。
 - 模型名不做别名归一，请求里的 `model` 必须与账号 `--models` 里的名字完全一致。
-- 不带任何客户端配置改写：客户端里的 base URL、token、模型名都靠自己填。
 - 探活并发默认 4，`--concurrency` 可以改，只是默认值，不会根据上游限速自适应。
 - gemini 只取 `candidates[0]`，`candidateCount` 与多候选不搬；流式里不搬图片（`inlineData` / `fileData`）。
 - gemini 的思考内容（`thought` 标记与 `thoughtSignature`）与 `thinkingConfig` 不搬，`ParallelToolCalls` 与 `tool_result.is_error` 丢弃；工具结果的 `response` 固定写成 `{"result": <文本>}`，非对象的 `args` 整段省略；gemini 自己的内置工具（`googleSearch`、`codeExecution` 一类，`tools[]` 里只有对应键、没有 `functionDeclarations`）整条丢弃，既不给上游伪造、也不转成别的协议的工具定义（见 5.9）。
