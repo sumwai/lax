@@ -193,8 +193,14 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	candidates := account.Candidates(accounts, req.Model, s.now(), session)
 	if len(candidates) == 0 {
+		// 候选为空有两种成因，报错不能混在一起：没有任何账号声明提供这个模型，是清单问题；
+		// 有账号提供但全部在冷却或被停用，是可用性问题，仍按 503 走。
+		if len(account.Providers(accounts, req.Model)) == 0 {
+			writeError(w, http.StatusNotFound, modelNotFoundKind(inbound), modelNotFoundMessage(req.Model))
+			return
+		}
 		writeError(w, http.StatusServiceUnavailable, "api_error",
-			fmt.Sprintf("没有可用于模型 %s 的账号，先运行 switchboard account add 与 model probe", req.Model))
+			fmt.Sprintf("模型 %s 的账号都在冷却或被停用，先用 switchboard account ls 看状态", req.Model))
 		return
 	}
 
@@ -283,6 +289,21 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeError(w, http.StatusServiceUnavailable, "api_error", "所有候选账号都失败："+lastErr)
+}
+
+// modelNotFoundKind 给出「没有账号提供该模型」在入站协议里的错误类型：anthropic 用它自己的
+// not_found_error，两条 openai 路径用 invalid_request_error（都没有专门的「模型未配置」类型）。
+func modelNotFoundKind(inbound string) string {
+	if inbound == ProtocolAnthropic {
+		return "not_found_error"
+	}
+	return "invalid_request_error"
+}
+
+// modelNotFoundMessage 说明找不到模型，并给出下一步的两条命令：先看现有清单，再探活。
+func modelNotFoundMessage(model string) string {
+	return fmt.Sprintf("没有账号提供模型 %s；先运行 switchboard model ls 看现有清单，"+
+		"再用 switchboard model probe 探活", model)
 }
 
 // sessionFromBody 从请求体里取会话标识，用于粘同一个账号。

@@ -45,10 +45,12 @@ func Retryable(status int) bool {
 	return status >= 500
 }
 
-// Supports 判断账号的模型列表是否覆盖请求的模型。列表为空视为不限制。
+// Supports 判断账号的模型列表是否覆盖请求的模型。列表为空表示该账号不提供任何模型：
+// 刚建号、或 `model probe` 没探出可用模型的账号因此不参与选号，
+// 否则它会接下任何模型名，把请求打到一家根本不提供该模型的上游。
 func Supports(a store.Account, model string) bool {
 	if len(a.Models) == 0 {
-		return true
+		return false
 	}
 	for _, m := range a.Models {
 		if m == model {
@@ -85,6 +87,19 @@ func Available(a store.Account, now time.Time) bool {
 		return true
 	}
 	return now.Unix() >= a.CooldownUntil
+}
+
+// Providers 列出模型列表覆盖该模型的账号，不看 enabled 与冷却。
+// 选号之外的判定用它区分两件事：没有任何账号提供这个模型（该报找不到），
+// 与有账号提供但此刻都在冷却或被停用（那是可用性问题，不是清单问题）。
+func Providers(accounts []store.Account, model string) []store.Account {
+	var out []store.Account
+	for _, a := range accounts {
+		if Supports(a, model) {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // Candidates 过滤出可用于该模型的账号，按 priority 升序排好。

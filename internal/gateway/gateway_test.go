@@ -3,11 +3,13 @@ package gateway_test
 import (
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"switchboard/internal/gateway"
 	"switchboard/internal/secret"
@@ -338,17 +340,149 @@ func TestForbiddenDoesNotDisableAccount(t *testing.T) {
 	}
 }
 
-func TestNoCandidates(t *testing.T) {
+// 没有任何账号声明提供这个模型时返回 404，并说明下一步命令；不是 503。
+func TestModelWithoutProviderIsNotFound(t *testing.T) {
 	f := newFixture(t)
-	f.add(t, "ds1", gateway.ProtocolChat, "http://127.0.0.1:1", "sk-1", []string{"other-model"}, 100)
+	// 只放一个模型列表为空的账号：它刚建号、不提供任何模型，不该接住任意模型名。
+	f.add(t, "fresh", gateway.ProtocolChat, "http://127.0.0.1:1", "sk-1", nil, 100)
+	srv := f.server(t)
+
+	const model = "deepseek/deepseek-v4.1-flash"
+	cases := []struct {
+		path   string
+		body   string
+		wantTy string
+	}{
+		{"/v1/messages",
+			`{"model":"` + model + `","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`,
+			"not_found_error"},
+		{"/v1/chat/completions",
+			`{"model":"` + model + `","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`,
+			"invalid_request_error"},
+		{"/v1/responses",
+			`{"model":"` + model + `","max_output_tokens":16,"input":"hi"}`,
+			"invalid_request_error"},
+	}
+	for _, tc := range cases {
+		resp, err := http.Post(srv.URL+tc.path, "application/json", strings.NewReader(tc.body))
+		if err != nil {
+			t.Fatalf("%s 请求网关: %v", tc.path, err)
+		}
+		b, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("%s 读响应: %v", tc.path, err)
+		}
+		body := string(b)
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s 状态 = %d，响应 %s", tc.path, resp.StatusCode, body)
+		}
+		var env struct {
+			Error struct {
+				Type    string `json:"type"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(b, &env); err != nil {
+			t.Fatalf("%s 响应不是 JSON: %v，原文 %s", tc.path, err, body)
+		}
+		if env.Error.Type != tc.wantTy {
+			t.Fatalf("%s 错误类型 = %q，期望 %q：%s", tc.path, env.Error.Type, tc.wantTy, body)
+		}
+		for _, want := range []string{model, "switchboard model ls", "switchboard model probe"} {
+			if !strings.Contains(env.Error.Message, want) {
+				t.Fatalf("%s 错误文案应含 %q：%s", tc.path, want, body)
+			}
+		}
+	}
+}
+
+// 有账号提供该模型，但全部在冷却或停用时仍是 503：那是可用性问题，不是清单问题。
+func TestAllProvidersCoolingOrDisabled(t *testing.T) {
+	f := newFixture(t)
+	cooling := f.add(t, "cooling", gateway.ProtocolChat, "http://127.0.0.1:1", "sk-1", []string{"m1"}, 100)
+	disabled := f.add(t, "disabled", gateway.ProtocolChat, "http://127.0.0.1:1", "sk-2", []string{"m1"}, 200)
+	if err := f.st.RecordFailure(cooling.ID, time.Now().Add(time.Minute).Unix(), "429 冷却中"); err != nil {
+		t.Fatalf("设置冷却: %v", err)
+	}
+	if err := f.st.SetEnabled(disabled.ID, false, "手工停用"); err != nil {
+		t.Fatalf("停用账号: %v", err)
+	}
 	srv := f.server(t)
 
 	status, body := postMessages(t, srv, `{"model":"m1","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
 	if status != http.StatusServiceUnavailable {
 		t.Fatalf("状态 = %d，响应 %s", status, body)
 	}
-	if !strings.Contains(body, "account add") {
-		t.Fatalf("错误提示应告诉用户下一步命令: %s", body)
+	if !strings.Contains(body, "冷却") || !strings.Contains(body, "停用") {
+		t.Fatalf("错误提示应说明账号在冷却或被停用: %s", body)
+	}
+}
+
+// 新增的 404 与 503 路径都不碰凭据：响应体与日志里都不该出现 key 明文。
+func TestCandidateErrorsDoNotLeakKey(t *testing.T) {
+	f := newFixture(t)
+	const key = "sk-leak-canary-0123456789"
+	fresh := f.add(t, "fresh", gateway.ProtocolChat, "http://127.0.0.1:1", key, nil, 100)
+
+	var logs strings.Builder
+	logf := func(format string, args ...any) {
+		fmt.Fprintf(&logs, format+"\n", args...)
+	}
+	gs, err := gateway.New(gateway.Options{Store: f.st, Key: f.key, Logf: logf})
+	if err != nil {
+		t.Fatalf("构造网关: %v", err)
+	}
+	srv := httptest.NewServer(gs.Handler())
+	defer srv.Close()
+
+	// 没有账号提供 m1：404。
+	status, body := postMessages(t, srv, `{"model":"m1","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	if status != http.StatusNotFound {
+		t.Fatalf("状态 = %d，响应 %s", status, body)
+	}
+	if strings.Contains(body, key) {
+		t.Fatalf("404 响应体泄漏了凭据: %s", body)
+	}
+
+	// 有账号提供 m1 但正在冷却：503。
+	if err := f.st.RecordFailure(fresh.ID, time.Now().Add(time.Minute).Unix(), "429 冷却中"); err != nil {
+		t.Fatalf("设置冷却: %v", err)
+	}
+	if err := f.st.SetModels(fresh.ID, []string{"m1"}); err != nil {
+		t.Fatalf("写模型列表: %v", err)
+	}
+	status, body = postMessages(t, srv, `{"model":"m1","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("状态 = %d，响应 %s", status, body)
+	}
+	if strings.Contains(body, key) {
+		t.Fatalf("503 响应体泄漏了凭据: %s", body)
+	}
+
+	logged := logs.String()
+	if strings.Contains(logged, key) {
+		t.Fatalf("日志泄漏了凭据: %s", logged)
+	}
+}
+
+// 模型列表为空表示不提供任何模型：刚建号的账号因此不会被选中，也不会被上游 400 打脸。
+func TestEmptyModelListAccountIsNotCandidate(t *testing.T) {
+	f := newFixture(t)
+
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("模型列表为空的账号不该被选号，却收到了请求")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"message":"The supported API model names are deepseek-flash, deepseek-v4-pro"}}`)
+	}))
+	defer up.Close()
+
+	f.add(t, "yulong", gateway.ProtocolChat, up.URL, "sk-1", nil, 100)
+	srv := f.server(t)
+
+	status, body := postMessages(t, srv, `{"model":"deepseek/deepseek-v4.1-flash","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	if status != http.StatusNotFound {
+		t.Fatalf("状态 = %d，响应 %s", status, body)
 	}
 }
 
