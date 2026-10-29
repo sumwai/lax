@@ -1,7 +1,8 @@
 # Tool results must fold into a user message for anthropic upstreams
 
 Found: 2026-10-29, in a read-only audit of the tool-call translation chain at commit `89f9c46`.
-Fixed: `e7d29e7`.
+Fixed: the role folding landed in `e7d29e7`; merging results with a following user message landed
+in `8a54abd`.
 
 ## Symptom
 
@@ -28,6 +29,11 @@ covered `chat -> chat` and `anthropic -> anthropic`, not the cross-protocol dire
 Encoding to anthropic folds tool results into a `user` message: consecutive results following one
 assistant message merge into a single `user` message, and any following user content joins that
 same message so two consecutive `user` messages cannot appear.
+
+Cost: because tool results and the next user turn share one message, the two are no longer
+distinguishable once encoded. That is the shape anthropic expects, and the alternative (two
+consecutive user messages) is rejected outright, so the merge is the working choice rather than
+the strictly lossless one.
 
 ## How to verify
 

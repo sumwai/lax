@@ -1,6 +1,8 @@
 # An empty model list must not mean "serves every model"
 
-Found: 2026-10-29, from a live failure while running `serve`.
+Found: 2026-10-29, from a live failure while running `serve`: a request for
+`deepseek/deepseek-v4.1-flash` reached an account on the official DeepSeek endpoint, which
+answered with the error quoted below.
 Fixed: `30421bf`.
 
 ## Symptom
@@ -29,6 +31,11 @@ An empty model list means the account provides no models: `Supports` returns fal
 account provides a requested model the gateway answers 404 with an actionable message, and 503 is
 kept for the different case where accounts exist but are all disabled or cooling down. Accounts
 with zero usable models can still be probed explicitly with `account test` and `model probe`.
+
+Cost: a freshly added account serves nothing until its model list is populated, so the first
+request after `account add` fails with 404 instead of being routed somewhere hopeful. That is the
+intended trade: a wrong route costs a failed upstream call and a confusing vendor error, while a
+missing route names the model and tells the reader what to run next.
 
 ## How to verify
 

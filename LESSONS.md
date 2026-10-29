@@ -1,13 +1,9 @@
 # Lessons
 
-Index of non-obvious pitfalls found in this repository. Each entry links to a file under
-`lessons/` with the full account: what was observed, how it was diagnosed, when it was found,
-and which commit fixed it.
-
-Rule: when a review or a bug hunt turns up something that would be hard to reconstruct later,
-add an entry here in the same change that fixes it. Files under `lessons/` are written in English
-and include the discovery date and the fixing commit, so a later reader can tell whether the
-note still applies.
+Index of non-obvious pitfalls found in this repository. Each row links to a file under
+`lessons/` with the full account: what was observed, how it was diagnosed, when it was found, and
+which commit fixed it. Add a row in the same change that fixes the pitfall, and keep the fixing
+commit in the row so a later reader can tell whether the note still applies.
 
 | Found | Topic | File | Status |
 | --- | --- | --- | --- |
