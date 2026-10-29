@@ -142,7 +142,7 @@ func TestProviderHeadersScopePerProtocol(t *testing.T) {
 		store.ProviderRoute{Protocol: gateway.ProtocolAnthropic, Path: "/anthropic/v1/messages"})
 	acc := f.addAs(t, "a1", "acme", gateway.ProtocolChat, up.srv.URL, "sk-acme", []string{"claude-x", "gpt-x"})
 	// claude-x 的协议发现结果是 anthropic：同一个账号的两个模型各走各的协议。
-	if err := f.st.SetModelProtocol(acc.ID, "claude-x", gateway.ProtocolAnthropic); err != nil {
+	if err := f.st.SetAccountModelProtocol(acc.ID, "claude-x", gateway.ProtocolAnthropic); err != nil {
 		t.Fatalf("写协议发现结果: %v", err)
 	}
 	f.mustSetHeader(t, "acme", "", "x-scope", "vendor")

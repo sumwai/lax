@@ -242,12 +242,21 @@ func TestProbeModelUnauthorizedSkipsDiscovery(t *testing.T) {
 	if got.Enabled {
 		t.Fatal("401 之后账号应被停用")
 	}
+	// 401 不是模型层面的结论：探活既不给可达性取值（res.Access 为空，调用方据此不写
+	// SetAccountModelAccess），也不写协议。m1 那一行还在，因为 `account add --models`
+	// 已经把它标成可达（access='allowed'，未探过），一次凭据故障不应抹掉它。
+	if res.Access != "" {
+		t.Fatalf("401 不该给出可达性结论，实际 %q", res.Access)
+	}
 	rows, err := f.st.AccountModels(acc.ID)
 	if err != nil {
 		t.Fatalf("读模型行: %v", err)
 	}
-	if len(rows) != 0 {
+	if len(rows) != 1 || rows[0].Model != "m1" || rows[0].Protocol != "" {
 		t.Fatalf("401 不该写入协议，实际 %+v", rows)
+	}
+	if rows[0].Access != store.AccessAllowed || rows[0].CheckedAt != 0 {
+		t.Fatalf("401 不该改写可达性行，实际 %+v", rows[0])
 	}
 }
 
@@ -293,8 +302,13 @@ func TestProbeModelAllProtocolsFailKeepsAccountVerdict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读模型行: %v", err)
 	}
-	if len(rows) != 0 {
+	// 全失败时不写协议列（协议只在发现成功时写）。可达性那一行是账号自己声明的，
+	// 原样留着；结论的可达性取值由调用方按 res.Access 写回，不在这里改。
+	if len(rows) != 1 || rows[0].Model != "m1" || rows[0].Protocol != "" {
 		t.Fatalf("全失败时不该凭空写协议，实际 %+v", rows)
+	}
+	if res.Access != store.AccessMissing {
+		t.Fatalf("结论的可达性取值 = %q，期望 %q", res.Access, store.AccessMissing)
 	}
 	recs, err := f.st.RecentRequests(10)
 	if err != nil {
@@ -377,7 +391,7 @@ func TestForwardUsesModelProtocol(t *testing.T) {
 
 	acc := f.add(t, "cc", gateway.ProtocolChat, up.URL, key, []string{"claude-x", "gpt-y"}, 100)
 	// 只有 claude-x 有协议发现结果；gpt-y 没有行，按继承算。
-	if err := f.st.SetModelProtocol(acc.ID, "claude-x", gateway.ProtocolAnthropic); err != nil {
+	if err := f.st.SetAccountModelProtocol(acc.ID, "claude-x", gateway.ProtocolAnthropic); err != nil {
 		t.Fatalf("写协议发现结果: %v", err)
 	}
 	srv := f.server(t)

@@ -118,7 +118,7 @@ func TestForwardUsesProviderRoute(t *testing.T) {
 
 	acc := f.addAs(t, "ds1", "deepseek", gateway.ProtocolChat, up.URL, key, []string{"claude-x", "gpt-y"})
 	// deepseek 的 claude-* 走 anthropic：这个结论来自探活，写进 account_models.protocol。
-	if err := f.st.SetModelProtocol(acc.ID, "claude-x", gateway.ProtocolAnthropic); err != nil {
+	if err := f.st.SetAccountModelProtocol(acc.ID, "claude-x", gateway.ProtocolAnthropic); err != nil {
 		t.Fatalf("写协议发现结果: %v", err)
 	}
 
@@ -190,7 +190,7 @@ func TestEndpointFallsBackWithoutProviderRoute(t *testing.T) {
 	// anthropic 厂商只声明了 anthropic 一条路由；这个模型探活发现该用 chat，路由里没有这条协议，
 	// 于是按 base_url 后缀猜。
 	acc := f.addAs(t, "a1", "anthropic", gateway.ProtocolAnthropic, up.URL, "sk-fallback", []string{"m1"})
-	if err := f.st.SetModelProtocol(acc.ID, "m1", gateway.ProtocolChat); err != nil {
+	if err := f.st.SetAccountModelProtocol(acc.ID, "m1", gateway.ProtocolChat); err != nil {
 		t.Fatalf("写协议发现结果: %v", err)
 	}
 	srv := f.server(t)
@@ -275,7 +275,7 @@ func TestProbeModelStartsFromDiscoveredProtocol(t *testing.T) {
 
 	// 厂商默认协议是 chat，但 claude-x 已经发现成 anthropic。
 	acc := f.addAs(t, "ds1", "deepseek", gateway.ProtocolChat, up.URL, "sk-discovered", []string{"claude-x"})
-	if err := f.st.SetModelProtocol(acc.ID, "claude-x", gateway.ProtocolAnthropic); err != nil {
+	if err := f.st.SetAccountModelProtocol(acc.ID, "claude-x", gateway.ProtocolAnthropic); err != nil {
 		t.Fatalf("写协议发现结果: %v", err)
 	}
 

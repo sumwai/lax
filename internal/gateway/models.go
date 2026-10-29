@@ -451,14 +451,31 @@ func readModelList(r io.Reader) ([]string, bool) {
 }
 
 // ModelProbe 是单个模型在一次探活里的结论。
+//
+// Access 是结论的正文：`allowed` / `forbidden` / `missing` / `error`（见 store.Access* 与
+// DESIGN 5.13），调用方拿它写 store.SetAccountModelAccess。**401 不是模型层面的结论**，那一栏留空，
+// 表示「这一次不要写可达性」（见 DESIGN 5.7 里遇到 401 就停下那条）。
+//
+// Status 是迁移 0015 之前的状态词表，由 Access 推出，只为尚未改完的 internal/cli 保留：
+// 两栏永远同时有值或同时为空，读哪一栏都不会看到半个结论。
+//
 // Protocol 是这次实际用到的协议：发现成功时是发现到的那个，其余情况下是厂商默认协议。
 type ModelProbe struct {
 	Model      string
+	Access     string
 	Status     string
 	Protocol   string
 	HTTPStatus int
 	Message    string
 	Latency    time.Duration
+}
+
+// setAccess 记下这次探活的可达性结论，并把旧词表那一栏一起推出来。
+// 映射只有 store.LegacyStatus 一份：探活的结论一定带着「刚探过」，所以 checkedAt 传 1，
+// allowed 落成 usable 而不是 synced（synced 的意思是「同步拿到名字、还没探过」，探活结论不会是它）。
+func (res *ModelProbe) setAccess(access string) {
+	res.Access = access
+	res.Status = store.LegacyStatus(access, 1)
 }
 
 // probeAttempt 是一次协议尝试的完整结果：结论加记账需要的开始时间与用量。
@@ -598,6 +615,10 @@ func (s *Server) ProbeModel(ctx context.Context, a store.Account, model string) 
 //
 // 每次上游调用都在 requests 里记一行，换协议前的中间尝试也记（见 recordProbeAttempts）：
 // 一次 403 触发三次调用就应当是三行，账实一致比行数好看重要。
+//
+// 结论的写法：可达性放在 ModelProbe.Access（`allowed` / `forbidden` / `missing` / `error`），
+// 由调用方写进 store.SetAccountModelAccess；401 不是模型层面的结论，那一栏留空。
+// 协议发现成功时这里自己写 store.SetAccountModelProtocol（账号级覆盖，见 DESIGN 5.13）。
 func (s *Server) ProbeModelWithProtocols(ctx context.Context, a store.Account, model string,
 	candidates []string) (ModelProbe, error) {
 
@@ -609,7 +630,9 @@ func (s *Server) ProbeModelWithProtocols(ctx context.Context, a store.Account, m
 
 	order, err := s.routeProtocolOrder(a, model, candidates)
 	if err != nil {
-		return ModelProbe{Model: model, Protocol: a.Protocol, Status: store.ModelError, Message: err.Error()}, err
+		res := ModelProbe{Model: model, Protocol: a.Protocol, Message: err.Error()}
+		res.setAccess(store.AccessError)
+		return res, err
 	}
 
 	// 厂商默认协议那一次是「按厂商配置打」的真相：401 判定与全失败时的结论都取它。
@@ -628,16 +651,17 @@ func (s *Server) ProbeModelWithProtocols(ctx context.Context, a store.Account, m
 		att := s.probeOnce(ctx, a, model, protocol, secretValue)
 		attempts = append(attempts, att)
 
-		if att.res.Status == store.ModelUsable {
+		if att.res.Access == store.AccessAllowed {
 			// 2xx 就是结论：记下这次用的协议，剩下的候选不再试。
 			s.recordProbeAttempts(a, model, attempts, i)
-			if err := s.store.SetModelProtocol(a.ID, model, protocol); err != nil {
+			if err := s.store.SetAccountModelProtocol(a.ID, model, protocol); err != nil {
 				storeErr = fmt.Errorf("账号 %s 的模型 %s 探活成功但记录协议失败: %w", a.Name, model, err)
 			}
 			return att.res, storeErr
 		}
 
-		if i == primaryIdx && att.res.Status == store.ModelAuthFailed {
+		// 401 没有对应的可达性取值（凭据问题不是这个模型的结论），只有旧词表里那一栏认得出它。
+		if i == primaryIdx && att.res.HTTPStatus == http.StatusUnauthorized {
 			// 401 是凭据问题，与协议无关：停用账号并立即收工。
 			// 停用失败不能改写结论：调用方靠 auth 决定「碰到 401 就停下」。
 			s.recordProbeAttempts(a, model, attempts, i)
@@ -678,14 +702,14 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 	}
 	raw, err := translate.EncodeRequest(protocol, ir, model)
 	if err != nil {
-		res.Status = store.ModelError
+		res.setAccess(store.AccessError)
 		res.Message = "按协议 " + protocol + " 编码探活请求失败: " + err.Error()
 		return att
 	}
 	// 模型同步没有客户端请求可依，入站头传 nil：客户端头透传只作用于转发路径（DESIGN 5.11）。
 	upReq, err := s.buildRequest(ctx, a, protocol, protocol, nil, raw, ir, key, "")
 	if err != nil {
-		res.Status = store.ModelError
+		res.setAccess(store.AccessError)
 		res.Message = "构造探活请求失败: " + err.Error()
 		return att
 	}
@@ -693,7 +717,7 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 	resp, err := s.client.Do(upReq)
 	res.Latency = s.now().Sub(att.start)
 	if err != nil {
-		res.Status = store.ModelError
+		res.setAccess(store.AccessError)
 		res.Message = scrubSecret("上游请求失败: "+err.Error(), key)
 		return att
 	}
@@ -703,7 +727,7 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 		att.usage = readProbeUsage(protocol, body)
-		res.Status = store.ModelUsable
+		res.setAccess(store.AccessAllowed)
 		return att
 	}
 
@@ -712,19 +736,22 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 	lower := strings.ToLower(msg)
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
+		// 凭据被拒不是这个模型的结论：可达性留空（调用方不写），旧词表那一栏记 auth
+		// 只为「碰到 401 就停下整次探活」这条判定还认得出它。
+		res.Access = ""
 		res.Status = store.ModelAuthFailed
 	case resp.StatusCode == http.StatusForbidden:
-		res.Status = store.ModelForbidden
+		res.setAccess(store.AccessForbidden)
 	case resp.StatusCode == http.StatusNotFound:
-		res.Status = store.ModelNotFound
+		res.setAccess(store.AccessMissing)
 	case resp.StatusCode == http.StatusBadRequest &&
 		(strings.Contains(lower, "not found") || strings.Contains(lower, "model_not_found") ||
 			strings.Contains(lower, "unknown model")):
-		// 400 里只有明说模型不存在才算 notfound，其余当临时失败，
+		// 400 里只有明说模型不存在才算 missing，其余当临时失败，
 		// 否则「no available providers match ...」这种会误判成模型名不存在。
-		res.Status = store.ModelNotFound
+		res.setAccess(store.AccessMissing)
 	default:
-		res.Status = store.ModelError
+		res.setAccess(store.AccessError)
 	}
 	return att
 }

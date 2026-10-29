@@ -51,7 +51,7 @@ func TestProbeModelUnauthorizedSingleRouteStops(t *testing.T) {
 		t.Fatalf("上游调用 = %+v，期望 POST /v1/messages 只带 x-api-key", calls[0])
 	}
 
-	// 401 停用账号，且不写协议发现结果。
+	// 401 停用账号，且不写协议发现结果：401 不是模型层面的结论，可达性也不由这次探活给出。
 	stored, err := f.st.GetAccount(acc.Name)
 	if err != nil {
 		t.Fatalf("读账号: %v", err)
@@ -59,11 +59,14 @@ func TestProbeModelUnauthorizedSingleRouteStops(t *testing.T) {
 	if stored.Enabled {
 		t.Fatal("401 之后账号应被停用")
 	}
+	if res.Access != "" {
+		t.Fatalf("401 不该给出可达性结论，实际 %q", res.Access)
+	}
 	rows, err := f.st.AccountModels(acc.ID)
 	if err != nil {
 		t.Fatalf("读模型行: %v", err)
 	}
-	if len(rows) != 0 {
+	if len(rows) != 1 || rows[0].Model != "claude-x" || rows[0].Protocol != "" {
 		t.Fatalf("401 不该写入协议发现结果: %+v", rows)
 	}
 
@@ -191,6 +194,9 @@ func TestProbeModelForbiddenLastRouteRecordsVerdict(t *testing.T) {
 		t.Fatalf("没有下一次尝试时协议应保持厂商默认协议，实际 %q", res.Protocol)
 	}
 
+	if res.Access != store.AccessForbidden {
+		t.Fatalf("结论的可达性取值 = %q，期望 %q", res.Access, store.AccessForbidden)
+	}
 	if paths := rec.paths(); len(paths) != 1 || paths[0] != "/v1/messages" {
 		t.Fatalf("上游调用 = %v，期望只打已声明的那一条", paths)
 	}
@@ -206,8 +212,8 @@ func TestProbeModelForbiddenLastRouteRecordsVerdict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读模型行: %v", err)
 	}
-	if len(rows) != 0 {
-		t.Fatalf("没发现成功协议时不该写模型行: %+v", rows)
+	if len(rows) != 1 || rows[0].Model != "claude-x" || rows[0].Protocol != "" {
+		t.Fatalf("没发现成功协议时不该写协议列: %+v", rows)
 	}
 
 	recs, err := f.st.RecentRequests(10)

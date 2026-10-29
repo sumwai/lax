@@ -106,7 +106,7 @@ func TestForwardModelProtocolBeatsProviderDefault(t *testing.T) {
 
 	acc := f.createAccount(t, "a1", "pdef", key, []string{"m1"}, 100)
 	// 探活发现这个模型该用 chat，结论落在 account_models.protocol 上。
-	if err := f.st.SetModelProtocol(acc.ID, "m1", translate.ProtocolChat); err != nil {
+	if err := f.st.SetAccountModelProtocol(acc.ID, "m1", translate.ProtocolChat); err != nil {
 		t.Fatalf("写协议发现结果: %v", err)
 	}
 	if got, err := f.st.EffectiveProtocol(acc.ID, "m1"); err != nil || got != translate.ProtocolChat {

@@ -36,8 +36,8 @@ type modelListBody struct {
 	Data   []ModelEntry `json:"data"`
 }
 
-// modelCatalog 汇总选号实际读的那份清单：`enabled=1` 账号的 `accounts.models`，
-// 按模型名去重、升序。三条规则：
+// modelCatalog 汇总选号实际读的那份清单：`enabled=1` 账号的可达模型（`account_models.access='allowed'`，
+// 由 store 的派生字段 `Account.Models` 一并读出来），按模型名去重、升序。三条规则：
 //
 //  1. 只看 `enabled=1`：停用账号的模型不出现在清单里，客户端因此不会把请求发到一个
 //     必然 503 的模型名上；冷却中的账号照样算——冷却影响的是「这一次能不能接」，
@@ -47,8 +47,8 @@ type modelListBody struct {
 //  3. `owned_by` 取厂商名；同名模型被多家支持时取厂商名字典序第一个，不看 priority
 //     与账号顺序：同一份库必须给出同一份响应，否则客户端缓存与测试断言都会抖。
 //
-// 数据来源与 5.3 的候选集合是同一列 `accounts.models`，不是 `account_models`：
-// 后者是同步与探活的原料，选号不读它（见 5.7）。
+// 数据来源与 5.3 的候选集合是同一批行：`account_models.access='allowed'`（见 5.13）。
+// 同步与探活的过程值（`forbidden` / `missing` / `error`）不进这里，账号行也没有第二份清单列可读。
 func (s *Server) modelCatalog() ([]ModelEntry, error) {
 	accounts, err := s.store.ListAccounts()
 	if err != nil {

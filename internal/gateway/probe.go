@@ -61,7 +61,7 @@ type ProbeResult struct {
 	List        ProbeStep
 }
 
-// probeFallbackModel 是探活最小调用的最后一个模型名候选：账号的 `accounts.models` 里没有名字、
+// probeFallbackModel 是探活最小调用的最后一个模型名候选：账号没有任何 `access='allowed'` 的模型、
 // 列表那一步也没拿到名字（列表接口 404/405/403、连不上，或上游返回的不是模型列表）时用它。
 // 刚建好、还没跑过 `model sync` / `model probe` 的账号就是这种状态：没有模型名也得打一条请求，
 // 因为 `account test` 检验的是凭据与账号整体可用性，与具体模型无关。它是第三顺位，
@@ -205,10 +205,14 @@ func fallsBackToCall(status int) bool {
 //
 // 模型名按三档取，前两档都是真实存在的名字，第三档只是没有名字可用时的兜底：
 //
-//  1. 账号 `accounts.models` 的第一个非空名字——账号自己声明过模型时按它打；
-//  2. 列表那一步拿到的第一个模型名——账号还没同步过模型时，上游清单已经给出了一个真实的名字，
+//  1. 账号可达的模型里的第一项（`account_models.access='allowed'`，按名字升序）——账号自己探出或声明过
+//     模型时按它打；
+//  2. 列表那一步拿到的第一个模型名——账号还没有可用模型时，上游清单已经给出了一个真实的名字，
 //     再用固定名字去打只会把「模型名不对」误报成账号失败；
 //  3. probeFallbackModel——列表那一步没成或清单为空时只能用它，凭据好不好用仍要试出来。
+//
+// 第一档只读可达性：账号侧没有第二份「模型清单」列了（`accounts.models` 随迁移 0015 删掉，见
+// DESIGN 5.13），AllowedModels 与候选集合读到的是同一批行，不在这里另拼一份。
 //
 // 备注写清这次用的是哪一个、来自哪一档（账号清单 / 上游清单 / 兜底默认名）：只说「模型调用返回 404」
 // 看不出是名字不对还是模型真的不能用。listNote 说明列表那一步的结果（通了、上游几个模型，或为什么
@@ -216,9 +220,13 @@ func fallsBackToCall(status int) bool {
 func (s *Server) probeMinimalCall(ctx context.Context, a store.Account, listNote, listModel string) (ProbeStep, error) {
 	step := ProbeStep{Stage: ProbeStageCall}
 
+	allowed, err := s.store.AllowedModels(a.ID)
+	if err != nil {
+		return step, fmt.Errorf("读账号 %s 的可达模型失败（探活要用清单里第一个名字）: %w", a.Name, err)
+	}
 	// 逐项跳过空名字：模型列表为空的账号（刚建好、还没同步过）直接取下标会 panic，
 	// 空白名字拿去请求上游也只会换回一个 400。
-	model := firstAccountModel(a.Models)
+	model := firstModelName(allowed)
 	note := listNote
 	switch {
 	case model != "":
@@ -310,10 +318,10 @@ func (s *Server) applyProbeState(a store.Account, step ProbeStep) error {
 	return nil
 }
 
-// firstAccountModel 取账号自己声明的模型列表里的第一个非空名字，没有时返回空串。
-// 空白名字不算模型（与 /v1/models 的口径一致，见 DESIGN 5.2.1）：它是 --models 手填或上游清单
-// 留下的空档，拿它去请求上游只会换回一个 400，还把「模型名不对」记在凭据头上。
-func firstAccountModel(models []string) string {
+// firstModelName 取一组模型名里的第一个非空名字，没有时返回空串。
+// 空白名字不算模型（与 /v1/models 的口径一致，见 DESIGN 5.2.1）：它是历史行或上游清单留下的空档，
+// 拿它去请求上游只会换回一个 400，还把「模型名不对」记在凭据头上。
+func firstModelName(models []string) string {
 	for _, name := range models {
 		if name = strings.TrimSpace(name); name != "" {
 			return name

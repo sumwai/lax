@@ -149,20 +149,23 @@ func TestSyncModelsEmptyListIsError(t *testing.T) {
 	}
 }
 
+// TestProbeModelStatuses 钉住探活结论的两栏：Access 是正文（写 store.SetAccountModelAccess
+// 的那个取值），Status 是旧词表，两栏必须一起对——只对一栏就会出现「结论一个可用、写回另一个」。
 func TestProbeModelStatuses(t *testing.T) {
 	cases := []struct {
 		name       string
 		httpStatus int
 		body       string
+		wantAccess string
 		want       string
 	}{
-		{"可用", http.StatusOK, `{"id":"msg_1","type":"message","content":[{"type":"text","text":"p"}],"usage":{"input_tokens":1,"output_tokens":1}}`, store.ModelUsable},
-		{"无权", http.StatusForbidden, `{"error":{"message":"MODEL_NOT_IN_PLAN"}}`, store.ModelForbidden},
-		{"不存在", http.StatusNotFound, `{"error":{"message":"no such model"}}`, store.ModelNotFound},
-		{"四百且提到模型", http.StatusBadRequest, `{"error":{"message":"model not found"}}`, store.ModelNotFound},
-		{"四百但无关模型", http.StatusBadRequest, `{"error":{"message":"max_tokens 太小"}}`, store.ModelError},
-		{"四百但只是没有可用上游", http.StatusBadRequest, `{"error":{"message":"No available providers match the 'only' filter: fireworks"}}`, store.ModelError},
-		{"上游故障", http.StatusInternalServerError, `{"error":{"message":"上游挂了"}}`, store.ModelError},
+		{"可用", http.StatusOK, `{"id":"msg_1","type":"message","content":[{"type":"text","text":"p"}],"usage":{"input_tokens":1,"output_tokens":1}}`, store.AccessAllowed, store.ModelUsable},
+		{"无权", http.StatusForbidden, `{"error":{"message":"MODEL_NOT_IN_PLAN"}}`, store.AccessForbidden, store.ModelForbidden},
+		{"不存在", http.StatusNotFound, `{"error":{"message":"no such model"}}`, store.AccessMissing, store.ModelNotFound},
+		{"四百且提到模型", http.StatusBadRequest, `{"error":{"message":"model not found"}}`, store.AccessMissing, store.ModelNotFound},
+		{"四百但无关模型", http.StatusBadRequest, `{"error":{"message":"max_tokens 太小"}}`, store.AccessError, store.ModelError},
+		{"四百但只是没有可用上游", http.StatusBadRequest, `{"error":{"message":"No available providers match the 'only' filter: fireworks"}}`, store.AccessError, store.ModelError},
+		{"上游故障", http.StatusInternalServerError, `{"error":{"message":"上游挂了"}}`, store.AccessError, store.ModelError},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -180,6 +183,9 @@ func TestProbeModelStatuses(t *testing.T) {
 			res, err := gs.ProbeModel(context.Background(), acc, "m1")
 			if err != nil {
 				t.Fatalf("探活: %v", err)
+			}
+			if res.Access != c.wantAccess {
+				t.Fatalf("可达性 = %q，期望 %q（HTTP %d）", res.Access, c.wantAccess, c.httpStatus)
 			}
 			if res.Status != c.want {
 				t.Fatalf("状态 = %q，期望 %q（HTTP %d）", res.Status, c.want, c.httpStatus)

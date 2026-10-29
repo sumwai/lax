@@ -238,8 +238,9 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	candidates := account.Candidates(accounts, req.Model, s.now(), session)
 	if len(candidates) == 0 {
-		// 候选为空有两种成因，报错不能混在一起：没有任何账号声明提供这个模型，是清单问题；
-		// 有账号提供但全部在冷却或被停用，是可用性问题，仍按 503 走。
+		// 候选为空有两种成因，报错不能混在一起：这个模型没有落在任何账号的
+		// `account_models.access='allowed'` 上（清单问题），或者有账号可达但全部在冷却或被停用
+		// （可用性问题，仍按 503 走）。可达性是账号侧唯一的事实，账号行没有第二份清单可对。
 		if len(account.Providers(accounts, req.Model)) == 0 {
 			writeInboundError(w, inbound, http.StatusNotFound, modelNotFoundKind(inbound), modelNotFoundMessage(req.Model))
 			return
@@ -255,8 +256,9 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// 有效出站协议只有一处算：模型上的发现结果优先，否则厂商的有效默认协议
-		// （store.EffectiveProtocol）。账号行不再存协议，cand.Protocol 只是厂商默认协议的展示值。
+		// 有效出站协议只有一处算：账号覆盖 → 目录里这个模型支持的协议 → 厂商的有效默认协议
+		// （store.EffectiveProtocol，见 DESIGN 5.13）。账号行不再存协议，cand.Protocol 只是厂商默认
+		// 协议的展示值；有效价格与上下文长度同理只从 store.EffectiveModels 取，网关不重算优先级。
 		outbound, err := s.store.EffectiveProtocol(cand.ID, req.Model)
 		if err != nil {
 			// 读库失败不猜协议：猜出来的协议会打到这家没声明的路径上，报错比打错地址好。

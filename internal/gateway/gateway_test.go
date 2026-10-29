@@ -564,12 +564,13 @@ func TestCandidateErrorsDoNotLeakKey(t *testing.T) {
 		t.Fatalf("404 响应体泄漏了凭据: %s", body)
 	}
 
-	// 有账号提供 m1 但正在冷却：503。
+	// 有账号提供 m1 但正在冷却：503。可达性那一行走 ReplaceModels（`access='allowed'`），
+	// 与 `model sync` / `account add --models` 是同一条写入口。
 	if err := f.st.RecordFailure(fresh.ID, time.Now().Add(time.Minute).Unix(), "429 冷却中"); err != nil {
 		t.Fatalf("设置冷却: %v", err)
 	}
-	if err := f.st.SetModels(fresh.ID, []string{"m1"}); err != nil {
-		t.Fatalf("写模型列表: %v", err)
+	if _, err := f.st.ReplaceModels(fresh.ID, []string{"m1"}); err != nil {
+		t.Fatalf("写可达模型: %v", err)
 	}
 	status, body = postMessages(t, srv, `{"model":"m1","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
 	if status != http.StatusServiceUnavailable {

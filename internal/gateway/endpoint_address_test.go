@@ -92,7 +92,7 @@ func TestEndpointFallbackNormalizesBaseURL(t *testing.T) {
 		t.Fatalf("建厂商: %v", err)
 	}
 	acc := f.createAccount(t, "self", "self-hosted", "sk-self", []string{"m1"}, 100)
-	if err := f.st.SetModelProtocol(acc.ID, "m1", translate.ProtocolAnthropic); err != nil {
+	if err := f.st.SetAccountModelProtocol(acc.ID, "m1", translate.ProtocolAnthropic); err != nil {
 		t.Fatalf("写协议发现结果: %v", err)
 	}
 	srv := f.server(t)
