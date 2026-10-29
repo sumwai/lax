@@ -103,6 +103,27 @@ func TestAccountAddUsesProviderTable(t *testing.T) {
 	}
 }
 
+// TestAccountAddHelpMentionsGemini 钉住 --protocol 的帮助文案：gemini 在可选值里，
+// 并且写明它目前只作出站、没有入站路径（见 DESIGN 4 的 account add 行）。
+func TestAccountAddHelpMentionsGemini(t *testing.T) {
+	sandbox(t)
+
+	code, _, errOut := run(t, "account", "add", "--help")
+	if code != 0 {
+		t.Fatalf("account add --help 的退出码 = %d", code)
+	}
+	for _, want := range []string{
+		"anthropic | openai-chat | openai-responses | gemini",
+		"只作出站",
+		"没有入站路径",
+		"/v1/messages",
+	} {
+		if !strings.Contains(errOut, want) {
+			t.Fatalf("account add --help 应提到 %q: %s", want, errOut)
+		}
+	}
+}
+
 // TestAccountAddProviderWithoutRoutes 覆盖厂商行在、但一条路由都没声明的情况：
 // 没给 --protocol 也没给 --base-url 时报错并给出三条下一步，给了任一个都能加。
 func TestAccountAddProviderWithoutRoutes(t *testing.T) {

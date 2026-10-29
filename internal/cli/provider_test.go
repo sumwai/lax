@@ -795,7 +795,7 @@ func TestProviderAddUsageErrors(t *testing.T) {
 		if code != 2 {
 			t.Fatalf("退出码 = %d，期望 2", code)
 		}
-		for _, want := range []string{"至少给一条", "--anthropic", "--openai", "--responses"} {
+		for _, want := range []string{"至少给一条", "--anthropic", "--openai", "--responses", "--gemini"} {
 			if !strings.Contains(stderr, want) {
 				t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 			}
@@ -804,12 +804,12 @@ func TestProviderAddUsageErrors(t *testing.T) {
 
 	t.Run("不认识的默认协议", func(t *testing.T) {
 		code, _, stderr := run(t, "provider", "add", "mine", "--base-url", "https://api.example.com",
-			"--openai", "/v1/chat/completions", "--default-protocol", "gemini")
+			"--openai", "/v1/chat/completions", "--default-protocol", "cohere")
 		if code != 2 {
 			t.Fatalf("退出码 = %d，期望 2", code)
 		}
 		// 错误文案给的是命令行写法，不是线协议名。
-		for _, want := range []string{"--default-protocol", "anthropic、openai、responses", "--default-protocol openai"} {
+		for _, want := range []string{"--default-protocol", "anthropic、openai、responses、gemini", "--default-protocol openai"} {
 			if !strings.Contains(stderr, want) {
 				t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 			}
@@ -869,6 +869,167 @@ func TestProviderAddDefaultProtocol(t *testing.T) {
 	}
 	if _, ok := mustProviderLs(t)["bad"]; ok {
 		t.Fatal("整笔拒绝后不该留下厂商行或路由")
+	}
+}
+
+// TestProviderGeminiRoute 钉住 --gemini 这条路：路由与默认协议一起写进去，{model} 占位符原样落库，
+// provider ls 能带出它，provider set 能补一条，provider unset gemini 能删掉它（见 DESIGN 4 与 5.9）。
+func TestProviderGeminiRoute(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	const geminiPath = "/v1beta/models/{model}:generateContent"
+
+	// 相对路径加占位符，与 --default-protocol gemini 一起写。
+	code, out, stderr := run(t, "provider", "add", "google-gemini",
+		"--base-url", "https://generativelanguage.googleapis.com",
+		"--gemini", geminiPath, "--default-protocol", "gemini")
+	if code != 0 {
+		t.Fatalf("provider add --gemini 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if want := "已添加厂商 google-gemini（https://generativelanguage.googleapis.com），1 条路由，默认协议 gemini"; !strings.Contains(out, want) {
+		t.Fatalf("provider add --gemini 的输出 = %s，期望包含 %q", out, want)
+	}
+
+	// provider ls --json 里带出 gemini 路由，path 是命令行里那一串：{model} 不展开、不转义。
+	added := mustProviderLs(t)["google-gemini"]
+	if added.DefaultProtocol != "gemini" {
+		t.Fatalf("--default-protocol gemini 应原样落库，实际 %q", added.DefaultProtocol)
+	}
+	route, ok := routeMap(added)["gemini"]
+	if !ok {
+		t.Fatalf("provider ls --json 没带出 gemini 路由: %+v", added.Protocols)
+	}
+	if route.Path != geminiPath {
+		t.Fatalf("gemini 路由的 path = %q，期望原样保留 %q", route.Path, geminiPath)
+	}
+	// gemini 没有自己的列表接口，推导不出 models_path（读取时回退到同厂商其它协议，见 DESIGN 5.7）。
+	if route.ModelsPath != "" {
+		t.Fatalf("gemini 路由不该有推导出来的 models_path: %+v", route)
+	}
+
+	// 人读表格的路由列同样带出协议名与路径。
+	if code, out, stderr = run(t, "provider", "ls"); code != 0 {
+		t.Fatalf("provider ls 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if !strings.Contains(out, "gemini /v1beta/models/{model}:generateContent") {
+		t.Fatalf("provider ls 的路由列应带出 gemini 路由: %s", out)
+	}
+
+	// 整条地址的写法：不再拼 base_url，占位符同样原样保留。
+	if code, _, stderr = run(t, "provider", "add", "full-addr",
+		"--base-url", "https://example.com",
+		"--gemini", "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"); code != 0 {
+		t.Fatalf("provider add --gemini 整条地址退出码 = %d，stderr = %s", code, stderr)
+	}
+	if got := routeMap(mustProviderLs(t)["full-addr"])["gemini"]; got.Path != "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent" {
+		t.Fatalf("整条地址的 gemini 路由 = %+v", got)
+	}
+
+	// provider set 给已有厂商补一条 gemini 路由，同时把默认协议换成已声明的 responses。
+	if code, _, stderr = run(t, "provider", "set", "google-gemini",
+		"--responses", "/v1/responses", "--default-protocol", "responses"); code != 0 {
+		t.Fatalf("provider set 退出码 = %d，stderr = %s", code, stderr)
+	}
+	// 默认协议已经不是 gemini，删这条路由不会被默认协议挡住。
+	code, out, stderr = run(t, "provider", "unset", "google-gemini", "gemini")
+	if code != 0 {
+		t.Fatalf("provider unset gemini 退出码 = %d，stderr = %s", code, stderr)
+	}
+	for _, want := range []string{"google-gemini 已清掉 gemini 路由", "现有 1 条路由，默认协议 openai-responses"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("provider unset gemini 的输出缺 %q: %s", want, out)
+		}
+	}
+	if _, ok := routeMap(mustProviderLs(t)["google-gemini"])["gemini"]; ok {
+		t.Fatal("unset 之后 gemini 路由应该不在了")
+	}
+
+	// 再来一次是幂等的：不报错，只说明本来就没有。
+	code, out, stderr = run(t, "provider", "unset", "google-gemini", "gemini")
+	if code != 0 || !strings.Contains(out, "google-gemini 本来就没有 gemini 路由") {
+		t.Fatalf("幂等 unset gemini 退出码 = %d，输出 = %s，stderr = %s", code, out, stderr)
+	}
+}
+
+// TestProviderGeminiErrors 覆盖 --gemini 的两类失败：默认协议指不到已声明的路由（退出码 1，
+// 整笔拒绝、不落库），以及路径传空值（退出码 2，删除语义归 provider unset）。
+func TestProviderGeminiErrors(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	// 只声明 openai 路由却说默认协议是 gemini。
+	code, out, stderr := run(t, "provider", "add", "g",
+		"--base-url", "https://api.example.com",
+		"--openai", "/v1/chat/completions", "--default-protocol", "gemini")
+	if code != 1 || out != "" {
+		t.Fatalf("退出码 = %d，stdout = %q", code, out)
+	}
+	for _, want := range []string{"默认协议", "gemini", "openai-chat"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+		}
+	}
+	if _, ok := mustProviderLs(t)["g"]; ok {
+		t.Fatal("整笔拒绝后不该留下厂商行")
+	}
+
+	// set 把默认协议改成 gemini 而这家没有 gemini 路由：同样整笔拒绝，文案指出缺这条路由用 --gemini 补。
+	if code, _, stderr = run(t, "provider", "add", "mine",
+		"--base-url", "https://api.example.com", "--openai", "/v1/chat/completions"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	code, out, stderr = run(t, "provider", "set", "mine", "--default-protocol", "gemini")
+	if code != 1 || out != "" {
+		t.Fatalf("退出码 = %d，stdout = %q", code, out)
+	}
+	for _, want := range []string{"gemini", "--gemini"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+		}
+	}
+	if got := mustProviderLs(t)["mine"]; got.DefaultProtocol != "openai-chat" {
+		t.Fatalf("整笔拒绝后默认协议不该变: %+v", got)
+	}
+
+	// 空值（含只有斜杠）是用法错误，文案指向 provider unset 并打出用法行。
+	for _, args := range [][]string{
+		{"provider", "add", "blank", "--base-url", "https://api.example.com", "--gemini", ""},
+		{"provider", "add", "blank", "--base-url", "https://api.example.com", "--gemini", "//"},
+		{"provider", "set", "mine", "--gemini", ""},
+	} {
+		code, out, stderr := run(t, args...)
+		if code != 2 || out != "" {
+			t.Fatalf("%v 退出码 = %d，stdout = %q", args, code, out)
+		}
+		for _, want := range []string{"传了空值", "--gemini", "switchboard provider unset <名称> gemini"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("%v 的 stderr 应提到 %q: %s", args, want, stderr)
+			}
+		}
+	}
+}
+
+// TestProviderAddHelpMentionsGemini 钉住帮助文案里的真实示例：取值形状、{model} 占位符的说明
+// 与 gemini 示例都在 provider add --help 里（见 DESIGN 4）。
+func TestProviderAddHelpMentionsGemini(t *testing.T) {
+	sandbox(t)
+
+	code, _, errOut := run(t, "provider", "add", "--help")
+	if code != 0 {
+		t.Fatalf("provider add --help 的退出码 = %d", code)
+	}
+	for _, want := range []string{
+		"--gemini",
+		"/v1beta/models/{model}:generateContent",
+		"{model} 是占位符",
+		"switchboard provider add google-gemini --base-url https://generativelanguage.googleapis.com",
+		"--default-protocol gemini",
+		"anthropic、openai、responses、gemini",
+	} {
+		if !strings.Contains(errOut, want) {
+			t.Fatalf("provider add --help 应提到 %q: %s", want, errOut)
+		}
 	}
 }
 
@@ -1125,7 +1286,7 @@ func TestProviderUnsetErrors(t *testing.T) {
 		args []string
 		want []string
 	}{
-		{"未知字段", []string{"gemini"}, []string{"gemini", "不认识", "anthropic、openai、responses、models-path、default-protocol、note"}},
+		{"未知字段", []string{"cohere"}, []string{"cohere", "不认识", "anthropic、openai、responses、gemini、models-path、default-protocol、note"}},
 		{"带 -- 前缀", []string{"--", "--openai"}, []string{"不要带 -- 前缀", "可用："}},
 		{"大小写不符", []string{"OpenAI"}, []string{"大小写不符", "openai"}},
 		{"base-url", []string{"base-url"}, []string{"不能 unset", "--base-url"}},

@@ -156,6 +156,41 @@ func TestREADMEProviderExamples(t *testing.T) {
 	}
 }
 
+// TestREADMEProviderGeminiExample 逐字跑 README「自己加一家厂商」一节的 gemini 示例：
+// 只声明一条 gemini 路由、默认协议写 gemini，{model} 占位符原样落库；
+// README 里说的「这家只有这一条路由时会被拒绝」也一并钉住。
+func TestREADMEProviderGeminiExample(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	code, out, stderr := run(t, "provider", "add", "google-gemini",
+		"--base-url", "https://generativelanguage.googleapis.com",
+		"--gemini", "/v1beta/models/{model}:generateContent",
+		"--default-protocol", "gemini")
+	if code != 0 {
+		t.Fatalf("README 示例 provider add google-gemini 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if want := "已添加厂商 google-gemini（https://generativelanguage.googleapis.com），1 条路由，默认协议 gemini"; !strings.Contains(out, want) {
+		t.Fatalf("provider add google-gemini 的输出与 README 不符：\n得到 %s\n期望包含 %q", out, want)
+	}
+	got := mustProviderLs(t)["google-gemini"]
+	if got.DefaultProtocol != "gemini" {
+		t.Fatalf("README 示例的默认协议 = %q，期望 gemini", got.DefaultProtocol)
+	}
+	if route := routeMap(got)["gemini"]; route.Path != "/v1beta/models/{model}:generateContent" {
+		t.Fatalf("README 示例的 gemini 路由 = %+v", route)
+	}
+
+	// README：这家只有这一条路由时 unset 会被拒绝，要撤就撤整个厂商。
+	code, out, stderr = run(t, "provider", "unset", "google-gemini", "gemini")
+	if code != 1 || out != "" {
+		t.Fatalf("删掉唯一一条路由的退出码 = %d，stdout = %q", code, out)
+	}
+	if !strings.Contains(stderr, "switchboard provider rm google-gemini") {
+		t.Fatalf("拒绝文案应指向 provider rm: %s", stderr)
+	}
+}
+
 // TestREADMEModelFlowExamples 逐字跑 README 快速上手与「模型从上游拉」两节的
 // account add / model sync / model probe 命令；唯一加的参数是 --base-url 指向假上游。
 func TestREADMEModelFlowExamples(t *testing.T) {
