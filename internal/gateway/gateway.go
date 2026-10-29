@@ -158,9 +158,13 @@ type attempt struct {
 	outTok     int64
 	cacheRead  int64
 	cacheWrite int64
-	wrote      bool
-	message    string
-	err        error
+	// reasoning 是上游上报的思考 token，total 是上游上报的总 token（0 表示没报）。
+	// 两个都只用于入账判定（store.ReasoningExtra），转发路径不读它们（见 DESIGN 5.5）。
+	reasoning int64
+	total     int64
+	wrote     bool
+	message   string
+	err       error
 }
 
 func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
@@ -268,8 +272,12 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			OutTokens:        res.outTok,
 			CacheRead:        res.cacheRead,
 			CacheWrite:       res.cacheWrite,
-			LatencyMS:        latency.Milliseconds(),
-			Error:            res.message,
+			// 思考 token 原值整列入账，是否再按输出价计一次交给 ReasoningExtra：
+			// 判定只写在那一处，不在这里按协议猜（见 DESIGN 5.5）。
+			ReasoningTokens:      res.reasoning,
+			ReasoningTokensExtra: store.ReasoningExtra(res.total, res.inTok, res.outTok, res.reasoning),
+			LatencyMS:            latency.Milliseconds(),
+			Error:                res.message,
 		}
 		// 一次尝试的账（requests 一行）与它的结论（冷却、清零、停用）在同一个事务里落库，
 		// 要么都写、要么都不写（见 store.RecordAttempt）。
@@ -496,6 +504,7 @@ func (s *Server) jsonSuccess(w http.ResponseWriter, resp *http.Response,
 		if parsed, err := translate.DecodeResponse(outbound, body, req.Model); err == nil {
 			res.inTok, res.outTok = parsed.Usage.In, parsed.Usage.Out
 			res.cacheRead, res.cacheWrite = parsed.Usage.CacheRead, parsed.Usage.CacheWrite
+			res.reasoning, res.total = parsed.Usage.Reasoning, parsed.Usage.Total
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -524,6 +533,7 @@ func (s *Server) jsonSuccess(w http.ResponseWriter, resp *http.Response,
 		status: http.StatusOK, wrote: true,
 		inTok: parsed.Usage.In, outTok: parsed.Usage.Out,
 		cacheRead: parsed.Usage.CacheRead, cacheWrite: parsed.Usage.CacheWrite,
+		reasoning: parsed.Usage.Reasoning, total: parsed.Usage.Total,
 	}
 }
 
@@ -630,7 +640,8 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 	_ = write(enc.Finish())
 
 	res := attempt{status: http.StatusOK, wrote: true, inTok: usage.In, outTok: usage.Out,
-		cacheRead: usage.CacheRead, cacheWrite: usage.CacheWrite}
+		cacheRead: usage.CacheRead, cacheWrite: usage.CacheWrite,
+		reasoning: usage.Reasoning, total: usage.Total}
 	if failure != "" {
 		// 记账用的摘要也过一遍脱敏：scanErr 的原文里可能带着上游回显的地址或凭据。
 		res.message = scrubSecret(failure, secretValue)
@@ -712,9 +723,11 @@ func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, p
 	// 最后一帧可能没有空行结尾：攒下的字节仍然算一帧，用量与收尾判定不能丢。
 	checkFrame()
 
-	in, out, cacheRead, cacheWrite := scanner.Usage()
+	scanned := scanner.Usage()
+	in, out := scanned.In, scanned.Out
 	res := attempt{status: http.StatusOK, wrote: true, inTok: in, outTok: out,
-		cacheRead: cacheRead, cacheWrite: cacheWrite}
+		cacheRead: scanned.CacheRead, cacheWrite: scanned.CacheWrite,
+		reasoning: scanned.Reasoning, total: scanned.Total}
 	if readErr != nil {
 		res.message = "上游流式响应中断: " + readErr.Error()
 		res.err = readErr

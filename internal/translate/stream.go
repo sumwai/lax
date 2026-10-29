@@ -160,9 +160,10 @@ func (s *AnthropicUsageScanner) Feed(data []byte) {
 	}
 }
 
-// Usage 返回读到的用量。
-func (s *AnthropicUsageScanner) Usage() (in, out, cacheRead, cacheWrite int64) {
-	return s.in, s.out, s.cacheRead, s.cacheWrite
+// Usage 返回读到的用量。anthropic 没有独立的思考与总 token 字段，Reasoning 与 Total 恒为 0：
+// 它的 output_tokens 本来就含思考，不需要再判一次（见 DESIGN 5.5）。
+func (s *AnthropicUsageScanner) Usage() Usage {
+	return Usage{In: s.in, Out: s.out, CacheRead: s.cacheRead, CacheWrite: s.cacheWrite}
 }
 
 // StopReason 返回读到的结束原因。

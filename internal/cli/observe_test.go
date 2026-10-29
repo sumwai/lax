@@ -46,22 +46,24 @@ func addPricedAccount(t *testing.T, name, priceIn, priceOut string) {
 
 // usageRowJSON 是 usage --json 的一行。
 type usageRowJSON struct {
-	Key        string  `json:"key"`
-	Requests   int64   `json:"requests"`
-	InTokens   int64   `json:"in_tokens"`
-	OutTokens  int64   `json:"out_tokens"`
-	CacheRead  int64   `json:"cache_read"`
-	CacheWrite int64   `json:"cache_write"`
-	Cost       float64 `json:"cost"`
+	Key             string  `json:"key"`
+	Requests        int64   `json:"requests"`
+	InTokens        int64   `json:"in_tokens"`
+	OutTokens       int64   `json:"out_tokens"`
+	ReasoningTokens int64   `json:"reasoning_tokens"`
+	CacheRead       int64   `json:"cache_read"`
+	CacheWrite      int64   `json:"cache_write"`
+	Cost            float64 `json:"cost"`
 }
 
 // logRowJSON 是 log tail --json 的一行，只取用例关心的字段。
 type logRowJSON struct {
-	Model      string `json:"model"`
-	InTokens   int64  `json:"in_tokens"`
-	OutTokens  int64  `json:"out_tokens"`
-	CacheRead  int64  `json:"cache_read"`
-	CacheWrite int64  `json:"cache_write"`
+	Model           string `json:"model"`
+	InTokens        int64  `json:"in_tokens"`
+	OutTokens       int64  `json:"out_tokens"`
+	ReasoningTokens int64  `json:"reasoning_tokens"`
+	CacheRead       int64  `json:"cache_read"`
+	CacheWrite      int64  `json:"cache_write"`
 }
 
 // mustUsageRows 读 usage --json 并按 key 索引。
@@ -152,27 +154,28 @@ func TestLogTailShowsCacheTokens(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("log tail 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"输入", "输出", "缓存读", "缓存写", "耗时", "错误"} {
+	for _, want := range []string{"输入", "输出", "思考", "缓存读", "缓存写", "耗时", "错误"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("log tail 的表头缺 %q:\n%s", want, out)
 		}
 	}
-	// 时间占两列（日期 + 时刻），后面依次是协议、模型、账号、状态、输入、输出、缓存读、缓存写、耗时。
+	// 时间占两列（日期 + 时刻），后面依次是协议、模型、账号、状态、输入、输出、思考、缓存读、缓存写、耗时。
 	cached := logRowFields(t, out, "m-cache")
-	if len(cached) < 11 {
-		t.Fatalf("带缓存的记录列数 = %d，少于 11 列：%v", len(cached), cached)
+	if len(cached) < 12 {
+		t.Fatalf("带缓存的记录列数 = %d，少于 12 列：%v", len(cached), cached)
 	}
-	for i, want := range map[int]string{6: "100", 7: "20", 8: "1500", 9: "300"} {
+	for i, want := range map[int]string{6: "100", 7: "20", 8: "0", 9: "1500", 10: "300"} {
 		if cached[i] != want {
 			t.Fatalf("带缓存的记录第 %d 列 = %q，期望 %q：%v", i, cached[i], want, cached)
 		}
 	}
 	plain := logRowFields(t, out, "m-plain")
-	if len(plain) < 11 {
-		t.Fatalf("全 0 的记录列数 = %d，少于 11 列：%v", len(plain), plain)
+	if len(plain) < 12 {
+		t.Fatalf("全 0 的记录列数 = %d，少于 12 列：%v", len(plain), plain)
 	}
-	if plain[8] != "0" || plain[9] != "0" {
-		t.Fatalf("全 0 的记录缓存列 = %q / %q，期望都显示 0：%v", plain[8], plain[9], plain)
+	if plain[8] != "0" || plain[9] != "0" || plain[10] != "0" {
+		t.Fatalf("全 0 的记录思考与缓存列 = %q / %q / %q，期望都显示 0：%v",
+			plain[8], plain[9], plain[10], plain)
 	}
 
 	byModel := mustLogRows(t)
@@ -245,22 +248,22 @@ func TestUsageCacheTotalsPerDimension(t *testing.T) {
 		}
 	}
 
-	// 文本表格：两列缓存与合计行都要在。
+	// 文本表格：思考、两列缓存与合计行都要在。
 	code, out, stderr := run(t, "usage", "--by", "account", "--since", "1d")
 	if code != 0 {
 		t.Fatalf("usage 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"输入 token", "输出 token", "缓存读 token", "缓存写 token", "估算花费", "合计"} {
+	for _, want := range []string{"输入 token", "输出 token", "思考 token", "缓存读 token", "缓存写 token", "估算花费", "合计"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("usage 表格缺 %q:\n%s", want, out)
 		}
 	}
 	total := tableRowFields(t, out, "合计")
-	if len(total) < 7 {
-		t.Fatalf("合计行列数 = %d，少于 7 列：%v", len(total), total)
+	if len(total) < 8 {
+		t.Fatalf("合计行列数 = %d，少于 8 列：%v", len(total), total)
 	}
-	if total[4] != "1500" || total[5] != "300" {
-		t.Fatalf("合计行的缓存列 = %q / %q，期望 1500 / 300：%v", total[4], total[5], total)
+	if total[5] != "1500" || total[6] != "300" {
+		t.Fatalf("合计行的缓存列 = %q / %q，期望 1500 / 300：%v", total[5], total[6], total)
 	}
 }
 

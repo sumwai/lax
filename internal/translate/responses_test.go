@@ -304,7 +304,22 @@ func TestDecodeResponsesResponse(t *testing.T) {
 				Model:      "client-model",
 				Blocks:     []Block{{Kind: BlockText, Text: "你好"}},
 				StopReason: StopEndTurn,
-				Usage:      Usage{In: 10, Out: 3, CacheRead: 4},
+				Usage:      Usage{In: 10, Out: 3, CacheRead: 4, Total: 13},
+			},
+		},
+		{
+			// 非流式直通的记账走解码器，思考 token 与总 token 一并从 usage 里读出来（DESIGN 5.5）。
+			name: "思考 token",
+			body: `{"id":"resp_9","status":"completed",
+				"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"想完了"}]}],
+				"usage":{"input_tokens":7,"output_tokens":1,"total_tokens":132,
+					"output_tokens_details":{"reasoning_tokens":124}}}`,
+			want: &Response{
+				ID:         "resp_9",
+				Model:      "client-model",
+				Blocks:     []Block{{Kind: BlockText, Text: "想完了"}},
+				StopReason: StopEndTurn,
+				Usage:      Usage{In: 7, Out: 1, Total: 132, Reasoning: 124},
 			},
 		},
 		{
@@ -782,29 +797,63 @@ func TestResponsesStreamEncodeFinish(t *testing.T) {
 // TestResponsesUsageScanner 覆盖直通流里读用量。
 func TestResponsesUsageScanner(t *testing.T) {
 	var sc responsesUsageScanner
-	if in, out, cacheRead, cacheWrite := sc.Usage(); in != 0 || out != 0 || cacheRead != 0 || cacheWrite != 0 {
-		t.Fatalf("初始用量 = %d/%d/%d/%d", in, out, cacheRead, cacheWrite)
+	if u := sc.Usage(); u != (Usage{}) {
+		t.Fatalf("初始用量应是零值，实际 %+v", u)
 	}
 
 	sc.Feed([]byte(`{"type":"response.created","response":{"id":"resp_1"}}`))
 	sc.Feed([]byte(`{"type":"response.output_text.delta","delta":"x"}`))
 	sc.Feed([]byte(`[DONE]`))
 	sc.Feed([]byte(`不是 JSON`))
-	if in, out, _, _ := sc.Usage(); in != 0 || out != 0 {
-		t.Fatalf("收尾前用量 = %d/%d", in, out)
+	if u := sc.Usage(); u.In != 0 || u.Out != 0 {
+		t.Fatalf("收尾前用量 = %+v", u)
 	}
 
 	sc.Feed([]byte(`{"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":11,"output_tokens":5,"total_tokens":16,"input_tokens_details":{"cached_tokens":3}}}}`))
-	in, out, cacheRead, cacheWrite := sc.Usage()
-	if in != 11 || out != 5 || cacheRead != 3 || cacheWrite != 0 {
-		t.Fatalf("用量 = %d/%d/%d/%d", in, out, cacheRead, cacheWrite)
+	u := sc.Usage()
+	if u.In != 11 || u.Out != 5 || u.CacheRead != 3 || u.CacheWrite != 0 {
+		t.Fatalf("用量 = %+v，期望 11/5/3/0", u)
+	}
+	if u.Total != 16 {
+		t.Fatalf("总 token = %d，期望 16", u.Total)
 	}
 
 	var incomplete responsesUsageScanner
 	incomplete.Feed([]byte(`{"type":"response.incomplete","response":{"status":"incomplete","usage":{"input_tokens":7,"output_tokens":2}}}`))
-	in, out, cacheRead, cacheWrite = incomplete.Usage()
-	if in != 7 || out != 2 || cacheRead != 0 || cacheWrite != 0 {
-		t.Fatalf("incomplete 用量 = %d/%d/%d/%d", in, out, cacheRead, cacheWrite)
+	u = incomplete.Usage()
+	if u.In != 7 || u.Out != 2 || u.CacheRead != 0 || u.CacheWrite != 0 {
+		t.Fatalf("incomplete 用量 = %+v", u)
+	}
+}
+
+// TestResponsesUsageScannerReadsReasoning 钉住思考 token 的两个落点：官方 Responses 报文
+// 放在 output_tokens_details.reasoning_tokens，部分中转照 chat 的写法放在
+// completion_tokens_details 里，两处都读（DESIGN 5.5）。
+func TestResponsesUsageScannerReadsReasoning(t *testing.T) {
+	var official responsesUsageScanner
+	official.Feed([]byte(`{"id":"resp_1","object":"response","status":"completed","output":[],` +
+		`"usage":{"input_tokens":7,"output_tokens":1,"total_tokens":132,` +
+		`"output_tokens_details":{"reasoning_tokens":124}}}`))
+	u := official.Usage()
+	if u.Reasoning != 124 || u.Total != 132 || u.In != 7 || u.Out != 1 {
+		t.Fatalf("官方形状的用量 = %+v，期望 输入 7、输出 1、总 132、思考 124", u)
+	}
+
+	var relay responsesUsageScanner
+	relay.Feed([]byte(`{"id":"resp_2","object":"response","status":"completed","output":[],` +
+		`"usage":{"input_tokens":7,"output_tokens":1,"total_tokens":132,` +
+		`"completion_tokens_details":{"reasoning_tokens":124}}}`))
+	if u := relay.Usage(); u.Reasoning != 124 {
+		t.Fatalf("中转形状的思考 token = %+v，期望 124", u)
+	}
+
+	// 两个位置都有时取官方那个，不把同一份数读两遍。
+	var both responsesUsageScanner
+	both.Feed([]byte(`{"id":"resp_3","object":"response","status":"completed","output":[],` +
+		`"usage":{"input_tokens":7,"output_tokens":1,"total_tokens":132,` +
+		`"output_tokens_details":{"reasoning_tokens":100},"completion_tokens_details":{"reasoning_tokens":124}}}`))
+	if u := both.Usage(); u.Reasoning != 100 {
+		t.Fatalf("两处都有思考数时应取 output_tokens_details 的 100，实际 %d", u.Reasoning)
 	}
 }
 
@@ -812,9 +861,9 @@ func TestResponsesUsageScanner(t *testing.T) {
 func TestResponsesUsageScannerNonStream(t *testing.T) {
 	var sc responsesUsageScanner
 	sc.Feed([]byte(`{"id":"resp_1","object":"response","status":"completed","output":[],"usage":{"input_tokens":9,"output_tokens":1,"total_tokens":10,"input_tokens_details":{"cached_tokens":4}}}`))
-	in, out, cacheRead, cacheWrite := sc.Usage()
-	if in != 9 || out != 1 || cacheRead != 4 || cacheWrite != 0 {
-		t.Fatalf("用量 = %d/%d/%d/%d，期望 9/1/4/0", in, out, cacheRead, cacheWrite)
+	u := sc.Usage()
+	if u.In != 9 || u.Out != 1 || u.CacheRead != 4 || u.CacheWrite != 0 {
+		t.Fatalf("用量 = %+v，期望 9/1/4/0", u)
 	}
 }
 

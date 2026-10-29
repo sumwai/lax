@@ -168,11 +168,14 @@ type GeminiPromptFeedback struct {
 
 // GeminiUsageMetadata 是 gemini 的用量。cachedContentTokenCount 是 promptTokenCount 的子集，
 // 与 chat 的 prompt_tokens_details.cached_tokens 同一套记法（DESIGN 5.9）。
+// thoughtsTokenCount 是思考 token：真实 gemini 的 totalTokenCount 已经把它算进去，
+// 是否另计一次由入账时按 total 判定（见 store.ReasoningExtra 与 DESIGN 5.5）。
 type GeminiUsageMetadata struct {
 	PromptTokenCount        int64 `json:"promptTokenCount"`
 	CandidatesTokenCount    int64 `json:"candidatesTokenCount"`
 	TotalTokenCount         int64 `json:"totalTokenCount"`
 	CachedContentTokenCount int64 `json:"cachedContentTokenCount,omitempty"`
+	ThoughtsTokenCount      int64 `json:"thoughtsTokenCount,omitempty"`
 }
 
 // EncodeGeminiRequest 把 IR 编成 generateContent 的请求体。
@@ -767,6 +770,7 @@ func (e *geminiStreamEncoder) frame(v any) SSEEvent {
 // 非流式的响应体是整条 JSON，流式的每帧也是 JSON，两者都只有 usageMetadata 有用。
 type geminiUsageScanner struct {
 	in, out, cacheRead int64
+	reasoning, total   int64
 }
 
 // Feed 送入一段响应体，只认 usageMetadata，其余字段忽略。
@@ -790,11 +794,17 @@ func (s *geminiUsageScanner) Feed(data []byte) {
 	if env.UsageMetadata.CachedContentTokenCount > 0 {
 		s.cacheRead = env.UsageMetadata.CachedContentTokenCount
 	}
+	if env.UsageMetadata.TotalTokenCount > 0 {
+		s.total = env.UsageMetadata.TotalTokenCount
+	}
+	if env.UsageMetadata.ThoughtsTokenCount > 0 {
+		s.reasoning = env.UsageMetadata.ThoughtsTokenCount
+	}
 }
 
-// Usage 返回读到的用量。gemini 没有缓存写入字段，cacheWrite 恒为 0。
-func (s *geminiUsageScanner) Usage() (in, out, cacheRead, cacheWrite int64) {
-	return s.in, s.out, s.cacheRead, 0
+// Usage 返回读到的用量。gemini 没有缓存写入字段，CacheWrite 恒为 0。
+func (s *geminiUsageScanner) Usage() Usage {
+	return Usage{In: s.in, Out: s.out, CacheRead: s.cacheRead, Reasoning: s.reasoning, Total: s.total}
 }
 
 // appendGeminiContent 追加一条内容：相邻同角色的并成一条，空 parts 不写出去。
@@ -1191,9 +1201,17 @@ func hasToolUse(blocks []Block) bool {
 }
 
 // geminiUsageToIR 把 gemini 的用量映射成 IR 用量。nil 视为零值。
+// 思考 token 与总 token 都要带上：真实 gemini 的 totalTokenCount = prompt + candidates + thoughts，
+// 入账时按它判定 thoughts 要不要单独计价（DESIGN 5.5）。
 func geminiUsageToIR(u *GeminiUsageMetadata) Usage {
 	if u == nil {
 		return Usage{}
 	}
-	return Usage{In: u.PromptTokenCount, Out: u.CandidatesTokenCount, CacheRead: u.CachedContentTokenCount}
+	return Usage{
+		In:        u.PromptTokenCount,
+		Out:       u.CandidatesTokenCount,
+		CacheRead: u.CachedContentTokenCount,
+		Reasoning: u.ThoughtsTokenCount,
+		Total:     u.TotalTokenCount,
+	}
 }

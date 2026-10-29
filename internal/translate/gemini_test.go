@@ -306,9 +306,29 @@ func TestGeminiUsageScanner(t *testing.T) {
 	}
 	scanner.Feed([]byte(`{"candidates":[{"content":{"parts":[{"text":"pong"}]}}],` +
 		`"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":7,"cachedContentTokenCount":4}}`))
-	in, out, cacheRead, cacheWrite := scanner.Usage()
-	if in != 12 || out != 7 || cacheRead != 4 || cacheWrite != 0 {
-		t.Fatalf("用量 = %d/%d/%d/%d，期望 12/7/4/0", in, out, cacheRead, cacheWrite)
+	u := scanner.Usage()
+	if u.In != 12 || u.Out != 7 || u.CacheRead != 4 || u.CacheWrite != 0 {
+		t.Fatalf("用量 = %+v，期望 12/7/4/0", u)
+	}
+}
+
+// TestGeminiUsageScannerReadsThoughts 钉住思考 token 的读法：gemini 把它报成
+// usageMetadata.thoughtsTokenCount，totalTokenCount 把它算在里面，入账按这两个数判定
+// 要不要另计一次（DESIGN 5.5）。
+func TestGeminiUsageScannerReadsThoughts(t *testing.T) {
+	scanner, err := NewUsageScanner(ProtocolGemini)
+	if err != nil {
+		t.Fatalf("造用量读取器: %v", err)
+	}
+	scanner.Feed([]byte(`{"candidates":[{"content":{"parts":[{"text":"思考后回答"}]},"finishReason":"STOP"}],` +
+		`"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":1,"thoughtsTokenCount":124,` +
+		`"totalTokenCount":132}}`))
+	u := scanner.Usage()
+	if u.Reasoning != 124 || u.Total != 132 {
+		t.Fatalf("思考与总 token = %d/%d，期望 124/132", u.Reasoning, u.Total)
+	}
+	if u.In != 7 || u.Out != 1 {
+		t.Fatalf("输入输出 = %d/%d，期望 7/1", u.In, u.Out)
 	}
 }
 

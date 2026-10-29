@@ -434,7 +434,23 @@ func TestChatDecodeResponse(t *testing.T) {
 				Model:      "client-model",
 				Blocks:     []Block{{Kind: BlockText, Text: "你好"}},
 				StopReason: StopEndTurn,
-				Usage:      Usage{In: 9, Out: 2, CacheRead: 4},
+				Usage:      Usage{In: 9, Out: 2, CacheRead: 4, Total: 11},
+			},
+		},
+		{
+			// 直通路径的非流式响应体走解码器记账，思考 token 与总 token 也要从这四个字段里读出来：
+			// 少读一个，入账时就判不出思考是不是独立的一项（见 DESIGN 5.5）。
+			name: "思考 token",
+			raw: `{"id":"chatcmpl-9","choices":[{"index":0,
+				"message":{"role":"assistant","content":"想完了"},"finish_reason":"stop"}],
+				"usage":{"prompt_tokens":7,"completion_tokens":1,"total_tokens":132,
+					"completion_tokens_details":{"reasoning_tokens":124}}}`,
+			want: &Response{
+				ID:         "chatcmpl-9",
+				Model:      "client-model",
+				Blocks:     []Block{{Kind: BlockText, Text: "想完了"}},
+				StopReason: StopEndTurn,
+				Usage:      Usage{In: 7, Out: 1, Total: 132, Reasoning: 124},
 			},
 		},
 		{
@@ -911,29 +927,49 @@ func TestChatStreamEncoderUsageAfterStop(t *testing.T) {
 func TestChatUsageScanner(t *testing.T) {
 	s := &chatUsageScanner{}
 	s.Feed([]byte(`{"choices":[{"index":0,"delta":{"content":"hi"}}]}`))
-	if in, out, cacheRead, cacheWrite := s.Usage(); in != 0 || out != 0 || cacheRead != 0 || cacheWrite != 0 {
-		t.Fatalf("还没出现用量帧时应全为 0，实际 %d/%d/%d/%d", in, out, cacheRead, cacheWrite)
+	if u := s.Usage(); u != (Usage{}) {
+		t.Fatalf("还没出现用量帧时应是零值，实际 %+v", u)
 	}
 
 	s.Feed([]byte(`{"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18,
 		"prompt_tokens_details":{"cached_tokens":3}}}`))
-	if in, out, cacheRead, _ := s.Usage(); in != 11 || out != 7 || cacheRead != 3 {
-		t.Fatalf("用量 = %d/%d/%d，期望 11/7/3", in, out, cacheRead)
+	u := s.Usage()
+	if u.In != 11 || u.Out != 7 || u.CacheRead != 3 || u.CacheWrite != 0 {
+		t.Fatalf("用量 = %+v，期望 11/7/3/0", u)
+	}
+	if u.Total != 18 {
+		t.Fatalf("总 token = %d，期望 18（判定思考是否独立成项要用它）", u.Total)
 	}
 
 	// 非 JSON 与 [DONE] 不影响已读到的值。
 	s.Feed([]byte(`[DONE]`))
 	s.Feed([]byte(`not-json`))
 	s.Feed(nil)
-	if in, out, cacheRead, cacheWrite := s.Usage(); in != 11 || out != 7 || cacheRead != 3 || cacheWrite != 0 {
-		t.Fatalf("用量被非 JSON 帧改动：%d/%d/%d/%d", in, out, cacheRead, cacheWrite)
+	if u := s.Usage(); u.In != 11 || u.Out != 7 || u.CacheRead != 3 || u.CacheWrite != 0 {
+		t.Fatalf("用量被非 JSON 帧改动：%+v", u)
+	}
+}
+
+// TestChatUsageScannerReadsReasoning 钉住思考 token 的读法：chat 把它报在
+// completion_tokens_details.reasoning_tokens 里，与 total_tokens 一起读出来交给入账判定
+// （DESIGN 5.5）。
+func TestChatUsageScannerReadsReasoning(t *testing.T) {
+	s := &chatUsageScanner{}
+	s.Feed([]byte(`{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":1,"total_tokens":132,
+		"completion_tokens_details":{"reasoning_tokens":124}}}`))
+	u := s.Usage()
+	if u.Reasoning != 124 {
+		t.Fatalf("思考 token = %d，期望 124", u.Reasoning)
+	}
+	if u.Total != 132 || u.In != 7 || u.Out != 1 {
+		t.Fatalf("用量 = %+v，期望 输入 7、输出 1、总 132", u)
 	}
 }
 
 func TestChatUsageScannerEmpty(t *testing.T) {
 	s := &chatUsageScanner{}
-	if in, out, cacheRead, cacheWrite := s.Usage(); in != 0 || out != 0 || cacheRead != 0 || cacheWrite != 0 {
-		t.Fatalf("空扫描器应全为 0，实际 %d/%d/%d/%d", in, out, cacheRead, cacheWrite)
+	if u := s.Usage(); u != (Usage{}) {
+		t.Fatalf("空扫描器应是零值，实际 %+v", u)
 	}
 }
 

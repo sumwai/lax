@@ -46,9 +46,13 @@ func TestAnthropicUsageScanner(t *testing.T) {
 	sc.Feed([]byte(`{"type":"message_start","message":{"model":"claude-x","usage":{"input_tokens":42,"output_tokens":1,"cache_read_input_tokens":7}}}`))
 	sc.Feed([]byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":17}}`))
 
-	in, out, cacheRead, _ := sc.Usage()
-	if in != 42 || out != 17 || cacheRead != 7 {
-		t.Fatalf("用量 = %d/%d/缓存 %d，期望 42/17/7", in, out, cacheRead)
+	u := sc.Usage()
+	if u.In != 42 || u.Out != 17 || u.CacheRead != 7 {
+		t.Fatalf("用量 = %d/%d/缓存 %d，期望 42/17/7", u.In, u.Out, u.CacheRead)
+	}
+	// anthropic 没有独立的思考与总 token 字段，两个都是 0（见 DESIGN 5.5）。
+	if u.Reasoning != 0 || u.Total != 0 {
+		t.Fatalf("anthropic 的思考与总 token 应为 0，实际 %d/%d", u.Reasoning, u.Total)
 	}
 	if sc.StopReason() != "end_turn" {
 		t.Fatalf("stop_reason = %q", sc.StopReason())
@@ -59,9 +63,9 @@ func TestAnthropicUsageScannerNonStream(t *testing.T) {
 	var sc AnthropicUsageScanner
 	// 非流式响应体里 type 是 message，usage 在顶层，探活记账走这条。
 	sc.Feed([]byte(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"p"}],"usage":{"input_tokens":13,"output_tokens":1,"cache_read_input_tokens":2,"cache_creation_input_tokens":5}}`))
-	in, out, cacheRead, cacheWrite := sc.Usage()
-	if in != 13 || out != 1 || cacheRead != 2 || cacheWrite != 5 {
-		t.Fatalf("用量 = %d/%d/%d/%d，期望 13/1/2/5", in, out, cacheRead, cacheWrite)
+	u := sc.Usage()
+	if u.In != 13 || u.Out != 1 || u.CacheRead != 2 || u.CacheWrite != 5 {
+		t.Fatalf("用量 = %d/%d/%d/%d，期望 13/1/2/5", u.In, u.Out, u.CacheRead, u.CacheWrite)
 	}
 }
 

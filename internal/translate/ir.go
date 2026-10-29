@@ -245,6 +245,15 @@ type Usage struct {
 	Out        int64
 	CacheRead  int64
 	CacheWrite int64
+	// Reasoning 是上游上报的思考 token：chat 读 completion_tokens_details.reasoning_tokens，
+	// responses 读 output_tokens_details.reasoning_tokens（部分中转照 chat 的写法放在
+	// completion_tokens_details 里，两处都读），gemini 读 usageMetadata.thoughtsTokenCount。
+	// anthropic 没有独立字段，恒为 0（DESIGN 5.5）。
+	Reasoning int64
+	// Total 是上游上报的总 token，0 表示上游没报。思考算不算输出的一项只能按它判：
+	// 各协议做法不同，OpenAI 官方把 reasoning 当作 completion 的子集，有的中转把它报成
+	// 输出之外的一项、total 里才对得上（见 store.ReasoningExtra 与 DESIGN 5.5）。
+	Total int64
 }
 
 // Response 是中间表示里的响应。
@@ -430,9 +439,11 @@ func PathProtocol(path string) (string, bool) {
 }
 
 // UsageScanner 从同协议直通的流式字节里读出用量，不改变转发内容。
+// 读出的 Usage 带 Reasoning 与 Total：入账时判定思考 token 算不算输出的一项要用它们，
+// 判定本身在 store.ReasoningExtra（DESIGN 5.5）。
 type UsageScanner interface {
 	Feed(data []byte)
-	Usage() (in, out, cacheRead, cacheWrite int64)
+	Usage() Usage
 }
 
 // NewUsageScanner 按协议造一个直通用的用量读取器。

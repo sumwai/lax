@@ -79,12 +79,49 @@ type responsesTokenDetail struct {
 	CachedTokens int64 `json:"cached_tokens"`
 }
 
+// responsesOutputDetail 携带输出里的思考 token 数。官方 Responses 报文把它放在
+// output_tokens_details 里，部分中转照 chat 的写法放在 completion_tokens_details 里，
+// 两个位置都读，官方形状优先（见 reasoningTokens）。
+type responsesOutputDetail struct {
+	ReasoningTokens int64 `json:"reasoning_tokens"`
+}
+
 // responsesUsage 是 Responses 的用量字段。
 type responsesUsage struct {
-	InputTokens        int64                 `json:"input_tokens"`
-	OutputTokens       int64                 `json:"output_tokens"`
-	TotalTokens        int64                 `json:"total_tokens"`
-	InputTokensDetails *responsesTokenDetail `json:"input_tokens_details,omitempty"`
+	InputTokens             int64                  `json:"input_tokens"`
+	OutputTokens            int64                  `json:"output_tokens"`
+	TotalTokens             int64                  `json:"total_tokens"`
+	InputTokensDetails      *responsesTokenDetail  `json:"input_tokens_details,omitempty"`
+	OutputTokensDetails     *responsesOutputDetail `json:"output_tokens_details,omitempty"`
+	CompletionTokensDetails *responsesOutputDetail `json:"completion_tokens_details,omitempty"`
+}
+
+// reasoningTokens 读这道用量里的思考 token：output_tokens_details 优先，其次
+// completion_tokens_details。两边都有时取官方形状，免得中转把同一份数写两遍。
+func (u *responsesUsage) reasoningTokens() int64 {
+	if u == nil {
+		return 0
+	}
+	if u.OutputTokensDetails != nil && u.OutputTokensDetails.ReasoningTokens > 0 {
+		return u.OutputTokensDetails.ReasoningTokens
+	}
+	if u.CompletionTokensDetails != nil {
+		return u.CompletionTokensDetails.ReasoningTokens
+	}
+	return 0
+}
+
+// responsesUsageToIR 把上游报的用量映射成 IR 用量，含思考 token 与总 token。
+// 思考算不算输出的一项不在这里定，判定在 store.ReasoningExtra（DESIGN 5.5）。
+func responsesUsageToIR(u *responsesUsage) Usage {
+	if u == nil {
+		return Usage{}
+	}
+	out := Usage{In: u.InputTokens, Out: u.OutputTokens, Total: u.TotalTokens, Reasoning: u.reasoningTokens()}
+	if u.InputTokensDetails != nil {
+		out.CacheRead = u.InputTokensDetails.CachedTokens
+	}
+	return out
 }
 
 // responsesOutputItem 是响应 output 数组里的一项。
@@ -772,12 +809,7 @@ func DecodeResponsesResponse(raw []byte, requestedModel string) (*Response, erro
 	}
 
 	out.StopReason = responsesStopReason(in, hasToolUse)
-	if u := in.Usage; u != nil {
-		out.Usage = Usage{In: u.InputTokens, Out: u.OutputTokens}
-		if u.InputTokensDetails != nil {
-			out.Usage.CacheRead = u.InputTokensDetails.CachedTokens
-		}
-	}
+	out.Usage = responsesUsageToIR(in.Usage)
 	return out, nil
 }
 
@@ -1053,10 +1085,8 @@ func (d *responsesStreamDecoder) Decode(data []byte) ([]Delta, error) {
 			}
 			reason = responsesStopReason(*env.Response, hasTool)
 			if u := env.Response.Usage; u != nil {
-				usage = &Usage{In: u.InputTokens, Out: u.OutputTokens}
-				if u.InputTokensDetails != nil {
-					usage.CacheRead = u.InputTokensDetails.CachedTokens
-				}
+				ir := responsesUsageToIR(u)
+				usage = &ir
 			}
 		} else if hasTool {
 			reason = StopToolUse
@@ -1568,7 +1598,7 @@ func (e *responsesStreamEncoder) event(name string, fields map[string]any) SSEEv
 // responsesUsageScanner 从 Responses 的响应里读出用量，不改动转发内容。
 // 流式帧读收尾事件的嵌套 usage，非流式响应体读顶层 usage（探活走这条）。
 type responsesUsageScanner struct {
-	in, out, cacheRead int64
+	usage Usage
 }
 
 // Feed 送入一条 data 帧或一份完整响应体。
@@ -1600,15 +1630,8 @@ func (s *responsesUsageScanner) Feed(data []byte) {
 }
 
 func (s *responsesUsageScanner) set(u *responsesUsage) {
-	s.in = u.InputTokens
-	s.out = u.OutputTokens
-	s.cacheRead = 0
-	if u.InputTokensDetails != nil {
-		s.cacheRead = u.InputTokensDetails.CachedTokens
-	}
+	s.usage = responsesUsageToIR(u)
 }
 
-// Usage 返回读到的用量，读不到时为 0。
-func (s *responsesUsageScanner) Usage() (in, out, cacheRead, cacheWrite int64) {
-	return s.in, s.out, s.cacheRead, 0
-}
+// Usage 返回读到的用量，读不到时为零值。responses 没有缓存写入字段，CacheWrite 恒为 0。
+func (s *responsesUsageScanner) Usage() Usage { return s.usage }

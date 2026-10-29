@@ -585,6 +585,7 @@ type chatStreamError struct {
 // chatUsageScanner 从 chat SSE 里读用量，用于同协议直通时记账。读不到就返回 0。
 type chatUsageScanner struct {
 	in, out, cacheRead int64
+	reasoning, total   int64
 }
 
 // Feed 送入一条 data 帧，非 JSON 与 [DONE] 一律忽略。
@@ -605,14 +606,20 @@ func (s *chatUsageScanner) Feed(data []byte) {
 	if env.Usage.CompletionTokens > 0 {
 		s.out = env.Usage.CompletionTokens
 	}
+	if env.Usage.TotalTokens > 0 {
+		s.total = env.Usage.TotalTokens
+	}
 	if env.Usage.PromptTokensDetails != nil {
 		s.cacheRead = env.Usage.PromptTokensDetails.CachedTokens
 	}
+	if d := env.Usage.CompletionTokensDetails; d != nil && d.ReasoningTokens > 0 {
+		s.reasoning = d.ReasoningTokens
+	}
 }
 
-// Usage 返回读到的用量。chat 协议没有缓存写入字段，cacheWrite 恒为 0。
-func (s *chatUsageScanner) Usage() (in, out, cacheRead, cacheWrite int64) {
-	return s.in, s.out, s.cacheRead, 0
+// Usage 返回读到的用量。chat 协议没有缓存写入字段，CacheWrite 恒为 0。
+func (s *chatUsageScanner) Usage() Usage {
+	return Usage{In: s.in, Out: s.out, CacheRead: s.cacheRead, Reasoning: s.reasoning, Total: s.total}
 }
 
 // chatUserBlocks 把 user 消息的 content（字符串或 part 数组）转成内容块。
@@ -988,9 +995,12 @@ func chatUsageToIR(u *ChatUsage) Usage {
 	if u == nil {
 		return Usage{}
 	}
-	out := Usage{In: u.PromptTokens, Out: u.CompletionTokens}
+	out := Usage{In: u.PromptTokens, Out: u.CompletionTokens, Total: u.TotalTokens}
 	if u.PromptTokensDetails != nil {
 		out.CacheRead = u.PromptTokensDetails.CachedTokens
+	}
+	if u.CompletionTokensDetails != nil {
+		out.Reasoning = u.CompletionTokensDetails.ReasoningTokens
 	}
 	return out
 }

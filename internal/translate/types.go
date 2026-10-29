@@ -261,15 +261,23 @@ type ChatChoice struct {
 
 // ChatUsage 是 openai-chat 的用量字段。
 type ChatUsage struct {
-	PromptTokens        int64              `json:"prompt_tokens"`
-	CompletionTokens    int64              `json:"completion_tokens"`
-	TotalTokens         int64              `json:"total_tokens"`
-	PromptTokensDetails *PromptTokenDetail `json:"prompt_tokens_details,omitempty"`
+	PromptTokens            int64                  `json:"prompt_tokens"`
+	CompletionTokens        int64                  `json:"completion_tokens"`
+	TotalTokens             int64                  `json:"total_tokens"`
+	PromptTokensDetails     *PromptTokenDetail     `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *CompletionTokenDetail `json:"completion_tokens_details,omitempty"`
 }
 
 // PromptTokenDetail 携带命中缓存的输入 token 数。
 type PromptTokenDetail struct {
 	CachedTokens int64 `json:"cached_tokens"`
+}
+
+// CompletionTokenDetail 携带输出里的思考 token 数。各家口径不同：OpenAI 官方把这部分算在
+// completion_tokens 里（子集），有的中转把它报成输出之外的一项、只相加到 total。入账时按
+// total 判定要不要另算一遍，不按协议猜（见 store.ReasoningExtra 与 DESIGN 5.5）。
+type CompletionTokenDetail struct {
+	ReasoningTokens int64 `json:"reasoning_tokens"`
 }
 
 // ChatStreamChunk 是流式响应的一帧。

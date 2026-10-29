@@ -721,11 +721,14 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 
 // probeUsage 是一次上游调用里读出来的用量。缓存读写同样要记账：
 // anthropic 的 scanner 两个都读，chat 与 responses 只读缓存读，缓存写恒为 0。
+// reasoning 与 total 是上游上报的思考 token 与总 token，探活行与转发行同一套判定入账。
 type probeUsage struct {
 	in         int64
 	out        int64
 	cacheRead  int64
 	cacheWrite int64
+	reasoning  int64
+	total      int64
 }
 
 // readProbeUsage 用该协议的 usage scanner 从响应体里读用量，读不到时为 0。
@@ -735,9 +738,11 @@ func readProbeUsage(protocol string, body []byte) probeUsage {
 		return probeUsage{}
 	}
 	scanner.Feed(body)
-	var u probeUsage
-	u.in, u.out, u.cacheRead, u.cacheWrite = scanner.Usage()
-	return u
+	scanned := scanner.Usage()
+	return probeUsage{
+		in: scanned.In, out: scanned.Out, cacheRead: scanned.CacheRead, cacheWrite: scanned.CacheWrite,
+		reasoning: scanned.Reasoning, total: scanned.Total,
+	}
 }
 
 // probeRetryNote 是没得出判定的那几次上游调用的错误摘要前缀。换协议会多打一两次，
@@ -782,8 +787,12 @@ func (s *Server) recordProbeAttempts(a store.Account, model string, attempts []p
 			OutTokens:        att.usage.out,
 			CacheRead:        att.usage.cacheRead,
 			CacheWrite:       att.usage.cacheWrite,
-			LatencyMS:        att.res.Latency.Milliseconds(),
-			Error:            msg,
+			// 探活也算真实花费，思考 token 与转发行走同一个判定：原值入列，
+			// 只有「输出之外的一项」那份再按输出价计一次（见 DESIGN 5.5）。
+			ReasoningTokens:      att.usage.reasoning,
+			ReasoningTokensExtra: store.ReasoningExtra(att.usage.total, att.usage.in, att.usage.out, att.usage.reasoning),
+			LatencyMS:            att.res.Latency.Milliseconds(),
+			Error:                msg,
 		}
 		if err := s.store.InsertRequest(rec); err != nil {
 			s.logf("写探活请求记录失败: %v", err)

@@ -70,8 +70,13 @@ type RequestRecord struct {
 	OutTokens        int64
 	CacheRead        int64
 	CacheWrite       int64
-	LatencyMS        int64
-	Error            string
+	// ReasoningTokens 是上游上报的思考 token 原值（anthropic 没有独立字段，恒为 0），
+	// ReasoningTokensExtra 是其中「输出之外的一项」那部分：只给 extra 按输出价再计一次，
+	// 判定由 ReasoningExtra 给（见 DESIGN 5.5）。两列都进 requests 的独立列。
+	ReasoningTokens      int64
+	ReasoningTokensExtra int64
+	LatencyMS            int64
+	Error                string
 }
 
 // Open 打开数据库，按需建目录并执行迁移。
@@ -436,10 +441,12 @@ func (s *Store) InsertRequest(r *RequestRecord) error {
 func insertRequestTx(tx *sql.Tx, r *RequestRecord) error {
 	res, err := tx.Exec(`INSERT INTO requests
 		(ts, inbound, outbound, model_requested, model_used, account_id, http_status, ok,
-		 in_tokens, in_tokens_uncached, out_tokens, cache_read, cache_write, latency_ms, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 in_tokens, in_tokens_uncached, out_tokens, cache_read, cache_write,
+		 reasoning_tokens, reasoning_tokens_extra, latency_ms, error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.TS, r.Inbound, r.Outbound, r.ModelRequested, r.ModelUsed, r.AccountID, r.HTTPStatus, boolInt(r.OK),
-		r.InTokens, r.InTokensUncached, r.OutTokens, r.CacheRead, r.CacheWrite, r.LatencyMS, r.Error)
+		r.InTokens, r.InTokensUncached, r.OutTokens, r.CacheRead, r.CacheWrite,
+		r.ReasoningTokens, r.ReasoningTokensExtra, r.LatencyMS, r.Error)
 	if err != nil {
 		return err
 	}
@@ -453,7 +460,8 @@ func (s *Store) RecentRequests(limit int) ([]RequestRecord, error) {
 		limit = 20
 	}
 	rows, err := s.db.Query(`SELECT id, ts, inbound, outbound, model_requested, model_used, COALESCE(account_id, 0),
-		http_status, ok, in_tokens, in_tokens_uncached, out_tokens, cache_read, cache_write, latency_ms, COALESCE(error, '')
+		http_status, ok, in_tokens, in_tokens_uncached, out_tokens, cache_read, cache_write,
+		reasoning_tokens, reasoning_tokens_extra, latency_ms, COALESCE(error, '')
 		FROM requests ORDER BY ts DESC, id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -466,7 +474,7 @@ func (s *Store) RecentRequests(limit int) ([]RequestRecord, error) {
 		var ok int
 		if err := rows.Scan(&r.ID, &r.TS, &r.Inbound, &r.Outbound, &r.ModelRequested, &r.ModelUsed, &r.AccountID,
 			&r.HTTPStatus, &ok, &r.InTokens, &r.InTokensUncached, &r.OutTokens, &r.CacheRead, &r.CacheWrite,
-			&r.LatencyMS, &r.Error); err != nil {
+			&r.ReasoningTokens, &r.ReasoningTokensExtra, &r.LatencyMS, &r.Error); err != nil {
 			return nil, err
 		}
 		r.OK = ok == 1
@@ -497,17 +505,42 @@ func UncachedInTokens(outbound string, inTokens, cacheRead int64) int64 {
 	}
 }
 
+// ReasoningExtra 判定上游上报的思考 token 里有多少是「输出之外的一项」，入账时只给这一部分
+// 按输出价再计一次（DESIGN 5.5）。各家对「思考算不算输出」的做法不同，只能按上报的数字判，
+// 不按协议猜：
+//
+//   - total > in + out：思考是输出之外的一项。有的中转只把思考报在 reasoning_tokens 里、
+//     没有并进 completion_tokens，total 却是三者相加；不单独计价会漏掉九成以上的输出花费
+//     （实测一个 prompt=7、completion=1、total=132、reasoning=124 的中转，按 1 个输出 token 收费）。
+//   - total <= in + out：OpenAI 官方把 reasoning 当作 completion_tokens 的子集，已经算在输出里，
+//     再加一遍就是重复收费。
+//   - total 为 0（上游没报）：按子集处理，宁可少算一次也不重复计价。
+//
+// reasoning 原值仍然整列进 reasoning_tokens 供展示，判定只决定 extra 这一列，所以 0 值不丢信息。
+func ReasoningExtra(total, in, out, reasoning int64) int64 {
+	if reasoning <= 0 || total <= 0 {
+		return 0
+	}
+	if total > in+out {
+		return reasoning
+	}
+	return 0
+}
+
 // UsageRow 是一行用量汇总。
-// Cost 按 UncachedInTokens 归一化之后的输入、缓存读、缓存写与输出折价（见 DESIGN 5.5）：
-// 缓存单价未填时回退到输入价，账号一个价都没填时是 0。
+// Cost 按 UncachedInTokens 归一化之后的输入、缓存读、缓存写、输出与独立的思考 token 折价
+// （见 DESIGN 5.5）：缓存单价未填时回退到输入价，账号一个价都没填时是 0。
 type UsageRow struct {
-	Key        string
-	Requests   int64
-	InTokens   int64
-	OutTokens  int64
-	CacheRead  int64
-	CacheWrite int64
-	Cost       float64
+	Key       string
+	Requests  int64
+	InTokens  int64
+	OutTokens int64
+	// ReasoningTokens 是上游上报的思考 token 合计；只有其中被判定成输出之外一项的那部分
+	// 才进 Cost，见 ReasoningExtra。
+	ReasoningTokens int64
+	CacheRead       int64
+	CacheWrite      int64
+	Cost            float64
 }
 
 // Usage 按 dimension 汇总 since 之后的请求。dimension 取 account、model 或 day。
@@ -527,12 +560,14 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 	const join = "LEFT JOIN accounts a ON a.id = r.account_id"
 
 	q := fmt.Sprintf(`SELECT %s AS k, COUNT(*), COALESCE(SUM(r.in_tokens),0), COALESCE(SUM(r.out_tokens),0),
+		COALESCE(SUM(r.reasoning_tokens),0),
 		COALESCE(SUM(r.cache_read),0), COALESCE(SUM(r.cache_write),0),
 		COALESCE(SUM(
 			r.in_tokens_uncached * COALESCE(a.price_in,0)
 			+ r.cache_read * COALESCE(a.price_cache_read, a.price_in, 0)
 			+ r.cache_write * COALESCE(a.price_cache_write, a.price_in, 0)
 			+ r.out_tokens * COALESCE(a.price_out,0)
+			+ r.reasoning_tokens_extra * COALESCE(a.price_out,0)
 		) / 1e6, 0)
 		FROM requests r %s WHERE r.ts >= ? GROUP BY k ORDER BY 2 DESC`, expr, join)
 
@@ -545,7 +580,8 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 	var out []UsageRow
 	for rows.Next() {
 		var u UsageRow
-		if err := rows.Scan(&u.Key, &u.Requests, &u.InTokens, &u.OutTokens, &u.CacheRead, &u.CacheWrite, &u.Cost); err != nil {
+		if err := rows.Scan(&u.Key, &u.Requests, &u.InTokens, &u.OutTokens, &u.ReasoningTokens,
+			&u.CacheRead, &u.CacheWrite, &u.Cost); err != nil {
 			return nil, err
 		}
 		out = append(out, u)

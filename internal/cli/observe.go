@@ -54,13 +54,14 @@ func cmdUsage(e *Env, args []string) error {
 		out := make([]map[string]any, 0, len(rows))
 		for _, r := range rows {
 			out = append(out, map[string]any{
-				"key":         r.Key,
-				"requests":    r.Requests,
-				"in_tokens":   r.InTokens,
-				"out_tokens":  r.OutTokens,
-				"cache_read":  r.CacheRead,
-				"cache_write": r.CacheWrite,
-				"cost":        r.Cost,
+				"key":              r.Key,
+				"requests":         r.Requests,
+				"in_tokens":        r.InTokens,
+				"out_tokens":       r.OutTokens,
+				"reasoning_tokens": r.ReasoningTokens,
+				"cache_read":       r.CacheRead,
+				"cache_write":      r.CacheWrite,
+				"cost":             r.Cost,
 			})
 		}
 		return e.printJSON(out)
@@ -73,7 +74,7 @@ func cmdUsage(e *Env, args []string) error {
 
 	headerName := map[string]string{"account": "账号", "model": "模型", "day": "日期"}[*by]
 	table := make([][]string, 0, len(rows))
-	var totalReq, totalIn, totalOut, totalCacheRead, totalCacheWrite int64
+	var totalReq, totalIn, totalOut, totalReasoning, totalCacheRead, totalCacheWrite int64
 	var totalCost float64
 	for _, r := range rows {
 		table = append(table, []string{
@@ -81,6 +82,7 @@ func cmdUsage(e *Env, args []string) error {
 			fmt.Sprintf("%d", r.Requests),
 			fmt.Sprintf("%d", r.InTokens),
 			fmt.Sprintf("%d", r.OutTokens),
+			fmt.Sprintf("%d", r.ReasoningTokens),
 			fmt.Sprintf("%d", r.CacheRead),
 			fmt.Sprintf("%d", r.CacheWrite),
 			usage.Yuan(r.Cost),
@@ -88,6 +90,7 @@ func cmdUsage(e *Env, args []string) error {
 		totalReq += r.Requests
 		totalIn += r.InTokens
 		totalOut += r.OutTokens
+		totalReasoning += r.ReasoningTokens
 		totalCacheRead += r.CacheRead
 		totalCacheWrite += r.CacheWrite
 		totalCost += r.Cost
@@ -97,12 +100,13 @@ func cmdUsage(e *Env, args []string) error {
 		fmt.Sprintf("%d", totalReq),
 		fmt.Sprintf("%d", totalIn),
 		fmt.Sprintf("%d", totalOut),
+		fmt.Sprintf("%d", totalReasoning),
 		fmt.Sprintf("%d", totalCacheRead),
 		fmt.Sprintf("%d", totalCacheWrite),
 		usage.Yuan(totalCost),
 	})
 	fmt.Fprint(e.Stdout, renderTable(
-		[]string{headerName, "请求", "输入 token", "输出 token", "缓存读 token", "缓存写 token", "估算花费"}, table))
+		[]string{headerName, "请求", "输入 token", "输出 token", "思考 token", "缓存读 token", "缓存写 token", "估算花费"}, table))
 	if totalCost == 0 {
 		fmt.Fprintln(e.Stdout, "花费为 0：账号没定价，加账号时给 --price-in 与 --price-out（缓存单价可选，未填时回退输入价）")
 	}
@@ -232,19 +236,20 @@ func printRecords(e *Env, records []store.RequestRecord, names map[int64]string)
 		out := make([]map[string]any, 0, len(records))
 		for _, r := range records {
 			out = append(out, map[string]any{
-				"ts":          r.TS,
-				"inbound":     r.Inbound,
-				"outbound":    r.Outbound,
-				"model":       r.ModelRequested,
-				"account":     names[r.AccountID],
-				"http_status": r.HTTPStatus,
-				"ok":          r.OK,
-				"in_tokens":   r.InTokens,
-				"out_tokens":  r.OutTokens,
-				"cache_read":  r.CacheRead,
-				"cache_write": r.CacheWrite,
-				"latency_ms":  r.LatencyMS,
-				"error":       r.Error,
+				"ts":               r.TS,
+				"inbound":          r.Inbound,
+				"outbound":         r.Outbound,
+				"model":            r.ModelRequested,
+				"account":          names[r.AccountID],
+				"http_status":      r.HTTPStatus,
+				"ok":               r.OK,
+				"in_tokens":        r.InTokens,
+				"out_tokens":       r.OutTokens,
+				"reasoning_tokens": r.ReasoningTokens,
+				"cache_read":       r.CacheRead,
+				"cache_write":      r.CacheWrite,
+				"latency_ms":       r.LatencyMS,
+				"error":            r.Error,
 			})
 		}
 		return e.printJSON(out)
@@ -273,6 +278,7 @@ func printRecords(e *Env, records []store.RequestRecord, names map[int64]string)
 			status,
 			fmt.Sprintf("%d", r.InTokens),
 			fmt.Sprintf("%d", r.OutTokens),
+			fmt.Sprintf("%d", r.ReasoningTokens),
 			fmt.Sprintf("%d", r.CacheRead),
 			fmt.Sprintf("%d", r.CacheWrite),
 			fmt.Sprintf("%dms", r.LatencyMS),
@@ -280,7 +286,7 @@ func printRecords(e *Env, records []store.RequestRecord, names map[int64]string)
 		})
 	}
 	fmt.Fprint(e.Stdout, renderTable(
-		[]string{"时间", "协议", "模型", "账号", "状态", "输入", "输出", "缓存读", "缓存写", "耗时", "错误"}, rows))
+		[]string{"时间", "协议", "模型", "账号", "状态", "输入", "输出", "思考", "缓存读", "缓存写", "耗时", "错误"}, rows))
 	return nil
 }
 
