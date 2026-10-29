@@ -1,0 +1,33 @@
+{
+  "id": "resp_msg_1",
+  "model": "m1",
+  "object": "response",
+  "output": [
+    {
+      "summary": [
+        {
+          "text": "先算 6×7。",
+          "type": "summary_text"
+        }
+      ],
+      "type": "reasoning"
+    },
+    {
+      "content": [
+        {
+          "text": "42",
+          "type": "output_text"
+        }
+      ],
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "status": "completed",
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 5,
+    "total_tokens": 17
+  }
+}

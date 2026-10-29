@@ -1,0 +1,13 @@
+{
+  "from": "openai-chat",
+  "to": "openai-responses",
+  "kind": "request",
+  "body": {
+    "model": "m1",
+    "max_tokens": 256,
+    "messages": [
+      {"role": "user", "content": "6 乘 7 是多少"},
+      {"role": "assistant", "reasoning": "少数实现把思考正文写在 reasoning 字段。", "content": "42"}
+    ]
+  }
+}

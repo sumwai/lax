@@ -1,0 +1,18 @@
+{
+  "content": [
+    {
+      "text": "42",
+      "type": "text"
+    }
+  ],
+  "id": "resp_1",
+  "model": "m1",
+  "role": "assistant",
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "type": "message",
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 5
+  }
+}

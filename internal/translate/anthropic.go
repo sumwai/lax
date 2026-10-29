@@ -129,6 +129,18 @@ func DecodeAnthropicResponse(raw []byte, requestedModel string) (*Response, erro
 		switch b.Type {
 		case "text":
 			resp.Blocks = append(resp.Blocks, Block{Kind: BlockText, Text: b.Text})
+		case "thinking":
+			if b.Thinking == "" && b.Signature == "" {
+				continue
+			}
+			resp.Blocks = append(resp.Blocks, Block{Kind: BlockThinking, Thinking: &Thinking{
+				Text: b.Thinking, Signature: b.Signature,
+			}})
+		case "redacted_thinking":
+			if b.Data == "" {
+				continue
+			}
+			resp.Blocks = append(resp.Blocks, Block{Kind: BlockThinking, Thinking: &Thinking{Redacted: b.Data}})
 		case "tool_use":
 			input := b.Input
 			if len(input) == 0 {
@@ -162,6 +174,13 @@ func EncodeAnthropicResponse(r *Response) ([]byte, error) {
 		switch b.Kind {
 		case BlockText:
 			wire.Content = append(wire.Content, ContentBlock{Type: "text", Text: b.Text})
+		case BlockThinking:
+			if b.Thinking == nil {
+				continue
+			}
+			if blk, ok := anthropicThinkingBlock(*b.Thinking); ok {
+				wire.Content = append(wire.Content, blk)
+			}
 		case BlockToolUse:
 			if b.ToolUse == nil {
 				continue
@@ -193,6 +212,8 @@ func (d *anthropicStreamDecoder) Decode(data []byte) ([]Delta, error) {
 		Delta struct {
 			Type        string `json:"type"`
 			Text        string `json:"text"`
+			Thinking    string `json:"thinking"`
+			Signature   string `json:"signature"`
 			PartialJSON string `json:"partial_json"`
 			StopReason  string `json:"stop_reason"`
 		} `json:"delta"`
@@ -229,6 +250,10 @@ func (d *anthropicStreamDecoder) Decode(data []byte) ([]Delta, error) {
 		}
 	case "content_block_delta":
 		switch env.Delta.Type {
+		case "thinking_delta":
+			return []Delta{{Kind: DeltaThinking, Text: env.Delta.Thinking, Index: env.Index}}, nil
+		case "signature_delta":
+			return []Delta{{Kind: DeltaThinking, Signature: env.Delta.Signature, Index: env.Index}}, nil
 		case "text_delta":
 			return []Delta{{Kind: DeltaText, Text: env.Delta.Text, Index: env.Index}}, nil
 		case "input_json_delta":
@@ -309,6 +334,29 @@ func (e *anthropicStreamEncoder) Start() []SSEEvent {
 func (e *anthropicStreamEncoder) Emit(d Delta) []SSEEvent {
 	var events []SSEEvent
 	switch d.Kind {
+	case DeltaThinking:
+		// 思考正文与签名分两个 delta 到达，共用一个块；先开块再发增量。
+		if d.Text == "" && d.Signature == "" {
+			break
+		}
+		if e.openKind != BlockThinking {
+			e.closeBlock(&events)
+			e.startBlock(&events, ContentBlock{Type: "thinking"})
+		}
+		if d.Text != "" {
+			events = append(events, e.event("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": e.openIndex,
+				"delta": map[string]string{"type": "thinking_delta", "thinking": d.Text},
+			}))
+		}
+		if d.Signature != "" {
+			events = append(events, e.event("content_block_delta", map[string]any{
+				"type":  "content_block_delta",
+				"index": e.openIndex,
+				"delta": map[string]string{"type": "signature_delta", "signature": d.Signature},
+			}))
+		}
 	case DeltaText:
 		if e.openKind != BlockText {
 			e.closeBlock(&events)
@@ -398,8 +446,11 @@ func (e *anthropicStreamEncoder) startBlock(events *[]SSEEvent, block ContentBlo
 	e.openIndex = idx
 	e.openKind = BlockKind(block.Type)
 	var payload any = block
-	if block.Type == "text" {
+	switch block.Type {
+	case "text":
 		payload = map[string]any{"type": "text", "text": ""}
+	case "thinking":
+		payload = map[string]any{"type": "thinking", "thinking": ""}
 	}
 	*events = append(*events, e.event("content_block_start", map[string]any{
 		"type":          "content_block_start",
@@ -490,6 +541,18 @@ func anthropicMessage(m AnthropicMessage) (Message, error) {
 				Text:      toolResultText(b.Content),
 				IsError:   b.IsError,
 			}})
+		case "thinking":
+			if b.Thinking == "" && b.Signature == "" {
+				continue
+			}
+			msg.Blocks = append(msg.Blocks, Block{Kind: BlockThinking, Thinking: &Thinking{
+				Text: b.Thinking, Signature: b.Signature,
+			}})
+		case "redacted_thinking":
+			if b.Data == "" {
+				continue
+			}
+			msg.Blocks = append(msg.Blocks, Block{Kind: BlockThinking, Thinking: &Thinking{Redacted: b.Data}})
 		}
 	}
 	return msg, nil
@@ -502,6 +565,13 @@ func toAnthropicMessage(m Message) (AnthropicMessage, error) {
 		switch b.Kind {
 		case BlockText:
 			blocks = append(blocks, ContentBlock{Type: "text", Text: b.Text})
+		case BlockThinking:
+			if b.Thinking == nil {
+				continue
+			}
+			if blk, ok := anthropicThinkingBlock(*b.Thinking); ok {
+				blocks = append(blocks, blk)
+			}
 		case BlockImage:
 			if b.Image == nil {
 				continue
@@ -534,6 +604,19 @@ func toAnthropicMessage(m Message) (AnthropicMessage, error) {
 	}
 	out.Content = Content{Blocks: blocks}
 	return out, nil
+}
+
+// anthropicThinkingBlock 把思考块编成 anthropic 的 content block（DESIGN 5.4）。
+// redacted_thinking 的 data 原样写回；普通思考块没有签名就不写——伪造签名会让上游以
+// 400 拒绝整条请求，宁可丢掉这段正文。
+func anthropicThinkingBlock(t Thinking) (ContentBlock, bool) {
+	if t.Redacted != "" {
+		return ContentBlock{Type: "redacted_thinking", Data: t.Redacted}, true
+	}
+	if t.Text == "" || t.Signature == "" {
+		return ContentBlock{}, false
+	}
+	return ContentBlock{Type: "thinking", Thinking: t.Text, Signature: t.Signature}, true
 }
 
 // imageSource 把 data URI 或普通地址转成 anthropic 的 source 结构。

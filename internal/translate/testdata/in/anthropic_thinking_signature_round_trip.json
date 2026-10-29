@@ -1,0 +1,20 @@
+{
+  "from": "anthropic",
+  "to": "anthropic",
+  "kind": "response",
+  "model": "m1",
+  "body": {
+    "id": "msg_1",
+    "type": "message",
+    "role": "assistant",
+    "model": "upstream-model",
+    "content": [
+      {"type": "thinking", "thinking": "先算 6×7。", "signature": "sig-abc"},
+      {"type": "redacted_thinking", "data": "opaque-data"},
+      {"type": "text", "text": "42"}
+    ],
+    "stop_reason": "end_turn",
+    "stop_sequence": null,
+    "usage": {"input_tokens": 12, "output_tokens": 5}
+  }
+}

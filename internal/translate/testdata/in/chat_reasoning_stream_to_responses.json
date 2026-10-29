@@ -1,0 +1,14 @@
+{
+  "from": "openai-responses",
+  "to": "openai-chat",
+  "kind": "stream",
+  "model": "m1",
+  "frames": [
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"reasoning_content": "先算"}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"reasoning_content": " 6×7。"}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"content": "42"}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 12, "completion_tokens": 5}},
+    "[DONE]"
+  ]
+}

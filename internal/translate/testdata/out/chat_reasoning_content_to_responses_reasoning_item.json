@@ -1,0 +1,35 @@
+{
+  "input": [
+    {
+      "content": [
+        {
+          "text": "6 乘 7 是多少",
+          "type": "input_text"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    },
+    {
+      "summary": [
+        {
+          "text": "用户问乘法，先算 6×7=42。",
+          "type": "summary_text"
+        }
+      ],
+      "type": "reasoning"
+    },
+    {
+      "content": [
+        {
+          "text": "42",
+          "type": "output_text"
+        }
+      ],
+      "role": "assistant",
+      "type": "message"
+    }
+  ],
+  "max_output_tokens": 256,
+  "model": "m1"
+}

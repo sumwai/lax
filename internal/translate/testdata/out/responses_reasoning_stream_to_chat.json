@@ -1,0 +1,86 @@
+[
+  {
+    "data": {
+      "choices": [
+        {
+          "delta": {
+            "content": "",
+            "role": "assistant"
+          },
+          "finish_reason": null,
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-switchboard",
+      "model": "m1",
+      "object": "chat.completion.chunk"
+    }
+  },
+  {
+    "data": {
+      "choices": [
+        {
+          "delta": {
+            "reasoning_content": "先算 6×7。"
+          },
+          "finish_reason": null,
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-switchboard",
+      "model": "m1",
+      "object": "chat.completion.chunk"
+    }
+  },
+  {
+    "data": {
+      "choices": [
+        {
+          "delta": {
+            "content": "42"
+          },
+          "finish_reason": null,
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-switchboard",
+      "model": "m1",
+      "object": "chat.completion.chunk"
+    }
+  },
+  {
+    "data": {
+      "choices": [
+        {
+          "delta": {},
+          "finish_reason": "stop",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-switchboard",
+      "model": "m1",
+      "object": "chat.completion.chunk"
+    }
+  },
+  {
+    "data": {
+      "choices": [],
+      "created": 0,
+      "id": "chatcmpl-switchboard",
+      "model": "m1",
+      "object": "chat.completion.chunk",
+      "usage": {
+        "completion_tokens": 5,
+        "prompt_tokens": 12,
+        "total_tokens": 17
+      }
+    }
+  },
+  {
+    "data": "[DONE]"
+  }
+]

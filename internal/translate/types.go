@@ -45,6 +45,10 @@ type ContentBlock struct {
 	Content   json.RawMessage `json:"content,omitempty"`
 	IsError   bool            `json:"is_error,omitempty"`
 	Source    *ImageSource    `json:"source,omitempty"`
+	// 思考内容：thinking 块用 Thinking 与 Signature，redacted_thinking 块用 Data。
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	Data      string `json:"data,omitempty"`
 }
 
 // ImageSource 是 image 块的来源。
@@ -165,7 +169,11 @@ type ChatStreamOptions struct {
 
 // ChatMessage 是 openai-chat 的一条消息。
 type ChatMessage struct {
-	Role       string         `json:"role"`
+	Role string `json:"role"`
+	// ReasoningContent 是思考内容正文，主流实现在这里；编码时只写这个字段。
+	ReasoningContent string `json:"reasoning_content,omitempty"`
+	// Reasoning 只在解码时读：少数实现把同一段正文写在 reasoning 字段。
+	Reasoning  string         `json:"reasoning,omitempty"`
 	Content    any            `json:"content,omitempty"`
 	ToolCalls  []ChatToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
@@ -248,7 +256,9 @@ type ChatChunk struct {
 
 // ChatDelta 是增量内容。
 type ChatDelta struct {
-	Role      string         `json:"role,omitempty"`
-	Content   string         `json:"content,omitempty"`
-	ToolCalls []ChatToolCall `json:"tool_calls,omitempty"`
+	Role             string         `json:"role,omitempty"`
+	ReasoningContent string         `json:"reasoning_content,omitempty"`
+	Reasoning        string         `json:"reasoning,omitempty"`
+	Content          string         `json:"content,omitempty"`
+	ToolCalls        []ChatToolCall `json:"tool_calls,omitempty"`
 }

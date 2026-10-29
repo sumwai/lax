@@ -160,6 +160,11 @@ func DecodeChatResponse(raw []byte, requestedModel string) (*Response, error) {
 		out.Model = in.Model
 	}
 
+	// 思考内容先于正文：chat 的报文里 reasoning_content 与 content 是两个字段，
+	// 到达顺序丢失，统一按「先想后说」排。
+	if reasoning := chatReasoningText(choice.Message.ReasoningContent, choice.Message.Reasoning); reasoning != "" {
+		out.Blocks = append(out.Blocks, Block{Kind: BlockThinking, Thinking: &Thinking{Text: reasoning}})
+	}
 	if text := chatContentText(choice.Message.Content); text != "" {
 		out.Blocks = append(out.Blocks, Block{Kind: BlockText, Text: text})
 	}
@@ -192,10 +197,16 @@ func EncodeChatResponse(r *Response) ([]byte, error) {
 
 	msg := ChatMessage{Role: "assistant"}
 	var text strings.Builder
+	var reasoning strings.Builder
 	for i, b := range r.Blocks {
 		switch b.Kind {
 		case BlockText:
 			text.WriteString(b.Text)
+		case BlockThinking:
+			// chat 只有 reasoning_content 一个落点，签名与 redacted 没有地方放，丢弃。
+			if b.Thinking != nil && b.Thinking.Text != "" {
+				reasoning.WriteString(b.Thinking.Text)
+			}
 		case BlockToolUse:
 			if b.ToolUse == nil {
 				continue
@@ -222,6 +233,9 @@ func EncodeChatResponse(r *Response) ([]byte, error) {
 		}
 	}
 	msg.Content = text.String()
+	if r := reasoning.String(); r != "" {
+		msg.ReasoningContent = r
+	}
 
 	usage := chatUsageToWire(r.Usage)
 	out := ChatResponse{
@@ -280,6 +294,9 @@ func (d *chatStreamDecoder) Decode(data []byte) ([]Delta, error) {
 	for _, ch := range chunk.Choices {
 		if ch.Index != 0 {
 			continue
+		}
+		if reasoning := chatReasoningText(ch.Delta.ReasoningContent, ch.Delta.Reasoning); reasoning != "" {
+			out = append(out, Delta{Kind: DeltaThinking, Text: reasoning})
 		}
 		if ch.Delta.Content != "" {
 			out = append(out, Delta{Kind: DeltaText, Text: ch.Delta.Content})
@@ -379,6 +396,14 @@ func (e *chatStreamEncoder) Start() []SSEEvent {
 // Emit 把一条增量编成一帧或几帧。
 func (e *chatStreamEncoder) Emit(d Delta) []SSEEvent {
 	switch d.Kind {
+	case DeltaThinking:
+		// 签名在 chat 协议里没有落点，只有正文能写出去。
+		if d.Text == "" {
+			return nil
+		}
+		reasoning := d.Text
+		return []SSEEvent{e.choiceEvent(chatOutDelta{ReasoningContent: &reasoning}, nil)}
+
 	case DeltaText:
 		content := d.Text
 		return []SSEEvent{e.choiceEvent(chatOutDelta{Content: &content}, nil)}
@@ -507,9 +532,10 @@ type chatOutChoice struct {
 }
 
 type chatOutDelta struct {
-	Role      string         `json:"role,omitempty"`
-	Content   *string        `json:"content,omitempty"`
-	ToolCalls []ChatToolCall `json:"tool_calls,omitempty"`
+	Role             string         `json:"role,omitempty"`
+	ReasoningContent *string        `json:"reasoning_content,omitempty"`
+	Content          *string        `json:"content,omitempty"`
+	ToolCalls        []ChatToolCall `json:"tool_calls,omitempty"`
 }
 
 type chatStreamError struct {
@@ -585,9 +611,13 @@ func chatUserBlocks(content any) ([]Block, error) {
 	}
 }
 
-// chatAssistantBlocks 把 assistant 消息的文本与 tool_calls 转成内容块。
+// chatAssistantBlocks 把 assistant 消息的思考内容、文本与 tool_calls 转成内容块。
 func chatAssistantBlocks(m ChatMessage) ([]Block, error) {
-	blocks := chatTextBlocks(m.Content)
+	var blocks []Block
+	if reasoning := chatReasoningText(m.ReasoningContent, m.Reasoning); reasoning != "" {
+		blocks = append(blocks, Block{Kind: BlockThinking, Thinking: &Thinking{Text: reasoning}})
+	}
+	blocks = append(blocks, chatTextBlocks(m.Content)...)
 	for _, call := range m.ToolCalls {
 		input, err := chatArgumentsJSON(call.Function.Arguments)
 		if err != nil {
@@ -668,11 +698,17 @@ func chatMessagesFor(m Message) ([]ChatMessage, error) {
 
 	case RoleAssistant:
 		var text strings.Builder
+		var reasoning strings.Builder
 		var calls []ChatToolCall
 		for i, b := range m.Blocks {
 			switch b.Kind {
 			case BlockText:
 				text.WriteString(b.Text)
+			case BlockThinking:
+				// chat 只有 reasoning_content 一个落点，签名与 redacted 没有地方放，丢弃。
+				if b.Thinking != nil && b.Thinking.Text != "" {
+					reasoning.WriteString(b.Thinking.Text)
+				}
 			case BlockToolUse:
 				if b.ToolUse == nil {
 					continue
@@ -694,10 +730,10 @@ func chatMessagesFor(m Message) ([]ChatMessage, error) {
 				})
 			}
 		}
-		if text.Len() == 0 && len(calls) == 0 {
+		if text.Len() == 0 && len(calls) == 0 && reasoning.Len() == 0 {
 			return nil, nil
 		}
-		msg := ChatMessage{Role: "assistant", ToolCalls: calls}
+		msg := ChatMessage{Role: "assistant", ToolCalls: calls, ReasoningContent: reasoning.String()}
 		if t := text.String(); t != "" {
 			msg.Content = t
 		}
@@ -791,6 +827,15 @@ func chatJoinText(blocks []Block) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+// chatReasoningText 取思考内容正文。主流实现写在 reasoning_content，
+// 少数写在 reasoning；两个都读，同时出现时以前者为准（DESIGN 5.4）。
+func chatReasoningText(primary, compat string) string {
+	if primary != "" {
+		return primary
+	}
+	return compat
 }
 
 // chatArgumentsJSON 校验工具参数。空串按「没有参数」处理，等价于空对象。

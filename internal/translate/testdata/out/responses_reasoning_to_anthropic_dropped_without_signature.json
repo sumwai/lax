@@ -1,0 +1,24 @@
+{
+  "max_tokens": 256,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "6 乘 7 是多少",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "42",
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    }
+  ],
+  "model": "m1"
+}

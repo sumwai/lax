@@ -39,6 +39,7 @@ const (
 	BlockImage      BlockKind = "image"
 	BlockToolUse    BlockKind = "tool_use"
 	BlockToolResult BlockKind = "tool_result"
+	BlockThinking   BlockKind = "thinking"
 )
 
 // Block 是一块内容。按 Kind 取对应字段，其它字段为零值。
@@ -48,6 +49,17 @@ type Block struct {
 	Image      *Image
 	ToolUse    *ToolUse
 	ToolResult *ToolResult
+	Thinking   *Thinking
+}
+
+// Thinking 是一段思考内容（DESIGN 5.4）。
+// Text 是正文；Signature 是 anthropic 给出的签名，只有 anthropic 用得上，没有签名时
+// 不写进 anthropic 报文；Redacted 是 anthropic redacted_thinking 的不透明 data，
+// 同理只有 anthropic 能原样写回，编到另两条协议时丢弃。
+type Thinking struct {
+	Text      string
+	Signature string
+	Redacted  string
 }
 
 // Image 里存的是可直接放进请求的地址，http(s) 或 data URI。
@@ -132,6 +144,7 @@ type Response struct {
 type DeltaKind string
 
 const (
+	DeltaThinking  DeltaKind = "thinking"
 	DeltaText      DeltaKind = "text"
 	DeltaToolStart DeltaKind = "tool_start"
 	DeltaToolArgs  DeltaKind = "tool_args"
@@ -140,9 +153,12 @@ const (
 )
 
 // Delta 是流式过程中的一个增量。上游解码器产出它，客户端编码器消费它。
+// DeltaThinking 用 Text 与 Signature 两个字段：正文与签名分别到达，可能各占一个增量；
+// 只有 anthropic 给得出签名，其余两家的思考增量只有正文。
 type Delta struct {
 	Kind       DeltaKind
 	Text       string
+	Signature  string
 	Index      int
 	ToolID     string
 	ToolName   string

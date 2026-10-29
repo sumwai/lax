@@ -936,3 +936,58 @@ func TestChatUsageScannerEmpty(t *testing.T) {
 		t.Fatalf("空扫描器应全为 0，实际 %d/%d/%d/%d", in, out, cacheRead, cacheWrite)
 	}
 }
+
+func TestEncodeChatWritesReasoningContentOnly(t *testing.T) {
+	req := &Request{
+		Model: "m1",
+		Messages: []Message{
+			{Role: RoleUser, Blocks: []Block{{Kind: BlockText, Text: "问题"}}},
+			{Role: RoleAssistant, Blocks: []Block{
+				{Kind: BlockThinking, Thinking: &Thinking{Text: "想一下", Signature: "sig-abc", Redacted: "opaque"}},
+				{Kind: BlockText, Text: "答"},
+			}},
+		},
+	}
+	raw, err := EncodeChatRequest(req, "")
+	if err != nil {
+		t.Fatalf("编码请求: %v", err)
+	}
+	out := string(raw)
+	if !strings.Contains(out, `"reasoning_content":"想一下"`) {
+		t.Fatalf("思考正文应写进 reasoning_content：%s", out)
+	}
+	// 编码只认识 reasoning_content：reasoning、signature、redacted data 都不能出现在报文里。
+	for _, bad := range []string{`"reasoning":`, "sig-abc", "opaque"} {
+		if strings.Contains(out, bad) {
+			t.Fatalf("报文里不该出现 %q：%s", bad, out)
+		}
+	}
+}
+
+func TestDecodeChatReasoningOnlyMessage(t *testing.T) {
+	// 只有思考内容、没有正文的 assistant 消息也要保留，否则多轮里那段思考整块丢失。
+	raw := `{"model":"m1","messages":[
+	  {"role":"user","content":"问题"},
+	  {"role":"assistant","reasoning_content":"想一下"}
+	]}`
+	req, err := DecodeChatRequest([]byte(raw))
+	if err != nil {
+		t.Fatalf("解码请求: %v", err)
+	}
+	if len(req.Messages) != 2 || req.Messages[1].Role != RoleAssistant {
+		t.Fatalf("消息 = %+v", req.Messages)
+	}
+	b := req.Messages[1].Blocks
+	if len(b) != 1 || b[0].Kind != BlockThinking || b[0].Thinking.Text != "想一下" {
+		t.Fatalf("块 = %+v", b)
+	}
+
+	// 再编回 chat：仍然只有 reasoning_content。
+	out, err := EncodeChatRequest(req, "")
+	if err != nil {
+		t.Fatalf("编码请求: %v", err)
+	}
+	if !strings.Contains(string(out), `"reasoning_content":"想一下"`) {
+		t.Fatalf("报文 = %s", out)
+	}
+}

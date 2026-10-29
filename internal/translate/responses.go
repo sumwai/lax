@@ -35,11 +35,12 @@ type responsesTool struct {
 }
 
 // responsesInputItem 是 input 数组里的一项。content 可能是字符串或部件数组，
-// output 可能是字符串或部件数组，都先留原文。
+// output 可能是字符串或部件数组，reasoning item 的正文在 content 或 summary 里，都先留原文。
 type responsesInputItem struct {
 	Type      string          `json:"type"`
 	Role      string          `json:"role"`
 	Content   json.RawMessage `json:"content"`
+	Summary   json.RawMessage `json:"summary"`
 	CallID    string          `json:"call_id"`
 	Name      string          `json:"name"`
 	Arguments string          `json:"arguments"`
@@ -80,6 +81,7 @@ type responsesOutputItem struct {
 	Role      string                 `json:"role"`
 	Status    string                 `json:"status"`
 	Content   []responsesContentPart `json:"content"`
+	Summary   []responsesContentPart `json:"summary"`
 	CallID    string                 `json:"call_id"`
 	Name      string                 `json:"name"`
 	Arguments string                 `json:"arguments"`
@@ -266,8 +268,15 @@ func responsesAddInputItem(req *Request, item responsesInputItem) error {
 		})
 		return nil
 
+	case "reasoning":
+		// 思考内容先于正文进消息：报文里的先后已不可考，统一按「先想后说」排。
+		if text := responsesReasoningTextRaw(item.Content, item.Summary); text != "" {
+			responsesAddBlock(req, RoleAssistant, Block{Kind: BlockThinking, Thinking: &Thinking{Text: text}})
+		}
+		return nil
+
 	default:
-		// reasoning、item_reference 等第一版不支持，丢弃。
+		// item_reference 等第一版不支持，丢弃。
 		return nil
 	}
 }
@@ -350,6 +359,40 @@ func responsesImageURL(raw json.RawMessage) string {
 		return ""
 	}
 	return obj.URL
+}
+
+// responsesReasoningText 取 reasoning item 的正文：content 与 summary 里的文本都算，
+// 两处都有时 content 在前、summary 在后，用换行拼起来（DESIGN 5.4）。
+func responsesReasoningText(content, summary []responsesContentPart) string {
+	var parts []string
+	for _, group := range [][]responsesContentPart{content, summary} {
+		for _, p := range group {
+			if p.Text != "" {
+				parts = append(parts, p.Text)
+			}
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// responsesReasoningTextRaw 用于请求的 input item：content 与 summary 还是原始 JSON。
+func responsesReasoningTextRaw(content, summary json.RawMessage) string {
+	return responsesReasoningText(responsesParts(content), responsesParts(summary))
+}
+
+// responsesParts 解析部件数组，不是数组时返回 nil。
+// reasoning item 的部件有 reasoning_text 与 summary_text 两种，正文都在 text 字段，
+// 这里不看类型，其它字段一概不取。
+func responsesParts(raw json.RawMessage) []responsesContentPart {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '[' {
+		return nil
+	}
+	var parts []responsesContentPart
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return nil
+	}
+	return parts
 }
 
 // responsesOutputText 把 function_call_output 的 output 折成文本。
@@ -512,6 +555,12 @@ func responsesEncodeMessage(m Message) ([]any, error) {
 		switch b.Kind {
 		case BlockText:
 			parts = append(parts, map[string]any{"type": textType, "text": b.Text})
+		case BlockThinking:
+			if b.Thinking == nil || b.Thinking.Text == "" {
+				continue
+			}
+			flush()
+			items = append(items, responsesEncodeReasoning(*b.Thinking))
 		case BlockImage:
 			if b.Image == nil || b.Image.URL == "" {
 				continue
@@ -537,6 +586,18 @@ func responsesEncodeMessage(m Message) ([]any, error) {
 	}
 	flush()
 	return items, nil
+}
+
+// responsesEncodeReasoning 把思考内容编成 reasoning item。
+// 正文写在 summary 的 summary_text 里：content 里的 reasoning_text 要与 item id 和
+// encrypted_content 配套上游才认，这三样不搬，因此只写得出 summary 这一种形状。
+func responsesEncodeReasoning(t Thinking) map[string]any {
+	return map[string]any{
+		"type": "reasoning",
+		"summary": []any{
+			map[string]any{"type": "summary_text", "text": t.Text},
+		},
+	}
 }
 
 // responsesEncodeFunctionCall 把一个工具调用编成 function_call item。
@@ -597,6 +658,10 @@ func DecodeResponsesResponse(raw []byte, requestedModel string) (*Response, erro
 	hasToolUse := false
 	for i, item := range in.Output {
 		switch item.Type {
+		case "reasoning":
+			if text := responsesReasoningText(item.Content, item.Summary); text != "" {
+				out.Blocks = append(out.Blocks, Block{Kind: BlockThinking, Thinking: &Thinking{Text: text}})
+			}
 		case "message":
 			for _, part := range item.Content {
 				switch part.Type {
@@ -715,6 +780,12 @@ func EncodeResponsesResponse(r *Response) ([]byte, error) {
 		switch b.Kind {
 		case BlockText:
 			parts = append(parts, map[string]any{"type": "output_text", "text": b.Text})
+		case BlockThinking:
+			if b.Thinking == nil || b.Thinking.Text == "" {
+				continue
+			}
+			flush()
+			output = append(output, responsesEncodeReasoning(*b.Thinking))
 		case BlockToolUse:
 			if b.ToolUse == nil {
 				continue
@@ -787,6 +858,12 @@ func (d *responsesStreamDecoder) Decode(data []byte) ([]Delta, error) {
 	}
 
 	switch env.Type {
+	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+		if env.Delta == "" {
+			return nil, nil
+		}
+		return []Delta{{Kind: DeltaThinking, Text: env.Delta}}, nil
+
 	case "response.output_text.delta":
 		if env.Delta == "" {
 			return nil, nil
@@ -882,7 +959,8 @@ func (d *responsesStreamDecoder) Decode(data []byte) ([]Delta, error) {
 		return []Delta{{Kind: DeltaError, Text: text}}, nil
 
 	default:
-		// response.created、in_progress、content_part.*、reasoning 相关等忽略。
+		// response.created、in_progress、content_part.*、output_item.added(thinking) 等忽略：
+		// 思考正文由 reasoning_summary_text.delta 与 reasoning_text.delta 带过来。
 		return nil, nil
 	}
 }
@@ -918,24 +996,26 @@ func responsesStreamErrorText(resp *responsesResponse) string {
 
 // responsesStreamEncoder 把 IR 增量编成 Responses 的 SSE 事件。
 type responsesStreamEncoder struct {
-	model     string
-	id        string
-	seq       int
-	next      int
-	started   bool
-	finished  bool
-	sentStop  bool
-	textIndex int
-	toolIndex map[int]int
+	model         string
+	id            string
+	seq           int
+	next          int
+	started       bool
+	finished      bool
+	sentStop      bool
+	thinkingIndex int
+	textIndex     int
+	toolIndex     map[int]int
 }
 
 // newResponsesStreamEncoder 构造编码器。model 是客户端请求的模型名，会写回事件。
 func newResponsesStreamEncoder(model string) *responsesStreamEncoder {
 	return &responsesStreamEncoder{
-		model:     model,
-		id:        "resp_switchboard",
-		textIndex: -1,
-		toolIndex: map[int]int{},
+		model:         model,
+		id:            "resp_switchboard",
+		thinkingIndex: -1,
+		textIndex:     -1,
+		toolIndex:     map[int]int{},
 	}
 }
 
@@ -964,6 +1044,24 @@ func (e *responsesStreamEncoder) Emit(d Delta) []SSEEvent {
 
 	events := e.Start()
 	switch d.Kind {
+	case DeltaThinking:
+		// 思考正文单独占一个 output item，正文为空（只有签名）时没有可写的东西。
+		if d.Text == "" {
+			break
+		}
+		if e.thinkingIndex < 0 {
+			e.thinkingIndex = e.allocIndex()
+			events = append(events, e.event("response.output_item.added", map[string]any{
+				"output_index": e.thinkingIndex,
+				"item":         map[string]any{"type": "reasoning", "summary": []any{}},
+			}))
+		}
+		events = append(events, e.event("response.reasoning_summary_text.delta", map[string]any{
+			"output_index":  e.thinkingIndex,
+			"summary_index": 0,
+			"delta":         d.Text,
+		}))
+
 	case DeltaText:
 		if e.textIndex < 0 {
 			e.textIndex = e.allocIndex()

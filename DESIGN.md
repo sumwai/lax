@@ -233,7 +233,8 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | --- | --- |
 | `Request` | `Model`、`System`、`Messages`、`Tools`、`ToolChoice`、`ParallelToolCalls`、`MaxTokens`、`Temperature`、`TopP`、`Stop`、`Stream` |
 | `Message` | `Role` + `Blocks` |
-| `Block` | `text`、`image`、`tool_use`、`tool_result` |
+| `Block` | `text`、`image`、`tool_use`、`tool_result`、`thinking` |
+| `Thinking` | `Text`、`Signature`、`Redacted` |
 | `Response` | `ID`、`Model`、`Blocks`、`StopReason`、`Usage` |
 | `Usage` | `In`、`Out`、`CacheRead`、`CacheWrite` |
 
@@ -246,6 +247,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | system | 顶层 `system` 字段 | 首条 `role=system` 消息 | 顶层 `instructions` |
 | tool_use | assistant 消息里的 `tool_use` 块 | `tool_calls[]` | `function_call` item |
 | tool_result | user 消息里的 `tool_result` 块 | 独立 `role=tool` 消息 | `function_call_output` item |
+| 思考内容 | assistant 消息里的 `thinking` 块（带 `signature`）与 `redacted_thinking` 块（带 opaque `data`） | assistant 消息的 `reasoning_content`（少数实现把同一段正文写在 `reasoning`） | output 里的 `reasoning` item，正文在 `content` 或 `summary` 的文本里 |
 | 结束原因 | `end_turn` / `max_tokens` / `tool_use` / `stop_sequence` | `stop` / `length` / `tool_calls` | `completed` / `incomplete`（`max_output_tokens`） |
 | 流式事件 | 具名事件 `message_start`、`content_block_delta`、`message_stop` | 只有 `data` 帧，末尾 `[DONE]` | 具名事件 `response.created`、`response.output_text.delta`、`response.completed` |
 | 用量字段 | `input_tokens`、`output_tokens`、`cache_read_input_tokens`、`cache_creation_input_tokens` | `prompt_tokens`、`completion_tokens`、`prompt_tokens_details.cached_tokens` | `input_tokens`、`output_tokens`、`input_tokens_details.cached_tokens` |
@@ -257,7 +259,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 - 直通（入站协议 = 出站协议）：请求体只改 `model` 字段，其余字段与值原样保留，包括文档里没列出的陌生字段；响应体与流式帧按字节原样转发。读用量不改变转发内容，由该协议的 usage scanner 从响应体或流式帧里读，缓存字段也能读到。代价是只对同协议账号成立，好处是上游新加的字段与参数可以直接用。
 - 转换（入站协议 ≠ 出站协议）：解码成中间表示，再按目标协议编码，请求与响应都只搬表里定义过的字段。表里没有的字段丢弃，这是有意的：陌生字段跨协议搬过去只会变成语义错位。代价是改协议就意味着表外字段消失，新增映射必须同时补用例。
 
-流式在转换路径上走增量：上游帧先解码成 `text`、`tool_start`、`tool_args`、`stop`、`error` 增量，再由入站协议的编码器编成客户端事件。同协议直通时逐行转发原始字节，只用 scanner 记账。
+流式在转换路径上走增量：上游帧先解码成 `thinking`、`text`、`tool_start`、`tool_args`、`stop`、`error` 增量，再由入站协议的编码器编成客户端事件。同协议直通时逐行转发原始字节，只用 scanner 记账。
 
 两条路径判定断流用的是同一个判据：有没有见到上游的收尾帧。收尾帧按帧里的 `type` 字段或 SSE 的 `event` 名解析判定，不按字节子串——`{"type": "message_stop"}` 这种带空格、或者缩进成多行 `data` 行的合法帧同样是收尾帧。anthropic 认 `message_stop`，openai-chat 认 `[DONE]`，openai-responses 认 `response.completed`、`response.incomplete`、`response.failed`。
 
@@ -274,6 +276,8 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | `tool_result` 块 | 独立 `role=tool` 消息，`tool_call_id` 取 `tool_use_id` |
 | `image` 块（base64） | `image_url` 的 data URI |
 | `tools[].input_schema` | `tools[].function.parameters` |
+| assistant 消息里的 `thinking` 块 | 并进 assistant 消息的 `reasoning_content`，`signature` 丢弃（chat 没有放签名的字段） |
+| assistant 消息里的 `redacted_thinking` 块 | 丢弃（opaque `data` 只有 anthropic 认） |
 | `tool_choice` | `tool_choice`，`any` 映射为 `required` |
 | `max_tokens` | `max_tokens` |
 | `stop_sequences` | `stop` |
@@ -283,11 +287,20 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | `stop_reason=max_tokens` | `finish_reason=length` |
 | `usage.input_tokens` / `output_tokens` | `usage.prompt_tokens` / `completion_tokens` |
 
+思考内容的三条规则与它们的代价：
+
+- 思考块编到 anthropic 时必须有 `signature`，没有就整块不写（不是报错）。不伪造签名：anthropic 会以 400 拒绝整条请求，一次 400 比丢一段思考更贵。代价是 chat 与 responses 转进 anthropic 的非流式请求与响应里，思考内容整块消失。
+- `signature` 与 `redacted_thinking` 的 opaque `data` 只有 anthropic 有落点，编到另外两条协议时丢弃；反方向 chat、responses 的思考内容没有签名，转到 anthropic 时同样丢弃（见上一条）。中间表示里思考块只有一个种类（`BlockKind` 是 `thinking`），`Signature` 非空表示能写回 anthropic 的普通思考块，`Redacted` 非空表示只能写回 anthropic 的 `redacted_thinking`。
+- 流式是例外：增量一到就已经写给了客户端，撤不回来，所以 chat / responses → anthropic 的流里照发 `content_block_start(type=thinking)` 与 `thinking_delta`，只是不发 `signature_delta`。反过来 anthropic 的 `thinking_delta` 与 `signature_delta` 编成 chat 的 `delta.reasoning_content`（签名丢弃）、responses 的 `response.reasoning_summary_text.delta`。
+
+responses 的 `reasoning` item 在编码时把正文写进 `summary` 的 `summary_text`：`content` 里的 `reasoning_text` 要与 item 的 `id` 跟 `encrypted_content` 配套上游才认，这三样不搬，写 `summary` 是不伪造上游事实的写法；解码时两处的文本都读，`content` 在前、`summary` 在后，用换行拼起来。这条的形状是照 Responses 的对外报文推的，真实上游是否接受客户端回填的 `reasoning` item 还没实测（见第 10 节）。
+
 同一对协议间的流式映射（SSE）：
 
 | 上游 chat.completion.chunk | 下发给客户端 anthropic 事件 |
 | --- | --- |
 | 首块 | `message_start`（含空 content） |
+| `delta.reasoning_content` | `content_block_start(thinking)` 与 `content_block_delta(thinking_delta)` |
 | `delta.content` 首个非空 | `content_block_start(index=0, text)` |
 | 后续 `delta.content` | `content_block_delta(text_delta)` |
 | `delta.tool_calls[i]` 首个 | `content_block_start(tool_use)` 并分配 index |
@@ -513,7 +526,7 @@ CREATE TABLE provider_routes (
 | M9 | 厂商与路由进库：`providers` 与 `provider_routes`（迁移 `0006`），出站地址按 `(厂商, 协议)` 的 `path` 拼，模型列表按 `models_path` 取，探活候选协议按厂商声明过的路由收紧；没有厂商行的账号保留后缀猜测 | 空库跑到最新版本后种子逐行对上，11 条路由拼出的完整地址与 `models_path` 全部正确；deepseek 账号下 anthropic 模型打到 `/anthropic/v1/messages` 并带 `x-api-key`，chat 模型打到 `/v1/chat/completions` 并带 `Bearer`；只有一条路由的厂商探活失败时上游只收到一次请求，deepseek 试两条；`models_path` 为空时回退到同厂商第一条非空路径，全空时报错文案带「用 --models 手填」；自定义 `base_url` 且 `provider` 不在表里时仍按后缀猜测；空库跑到最新版本与从 `0006` 升级两条路径下，8 家的 `default_protocol` 逐行对上，显式默认优先于固定顺序兜底，deepseek 与 commandcode 的默认协议仍是 `openai-chat`（单靠协议名字典序会给 `anthropic`） |
 | M10 | 厂商命令面与模型列表路径：`provider add` 只新建、`provider set` 增量改（空值是用法错误，删除只在 `provider unset`）、默认协议按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 兜底，`models_path` 的写入默认值与厂商级覆盖（迁移 `0008`），模型列表的凭据头跟着取到路径的那条路由走，`model sync --endpoint`，`base_url` 校验下沉到 store，探活读库失败报错而不放宽候选协议 | 空库与从 `0007` 升级两条路径都到最新版本：升级后 `provider_routes.models_path` 还在、路由数据一个字段不动、`providers.models_path` 全场空串；`provider add` 重名报 `ErrProviderExists` 并提示 `provider set`，一条路由都不给报错；`provider set` 只改传入的字段，协议 flag 传空串是用法错误、删除走 `provider unset`，删到一条不剩报错，默认协议悬空整笔拒绝（同一次里一起改则放行）；`/v1/chat/completions` → `/v1/models`、`/chat/completions` → `/models`、anthropic 路由留空，重写内置 `anthropic` 厂商的 `/v1/messages` 之后它的 `/v1/models` 仍在；deepseek 的 anthropic 账号同步模型列表打到 `/v1/models` 并带 `Bearer`（不是 `x-api-key`）；`--endpoint /v1/model` 压过厂商覆盖与路由，`v1/model`、`//v1//model/` 这类写法被规整成同一个地址、不报错；默认协议显式优先、缺省按固定顺序、指不到路由拒绝、悬空的历史值按固定顺序回退 |
 | M11 | 端点两种写法的命令面与凭据轮换：`--anthropic`、`--openai`、`--responses`、`--models-path` 与 `model sync --endpoint` 一律收相对路径或整条地址，校验只有 `store.NormalizeEndpoint` 一份，cli 把它的错误包成用法错误；`account set --key`（`update` 同义）换凭据并在同一事务里清掉旧凭据的冷却与失败计数、重新启用账号；`serve` 增加两个只读的模型清单接口 `GET /v1/models` 与 `GET /v1/models/{id}`（见 5.2.1），清单取 `enabled=1` 账号的 `accounts.models`，按名字去重升序，`owned_by` 取厂商名 | `provider add` 用整条地址声明 openai 路由后，`provider ls --json` 的 `path` 就是整条地址，转发与 `model sync` 都打到那个 host、`base_url` 那台一次请求都不收；`https://`、`https:///x`、`ftp://host/x` 与空值在 add、set、`--models-path`、`--endpoint` 四处都退出码 2 且不落库；`model sync --endpoint <整条地址>` 打到该地址，下一轮回到路由的 `models_path`；`account set --key` 之后 `key_cipher` 变化、旧密文不再存在，`cooldown_until`、`fail_streak`、`last_error` 清零且 `enabled=1`，`accounts.models` 与 `account_models` 一个字段不动，新 key 能转发、`--json` 不含明文、`update` 与 `set` 输出一致；`account test` 对模型列表为空的账号退出码 0，用默认模型名探活且不 panic；`GET /v1/models` 对两个账号各自的模型去重后升序给出、同名模型取厂商名字典序第一个，停用账号的模型不出现、冷却中账号的模型出现，没有任何模型时是 200 加 `data:[]`；`GET /v1/models/{id}` 命中返回单个对象、未命中 404 且类型是 `not_found_error`；两个接口的非 GET 方法 405 并带 `Allow: GET`，不写 `requests` 行、不改账号状态，`/healthz` 与三条入站路径行为不变 |
-M0 到 M11 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkeleton` 用假上游验证：初始化、加账号、`call`、`log tail`、`usage`、`doctor` 全链路走通。协议矩阵由 `internal/gateway/matrix_test.go` 与 `matrix_stream_test.go` 验证：9 种组合的非流式与流式各跑一遍，同协议直通的「不改字节」「保留陌生字段」与跨协议的「丢弃陌生字段」单独有用例。协议降级到模型的那部分由 `internal/gateway` 的 `TestProbeModel*` 与 `TestForwardUsesModelProtocol` 验证，迁移兼容由 `internal/store` 的 `TestMigration0005*`、`TestMigration0006*`、`TestMigration0007*` 与 `TestMigrationsRunToLatestFromEmptyDB` 验证；厂商路由的解析、探活收紧与模型列表回退由 `internal/store` 的 `TestProvider*` 与 `internal/gateway` 的 `TestForwardUsesProviderRoute`、`TestEndpointFallsBackWithoutProviderRoute`、`TestProbeModelNarrowsCandidatesByProvider`、`TestProbeModelStartsFromDiscoveredProtocol`、`TestSyncModelsUsesProviderModelsPath`、`TestSyncModelsWithoutModelsPath` 验证。厂商写入口与模型列表路径由 `internal/store` 的 `TestCreateProvider*`、`TestSetProvider*`、`TestDeriveModelsPath`、`TestResolveModelsPath`、`TestRouteModelsPathDerivedOnWrite`、`TestStoreWritePathsValidateBaseURL`、`TestMigration0008*` 与 `internal/gateway` 的 `TestSyncModelsAuthFollowsModelsPathRoute`、`TestSyncModelsProviderModelsPathOverride`、`TestSyncModelsWithEndpointOverride`、`TestSyncModelsNoModelsPathAnywhere` 验证；路径与地址的规整由 `internal/store` 的 `TestNormalizePath`、`TestNormalizeBaseURL`、`TestCreateProviderNormalizesPaths`、`TestSetProviderNormalizesPaths` 与 `internal/gateway` 的 `TestJoinEndpoint` 验证；端点取值的两种写法（相对路径与整条地址）由 `internal/store` 的 `TestIsFullAddress`、`TestNormalizeEndpoint`、`TestDeriveModelsPathFullAddress`、`TestCreateProviderStoresFullAddressRoutes`、`TestSetProviderFullAddressRoutesAreIndependent`、`TestStoreWritePathsRejectBadFullAddress` 与 `internal/gateway` 的 `TestForwardUsesFullAddressRoute`、`TestForwardMixesFullAddressAndRelativeRoutes`、`TestSyncModelsFullAddressModelsPath`、`TestSyncModelsWithEndpointFullAddress`、`TestSyncModelsWithEndpointRejectsBadFullAddress` 验证；一次尝试的账与结论一起提交由 `internal/store` 的 `TestRecordAttemptWritesRowAndStateTogether` 验证；直通路径的断流结尾由 `internal/gateway` 的 `TestPassthroughStreamDisconnectKeepsLegalEnding`、`TestPassthroughCRLFTailStartsAtFrameBoundary` 逐协议验证，转换路径的干净截断与 responses 入站的 `response.failed` 由 `TestConversionStreamCleanTruncationIsFailure`、`TestConversionStreamResponsesInboundEndsFailed` 验证，收尾帧按 `type` 或 `event` 名判定（带空格、多行缩进、只写事件名）由 `TestPassthroughEndFrameShapeDoesNotMatter` 验证，完整流不被追加字节由 `TestProtocolMatrixStreaming` 的逐字节断言保证；端点两种写法在命令面上的行为与 `account set --key` 由 `internal/cli` 的 `TestProviderPathsAcceptFullAddress`、`TestProviderPathsRejectBadFullAddress`、`TestModelSyncEndpointFullAddress`、`TestModelSyncEndpointBadValues`、`TestAccountSetRotatesKey`、`TestAccountSetKeyFromStdin`、`TestAccountSetErrors`、`TestAccountSetJSONMasksKey`、`TestAccountUpdateIsSynonymForSet`、`TestAccountTestWithoutModels` 与 `internal/gateway` 的 `TestProbeEmptyModelsUsesFallbackModel`、`TestProbeEmptyModelsKeepsNoteOnFailure` 验证；模型清单接口由 `internal/gateway` 的 `TestModelsListDedupesSortsAndPicksOwner`、`TestModelsListSkipsDisabledKeepsCooling`、`TestModelsListEmpty`、`TestModelByIDHitAndMiss`、`TestModelByIDPathIsCleanedBeforeMatching`、`TestModelByIDDisabledOnlyModelIs404`、`TestModelsRejectNonGet`、`TestModelsEndpointsAreReadOnly`、`TestModelsEndpointsLeaveExistingRoutesAlone` 验证，三条入站路径 405 的 `Allow: POST` 由 `TestInboundRejectsOtherMethodsWithAllowPost` 验证。上游是 `httptest` 假服务，M5、M6、M7、M8、M9 与 M10 里涉及真实厂商的那部分需要拿到 key 后手工验收。
+M0 到 M11 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkeleton` 用假上游验证：初始化、加账号、`call`、`log tail`、`usage`、`doctor` 全链路走通。协议矩阵由 `internal/gateway/matrix_test.go` 与 `matrix_stream_test.go` 验证：9 种组合的非流式与流式各跑一遍，同协议直通的「不改字节」「保留陌生字段」与跨协议的「丢弃陌生字段」单独有用例。思考内容的映射与它的代价由 `internal/translate` 的 `TestGolden` 按 `testdata/in` 与 `testdata/out` 对拍：三对协议的请求、响应与流式都有用例，含带签名的往返与无签名时丢弃。协议降级到模型的那部分由 `internal/gateway` 的 `TestProbeModel*` 与 `TestForwardUsesModelProtocol` 验证，迁移兼容由 `internal/store` 的 `TestMigration0005*`、`TestMigration0006*`、`TestMigration0007*` 与 `TestMigrationsRunToLatestFromEmptyDB` 验证；厂商路由的解析、探活收紧与模型列表回退由 `internal/store` 的 `TestProvider*` 与 `internal/gateway` 的 `TestForwardUsesProviderRoute`、`TestEndpointFallsBackWithoutProviderRoute`、`TestProbeModelNarrowsCandidatesByProvider`、`TestProbeModelStartsFromDiscoveredProtocol`、`TestSyncModelsUsesProviderModelsPath`、`TestSyncModelsWithoutModelsPath` 验证。厂商写入口与模型列表路径由 `internal/store` 的 `TestCreateProvider*`、`TestSetProvider*`、`TestDeriveModelsPath`、`TestResolveModelsPath`、`TestRouteModelsPathDerivedOnWrite`、`TestStoreWritePathsValidateBaseURL`、`TestMigration0008*` 与 `internal/gateway` 的 `TestSyncModelsAuthFollowsModelsPathRoute`、`TestSyncModelsProviderModelsPathOverride`、`TestSyncModelsWithEndpointOverride`、`TestSyncModelsNoModelsPathAnywhere` 验证；路径与地址的规整由 `internal/store` 的 `TestNormalizePath`、`TestNormalizeBaseURL`、`TestCreateProviderNormalizesPaths`、`TestSetProviderNormalizesPaths` 与 `internal/gateway` 的 `TestJoinEndpoint` 验证；端点取值的两种写法（相对路径与整条地址）由 `internal/store` 的 `TestIsFullAddress`、`TestNormalizeEndpoint`、`TestDeriveModelsPathFullAddress`、`TestCreateProviderStoresFullAddressRoutes`、`TestSetProviderFullAddressRoutesAreIndependent`、`TestStoreWritePathsRejectBadFullAddress` 与 `internal/gateway` 的 `TestForwardUsesFullAddressRoute`、`TestForwardMixesFullAddressAndRelativeRoutes`、`TestSyncModelsFullAddressModelsPath`、`TestSyncModelsWithEndpointFullAddress`、`TestSyncModelsWithEndpointRejectsBadFullAddress` 验证；一次尝试的账与结论一起提交由 `internal/store` 的 `TestRecordAttemptWritesRowAndStateTogether` 验证；直通路径的断流结尾由 `internal/gateway` 的 `TestPassthroughStreamDisconnectKeepsLegalEnding`、`TestPassthroughCRLFTailStartsAtFrameBoundary` 逐协议验证，转换路径的干净截断与 responses 入站的 `response.failed` 由 `TestConversionStreamCleanTruncationIsFailure`、`TestConversionStreamResponsesInboundEndsFailed` 验证，收尾帧按 `type` 或 `event` 名判定（带空格、多行缩进、只写事件名）由 `TestPassthroughEndFrameShapeDoesNotMatter` 验证，完整流不被追加字节由 `TestProtocolMatrixStreaming` 的逐字节断言保证；端点两种写法在命令面上的行为与 `account set --key` 由 `internal/cli` 的 `TestProviderPathsAcceptFullAddress`、`TestProviderPathsRejectBadFullAddress`、`TestModelSyncEndpointFullAddress`、`TestModelSyncEndpointBadValues`、`TestAccountSetRotatesKey`、`TestAccountSetKeyFromStdin`、`TestAccountSetErrors`、`TestAccountSetJSONMasksKey`、`TestAccountUpdateIsSynonymForSet`、`TestAccountTestWithoutModels` 与 `internal/gateway` 的 `TestProbeEmptyModelsUsesFallbackModel`、`TestProbeEmptyModelsKeepsNoteOnFailure` 验证；模型清单接口由 `internal/gateway` 的 `TestModelsListDedupesSortsAndPicksOwner`、`TestModelsListSkipsDisabledKeepsCooling`、`TestModelsListEmpty`、`TestModelByIDHitAndMiss`、`TestModelByIDPathIsCleanedBeforeMatching`、`TestModelByIDDisabledOnlyModelIs404`、`TestModelsRejectNonGet`、`TestModelsEndpointsAreReadOnly`、`TestModelsEndpointsLeaveExistingRoutesAlone` 验证，三条入站路径 405 的 `Allow: POST` 由 `TestInboundRejectsOtherMethodsWithAllowPost` 验证。上游是 `httptest` 假服务，M5、M6、M7、M8、M9 与 M10 里涉及真实厂商的那部分需要拿到 key 后手工验收。
 
 已知未做，按已知行为处理：
 
@@ -522,8 +535,11 @@ M0 到 M11 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkel
 - 不带任何客户端配置改写：客户端里的 base URL、token、模型名都靠自己填。
 - 探活并发默认 4，`--concurrency` 可以改，只是默认值，不会根据上游限速自适应。
 - gemini 协议进出都没有实现：既没有入站路径，也不在账号的 `protocol` 可选值里，`provider add/set` 也没有 `--gemini`——留一条永远用不上的路由只会误导。
-- 思考与推理内容在转换时丢弃：anthropic 的 `thinking` 块、chat 的 `reasoning_content`、responses 的 `reasoning` item 都不进中间表示。
-- 音频与文件类内容丢弃，只搬运文本、图片、工具调用与工具结果四类块。
+- 思考配置参数不进中间表示：anthropic 顶层的 `thinking`、chat 的 `reasoning_effort`（以及 `reasoning` 对象）只在同协议直通时原样保留，跨协议时丢弃。请求侧参数决定「要不要思考」，与某条消息里已有的思考内容不是一件事，映射表只搬后者。
+- 流式转换下发给 anthropic 客户端的 `thinking` 块没有 `signature`：上游不是 anthropic 时给不出签名。客户端若把这些块回填到下一轮请求，anthropic 上游会以 400 拒绝；非流式不写无签名的思考块（见 5.4），两条路径的代价不一样，因为流式的增量写出后撤不回来。
+- reasoning token 不单独记账：`requests` 表没有对应的列，思考内容只算进各协议上报的输出 token。
+- responses 的 `encrypted_content` 与 reasoning item 的 `id` 不搬：它们只有原厂商的上游认，搬过去只会让上游拒收。
+- 音频与文件类内容丢弃，只搬运文本、图片、思考内容、工具调用与工具结果五类块。
 - responses 的内置工具（`web_search` 等）丢弃，工具定义只认 function。
 - 跨协议只做图片地址的搬运，没有图片转写以外的多模态变换。
 - 路径里 `//` 有真实含义的上游（少数 CDN 风格端点）目前无法表达：`store.NormalizePath` 会把连续斜杠折叠成一条，`provider add/set` 写进去的 `//` 落库就只剩一个 `/`；整条地址的路径部分（`https://host//a//b`）也过同一套折叠，同样表达不了这种路径（查询串与 `#` 之后不在折叠范围内）。
@@ -565,3 +581,4 @@ internal/usage/         用量汇总与花费估算
 - 各家上游的默认 base-url 与各协议的路径不再需要外部信息：迁移 `0006` 把已知厂商种进 `providers` 与 `provider_routes`，以后用 `provider ls|add|set|rm` 维护，新增厂商不必改代码重编译。新厂商的 `path` 要以它的文档为准：它是完整路径，程序只在 `base_url` 去掉末尾斜杠后直接拼接，不做补全；也可以写整条地址（含 `://`），此时直接用它、不再拼 `base_url`，同一厂商的不同协议因此可以落在不同域名上；模型列表路径没给时只给 openai-chat 路由按 `/chat/completions` → `/models` 推导；写法不同的上游用 `provider set --models-path` 给厂商级覆盖，路由级的值只由写入时推导产生，命令面不提供手工写入口。
 - 各家模型名清单，以及某家是否兼容 `openai-chat`。
 - 各家价格，用于估算花费。缺价格就记 null。
+- 哪些上游接受客户端回填的 `reasoning` item：现在转换时把思考正文写进 `summary` 的 `summary_text`，不带 `id` 与 `encrypted_content`（见 5.4），没有实测过哪几家收、哪几家报错。要定这条需要拿带推理的模型的真实 key 打 `/v1/responses`，分别试带 `summary`、带 `content` 与两者都带三种形状，看哪种返回 200。

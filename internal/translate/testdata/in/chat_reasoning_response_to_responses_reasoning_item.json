@@ -1,0 +1,19 @@
+{
+  "from": "openai-responses",
+  "to": "openai-chat",
+  "kind": "response",
+  "model": "m1",
+  "body": {
+    "id": "c1",
+    "object": "chat.completion",
+    "model": "upstream-model",
+    "choices": [
+      {
+        "index": 0,
+        "message": {"role": "assistant", "reasoning_content": "先算 6×7。", "content": "42"},
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {"prompt_tokens": 12, "completion_tokens": 5}
+  }
+}

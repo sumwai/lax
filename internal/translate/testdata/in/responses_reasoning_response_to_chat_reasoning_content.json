@@ -1,0 +1,27 @@
+{
+  "from": "openai-chat",
+  "to": "openai-responses",
+  "kind": "response",
+  "model": "m1",
+  "body": {
+    "id": "resp_1",
+    "object": "response",
+    "status": "completed",
+    "model": "upstream-model",
+    "output": [
+      {
+        "id": "rs_1",
+        "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": "先算 6×7。"}]
+      },
+      {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": "42"}]
+      }
+    ],
+    "usage": {"input_tokens": 12, "output_tokens": 5}
+  }
+}

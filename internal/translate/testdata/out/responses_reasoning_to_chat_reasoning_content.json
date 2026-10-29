@@ -1,0 +1,15 @@
+{
+  "max_tokens": 256,
+  "messages": [
+    {
+      "content": "6 乘 7 是多少",
+      "role": "user"
+    },
+    {
+      "content": "42",
+      "reasoning_content": "先算 6×7。",
+      "role": "assistant"
+    }
+  ],
+  "model": "m1"
+}

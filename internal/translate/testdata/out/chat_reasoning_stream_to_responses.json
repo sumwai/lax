@@ -1,0 +1,77 @@
+[
+  {
+    "data": {
+      "response": {
+        "id": "resp_switchboard",
+        "model": "m1",
+        "object": "response",
+        "output": [],
+        "status": "in_progress"
+      },
+      "sequence_number": 0,
+      "type": "response.created"
+    },
+    "event": "response.created"
+  },
+  {
+    "data": {
+      "item": {
+        "summary": [],
+        "type": "reasoning"
+      },
+      "output_index": 0,
+      "sequence_number": 1,
+      "type": "response.output_item.added"
+    },
+    "event": "response.output_item.added"
+  },
+  {
+    "data": {
+      "delta": "先算",
+      "output_index": 0,
+      "sequence_number": 2,
+      "summary_index": 0,
+      "type": "response.reasoning_summary_text.delta"
+    },
+    "event": "response.reasoning_summary_text.delta"
+  },
+  {
+    "data": {
+      "delta": " 6×7。",
+      "output_index": 0,
+      "sequence_number": 3,
+      "summary_index": 0,
+      "type": "response.reasoning_summary_text.delta"
+    },
+    "event": "response.reasoning_summary_text.delta"
+  },
+  {
+    "data": {
+      "content_index": 0,
+      "delta": "42",
+      "output_index": 1,
+      "sequence_number": 4,
+      "type": "response.output_text.delta"
+    },
+    "event": "response.output_text.delta"
+  },
+  {
+    "data": {
+      "response": {
+        "id": "resp_switchboard",
+        "model": "m1",
+        "object": "response",
+        "output": [],
+        "status": "completed",
+        "usage": {
+          "input_tokens": 12,
+          "output_tokens": 5,
+          "total_tokens": 17
+        }
+      },
+      "sequence_number": 5,
+      "type": "response.completed"
+    },
+    "event": "response.completed"
+  }
+]
