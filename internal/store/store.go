@@ -577,7 +577,8 @@ func ReasoningExtra(total, in, out, reasoning int64) int64 {
 
 // UsageRow 是一行用量汇总。
 // Cost 按 UncachedInTokens 归一化之后的输入、缓存读、缓存写、输出与独立的思考 token 折价
-// （见 DESIGN 5.5）：缓存单价未填时回退到输入价，账号一个价都没填时是 0。
+// （见 DESIGN 5.5）：单价按「这一行的账号 + 这一行的 model_used」现算，取值链见
+// usagePriceIn 那一组常量；缓存单价未填时回退到输入价，整条链都没有价时是 0。
 type UsageRow struct {
 	Key       string
 	Requests  int64
@@ -592,6 +593,7 @@ type UsageRow struct {
 }
 
 // Usage 按 dimension 汇总 since 之后的请求。dimension 取 account、model 或 day。
+// 每行花费按它自己的账号与 model_used 现算单价，见 usagePriceIn 那一组常量。
 func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 	var expr string
 	switch dimension {
@@ -605,19 +607,20 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 		return nil, fmt.Errorf("不支持的维度 %q，可用 account、model、day", dimension)
 	}
 
-	const join = "LEFT JOIN accounts a ON a.id = r.account_id"
-
+	// 单价按行现算：账号 + 模型 → 目录标价 → 账号旧价（见 usagePriceIn 与 usagePriceJoin）。
+	// 不把单价快照进 requests：改价之后历史行按新价重算，与账号级价格时的行为一致。
 	q := fmt.Sprintf(`SELECT %s AS k, COUNT(*), COALESCE(SUM(r.in_tokens),0), COALESCE(SUM(r.out_tokens),0),
 		COALESCE(SUM(r.reasoning_tokens),0),
 		COALESCE(SUM(r.cache_read),0), COALESCE(SUM(r.cache_write),0),
 		COALESCE(SUM(
-			r.in_tokens_uncached * COALESCE(a.price_in,0)
-			+ r.cache_read * COALESCE(a.price_cache_read, a.price_in, 0)
-			+ r.cache_write * COALESCE(a.price_cache_write, a.price_in, 0)
-			+ r.out_tokens * COALESCE(a.price_out,0)
-			+ r.reasoning_tokens_extra * COALESCE(a.price_out,0)
+			r.in_tokens_uncached * COALESCE(%s,0)
+			+ r.cache_read * COALESCE(%s,0)
+			+ r.cache_write * COALESCE(%s,0)
+			+ r.out_tokens * COALESCE(%s,0)
+			+ r.reasoning_tokens_extra * COALESCE(%s,0)
 		) / 1e6, 0)
-		FROM requests r %s WHERE r.ts >= ? GROUP BY k ORDER BY 2 DESC`, expr, join)
+		FROM requests r %s WHERE r.ts >= ? GROUP BY k ORDER BY 2 DESC`,
+		expr, usagePriceIn, usagePriceCacheRead, usagePriceCacheWrite, usagePriceOut, usagePriceOut, usagePriceJoin)
 
 	rows, err := s.db.Query(q, since)
 	if err != nil {
