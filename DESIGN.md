@@ -209,7 +209,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | openai-chat | `{"error":{"message":"…","type":"…","param":null,"code":null}}` | OpenAI 的取值：`invalid_request_error`、`not_found_error`、`authentication_error`、`permission_error`、`server_error`、`rate_limit_exceeded` |
 | openai-responses | 与 openai-chat 同形，同样是 `message`、`type`、`param`、`code` 四个字段 | 同上 |
 | gemini | `{"error":{"code":<HTTP 状态码整数>,"message":"…","status":"<google 的状态名>"}}` | `status` 按状态码映射：400 `INVALID_ARGUMENT`、401 `UNAUTHENTICATED`、403 `PERMISSION_DENIED`、404 `NOT_FOUND`、405 `UNIMPLEMENTED`、429 `RESOURCE_EXHAUSTED`、500 `INTERNAL`、503 `UNAVAILABLE`，其余 `UNKNOWN` |
-| systemone | `{"detail": {"message":"…","type":"…"}}` | `type` 与 anthropic 那套同名（`invalid_request_error`、`not_found_error`、`authentication_error`、`permission_error`、`rate_limit_error`、`api_error`）；`detail` 用对象而不是纯字符串，好在留下类型的同时不改 TypeSafe SDK 读 `detail` 的习惯（见 5.14） |
+| systemone | `{"detail":{"error_type":"…","message":"…"}}` | `error_type` 取上游自己那套名字：`invalid_request_error`、`not_found_error`、`authentication_error`、`permission_error`、`rate_limit_error`、`api_error`；字段名是 `error_type` 而不是 `type`，与 TypeSafe API 实测一致（见 5.14） |
 
 几条边界：
 
@@ -800,7 +800,8 @@ TypeSafe 的 System One（Jev）不是对话：输入一个 `state` 加一组带
 | 最少校验 | `model` 非空且是字符串、`questions` 是非空对象；其余字段交给上游（32 MiB、64 层嵌套、有限数这些规则在上游，不在本机复制一份） |
 | 流式 | 不支持。请求体带 `"stream": true` 时 400，文案说明这条协议没有流式、把请求体改回非流式：静默当同步会让等 SSE 的客户端挂到超时 |
 | 响应 | 直通，不改 `model`（5.12 的响应不改名同样适用）；`usage.input_tokens` 与 `usage.output_tokens` 写进请求记录，没有缓存与思考字段，输入 token 按不含缓存处理（`store.UncachedInTokens` 的默认分支，见 5.5） |
-| 错误体 | `{"detail": {"message": "…", "type": "…"}}`：这条协议真实的客户端是 TypeSafe 的 SDK，它读 `detail`；`detail` 用对象而不是纯字符串，好在留下类型的同时不改 SDK 的读法。HTTP 状态码与其它入站一致（400、413、401、403、404、429、503） |
+| 错误体 | `{"detail":{"error_type":"…","message":"…"}}`，形状照 TypeSafe 实测：这条协议真实的客户端是 TypeSafe 的 SDK，它读 `detail`。字段名是 `error_type` 不是 `type`；`detail` 用对象而不是纯字符串，好在留下类型的同时不改 SDK 的读法。取值：`invalid_request_error`（400、413）、`authentication_error`（401）、`permission_error`（403）、`not_found_error`（404）、`rate_limit_error`（429）、`api_error`（5xx）。上游自己的 `422` 与校验错误正文（`detail` 是数组）原样透传，不重新包装 |
+| 上游会把模型名解析成版本 | 请求 `model` 写 `jev-latest` 时，上游返回的 `model` 是 `jev-1.14.0`。响应体字节原样透传，我们不改写，也不把上游的这次解析写进 `model_used`：那一列记的是我们送去上游的名字 |
 | 探活 | systemone 模型的探活不是 `max_tokens=1` 的对话请求，而是一条最小决策请求：`state` 为 `ping`、一个问题 `{"ok":{"type":"noul","instructions":"Is this text present?"}}`；2xx 即 `allowed`，其余判定与 5.7 相同。一种模型的有效出站协议是 systemone 时，探活只能走这条路——对它发对话请求只会拿到 404 |
 | 同步 | `supported_endpoints` 里的 `/systemone` 折成 `systemone`（映射表见 5.7）；但 commandcode 的清单不列决策模型，`typesafe/jev` 一类的名字只能手工声明（`account add --models`） |
 | 别名与选号 | 与其余四条一致：别名解析在请求入口做一次（见 5.12），选号只读 `access='allowed'`（见 5.13） |
