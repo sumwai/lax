@@ -696,15 +696,26 @@ gemini 的原生接口（Generative Language API 的 `generateContent`）与另�
 - 单个头值超过 8KB 时丢弃整个头并记一行日志（头名与长度，不记值）：异常客户端把一个头写爆不应该变成上游的 431。
 - 透传的头不进 `requests` 记录：它们对排查没有价值，落库只会把客户端带的东西搬进本机数据库。
 
+### 5.12 模型别名
+
+客户端的模型名往往写死（`claude-3-5-sonnet`、`gpt-4o`），而账号声明的是上游的真实名字（`glm-4.6`、`gemini-3.8-flash`）。别名表让客户端继续用自己认识的名字，不必改客户端、也不必给账号编假模型名。
+
+- 存储：迁移 `0013` 的 `model_aliases(alias TEXT PRIMARY KEY, target TEXT NOT NULL, created_at INTEGER NOT NULL)`，全局一张表，不按账号分。按账号分会让同一个别名在不同厂商下指向不同模型，客户端拿到的名字就不再稳定；要按厂商区分就写两个别名（`fast-openai`、`fast-glm`）。
+- 匹配：精确匹配，区分大小写，不做通配、不做前缀归一。别名可以指向另一个别名，解析沿链走，最长 8 跳：8 跳是「别名 → … → 真实名字」的边数，走满 8 跳落到真实名字算解析成功，第 9 跳落到仍是别名的名字上报错。成环与超长是两种错误，都带上是哪几条串在一起；解析逻辑只有一份，调用方只问一次，不自己走链。解析结果就是「真实模型名」。
+- 写入校验：别名与目标都去首尾空白后不能为空、不能含控制字符（它们会原样进请求体与路径，也能进日志与表格），落库的就是去空白之后的值；别名不能等于目标（含去空白之后相等）；别名不能与任何账号已知的真实模型名同名，否则会遮蔽真名，客户端请求那个名字时行为会随账号增减而变。冲突判定看 `accounts.models` 这份 JSON 数组解析出来的名字集合，区分大小写的精确匹配，不看 `account_models`（那是探活结论，新账号同步前为空）。目标可以暂时没有任何账号提供，之后加账号即可生效。
+- 请求处理：拿到入站模型名后先解析别名，之后的选号、路由占位符、请求体里的 `model`、路径里的模型名全部用解析后的真实名字。`requests` 两列正好分工：`model_requested` 记客户端给的名字（别名），`model_used` 记解析后的真实名字；`log tail` 两列不同时能看出一次别名命中。
+- 404 文案：别名解析出的目标没有账号提供时，消息写明「别名 X 指向 Y，但没有账号提供 Y；用 switchboard model ls 看清单」，不要只说「没有账号提供 X」，否则用户会去清单里找一个永远不存在的名字。
+- 响应里的模型名不改：别名只影响请求方向。直通路径现在把上游响应按字节转发（有用例逐字节断言，流式尤其），为一个字段重编码整帧的代价与风险都高于收益；响应里的 `model` 因此是上游的真实名字。跨协议转换时同理，转换后的响应里也写真实名字。
+- `/v1/models` 与 `/v1/models/{id}`：清单里同时列出真实名字与别名。别名条目的 `id` 是别名，`owned_by` 取提供一个目标的厂商（多个时按现有规则取厂商名字典序第一个），`created` 仍是 0；两条都出现时客户端两个名字都能用。别名解析不到目标时不在清单里出现：清单反映「现在能接的名字」，解析不到的名字接不了。`/v1/models/{id}` 用别名查得到同一条目。
+- 命令行：`model alias set <别名> <目标>`（覆盖语义）、`model alias unset <别名>`、`model alias ls`（`--json` 输出别名与目标）。三条都在参数层做上面的校验，退出码与非空校验沿用现有约定。
+
 ## 6 数据模型
 
 ```sql
 CREATE TABLE accounts (
   id             INTEGER PRIMARY KEY,
   name           TEXT    NOT NULL UNIQUE,
-  provider       TEXT    NOT NULL,
-  protocol       TEXT    NOT NULL,
-  base_url       TEXT    NOT NULL,
+  provider       TEXT    NOT NULL,           -- 只存名字：地址、默认协议、路由都在 providers 上
   key_cipher     BLOB    NOT NULL,
   models         TEXT    NOT NULL DEFAULT '[]',
   price_in       REAL,
@@ -776,6 +787,11 @@ CREATE TABLE provider_headers (
   value    TEXT NOT NULL,                   -- 字面量，或 {env:…}、{session}、{model} 占位符（见 5.10）
   PRIMARY KEY (provider, protocol, name)
 );
+CREATE TABLE model_aliases (
+  alias          TEXT    PRIMARY KEY,
+  target         TEXT    NOT NULL,
+  created_at     INTEGER NOT NULL
+);
 ```
 
 `account_models` 由迁移 `0003` 建立，`status` 取值就是 `synced`、`usable`、`forbidden`、`notfound`、`auth`、`error`（见 5.7）。`accounts.fail_streak` 由迁移 `0004` 加入，只用于冷却翻倍，写入口只有 `RecordFailure`（加一）、`ClearFailure`（清零）与 `RotateKey`（换凭据时清零，见 5.6）。`accounts.models` 仍是选号实际读的那份列表。删除账号时 `DeleteAccount` 在同一个事务里删掉它的 `account_models` 行：SQLite 的 rowid 会被复用，遗留子行会让新账号继承旧账号的探活状态。
@@ -804,6 +820,8 @@ gemini 的两行由迁移 `0009` 种入，逐字段照下表：
 gemini 路由的 `models_path` 必须显式给：写入侧的默认值只推导 openai-chat 一条（见 5.8），gemini 自己的列表路径没有推导规则。两条都用 `INSERT OR IGNORE`：升级时用户可能已经用 `provider add google-gemini` 自己建过这家（名字撞上、地址指向代理），那两行原样保留，迁移不覆盖用户的写法，也不因为主键冲突整笔失败。
 
 `provider_routes.path` 里的 `{model}` 是出站模型名占位符（见 5.9）：规整只合并斜杠，花括号与冒号原样保留，替换发生在网关拼好地址之后。协议取值的白名单只有一份 `store.IsWireProtocol`（四条线协议），厂商路由、默认协议、账号的 `--protocol` 与探活候选都读它。
+
+`model_aliases` 由迁移 `0013` 建立：`alias` 是主键，`target` 是真实模型名（或另一个别名），`created_at` 是 Unix 秒（覆盖改目标时不动它）。写入口只有两处：`SetModelAlias` 是覆盖语义（同一个别名再写一次就是改目标，UPSERT，不报错），校验全部在事务里做完再落库：别名与目标去空白后不能为空、不能含控制字符、别名不等于目标，别名也不能与任何账号 `accounts.models` 里的真实模型名同名（区分大小写），否则报 `ErrModelAliasShadow` 并列出声明了那个名字的账号（最多三个）；`DeleteModelAlias` 删不到时按情况报 `ErrModelAliasNotFound`。读入口也只有两处：`ModelAliases` 按别名升序返回全表（SQLite 的 TEXT 默认二进制序，也就是区分大小写），`ResolveModelAlias` 把入站名字解析成真实名字——它先把全表一次读出来，再在内存里沿链走，不按跳查库，因此不会出现链走到一半表被改掉、前半段用旧目标后半段用新目标；名字不是别名时返回 `("", false, nil)`，成环报 `ErrModelAliasCycle`、超过 8 跳报 `ErrModelAliasTooDeep`，两种错误都把串起来的名字写进文案。别名与真实名字的冲突只在写入时判定，读取不做二次校验（见 5.12）。
 
 `provider_headers` 由迁移 `0010` 建立（见 5.10），一行是一条 `(厂商, 协议, 头名)` 的附加请求头声明：`protocol` 空串表示整个厂商的每条路由都加，非空表示只加给这条协议。`provider` 外键指向 `providers(name)` 并带 `ON DELETE CASCADE`，`store.Open` 的连接串带 `_pragma=foreign_keys(1)`，所以删厂商行时它的头由 SQLite 一起删掉；`provider_routes` 建于 `0006`、没有外键，才要在 `DeleteProvider` 里手删。写入口只有两处：`SetProviderHeader` 是覆盖语义（同一个 `(厂商, 协议, 头名)` 再写一次就是改值，UPSERT，不报错），`DeleteProviderHeader` 删不到时按情况报 `ErrProviderHeaderNotFound`（厂商在、头不在）或 `ErrProviderNotFound`（厂商不在）。两个写入口都先校验再进事务，并在事务里确认厂商行还在：外键虽然会拦住指向不存在厂商的写入，但报数据库的外键错误说不清下一步该干什么。头名按 HTTP `token` 校验（大小写不敏感，落库归一成小写），值不能是空白串、也不能带 CR/LF/NUL（那样拼进请求头会把一条头拆成两条），`protocol` 只能是空串或 `IsWireProtocol` 认的四种。读有两个入口：`ProviderHeaders` 返回这家厂商的全部声明（按 `protocol`、`name` 升序，厂商级在最前），`EffectiveProviderHeaders(厂商, 协议)` 返回那次请求真正要加的那一份——先铺厂商级，再用这个协议自己的声明按同名覆盖，返回时也是按 `name` 升序。转发侧只读后者，不在调用方拼覆盖规则。附加头不进 `requests`，日志只在没发时记头名与原因，正常发送不记；`ProviderHeader.String`（值截断到前四位）只给 `provider header ls` 与错误文案用。
 
@@ -837,7 +855,7 @@ M0 到 M13 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkel
 
 - 估算花费依赖账号上手工填的 `--price-in`、`--price-out`、`--price-cache-read` 与 `--price-cache-write`（单位每百万 token），没有内建价格表；一个价都没填时记为 0 并在 `usage` 末尾提示，缓存单价未填时回退到输入价（见 5.5 的公式）。
 - `in_tokens_uncached` 只在入账那一刻算一次：之后改归一口径不会重算历史行（迁移按当时的 `in_tokens` 回填）。三种协议的输入 token 含义不同，anthropic 的 `input_tokens` 已排除缓存，chat 的 `prompt_tokens` 与 gemini 的 `promptTokenCount` 含缓存命中，不按出站协议归一化时 anthropic 的缓存读等于白用、chat 与 gemini 的缓存读按满价多算；归一化由 `store.UncachedInTokens` 在写 `requests` 时做掉（转发与探活两处入账都过它），上游自己报出自相矛盾的数（缓存比输入还多）时只能夹到 0，不记负数。
-- 模型名不做别名归一，请求里的 `model` 必须与账号 `--models` 里的名字完全一致。
+- 别名只做精确匹配（见 5.12）：不做大小写归一、不做通配与前缀替换，链最长 8 跳；响应里的模型名保持上游的真实名字。
 - 探活并发默认 4，`--concurrency` 可以改，只是默认值，不会根据上游限速自适应。
 - gemini 只取 `candidates[0]`，`candidateCount` 与多候选不搬；流式里不搬图片（`inlineData` / `fileData`）。
 - gemini 的思考内容（`thought` 标记与 `thoughtSignature`）不搬，请求侧的思考配置参数按 5.4 落成 `thinkingConfig`；`ParallelToolCalls` 与 `tool_result.is_error` 丢弃；工具结果的 `response` 固定写成 `{"result": <文本>}`，非对象的 `args` 整段省略；gemini 自己的内置工具（`googleSearch`、`codeExecution` 一类，`tools[]` 里只有对应键、没有 `functionDeclarations`）整条丢弃，既不给上游伪造、也不转成别的协议的工具定义（见 5.9）。
