@@ -557,9 +557,20 @@ func TestAccountTestWithoutModels(t *testing.T) {
 }
 
 // accountTestJSON 是 account test --json 输出里用例关心的字段。
-// 旧字段（account、status、ok、latency、message）必须还在，新字段是 stage 与 models。
+// 旧字段（account、status、ok、latency、message）必须还在，之后加了 stage、models 与 list。
 type accountTestJSON struct {
-	Account string `json:"account"`
+	Account string              `json:"account"`
+	Stage   string              `json:"stage"`
+	Status  int                 `json:"status"`
+	OK      bool                `json:"ok"`
+	Models  int                 `json:"models"`
+	Latency string              `json:"latency"`
+	Message string              `json:"message"`
+	List    accountTestListJSON `json:"list"`
+}
+
+// accountTestListJSON 是列表那一段自己的结论：地址与连通性、上游模型数。
+type accountTestListJSON struct {
 	Stage   string `json:"stage"`
 	Status  int    `json:"status"`
 	OK      bool   `json:"ok"`
@@ -568,12 +579,13 @@ type accountTestJSON struct {
 	Message string `json:"message"`
 }
 
-// TestAccountTestModelsStageIsFree 钉住第一步就够：模型列表 2xx 时只发一次 GET，
-// 一条模型调用都不发（那一笔是要花钱的），输出报出上游模型数。
-func TestAccountTestModelsStageIsFree(t *testing.T) {
+// TestAccountTestListOKStillChecksKey 钉住两段都跑：列表 2xx 之后仍发一条最小调用证明凭据有效，
+// 两段都通过才算正常，上游模型数取列表那一段。
+func TestAccountTestListOKStillChecksKey(t *testing.T) {
 	sandbox(t)
 	up := newRecorderUpstream(t, map[string]fakeResponse{
-		"GET /v1/models": {status: http.StatusOK, body: modelsListM1},
+		"GET /v1/models":            {status: http.StatusOK, body: modelsListM1},
+		"POST /v1/chat/completions": {status: http.StatusOK, body: chatCompletionOK},
 	})
 	mustInit(t)
 
@@ -589,19 +601,20 @@ func TestAccountTestModelsStageIsFree(t *testing.T) {
 	}
 	var got accountTestJSON
 	mustJSON(t, out, &got)
-	if got.Account != "free" || got.Stage != "models" || got.Status != http.StatusOK || !got.OK {
-		t.Fatalf("探活结果 = %+v，期望 stage=models、200 且 ok", got)
+	if got.Account != "free" || got.Stage != "call" || got.Status != http.StatusOK || !got.OK {
+		t.Fatalf("探活结果 = %+v，期望两段都通过、stage=call、200 且 ok", got)
 	}
-	if got.Models != 1 {
-		t.Fatalf("上游模型数 = %d，期望 1", got.Models)
+	if got.Models != 1 || got.List.Models != 1 || !got.List.OK {
+		t.Fatalf("探活结果 = %+v，期望上游模型数 1 且列表那一段通过", got)
 	}
-	if got.Latency == "" || !strings.Contains(got.Message, "列表接口") {
-		t.Fatalf("探活结果 = %+v，期望带上耗时与列表接口的备注", got)
+	if got.Latency == "" || !strings.Contains(got.Message, "列表接口") || !strings.Contains(got.Message, "模型调用") {
+		t.Fatalf("探活结果 = %+v，期望备注写清两段", got)
 	}
 
 	calls := up.all()
-	if len(calls) != 1 || calls[0].method != http.MethodGet || calls[0].path != "/v1/models" {
-		t.Fatalf("上游调用 = %+v，期望只有一次 GET /v1/models（列表接口不该顺带花一次模型调用）", calls)
+	if len(calls) != 2 || calls[0].method != http.MethodGet || calls[0].path != "/v1/models" ||
+		calls[1].method != http.MethodPost || calls[1].path != "/v1/chat/completions" {
+		t.Fatalf("上游调用 = %+v，期望先 GET 列表再 POST 最小请求", calls)
 	}
 
 	// 人读输出：模型数是真数字，不是 -。
@@ -612,6 +625,58 @@ func TestAccountTestModelsStageIsFree(t *testing.T) {
 	}
 	if !strings.Contains(out, " 1 ") {
 		t.Fatalf("探活输出 = %s，期望模型数列写出 1", out)
+	}
+}
+
+// TestAccountTestPublicListDoesNotProveKey 钉住缺陷现场：列表接口对任何 key 都回 200（commandcode 的
+// GET /provider/v1/models 就是），凭据得看调用那段。调用 401 时状态是失败、退出码 1，
+// 列表那一段的结论仍留在输出里，好让「地址通、key 不行」一眼分开。
+func TestAccountTestPublicListDoesNotProveKey(t *testing.T) {
+	sandbox(t)
+	up := newRecorderUpstream(t, map[string]fakeResponse{
+		"GET /v1/models": {status: http.StatusOK, body: modelsListM1},
+		"POST /v1/chat/completions": {status: http.StatusUnauthorized,
+			body: `{"error":{"message":"Invalid 'Authorization' header or token"}}`},
+	})
+	mustInit(t)
+
+	if code, _, stderr := run(t, "account", "add", "public",
+		"--provider", "custom", "--base-url", up.srv.URL, "--key", "sk-bad",
+		"--models", "m1"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	code, out, _ := run(t, "account", "test", "public", "--json")
+	if code == 0 {
+		t.Fatalf("调用 401 应当是失败，退出码 = %d，输出 = %s", code, out)
+	}
+	var got accountTestJSON
+	mustJSON(t, out, &got)
+	if got.OK || got.Stage != "call" || got.Status != http.StatusUnauthorized {
+		t.Fatalf("探活结果 = %+v，期望失败、stage=call、401", got)
+	}
+	if !got.List.OK || got.List.Status != http.StatusOK || got.Models != 1 {
+		t.Fatalf("探活结果 = %+v，列表那一段应当仍是通过的、模型数 1", got)
+	}
+	for _, want := range []string{"模型调用返回 401", "列表接口可用"} {
+		if !strings.Contains(got.Message, want) {
+			t.Fatalf("备注 = %q，期望包含 %q", got.Message, want)
+		}
+	}
+	calls := up.all()
+	if len(calls) != 2 {
+		t.Fatalf("上游调用 = %+v，期望列表 2xx 之后仍发一次调用", calls)
+	}
+
+	// 人读输出：状态列是失败，且两段都写得出来。
+	up.reset()
+	code, out, _ = run(t, "account", "test", "public")
+	if code == 0 {
+		t.Fatalf("调用 401 应当以非零退出码结束，输出 = %s", out)
+	}
+	if !strings.Contains(out, "失败") || !strings.Contains(out, "列表接口可用") ||
+		!strings.Contains(out, "模型调用返回 401") {
+		t.Fatalf("探活输出 = %s，期望状态是失败、备注写清两段", out)
 	}
 }
 

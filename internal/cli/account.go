@@ -246,9 +246,11 @@ func cmdAccountAdd(e *Env, args []string) error {
 	if proto == "" {
 		proto = gateway.ProtocolChat
 	}
-	if base == "" {
+	if base == "" && !defs.Found {
 		return unknownProviderError(a.st, *provider)
 	}
+	// 厂商行的 base_url 为空是合法的（见 DESIGN 5.8）：它表示这家的路由与 models_path 都是整条地址，
+	// 地址拼不进任何地方。这种厂商的账号也留空 base_url，转发与模型同步都走整条地址。
 
 	if _, err := a.st.GetAccount(accountName); err == nil {
 		return fmt.Errorf("账号 %q 已存在，换个名称或先运行 switchboard account rm %s", accountName, accountName)
@@ -529,10 +531,11 @@ func cmdAccountRm(e *Env, args []string) error {
 }
 
 // cmdAccountTest 探活一个账号。判定分两步：先 GET 模型列表（地址与凭据头跟 `model sync` 同一套规则），
-// 2xx 就说明凭据与连通性正常，顺带报出上游模型数，这一条不花 token；列表接口不可用时
-// 退回一条 max_tokens=1 的请求。它只判凭据与连通性，某个模型能不能用由 `model probe` 决定（见 DESIGN 4、5.7）。
+// 证明地址通并报出上游模型数；随后一律发一条 max_tokens=1 的请求证明凭据有效——公开的列表接口
+// 对任何 key 都回 200，光凭列表判不出凭据。两段都通过才判正常，状态与退出码按调用那段算。
+// 它只判凭据与连通性，某个模型能不能用由 `model probe` 决定（见 DESIGN 4、5.7）。
 func cmdAccountTest(e *Env, args []string) error {
-	fs := newFlagSet(e, "account test", "先 GET 模型列表，不通时用最小请求探活一个账号")
+	fs := newFlagSet(e, "account test", "先 GET 模型列表证明地址通，再发一条最小请求证明凭据有效")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -567,13 +570,22 @@ func cmdAccountTest(e *Env, args []string) error {
 	if e.JSON {
 		if err := e.printJSON(map[string]any{
 			"account": res.Account,
-			// stage 是得出结论的那一步：models 是模型列表接口，call 是最小请求。
+			// stage 是判定成败的那一步：两段都跑到时是 call（凭据），列表接口自己给出结论时是 models。
 			"stage":   res.Stage,
 			"status":  res.Status,
 			"ok":      res.OK,
 			"models":  res.Models,
 			"latency": res.Latency.String(),
 			"message": res.Message,
+			// list 是列表那一段自己的结论：地址与连通性、上游模型数。调用那段的 401 不会抹掉它。
+			"list": map[string]any{
+				"stage":   res.List.Stage,
+				"status":  res.List.Status,
+				"ok":      res.List.OK,
+				"models":  res.List.Models,
+				"latency": res.List.Latency.String(),
+				"message": res.List.Message,
+			},
 		}); err != nil {
 			return err
 		}

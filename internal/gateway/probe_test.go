@@ -3,6 +3,7 @@ package gateway_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +16,7 @@ import (
 )
 
 // probeCall 是一次打到假上游的探活请求：方法、路径与两种凭据头。
-// 「列表接口一次 GET 就够」这类断言要看得到方法，只看路径分不出两阶段。
+// 「列表 2xx 之后还要发一次调用」这类断言要看得到方法，只看路径分不出两段。
 type probeCall struct {
 	method string
 	path   string
@@ -73,7 +74,7 @@ func (u *probeUpstream) all() []probeCall {
 }
 
 // mustCalls 断言这次探活正好打了 expected 次上游请求，返回它们。
-// 顺序也要对：「列表接口一次 GET 就够」与「列表 404 之后再 POST」是两种不同的账。
+// 顺序也要对：「列表 2xx 之后跟一次 POST」与「列表 404 之后才 POST」是两种不同的账。
 func (u *probeUpstream) mustCalls(t *testing.T, expected int) []probeCall {
 	t.Helper()
 	calls := u.all()
@@ -108,17 +109,73 @@ func (f *fixture) mustAccount(t *testing.T, name string) (enabled bool, failStre
 	return acc.Enabled, acc.FailStreak, acc.CooldownUntil, acc.LastError
 }
 
-// TestProbeModelsListIsEnough 钉住第一步就算结论：模型列表 2xx 说明凭据与连通性正常，
-// 这一条不花 token，所以上游只该收到一次 GET，一条模型调用请求都不该收到。
-func TestProbeModelsListIsEnough(t *testing.T) {
+// TestProbeListOKStillChecksKey 钉住「列表 2xx 之后仍然发一次调用」：公开的列表接口对任何 key
+// 都回 200（commandcode 的 GET /provider/v1/models 就是），所以列表那一段只能证明地址通，
+// 凭据要看调用那一段。调用 401 时整次探活判失败、账号停用，列表那一段的结论与上游模型数照旧留着。
+func TestProbeListOKStillChecksKey(t *testing.T) {
 	f := newFixture(t)
 	up := newProbeUpstream(t, map[string]probeReply{
 		"GET /v1/models": {status: http.StatusOK, body: `{"data":[{"id":"m-b"},{"id":"m-a"},{"id":"m-a"}]}`},
+		"POST /v1/chat/completions": {status: http.StatusUnauthorized,
+			body: `{"error":{"message":"Invalid 'Authorization' header or token"}}`},
 	})
 
 	// 自建地址（provider 不在厂商表里）：列表地址按 base_url 后缀猜成 <base>/v1/models。
-	acc := f.addAs(t, "list1", "custom", gateway.ProtocolChat, up.srv.URL, "sk-test", []string{"m1"})
-	f.exhausted(t, "list1")
+	acc := f.addAs(t, "list1", "custom", gateway.ProtocolChat, up.srv.URL, "sk-test", []string{"m-a"})
+	gs := newGateway(t, f)
+
+	res, err := gs.Probe(context.Background(), acc)
+	if err != nil {
+		t.Fatalf("探活失败: %v", err)
+	}
+
+	calls := up.mustCalls(t, 2)
+	if calls[0].method != http.MethodGet || calls[0].path != "/v1/models" {
+		t.Fatalf("上游调用 = %+v，期望先 GET /v1/models", calls)
+	}
+	if calls[0].bearer != "Bearer sk-test" {
+		t.Fatalf("列表接口的凭据头 = %q，期望按取到地址的协议发 Bearer", calls[0].bearer)
+	}
+	if calls[1].method != http.MethodPost || calls[1].path != "/v1/chat/completions" {
+		t.Fatalf("上游调用 = %+v，期望紧跟一次 POST /v1/chat/completions 校验凭据", calls)
+	}
+	if res.OK || res.Status != http.StatusUnauthorized {
+		t.Fatalf("探活结果 = %+v，期望调用 401 判失败", res)
+	}
+	if res.Stage != gateway.ProbeStageCall {
+		t.Fatalf("stage = %q，期望结论取自调用那一段", res.Stage)
+	}
+	// 列表那一段自己是通过的，上游模型数照旧报出来：列表通不等于凭据有效，两件事要能分开看。
+	if !res.List.OK || res.List.Status != http.StatusOK || res.List.Models != 2 || !res.List.ModelsKnown {
+		t.Fatalf("列表那一段 = %+v，期望 200 且数出 2 个模型", res.List)
+	}
+	if res.Models != 2 || !res.ModelsKnown {
+		t.Fatalf("上游模型数 = %d（known=%v），期望取列表那一段去重后的 2", res.Models, res.ModelsKnown)
+	}
+	for _, want := range []string{"模型调用返回 401", "列表接口可用"} {
+		if !strings.Contains(res.Message, want) {
+			t.Fatalf("备注 = %q，期望包含 %q", res.Message, want)
+		}
+	}
+	enabled, _, _, lastErr := f.mustAccount(t, "list1")
+	if enabled {
+		t.Fatal("调用 401 之后账号应停用")
+	}
+	if !strings.Contains(lastErr, "Invalid 'Authorization' header or token") {
+		t.Fatalf("last_error = %q，期望带上游原话", lastErr)
+	}
+}
+
+// TestProbeBothStagesPass 钉住两段都通过才判正常：列表 2xx 之后紧跟一次最小调用，
+// 结论记 stage=call（耗时取调用那段），2xx 的三个副作用照旧：启用、清冷却与 fail_streak、清 last_error。
+func TestProbeBothStagesPass(t *testing.T) {
+	f := newFixture(t)
+	up := newProbeUpstream(t, map[string]probeReply{
+		"GET /v1/models":            {status: http.StatusOK, body: `{"data":[{"id":"m-b"},{"id":"m-a"},{"id":"m-a"}]}`},
+		"POST /v1/chat/completions": {status: http.StatusOK, body: chatOK},
+	})
+	acc := f.addAs(t, "bothok", "custom", gateway.ProtocolChat, up.srv.URL, "sk-test", []string{"m-a"})
+	f.exhausted(t, "bothok")
 
 	gs := newGateway(t, f)
 	res, err := gs.Probe(context.Background(), acc)
@@ -126,25 +183,28 @@ func TestProbeModelsListIsEnough(t *testing.T) {
 		t.Fatalf("探活失败: %v", err)
 	}
 
-	calls := up.mustCalls(t, 1)
-	if calls[0].method != http.MethodGet || calls[0].path != "/v1/models" {
-		t.Fatalf("上游调用 = %+v，期望只有一次 GET /v1/models（列表接口不该顺带花一次模型调用）", calls)
-	}
-	if calls[0].bearer != "Bearer sk-test" {
-		t.Fatalf("列表接口的凭据头 = %q，期望按取到地址的协议发 Bearer", calls[0].bearer)
+	calls := up.mustCalls(t, 2)
+	if calls[0].method != http.MethodGet || calls[1].method != http.MethodPost {
+		t.Fatalf("上游调用 = %+v，期望先 GET 列表再 POST 最小请求", calls)
 	}
 	if !res.OK || res.Status != http.StatusOK {
 		t.Fatalf("探活结果 = %+v，期望 200 且 OK", res)
 	}
-	if res.Stage != gateway.ProbeStageModels {
-		t.Fatalf("stage = %q，期望 %q", res.Stage, gateway.ProbeStageModels)
+	if res.Stage != gateway.ProbeStageCall {
+		t.Fatalf("stage = %q，期望结论取自调用那一段", res.Stage)
 	}
 	if res.Models != 2 || !res.ModelsKnown {
 		t.Fatalf("上游模型数 = %d（known=%v），期望去重后的 2", res.Models, res.ModelsKnown)
 	}
+	if !res.List.OK || res.List.Models != 2 {
+		t.Fatalf("列表那一段 = %+v，期望 200 且数出 2 个模型", res.List)
+	}
+	if !strings.Contains(res.Message, "模型调用可用") || !strings.Contains(res.Message, "列表接口可用") {
+		t.Fatalf("备注 = %q，期望写清两段都通过", res.Message)
+	}
 
 	// 2xx 的三个副作用：启用、清冷却与 fail_streak、清 last_error。
-	enabled, streak, cooldown, lastErr := f.mustAccount(t, "list1")
+	enabled, streak, cooldown, lastErr := f.mustAccount(t, "bothok")
 	if !enabled || streak != 0 || cooldown != 0 || lastErr != "" {
 		t.Fatalf("账号状态 = enabled:%v fail_streak:%d cooldown:%d last_error:%q，期望全部清干净",
 			enabled, streak, cooldown, lastErr)
@@ -166,6 +226,7 @@ func TestProbeFallsBackToCall(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFixture(t)
 			up := newProbeUpstream(t, map[string]probeReply{
+				"GET /v1/models":            {status: c.status, body: `{"error":{"message":"列表接口不通"}}`},
 				"POST /v1/chat/completions": {status: http.StatusOK, body: chatOK},
 			})
 			acc := f.addAs(t, "fb", "custom", gateway.ProtocolChat, up.srv.URL, "sk-test", []string{"m1"})
@@ -189,6 +250,9 @@ func TestProbeFallsBackToCall(t *testing.T) {
 			}
 			if res.Models != 0 || res.ModelsKnown {
 				t.Fatalf("上游模型数 = %d（known=%v），列表接口没通时应当是未知的 0", res.Models, res.ModelsKnown)
+			}
+			if res.List.OK || res.List.Status != c.status {
+				t.Fatalf("列表那一段 = %+v，期望 %d 且不 OK", res.List, c.status)
 			}
 			// 备注要写清结论出自模型调用，以及列表接口为什么不采用。
 			for _, want := range []string{"模型调用", "列表接口返回"} {
@@ -356,12 +420,13 @@ func TestProbeCallStageDecidesWhenBothFail(t *testing.T) {
 	}
 }
 
-// TestProbeModelsListShapeUnknown 确认 2xx 但形状不是模型列表时不判失败：
-// 凭据与连通性已经从状态码上看出来了，只是模型个数未知。
+// TestProbeModelsListShapeUnknown 确认列表 2xx 但形状不是模型列表时模型个数记为未知：
+// 地址与凭据的结论分别由两段给出，形状不对只影响「上游有几个模型」这一列。
 func TestProbeModelsListShapeUnknown(t *testing.T) {
 	f := newFixture(t)
 	up := newProbeUpstream(t, map[string]probeReply{
-		"GET /v1/models": {status: http.StatusOK, body: `{"ok":true}`},
+		"GET /v1/models":            {status: http.StatusOK, body: `{"ok":true}`},
+		"POST /v1/chat/completions": {status: http.StatusOK, body: chatOK},
 	})
 	acc := f.addAs(t, "shape", "custom", gateway.ProtocolChat, up.srv.URL, "sk-test", []string{"m1"})
 
@@ -371,23 +436,30 @@ func TestProbeModelsListShapeUnknown(t *testing.T) {
 		t.Fatalf("探活失败: %v", err)
 	}
 
-	up.mustCalls(t, 1)
-	if !res.OK || res.Stage != gateway.ProbeStageModels {
-		t.Fatalf("探活结果 = %+v，期望 2xx 判定为正常、stage=models", res)
+	up.mustCalls(t, 2)
+	if !res.OK || res.Stage != gateway.ProbeStageCall {
+		t.Fatalf("探活结果 = %+v，期望调用 200 判定为正常、stage=call", res)
 	}
 	if res.Models != 0 || res.ModelsKnown {
 		t.Fatalf("上游模型数 = %d（known=%v），形状不对时个数应当是未知的 0", res.Models, res.ModelsKnown)
 	}
-	if !strings.Contains(res.Message, "不是模型列表") {
-		t.Fatalf("备注 = %q，期望说明上游返回的不是模型列表", res.Message)
+	if !res.List.OK {
+		t.Fatalf("列表那一段 = %+v，形状不对不判这一段失败", res.List)
+	}
+	for _, want := range []string{"不是模型列表", "模型调用可用"} {
+		if !strings.Contains(res.Message, want) {
+			t.Fatalf("备注 = %q，期望包含 %q", res.Message, want)
+		}
 	}
 }
 
 // TestProbeEmptyModelsListCountsZero 确认显式的空列表数得出来：0 个模型与「不知道几个」要能分开。
+// 列表 2xx 之后照旧发一次调用，模型列表为空时用默认模型名。
 func TestProbeEmptyModelsListCountsZero(t *testing.T) {
 	f := newFixture(t)
 	up := newProbeUpstream(t, map[string]probeReply{
-		"GET /v1/models": {status: http.StatusOK, body: `{"data":[]}`},
+		"GET /v1/models":            {status: http.StatusOK, body: `{"data":[]}`},
+		"POST /v1/chat/completions": {status: http.StatusOK, body: chatOK},
 	})
 	acc := f.addAs(t, "zero", "custom", gateway.ProtocolChat, up.srv.URL, "sk-test", nil)
 
@@ -398,6 +470,86 @@ func TestProbeEmptyModelsListCountsZero(t *testing.T) {
 	}
 	if !res.OK || !res.ModelsKnown || res.Models != 0 {
 		t.Fatalf("探活结果 = %+v，期望 2xx、模型数已知且为 0", res)
+	}
+	if !res.List.ModelsKnown || res.List.Models != 0 {
+		t.Fatalf("列表那一段 = %+v，期望模型数已知且为 0", res.List)
+	}
+}
+
+// bigModelList 造一份大清单：n 个模型、每个带 descBytes 字节的描述。commandcode 的 94 个模型
+// 就有 18461 字节，超过旧的 8KB 读取上限时 JSON 被截断，整份清单会被判成「上游返回的不是模型列表」。
+func bigModelList(t *testing.T, n, descBytes int) string {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString(`{"data":[`)
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `{"id":"m-%02d","description":%q}`, i, strings.Repeat("d", descBytes))
+	}
+	b.WriteString(`]}`)
+	if b.Len() <= 8<<10 {
+		t.Fatalf("生成的清单只有 %d 字节，压不住 8KB 截断", b.Len())
+	}
+	return b.String()
+}
+
+// TestProbeLargeModelListCounts 钉住「大清单也数得出个数」：读取上限与 `model sync` 一致，
+// 清单 20KB 级时不再被截断成「上游返回的不是模型列表」。
+func TestProbeLargeModelListCounts(t *testing.T) {
+	f := newFixture(t)
+	body := bigModelList(t, 20, 1024)
+	up := newProbeUpstream(t, map[string]probeReply{
+		"GET /v1/models":            {status: http.StatusOK, body: body},
+		"POST /v1/chat/completions": {status: http.StatusOK, body: chatOK},
+	})
+	acc := f.addAs(t, "big", "custom", gateway.ProtocolChat, up.srv.URL, "sk-test", []string{"m-01"})
+
+	gs := newGateway(t, f)
+	res, err := gs.Probe(context.Background(), acc)
+	if err != nil {
+		t.Fatalf("探活失败: %v", err)
+	}
+	if !res.OK || !res.ModelsKnown || res.Models != 20 {
+		t.Fatalf("探活结果 = %+v，期望 %d 字节的清单数出 20 个模型", res, len(body))
+	}
+	if strings.Contains(res.Message, "不是模型列表") {
+		t.Fatalf("备注 = %q，大清单不该被判成不是模型列表", res.Message)
+	}
+}
+
+// TestProbeModelCountSharesSyncShapes 钉住「模型数用与 model sync 同一套形状判定」：
+// `{models:[…]}` 与顶层数组也数得出来，不再只认 `{data:[…]}`。两条路径对同一份清单
+// 得出不同结论正是这次要修掉的矛盾。
+func TestProbeModelCountSharesSyncShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"data", `{"data":[{"id":"m-a"},{"id":"m-b"}]}`, 2},
+		{"models", `{"models":[{"name":"m-a"},{"name":"m-b"},{"name":"m-c"}]}`, 3},
+		{"顶层数组", `["m-a","m-b"]`, 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t)
+			up := newProbeUpstream(t, map[string]probeReply{
+				"GET /v1/models":            {status: http.StatusOK, body: c.body},
+				"POST /v1/chat/completions": {status: http.StatusOK, body: chatOK},
+			})
+			acc := f.addAs(t, "shapes", "custom", gateway.ProtocolChat, up.srv.URL, "sk-test", []string{"m-a"})
+
+			gs := newGateway(t, f)
+			res, err := gs.Probe(context.Background(), acc)
+			if err != nil {
+				t.Fatalf("探活失败: %v", err)
+			}
+			if !res.ModelsKnown || res.Models != c.want {
+				t.Fatalf("上游模型数 = %d（known=%v），期望 %d", res.Models, res.ModelsKnown, c.want)
+			}
+		})
 	}
 }
 

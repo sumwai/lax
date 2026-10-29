@@ -222,7 +222,7 @@ func fetchModelPage(ctx context.Context, client *http.Client, pageURL, target, p
 	}
 
 	var raw json.RawMessage
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&raw); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxModelListBytes)).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("模型列表不是合法 JSON: %w", err)
 	}
 	return raw, nil
@@ -413,35 +413,25 @@ func bareModelName(name string) string {
 	return name
 }
 
-// countModels 数出模型列表响应里的上游模型个数，形状按 `{data:[{id}]}` 解析（id 为空时认 name），
-// 与 SyncModels 的 `{data}` 那一种形状同一套取值规则，按名字去重。第二个返回值为 false 表示上游返回的不是模型列表：
-// `account test` 只用它报个数，形状不对不判失败——凭据与连通性已经从 2xx 上看出来了。
+// maxModelListBytes 是一次读模型列表响应的上限。`model sync` 与 `account test` 共用这一个值：
+// 两条路径对同一份清单必须得出同一个结论。清单本身并不小——commandcode 的 94 个模型就有 18KB——
+// 按更小的上限截断会让同步拿到完整清单、`account test` 却报「上游返回的不是模型列表」（见 DESIGN 5.7）。
+const maxModelListBytes = 8 << 20
+
+// countModels 数出模型列表响应里的上游模型个数。形状判定复用 parseModelListPage，与 `model sync`
+// 是同一份代码、同一套取值规则（`{data:[…]}`、`{models:[…]}`、顶层数组，按名字去重、去 `models/` 前缀），
+// 不再有第二套只认 `{data}` 的逻辑：一份清单在这两条路径上必须数出同一个数。
+// 第二个返回值为 false 表示上游返回的不是模型列表：`account test` 只用它报个数，形状不对不判失败。
 func countModels(r io.Reader) (int, bool) {
-	var payload struct {
-		Data []struct {
-			ID   string `json:"id"`
-			Name string `json:"name"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r, 8<<10)).Decode(&payload); err != nil {
+	raw, err := io.ReadAll(io.LimitReader(r, maxModelListBytes))
+	if err != nil {
 		return 0, false
 	}
-	// 没有 data 字段的响应体（例如 {"ok":true}）不是模型列表；显式给空数组是「0 个模型」，算数得出来。
-	if payload.Data == nil {
+	models, _, isModelList := parseModelListPage(raw)
+	if !isModelList {
 		return 0, false
 	}
-	seen := map[string]bool{}
-	for _, m := range payload.Data {
-		id := strings.TrimSpace(m.ID)
-		if id == "" {
-			id = strings.TrimSpace(m.Name)
-		}
-		if id == "" || seen[id] {
-			continue
-		}
-		seen[id] = true
-	}
-	return len(seen), true
+	return len(models), true
 }
 
 // ModelProbe 是单个模型在一次探活里的结论。

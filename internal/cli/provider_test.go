@@ -451,14 +451,17 @@ func TestProviderAddNormalizedPathsHitFullURL(t *testing.T) {
 	}
 
 	// account test 先 GET 模型列表：地址是厂商级覆盖 v1//models 拼出来的 <base_url>/v1/models。
-	// 列表接口通了就是结论，所以这里只有一次 GET，没有模型调用。
+	// 列表 2xx 之后仍发一条最小调用证明凭据有效，那条走账号协议的路由。
 	up.reset()
 	if code, _, stderr := run(t, "account", "test", "a-chat"); code != 0 {
 		t.Fatalf("account test a-chat 退出码 = %d，stderr = %s", code, stderr)
 	}
 	calls := up.all()
-	if want := up.srv.URL + "/v1/models"; len(calls) != 1 || calls[0].method != http.MethodGet || calls[0].url != want {
-		t.Fatalf("上游调用 = %+v，期望只有一次 GET %q", calls, want)
+	if want := up.srv.URL + "/v1/models"; len(calls) != 2 || calls[0].method != http.MethodGet || calls[0].url != want {
+		t.Fatalf("上游调用 = %+v，期望先 GET %q 再发一条最小调用", calls, want)
+	}
+	if calls[1].method != http.MethodPost || calls[1].url != up.srv.URL+"/v1/chat/completions" {
+		t.Fatalf("最小调用 = %+v，期望 POST 账号协议那条路由 %q", calls[1], up.srv.URL+"/v1/chat/completions")
 	}
 
 	// --models-path v1//models 是厂商级覆盖，model sync 打到 <base_url>/v1/models。
