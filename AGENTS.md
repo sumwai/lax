@@ -48,6 +48,39 @@ Conventional Commits：`feat(gateway): …`、`fix(translate): …`、`docs: …
 
 `LESSONS.md` 只在表格前留一段说明，其余内容全部放进 `lessons/` 的正文，不要在两处重复。
 
+## 文档
+
+三份文档面向不同读者，不互相代替：
+
+| 位置 | 读者 | 内容 |
+| --- | --- | --- |
+| `DESIGN.md` | 维护者 | 设计与取舍的唯一依据；实现与它冲突时先改它 |
+| `README.md` | 仓库访客 | 装、跑、常用命令、已知边界 |
+| `docs-site/` | 使用者 | 站点文档：安装、配置、接入客户端、排障 |
+
+### 什么时候改哪份
+
+改代码时同一次提交里把对应文档改掉，不要留到以后补：
+
+| 改动 | 要改的文档 |
+| --- | --- |
+| 命令、参数、输出列、`--json` 字段、退出码 | `DESIGN.md` 第 4 节、`README.md` 对应段、`docs-site/content/docs/reference/cli.mdx` |
+| 协议、转发、错误形状、已知边界 | `DESIGN.md` 第 5、7 节、`README.md`「已知边界」、`docs-site/content/docs/using/gateway.mdx` |
+| 厂商、路由、附加头、模型同步与探活 | `DESIGN.md` 5.7、5.8、5.10 与第 6 节、`docs-site/content/docs/configure/*`、`README.md` |
+| 数据库结构或新增迁移 | `DESIGN.md` 第 6 节（含迁移编号） |
+| 客户端接入方式（路径、鉴权头、SDK 示例） | `docs-site/content/docs/using/clients.mdx`、`README.md` |
+| 需要使用者动手的变化（换 key、重新探活、迁移） | `docs-site/content/docs/reference/faq.mdx` 或 `docs-site/content/docs/getting-started/*` |
+| 非显然的坑 | `LESSONS.md` 索引 + `lessons/<yyyy-mm-dd>-<topic>.md` |
+
+### 文档站
+
+- Fumadocs + Next.js，只在本机跑：`make docs`（127.0.0.1:3000，改文件热更新）、`make docs-build`（生产构建，顺带类型检查）、`make docs-install`。Node 依赖只在 `docs-site/` 内，`make check` 不包含站点。
+- 页面手写在 `docs-site/content/docs/`，侧边栏顺序在各级 `meta.json`。新增页面要同时加 `meta.json` 条目，否则页面存在但侧边栏里进不去。
+- 站点面向使用者：`DESIGN.md`、`LESSONS.md` 与 `lessons/` 的内容不进站点，站点也不写开发过程与设计取舍。
+- 示例输出要脱敏（token、key、账号名用占位），不写本机绝对路径与用户名；`--json` 示例保持真实键名。
+- 改完跑 `make docs-build`：它同时做类型检查与生产构建。`node_modules`、`.next`、`.next-build` 已在 `.gitignore` 里，不入库。
+- `/llms.txt` 与 `/llms-full.txt` 由 `content/docs` 自动生成（`docs-site/app/llms.txt/route.ts`），页面改了它们就跟着变，不要手写这两个地址下的内容。
+
 ## 不做
 
 多租户、配额、充值、网页后台、桌面菜单栏、逆向接口。这些是 `DESIGN.md` 第 9 节列的非目标，实现时不顺手加。
