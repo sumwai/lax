@@ -10,8 +10,9 @@ import (
 
 // 这个文件把 README 与 DESIGN 第 3 节里出现的示例命令逐字搬进测试：
 // 参数名、必填项与文档里印出来的输出一旦与实现漂移，这里会先红。
-// 只有 account add 额外补了 --base-url 指向 httptest 假上游——不加的话
-// model sync 会去连真实 deepseek，测试不许连真实厂商（见 AGENTS.md）。
+// 唯一的额外一步是把上游地址指到 httptest 假上游——账号的地址只在厂商行上（见 DESIGN 5.8），
+// 所以走 addAccount（先按厂商名把厂商的地址指过去）而不是直接调 account add；
+// 不这么做 model sync 会去连真实 deepseek，测试不许连真实厂商（见 AGENTS.md）。
 
 // syncTableRow 匹配 model sync 人读表格的一行：账号、厂商、模型数、新增数。
 var syncTableRow = regexp.MustCompile(`(?m)^(\S+)\s+(\S+)\s+(\d+)\s+(\d+)\s*$`)
@@ -48,10 +49,7 @@ func TestDesignSection3Examples(t *testing.T) {
 	}
 
 	// DESIGN 2：account add 的输出格式（厂商、协议、脱敏凭据）。
-	code, out, stderr = run(t, "account", "add", "deepseek-1",
-		"--provider", "deepseek",
-		"--protocol", "openai-chat",
-		"--key", "sk-xxxxxxxx")
+	code, out, stderr = addAccount(t, "deepseek-1", "deepseek", "", "", "--key", "sk-xxxxxxxx")
 	if code != 0 {
 		t.Fatalf("DESIGN 示例 account add deepseek-1 退出码 = %d，stderr = %s", code, stderr)
 	}
@@ -62,7 +60,7 @@ func TestDesignSection3Examples(t *testing.T) {
 
 // TestDesignSection3SyncExample 逐字跑 DESIGN 第 3 节第 3 步的 `model sync --account deepseek-1`：
 // 表格五列、一行数据与下一步提示都要在，上游地址按 deepseek 的 chat 路由 models_path 取。
-// 只多给 account add 补了 --base-url 指向假上游，参数名与文档一致。
+// 唯一的额外一步是把 deepseek 的地址指到假上游（`provider set --base-url`），参数名与文档一致。
 func TestDesignSection3SyncExample(t *testing.T) {
 	sandbox(t)
 	up := newRecorderUpstream(t, map[string]fakeResponse{
@@ -70,11 +68,7 @@ func TestDesignSection3SyncExample(t *testing.T) {
 	})
 	mustInit(t)
 
-	code, out, stderr := run(t, "account", "add", "deepseek-1",
-		"--provider", "deepseek",
-		"--protocol", "openai-chat",
-		"--key", "sk-xxxxxxxx",
-		"--base-url", up.srv.URL)
+	code, out, stderr := addAccount(t, "deepseek-1", "deepseek", up.srv.URL, "", "--key", "sk-xxxxxxxx")
 	if code != 0 {
 		t.Fatalf("DESIGN 示例 account add deepseek-1 退出码 = %d，stderr = %s", code, stderr)
 	}
@@ -239,7 +233,7 @@ func TestREADMEProviderHeaderExamples(t *testing.T) {
 }
 
 // TestREADMEModelFlowExamples 逐字跑 README 快速上手与「模型从上游拉」两节的
-// account add / model sync / model probe 命令；唯一加的参数是 --base-url 指向假上游。
+// account add / model sync / model probe 命令；唯一多出来的一步是把厂商的地址指到假上游。
 func TestREADMEModelFlowExamples(t *testing.T) {
 	sandbox(t)
 	up := newRecorderUpstream(t, map[string]fakeResponse{
@@ -252,9 +246,7 @@ func TestREADMEModelFlowExamples(t *testing.T) {
 		t.Fatalf("README 快速上手里的 provider ls 退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	code, out, stderr := run(t, "account", "add", "ds",
-		"--provider", "deepseek", "--key", "sk-xxx",
-		"--base-url", up.srv.URL)
+	code, out, stderr := addAccount(t, "ds", "deepseek", up.srv.URL, "", "--key", "sk-xxx")
 	if code != 0 {
 		t.Fatalf("README 示例 account add ds 退出码 = %d，stderr = %s", code, stderr)
 	}

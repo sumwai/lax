@@ -16,8 +16,7 @@ func TestCallEachInboundProtocol(t *testing.T) {
 	if code, _, stderr := run(t, "init"); code != 0 {
 		t.Fatalf("init 失败: %s", stderr)
 	}
-	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
-		"--base-url", up.URL, "--key", "sk-test", "--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "custom", up.URL, "", "--key", "sk-test", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 失败: %s", stderr)
 	}
 
@@ -48,8 +47,7 @@ func TestCallJSONShapeFollowsInboundProtocol(t *testing.T) {
 	if code, _, _ := run(t, "init"); code != 0 {
 		t.Fatal("init 失败")
 	}
-	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
-		"--base-url", up.URL, "--key", "sk-test", "--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "custom", up.URL, "", "--key", "sk-test", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 失败: %s", stderr)
 	}
 
@@ -74,9 +72,7 @@ func TestCallJSONShapeFollowsInboundProtocol(t *testing.T) {
 func TestCallNoModelsHint(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
-	if code, _, stderr := run(t, "account", "add", "bare",
-		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", "sk-1",
-		"--protocol", "openai-chat"); code != 0 {
+	if code, _, stderr := addAccount(t, "bare", "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-1"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -112,8 +108,7 @@ func TestCallGeminiInbound(t *testing.T) {
 	})
 	mustInit(t)
 
-	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
-		"--base-url", up.srv.URL, "--key", "sk-test", "--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "custom", up.srv.URL, "", "--key", "sk-test", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 失败: %s", stderr)
 	}
 
@@ -153,8 +148,7 @@ func TestCallGeminiInboundStream(t *testing.T) {
 	})
 	mustInit(t)
 
-	if code, _, stderr := run(t, "account", "add", "g1", "--provider", "custom",
-		"--base-url", up.srv.URL, "--key", "sk-test", "--protocol", "gemini", "--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "g1", "custom", up.srv.URL, "gemini", "--key", "sk-test", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 失败: %s", stderr)
 	}
 
@@ -180,8 +174,7 @@ func TestCallGeminiInboundStreamJSON(t *testing.T) {
 	})
 	mustInit(t)
 
-	if code, _, stderr := run(t, "account", "add", "g1", "--provider", "custom",
-		"--base-url", up.srv.URL, "--key", "sk-test", "--protocol", "gemini", "--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "g1", "custom", up.srv.URL, "gemini", "--key", "sk-test", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 失败: %s", stderr)
 	}
 

@@ -778,7 +778,13 @@ func cmdProviderRm(e *Env, args []string) error {
 			name, len(names), strings.Join(names, "、"), name)
 	}
 
-	if err := a.st.DeleteProvider(name); err != nil {
+	// --force 走 store.DeleteProviderForce：同一个事务里把指向它的账号停用，
+	// 否则这些账号留在选号池里必然 502（它们已经没有地址与路由了，见 DESIGN 5.8）。
+	if len(names) > 0 {
+		if err := a.st.DeleteProviderForce(name); err != nil {
+			return err
+		}
+	} else if err := a.st.DeleteProvider(name); err != nil {
 		return err
 	}
 
@@ -791,7 +797,7 @@ func cmdProviderRm(e *Env, args []string) error {
 	}
 	fmt.Fprintf(e.Stdout, "已删除厂商 %s 与它的 %d 条路由\n", name, len(routes))
 	if len(names) > 0 {
-		fmt.Fprintf(e.Stdout, "这些账号仍保留自己的 base_url，不受影响：%s\n", strings.Join(names, "、"))
+		fmt.Fprintf(e.Stdout, "这些账号已停用（地址与路由随厂商一起没了）：%s；重建厂商或改账号的厂商之后用 switchboard account enable 才能接着用\n", strings.Join(names, "、"))
 	}
 	return nil
 }
@@ -814,47 +820,17 @@ func flagWasSet(fs *flagSet, name string) bool {
 	return seen
 }
 
-// providerDefaults 是厂商表能给账号补的两项默认值。
-// Found 为 false 表示表里没有这一行；NoRoutes 为 true 表示厂商行在、但一条路由都没声明，
-// 这时算不出默认协议，由调用方决定报错还是回退（见 DESIGN 5.8）。
-type providerDefaults struct {
-	BaseURL  string
-	Protocol string
-	Found    bool
-	NoRoutes bool
-}
-
-// lookupProvider 按厂商表解析默认地址与默认协议。协议只问 store 的有效默认协议，
-// 不在 cli 里再算一遍排序兜底（见 DESIGN 5.8）。
-func lookupProvider(st *store.Store, name string) (providerDefaults, error) {
-	p, err := st.GetProvider(name)
-	if errors.Is(err, store.ErrProviderNotFound) {
-		return providerDefaults{}, nil
-	}
-	if err != nil {
-		return providerDefaults{}, err
-	}
-	d := providerDefaults{BaseURL: p.BaseURL, Found: true}
-	proto, err := st.EffectiveProviderProtocol(name)
-	if errors.Is(err, store.ErrProviderNoRoutes) {
-		d.NoRoutes = true
-		return d, nil
-	}
-	if err != nil {
-		return providerDefaults{}, err
-	}
-	d.Protocol = proto
-	return d, nil
-}
-
 // unknownProviderError 说明厂商表里没有这一行，并给出最接近的已知厂商与下一步命令。
+// 账号的地址与默认协议只在厂商行上（见 DESIGN 5.8），所以出路只有一条：先把厂商登记进去。
 func unknownProviderError(st *store.Store, name string) error {
 	providers, err := st.ListProviders()
 	if err != nil {
 		return err
 	}
+	register := fmt.Sprintf("switchboard provider add %s --base-url <地址> --openai /v1/chat/completions", name)
 	if len(providers) == 0 {
-		return fmt.Errorf("厂商表是空的，没法按厂商补 --base-url；先运行 switchboard provider ls 看已知厂商，或直接给 --base-url 自建地址，例如 switchboard account add <名称> --provider %s --base-url https://api.example.com --key <key>", name)
+		// 厂商表可以被删光，这时「最接近的名字」无从谈起，只给怎么登记。
+		return fmt.Errorf("厂商表是空的，没有地址可用；先运行 %s 登记这家厂商，再建账号", register)
 	}
 
 	names := make([]string, 0, len(providers))
@@ -865,7 +841,7 @@ func unknownProviderError(st *store.Store, name string) error {
 	if closest := closestName(names, name); closest != "" {
 		msg += fmt.Sprintf("；最接近的是 %q，确认拼错就改 --provider %s 再试", closest, closest)
 	}
-	msg += fmt.Sprintf("；也可以直接用 --provider %s --base-url <地址> 自建地址，或先 switchboard provider add %s --base-url <地址> --openai /v1/chat/completions 把它登记进厂商表", name, name)
+	msg += fmt.Sprintf("；地址与默认协议只存在厂商行上，先运行 %s 登记，再建账号", register)
 	return errors.New(msg)
 }
 

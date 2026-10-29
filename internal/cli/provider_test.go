@@ -373,8 +373,7 @@ func TestProviderPathWritesAreNormalized(t *testing.T) {
 	}
 
 	// 账号地址指到假上游，下面两条命令各自打一次上游，看的是规整后的完整地址。
-	if code, _, stderr := run(t, "account", "add", "mine1",
-		"--provider", "mine", "--base-url", up.srv.URL, "--key", "sk-test", "--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "mine1", "mine", up.srv.URL, "", "--key", "sk-test", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -440,18 +439,13 @@ func TestProviderAddNormalizedPathsHitFullURL(t *testing.T) {
 		t.Fatalf("厂商级模型列表路径 = %q，期望 /v1/models", added.ModelsPath)
 	}
 
-	// 两个账号各用一种协议，都用厂商的 base_url（不给 --base-url）。
-	if code, _, stderr := run(t, "account", "add", "a-chat",
-		"--provider", "mine", "--protocol", "openai-chat", "--key", "sk-test", "--models", "m1"); code != 0 {
+	// 账号的地址与默认协议都取厂商行（见 DESIGN 5.8）：这家默认协议是 openai-chat。
+	if code, _, stderr := addAccount(t, "a-chat", "mine", "", "", "--key", "sk-test", "--models", "m1"); code != 0 {
 		t.Fatalf("account add a-chat 退出码 = %d，stderr = %s", code, stderr)
-	}
-	if code, _, stderr := run(t, "account", "add", "a-anth",
-		"--provider", "mine", "--protocol", "anthropic", "--key", "sk-test", "--models", "m1"); code != 0 {
-		t.Fatalf("account add a-anth 退出码 = %d，stderr = %s", code, stderr)
 	}
 
 	// account test 先 GET 模型列表：地址是厂商级覆盖 v1//models 拼出来的 <base_url>/v1/models。
-	// 列表 2xx 之后仍发一条最小调用证明凭据有效，那条走账号协议的路由。
+	// 列表 2xx 之后仍发一条最小调用证明凭据有效，那条走厂商默认协议那条路由。
 	up.reset()
 	if code, _, stderr := run(t, "account", "test", "a-chat"); code != 0 {
 		t.Fatalf("account test a-chat 退出码 = %d，stderr = %s", code, stderr)
@@ -461,7 +455,7 @@ func TestProviderAddNormalizedPathsHitFullURL(t *testing.T) {
 		t.Fatalf("上游调用 = %+v，期望先 GET %q 再发一条最小调用", calls, want)
 	}
 	if calls[1].method != http.MethodPost || calls[1].url != up.srv.URL+"/v1/chat/completions" {
-		t.Fatalf("最小调用 = %+v，期望 POST 账号协议那条路由 %q", calls[1], up.srv.URL+"/v1/chat/completions")
+		t.Fatalf("最小调用 = %+v，期望 POST 厂商默认协议那条路由 %q", calls[1], up.srv.URL+"/v1/chat/completions")
 	}
 
 	// --models-path v1//models 是厂商级覆盖，model sync 打到 <base_url>/v1/models。
@@ -479,8 +473,9 @@ func TestProviderAddNormalizedPathsHitFullURL(t *testing.T) {
 }
 
 // TestAccountTestFallbackUsesProviderRoutes 钉住退回最小请求时打的是路由拼出来的完整地址：
-// 列表接口不通（这里是没有这个接口，上游回 404）时，openai-chat 账号打 --openai 那条、
-// anthropic 账号打 --anthropic 那条，两条路径都经过规整。
+// 列表接口不通（这里是没有这个接口，上游回 404）时，出站协议取厂商的有效默认协议
+// （账号不再存协议，见 DESIGN 5.8），默认 openai-chat 的厂商打 --openai 那条、
+// 默认 anthropic 的打 --anthropic 那条，两条路径都经过规整。
 func TestAccountTestFallbackUsesProviderRoutes(t *testing.T) {
 	sandbox(t)
 	up := newRecorderUpstream(t, map[string]fakeResponse{
@@ -489,18 +484,20 @@ func TestAccountTestFallbackUsesProviderRoutes(t *testing.T) {
 	})
 	mustInit(t)
 
-	if code, _, stderr := run(t, "provider", "add", "mine",
-		"--base-url", up.srv.URL,
-		"--openai", "//v1//chat/completions/",
-		"--anthropic", "v1/messages"); code != 0 {
-		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	// 两家厂商，各只声明一条路由：默认协议因此就是那一条（见 DESIGN 5.8）。
+	if code, _, stderr := run(t, "provider", "add", "chatco",
+		"--base-url", up.srv.URL, "--openai", "//v1//chat/completions/"); code != 0 {
+		t.Fatalf("provider add chatco 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, c := range []struct{ name, protocol string }{
-		{"a-chat", "openai-chat"},
-		{"a-anth", "anthropic"},
+	if code, _, stderr := run(t, "provider", "add", "anthco",
+		"--base-url", up.srv.URL, "--anthropic", "v1/messages"); code != 0 {
+		t.Fatalf("provider add anthco 退出码 = %d，stderr = %s", code, stderr)
+	}
+	for _, c := range []struct{ name, provider, path string }{
+		{"a-chat", "chatco", "/v1/chat/completions"},
+		{"a-anth", "anthco", "/v1/messages"},
 	} {
-		if code, _, stderr := run(t, "account", "add", c.name,
-			"--provider", "mine", "--protocol", c.protocol, "--key", "sk-test", "--models", "m1"); code != 0 {
+		if code, _, stderr := addAccount(t, c.name, c.provider, "", "", "--key", "sk-test", "--models", "m1"); code != 0 {
 			t.Fatalf("account add %s 退出码 = %d，stderr = %s", c.name, code, stderr)
 		}
 		up.reset()
@@ -512,10 +509,7 @@ func TestAccountTestFallbackUsesProviderRoutes(t *testing.T) {
 		if len(posts) != 1 {
 			t.Fatalf("%s 的模型调用 = %+v，期望正好一次", c.name, posts)
 		}
-		want := up.srv.URL + "/v1/chat/completions"
-		if c.protocol == "anthropic" {
-			want = up.srv.URL + "/v1/messages"
-		}
+		want := up.srv.URL + c.path
 		if posts[0].url != want {
 			t.Fatalf("%s 的模型调用地址 = %q，期望 %q", c.name, posts[0].url, want)
 		}
@@ -539,8 +533,7 @@ func TestModelSyncEndpointNormalizedPathIsTemporary(t *testing.T) {
 		"--models-path", "v1//models"); code != 0 {
 		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if code, _, stderr := run(t, "account", "add", "mine1",
-		"--provider", "mine", "--protocol", "openai-chat", "--key", "sk-test"); code != 0 {
+	if code, _, stderr := addAccount(t, "mine1", "mine", "", "openai-chat", "--key", "sk-test"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -590,8 +583,7 @@ func TestModelSyncEndpointFullAddress(t *testing.T) {
 		"--openai", "/v1/chat/completions"); code != 0 {
 		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if code, _, stderr := run(t, "account", "add", "mine1",
-		"--provider", "mine", "--protocol", "openai-chat", "--key", "sk-test"); code != 0 {
+	if code, _, stderr := addAccount(t, "mine1", "mine", "", "openai-chat", "--key", "sk-test"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -644,8 +636,7 @@ func TestProviderBaseURLVariantsHitSameAddress(t *testing.T) {
 			"--base-url", base, "--openai", route); code != 0 {
 			t.Fatalf("provider add %s 退出码 = %d，stderr = %s", provider, code, stderr)
 		}
-		if code, _, stderr := run(t, "account", "add", provider+"-1",
-			"--provider", provider, "--protocol", "openai-chat", "--key", "sk-test", "--models", "m1"); code != 0 {
+		if code, _, stderr := addAccount(t, provider+"-1", provider, "", "openai-chat", "--key", "sk-test", "--models", "m1"); code != 0 {
 			t.Fatalf("account add %s-1 退出码 = %d，stderr = %s", provider, code, stderr)
 		}
 		up.reset()
@@ -1438,8 +1429,7 @@ func TestProviderRmRefusesWhileAccountsUse(t *testing.T) {
 		"--openai", "/v1/chat/completions"); code != 0 {
 		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if code, _, stderr := run(t, "account", "add", "use1",
-		"--provider", "mine", "--key", "sk-test"); code != 0 {
+	if code, _, stderr := addAccount(t, "use1", "mine", "", "", "--key", "sk-test"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -1464,7 +1454,7 @@ func TestProviderRmRefusesWhileAccountsUse(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("--force 的退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"已删除厂商 mine", "仍保留自己的 base_url", "use1"} {
+	for _, want := range []string{"已删除厂商 mine", "这些账号已停用", "switchboard account enable", "use1"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("--force 的输出应提到 %q: %s", want, out)
 		}
@@ -1514,13 +1504,10 @@ func TestProviderRmMissingAndJSON(t *testing.T) {
 	}
 }
 
-// TestProviderRmForceKeepsAccountForwarding 确认 provider rm --force 删掉厂商行与它的全部路由之后，
-// 原先用这家厂商的账号仍能转发：账号行固化了自己的 base_url，路由没了只是让出站地址回到
-// base_url 后缀猜测，请求不该 404，也不该因为读不到厂商行就失败。
-//
-// 没有这条断言，删除厂商时顺手清掉账号地址（或让转发依赖厂商行存在）不会被测出来，
-// 线上表现是删完厂商之后所有请求 404。
-func TestProviderRmForceKeepsAccountForwarding(t *testing.T) {
+// TestProviderRmForceDisablesAccounts 确认 provider rm --force 删掉厂商行与它的全部路由之后，
+// 原先用这家厂商的账号在同一个事务里被停用：地址与默认协议都随厂商一起没了（见 DESIGN 5.8），
+// 留在选号池里只会必然 502。账号行、凭据与模型清单都不删，重建厂商后 account enable 就能接着用。
+func TestProviderRmForceDisablesAccounts(t *testing.T) {
 	sandbox(t)
 	up := newRecorderUpstream(t, map[string]fakeResponse{
 		"POST /v1/chat/completions": {status: http.StatusOK, body: chatCompletionOK},
@@ -1528,9 +1515,7 @@ func TestProviderRmForceKeepsAccountForwarding(t *testing.T) {
 	mustInit(t)
 
 	// 用种子厂商 deepseek：它的默认协议是 openai-chat，地址用 --base-url 指到假上游。
-	code, out, stderr := run(t, "account", "add", "ds1",
-		"--provider", "deepseek", "--base-url", up.srv.URL, "--key", "sk-test",
-		"--models", "m1", "--json")
+	code, out, stderr := addAccount(t, "ds1", "deepseek", up.srv.URL, "", "--key", "sk-test", "--models", "m1", "--json")
 	if code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
@@ -1547,7 +1532,7 @@ func TestProviderRmForceKeepsAccountForwarding(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("--force 的退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"已删除厂商 deepseek", "仍保留自己的 base_url", "ds1"} {
+	for _, want := range []string{"已删除厂商 deepseek", "这些账号已停用", "switchboard account enable", "ds1"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("--force 的输出应提到 %q: %s", want, out)
 		}
@@ -1556,24 +1541,42 @@ func TestProviderRmForceKeepsAccountForwarding(t *testing.T) {
 		t.Fatal("删除后 provider ls 不该再有 deepseek")
 	}
 
-	// 账号行仍固化着自己的地址：删厂商不改账号。
+	// 账号被停用，地址与协议算不出来：派生的两项都是空串，last_error 指出下一步。
 	code, out, _ = run(t, "account", "ls", "--json")
 	if code != 0 {
 		t.Fatalf("account ls 退出码 = %d", code)
 	}
-	var accounts []map[string]any
+	var accounts []struct {
+		Name     string   `json:"name"`
+		Enabled  bool     `json:"enabled"`
+		BaseURL  string   `json:"base_url"`
+		Protocol string   `json:"protocol"`
+		LastErr  string   `json:"last_error"`
+		Models   []string `json:"models"`
+	}
 	mustJSON(t, out, &accounts)
-	if len(accounts) != 1 || accounts[0]["base_url"] != up.srv.URL {
-		t.Fatalf("账号的 base_url 应保持不变，实际 %+v", accounts)
+	if len(accounts) != 1 {
+		t.Fatalf("账号应仍然存在，实际 %+v", accounts)
+	}
+	if acc := accounts[0]; acc.Enabled || acc.BaseURL != "" || acc.Protocol != "" ||
+		!strings.Contains(acc.LastErr, "厂商已删除") || len(acc.Models) != 1 {
+		t.Fatalf("删厂商后的账号 = %+v，期望停用、地址与协议为空、模型清单保留", acc)
 	}
 
-	// 转发照旧：厂商没了，地址按 base_url 后缀猜出 /v1/chat/completions，凭据头是 Bearer。
+	// 重建同名厂商再启用账号：转发照旧，地址来自新的厂商行。
+	if code, _, stderr := run(t, "provider", "add", "deepseek",
+		"--base-url", up.srv.URL, "--openai", "/v1/chat/completions", "--anthropic", "/anthropic/v1/messages"); code != 0 {
+		t.Fatalf("provider add 重建退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := run(t, "account", "enable", "ds1"); code != 0 {
+		t.Fatalf("account enable 退出码 = %d，stderr = %s", code, stderr)
+	}
 	code, out, stderr = run(t, "call", "hi", "--model", "m1")
 	if code != 0 {
-		t.Fatalf("删厂商后 call 的退出码 = %d，stderr = %s", code, stderr)
+		t.Fatalf("重建厂商后 call 的退出码 = %d，stderr = %s", code, stderr)
 	}
 	if !strings.Contains(out, "pong") {
-		t.Fatalf("删厂商后 call 的输出 = %q，期望包含 pong", out)
+		t.Fatalf("重建厂商后 call 的输出 = %q，期望包含 pong", out)
 	}
 	calls := up.all()
 	if len(calls) != 1 || calls[0].path != "/v1/chat/completions" {
@@ -1971,8 +1974,7 @@ func TestProviderPathsAcceptFullAddress(t *testing.T) {
 	}
 
 	// 账号仍固化厂商的 base_url；转发按路由的整条地址走到另一个 host。
-	if code, _, stderr := run(t, "account", "add", "split1",
-		"--provider", "split", "--key", "sk-test", "--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "split1", "split", "", "", "--key", "sk-test", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 	if code, _, stderr := run(t, "call", "hi", "--model", "m1"); code != 0 {
@@ -2171,8 +2173,7 @@ func TestProviderAddWithoutBaseURL(t *testing.T) {
 	}
 
 	// 账号的地址也留空：厂商没有 base_url 时不需要再塞一个占位地址。
-	if code, _, stderr := run(t, "account", "add", "bm1", "--provider", "bigmodel",
-		"--key", key, "--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "bm1", "bigmodel", "", "", "--key", key, "--models", "m1"); code != 0 {
 		t.Fatalf("account add 无 --base-url 退出码 = %d，stderr = %s", code, stderr)
 	}
 	code, accOut, stderr := run(t, "account", "ls", "--json")
@@ -2310,8 +2311,11 @@ func TestProviderSetKeepsBaseURLCoverage(t *testing.T) {
 		t.Fatalf("anthropic 路由 = %q，期望相对路径落库", got)
 	}
 
-	if code, _, stderr := run(t, "account", "add", "bm2", "--provider", "bigmodel",
-		"--protocol", "anthropic", "--key", "sk-test", "--models", "m1"); code != 0 {
+	// 出站协议取厂商的有效默认协议（账号不再存协议，见 DESIGN 5.8）：这条用例要打 anthropic 那条。
+	if code, _, stderr := run(t, "provider", "set", "bigmodel", "--default-protocol", "anthropic"); code != 0 {
+		t.Fatalf("provider set --default-protocol 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := addAccount(t, "bm2", "bigmodel", "", "", "--key", "sk-test", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 	anthropicUp.reset()

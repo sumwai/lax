@@ -17,9 +17,7 @@ import (
 func TestLogTailShowsReasoningTokens(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
-	if code, _, stderr := run(t, "account", "add", "relay",
-		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", "sk-secret-reasoning",
-		"--protocol", "openai-chat", "--models", "m-think,m-plain"); code != 0 {
+	if code, _, stderr := addAccount(t, "relay", "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-secret-reasoning", "--models", "m-think,m-plain"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 	id := accountID(t, "relay")
@@ -85,10 +83,7 @@ func TestLogTailShowsReasoningTokens(t *testing.T) {
 func TestUsageReasoningTotalsPerDimension(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
-	if code, _, stderr := run(t, "account", "add", "relay",
-		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", "sk-secret-usage",
-		"--protocol", "openai-chat", "--models", "m-a,m-b",
-		"--price-in", "2", "--price-out", "8"); code != 0 {
+	if code, _, stderr := addAccount(t, "relay", "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-secret-usage", "--models", "m-a,m-b", "--price-in", "2", "--price-out", "8"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 	id := accountID(t, "relay")

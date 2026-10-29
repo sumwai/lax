@@ -58,8 +58,7 @@ func TestWalkingSkeleton(t *testing.T) {
 		t.Fatalf("init 输出 = %s", out)
 	}
 
-	code, _, errOut = run(t, "account", "add", "ds1",
-		"--provider", "custom", "--base-url", up.URL, "--key", "sk-test", "--models", "m1")
+	code, _, errOut = addAccount(t, "ds1", "custom", up.URL, "", "--key", "sk-test", "--models", "m1")
 	if code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, errOut)
 	}
@@ -155,8 +154,7 @@ func TestAccountAddReadsKeyFromStdin(t *testing.T) {
 	os.Stdin = r
 	t.Cleanup(func() { os.Stdin = saved; _ = r.Close() })
 
-	code, _, errOut := run(t, "account", "add", "ds1", "--provider", "custom",
-		"--base-url", up.URL, "--key", "-", "--models", "m1")
+	code, _, errOut := addAccount(t, "ds1", "custom", up.URL, "", "--key", "-", "--models", "m1")
 	if code != 0 {
 		t.Fatalf("account add --key - 退出码 = %d，stderr = %s", code, errOut)
 	}
@@ -178,8 +176,7 @@ func TestAccountEnableDisable(t *testing.T) {
 	if code, _, stderr := run(t, "init"); code != 0 {
 		t.Fatalf("init 失败: %s", stderr)
 	}
-	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
-		"--base-url", up.URL, "--key", "sk-test", "--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "custom", up.URL, "", "--key", "sk-test", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 失败: %s", stderr)
 	}
 
@@ -231,7 +228,7 @@ func TestAccountAddRejectsMissingKey(t *testing.T) {
 		t.Fatal("init 失败")
 	}
 
-	code, _, errOut := run(t, "account", "add", "ds1", "--provider", "deepseek")
+	code, _, errOut := addAccount(t, "ds1", "deepseek", "", "")
 	if code != 2 {
 		t.Fatalf("退出码 = %d，缺必填参数应算用法错误", code)
 	}
@@ -243,8 +240,28 @@ func TestAccountAddRejectsMissingKey(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("未知厂商的退出码 = %d", code)
 	}
-	if !strings.Contains(errOut, "--base-url") {
-		t.Fatalf("stderr 应提示补 --base-url: %s", errOut)
+	if !strings.Contains(errOut, "switchboard provider add") {
+		t.Fatalf("stderr 应提示先登记厂商: %s", errOut)
+	}
+}
+
+// TestUnknownFlagIsUsageError 钉住「参数名写错」的退出码：2（用法错误），不是 1（运行失败），
+// 并把该子命令的用法行与参数清单打到 stderr，stdout 一个字都不写。
+func TestUnknownFlagIsUsageError(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	code, out, stderr := run(t, "account", "ls", "--nope")
+	if code != 2 {
+		t.Fatalf("未知参数的退出码 = %d，期望 2（用法错误）", code)
+	}
+	if out != "" {
+		t.Fatalf("用法错误不该写 stdout: %s", out)
+	}
+	for _, want := range []string{"-nope", "用法：", "--json"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+		}
 	}
 }
 

@@ -13,7 +13,7 @@ switchboard serve                                           # 起网关，127.0.
 switchboard log tail                                        # 看请求记录
 ```
 
-四条线协议能进，也能出。入站按路径分 anthropic、openai-chat、openai-responses 与 gemini，出站按账号的 `protocol` 字段，取值同为这四条；入站与出站相同则直通，不同则经中间表示转换，四条入站 × 四条出站共十六种组合，流式与非流式都可用，工具调用包含在内。中间表示、映射规则、选号规则、数据模型、里程碑见 [DESIGN.md](DESIGN.md)。
+四条线协议能进，也能出。入站按路径分 anthropic、openai-chat、openai-responses 与 gemini，出站按厂商行上那家厂商的默认协议（探活发现某个模型该走别的协议时，结论记在 `account_models.protocol` 上优先用它），取值同为这四条；入站与出站相同则直通，不同则经中间表示转换，四条入站 × 四条出站共十六种组合，流式与非流式都可用，工具调用包含在内。中间表示、映射规则、选号规则、数据模型、里程碑见 [DESIGN.md](DESIGN.md)。
 
 ## 命令
 
@@ -53,7 +53,7 @@ curl -s http://127.0.0.1:4567/v1beta/models/deepseek-v4-pro:generateContent \
     -d '{"contents":[{"role":"user","parts":[{"text":"用一句话介绍你自己"}]}]}'
 ```
 
-出站协议由账号决定：`account add --protocol` 取值 `anthropic`、`openai-chat`、`openai-responses` 与 `gemini`（gemini 的原生路径是 `{base}/v1beta/models/{model}:generateContent`，流式换成 `:streamGenerateContent?alt=sse`，凭据头是 `x-goog-api-key`），留空则取该厂商的默认协议（`provider add --default-protocol` 显式存的优先，没显式存则按 `openai-chat` → `openai-responses` → `anthropic` 取第一条路由）。厂商与各协议的路径在数据库里，`switchboard provider ls` 能看到，`provider add` / `set` / `unset` 可以增删改，不必重编译。入站协议与出站协议相同时直通，请求体只改 `model` 字段，其余字段与值原样带到上游，响应按字节原样返回（gemini 的报文里没有 `model` 字段，它直通时请求体一个字节都不改）；不同时经中间表示转换，请求与响应都只搬映射表里定义的字段，表外字段丢弃。未知路径返回 404，请求体解析失败返回 400，错误消息带协议名前缀。
+出站协议由厂商决定，账号只存厂商名：地址与默认协议都是那家厂商行上的值（迁移 `0014` 之后账号不再有 `base_url`、`protocol` 两列），所以 `account add` 没有 `--base-url` 与 `--protocol` 两个参数——先 `provider add` 把厂商登记进去，再建账号。默认协议的取值是 `anthropic`、`openai-chat`、`openai-responses` 与 `gemini`（gemini 的原生路径是 `{base}/v1beta/models/{model}:generateContent`，流式换成 `:streamGenerateContent?alt=sse`，凭据头是 `x-goog-api-key`）：`provider add --default-protocol` 显式存的优先，没显式存则按 `openai-chat` → `openai-responses` → `anthropic` 取第一条路由。改一家厂商的地址或默认协议立刻影响所有用它的账号（这是单一来源应有的行为）。厂商与各协议的路径在数据库里，`switchboard provider ls` 能看到，`provider add` / `set` / `unset` 可以增删改，不必重编译。入站协议与出站协议相同时直通，请求体只改 `model` 字段，其余字段与值原样带到上游，响应按字节原样返回（gemini 的报文里没有 `model` 字段，它直通时请求体一个字节都不改）；不同时经中间表示转换，请求与响应都只搬映射表里定义的字段，表外字段丢弃。未知路径返回 404，请求体解析失败返回 400，错误消息带协议名前缀。
 
 自己加一家厂商时，每个协议一条 flag（`--anthropic`、`--openai`、`--responses`、`--gemini`），值有两种写法：相对 `--base-url` 的完整路径，或者整条地址。整条地址给同一厂商不同协议分域名的情况用，写进去直接使用、不再拼 `--base-url`，例如 `--openai https://openai.example.com/v1/chat/completions --anthropic https://claude.example.com/v1/messages`；整条地址要带主机名，`https://` 这种只有 scheme、`https:///x` 缺主机名与 `ftp://host/x` 这类别的 scheme 都是用法错误（退出码 2）。`--base-url` 可以省略，条件是每个要声明的路由（以及给了的话 `--models-path`）都是整条地址：那时它拼不进任何地址，省掉它账号的地址也留空，转发与模型同步全走整条地址。bigmodel 就是这种形状——三套协议分属不同 host 与路径，模型列表在 chat 路径的同级：
 
@@ -85,7 +85,7 @@ switchboard provider add gem-proxy --base-url https://gemini-proxy.example.com \
 已添加厂商 gem-proxy（https://gemini-proxy.example.com），1 条路由，默认协议 gemini
 ```
 
-删掉这条路由是 `provider unset gem-proxy gemini`；这家只有这一条路由时会被拒绝，那是不想要这家厂商了，用 `provider rm`。账号一侧用 `account add --provider google-gemini --protocol gemini`（自建代理就把 `--provider` 换成那家的名字），gemini 的入站是 `POST /v1beta/models/{model}:generateContent` 与 `:streamGenerateContent`，非流式与流式都能用。
+删掉这条路由是 `provider unset gem-proxy gemini`；这家只有这一条路由时会被拒绝，那是不想要这家厂商了，用 `provider rm`。账号一侧用 `account add --provider google-gemini`（这家的默认协议已经是 gemini；自建代理就把 `--provider` 换成那家的名字），gemini 的入站是 `POST /v1beta/models/{model}:generateContent` 与 `:streamGenerateContent`，非流式与流式都能用。
 
 `provider set` 只设值：补一条路由、改默认协议或地址，没传的字段一律保留。传空值是用法错误，删除要显式声明：
 
@@ -124,7 +124,7 @@ SWITCHBOARD_KEY=sk-yyy switchboard account set ds # 留空则读环境变量 SWI
 
 `update` 是 `set` 的同义词。`--json` 只回显掩码，明文不进输出；换完 key 不用再跑 `account add`，也不影响已经探出来的模型状态。
 
-`account test` 判的是凭据与连通性，不是某个模型能不能用，所以它分两段。先 `GET` 模型列表证明地址通：地址与凭据头跟 `model sync` 同一套规则（厂商覆盖 → 账号协议那条路由的 `models_path`，整条地址直接访问，凭据头跟取到地址的那条路由的协议），2xx 说明上游连得上，顺带报出上游模型数，这一条不花 token。列表 2xx 之后**仍然**再发一条 `max_tokens=1` 的请求证明凭据有效：有的上游列表接口是公开的，任何 key 都回 200（commandcode 就是），光看列表判不出 key 好不好。这家没有列表接口（404、405）、列表被网关拦住（403）或连不上时也走这条请求，模型取账号模型列表第一项，为空时用默认模型名 `default` 并在备注里说明。两段都通过才判正常，状态与退出码按调用那段算；备注与 `--json` 写清两段各自的结果（`list` 对象是第一段的）。某个模型到底能不能用由 `model probe` 决定。
+`account test` 判的是凭据与连通性，不是某个模型能不能用，所以它分两段。先 `GET` 模型列表证明地址通：地址与凭据头跟 `model sync` 同一套规则（厂商覆盖 → 该账号的默认协议那条路由的 `models_path`，整条地址直接访问，凭据头跟取到地址的那条路由的协议），2xx 说明上游连得上，顺带报出上游模型数，这一条不花 token。列表 2xx 之后**仍然**再发一条 `max_tokens=1` 的请求证明凭据有效：有的上游列表接口是公开的，任何 key 都回 200（commandcode 就是），光看列表判不出 key 好不好。这家没有列表接口（404、405）、列表被网关拦住（403）或连不上时也走这条请求，模型取账号模型列表第一项，为空时用默认模型名 `default` 并在备注里说明。两段都通过才判正常，状态与退出码按调用那段算；备注与 `--json` 写清两段各自的结果（`list` 对象是第一段的）。某个模型到底能不能用由 `model probe` 决定。
 
 ```bash
 switchboard account test ds

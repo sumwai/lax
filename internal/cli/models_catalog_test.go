@@ -101,7 +101,8 @@ func TestModelsCatalogFollowsModelProbe(t *testing.T) {
 		t.Fatalf("model probe 退出码 = %d，stdout = %s，stderr = %s", code, out, stderr)
 	}
 
-	want := []catalogEntry{{ID: "m1", Object: "model", Created: 0, OwnedBy: "custom"}}
+	// owned_by 是账号所属厂商的名字：探活用例里每个账号一家自己的厂商（见 addProbeAccount）。
+	want := []catalogEntry{{ID: "m1", Object: "model", Created: 0, OwnedBy: "ds1-co"}}
 	if raw, got := mustCatalog(t, srv); !reflect.DeepEqual(got, want) {
 		t.Fatalf("探活后清单 = %s，期望 %+v：只有探通的 m1，403 的 m2 不该在清单里", raw, want)
 	}
@@ -136,7 +137,8 @@ func TestModelsCatalogFollowsAccountEnableDisable(t *testing.T) {
 	}
 	srv := gatewayServer(t)
 
-	want := []catalogEntry{{ID: "m1", Object: "model", Created: 0, OwnedBy: "custom"}}
+	// owned_by 是账号所属厂商的名字：探活用例里每个账号一家自己的厂商（见 addProbeAccount）。
+	want := []catalogEntry{{ID: "m1", Object: "model", Created: 0, OwnedBy: "ds1-co"}}
 	if raw, got := mustCatalog(t, srv); !reflect.DeepEqual(got, want) {
 		t.Fatalf("停用前清单 = %s，期望 %+v", raw, want)
 	}

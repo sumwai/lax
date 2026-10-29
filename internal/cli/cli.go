@@ -208,10 +208,15 @@ type flagSet struct {
 }
 
 // Parse 逐段解析：每遇到一个位置参数就收起来，继续解析它后面的参数。
+// 参数名写错、取值解析不了都是用法错误（退出码 2）：flag 包在出错时已经把
+// 这个子命令的用法行与参数清单写到 stderr 了，这里只把错误包成用法错误，让退出码对得上。
 func (f *flagSet) Parse(args []string) error {
 	for {
 		if err := f.FlagSet.Parse(args); err != nil {
-			return err
+			if errors.Is(err, flag.ErrHelp) {
+				return err
+			}
+			return usagef("%v", err)
 		}
 		rest := f.FlagSet.Args()
 		if len(rest) == 0 {

@@ -172,8 +172,7 @@ func TestModelSyncEndpointOverride(t *testing.T) {
 		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
 	}
 	// 账号地址指到假上游，厂商路由的 models_path 是 /v1/models。
-	if code, _, stderr := run(t, "account", "add", "mine1",
-		"--provider", "mine", "--base-url", up.srv.URL, "--key", "sk-test"); code != 0 {
+	if code, _, stderr := addAccount(t, "mine1", "mine", up.srv.URL, "", "--key", "sk-test"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -223,8 +222,7 @@ func TestModelSyncEndpointNormalized(t *testing.T) {
 		"--openai", "/v1/chat/completions"); code != 0 {
 		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if code, _, stderr := run(t, "account", "add", "mine1",
-		"--provider", "mine", "--base-url", up.srv.URL, "--key", "sk-test"); code != 0 {
+	if code, _, stderr := addAccount(t, "mine1", "mine", up.srv.URL, "", "--key", "sk-test"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -265,8 +263,7 @@ func TestAccountSyncProbeFlow(t *testing.T) {
 	if code, _, stderr := run(t, "init"); code != 0 {
 		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
-		"--base-url", up.srv.URL, "--key", "sk-test"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "custom", up.srv.URL, "", "--key", "sk-test"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -385,8 +382,7 @@ func TestModelProbeNoProgressOutsideTerminal(t *testing.T) {
 	if code, _, stderr := run(t, "init"); code != 0 {
 		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
-		"--base-url", up.srv.URL, "--key", "sk-test"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "custom", up.srv.URL, "", "--key", "sk-test"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -440,8 +436,7 @@ func TestAccountProbeAllForbiddenKeepsModels(t *testing.T) {
 	if code, _, stderr := run(t, "init"); code != 0 {
 		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
-		"--base-url", up.srv.URL, "--key", "sk-test", "--models", "keep-me"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "custom", up.srv.URL, "", "--key", "sk-test", "--models", "keep-me"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -479,8 +474,7 @@ func TestAccountProbeAuthFailureDisablesAccount(t *testing.T) {
 	if code, _, stderr := run(t, "init"); code != 0 {
 		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
-		"--base-url", up.srv.URL, "--key", "sk-test", "--models", "keep-me"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "custom", up.srv.URL, "", "--key", "sk-test", "--models", "keep-me"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -538,14 +532,22 @@ func probeVerdictRow(t *testing.T, recs []store.RequestRecord, model string) sto
 	return store.RequestRecord{}
 }
 
-// addProbeAccount 初始化数据库，加一个指向假上游的账号。
+// addProbeAccount 初始化数据库，加一个指向假上游的账号。地址只在厂商行上（DESIGN 5.8），
+// 所以先按账号名登记一家厂商，再建账号：每个账号一家厂商，两个账号指向两个假上游时
+// 才不会被后写的地址一起改掉。
 func addProbeAccount(t *testing.T, up *probeUpstream, name string, extra ...string) {
 	t.Helper()
 	if code, _, stderr := run(t, "init"); code != 0 {
 		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
 	}
-	args := append([]string{"account", "add", name, "--provider", "custom",
-		"--base-url", up.srv.URL, "--key", "sk-test"}, extra...)
+	provider := name + "-co"
+	// 三条非 gemini 路由都声明：探活的候选协议跟着路由收紧（见 DESIGN 5.8），
+	// 只声明一条时 403 之后就没有别的协议可换，探活行数会跟着变。
+	ensureProvider(t, provider, up.srv.URL,
+		"--openai", "/v1/chat/completions",
+		"--anthropic", "/v1/messages",
+		"--responses", "/v1/responses")
+	args := append([]string{"account", "add", name, "--provider", provider, "--key", "sk-test"}, extra...)
 	if code, _, stderr := run(t, args...); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
@@ -1023,7 +1025,7 @@ func TestModelProbeWritesRequestRows(t *testing.T) {
 	}
 	ok := probeVerdictRow(t, recs, "m1")
 	if ok.Inbound != "openai-chat" || ok.Outbound != "openai-chat" {
-		t.Fatalf("探活行的入站与出站都应取账号协议，实际 %s→%s", ok.Inbound, ok.Outbound)
+		t.Fatalf("探活行的入站与出站都应取厂商默认协议，实际 %s→%s", ok.Inbound, ok.Outbound)
 	}
 	if ok.ModelRequested != "m1" || ok.AccountID != acc.ID {
 		t.Fatalf("探活行的模型与账号不对: %+v", ok)
@@ -1179,8 +1181,7 @@ func TestModelProbeNeverPrintsKey(t *testing.T) {
 	if code, _, stderr := run(t, "init"); code != 0 {
 		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
-		"--base-url", up.URL, "--key", key); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "custom", up.URL, "", "--key", key); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -1257,8 +1258,7 @@ func TestModelProbeZeroUsableTellsSkipCount(t *testing.T) {
 	}
 
 	// 连模型列表都没拉到的账号：真实原因不能被「没有账号探出可用模型」盖住。
-	if code, _, stderr := run(t, "account", "add", "ds9", "--provider", "custom",
-		"--base-url", "http://127.0.0.1:1", "--key", "sk-test"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds9", "custom", "http://127.0.0.1:1", "", "--key", "sk-test"); code != 0 {
 		t.Fatalf("加不可达账号失败: %s", stderr)
 	}
 	code, _, errOut = run(t, "model", "probe", "--account", "ds9")
@@ -1293,7 +1293,7 @@ func TestModelProbeKeepsStderrClean(t *testing.T) {
 }
 
 // TestModelProbeRefreshStartsFromDiscoveredProtocol 确认 --refresh 重探已知模型时，
-// 库里发现的协议排在账号协议前面：账号协议 chat 只在首轮白打一次 404，
+// 库里发现的协议排在厂商默认协议前面：默认协议 chat 只在首轮白打一次 404，
 // 之后的每次重探都直接命中 anthropic 那条路由，上游只收到一次调用。
 //
 // 顺序反了的表现是每次 --refresh 都先多一条 404，模型多、重探频繁时全是白花的调用。
@@ -1307,20 +1307,19 @@ func TestModelProbeRefreshStartsFromDiscoveredProtocol(t *testing.T) {
 	if code, _, stderr := run(t, "init"); code != 0 {
 		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
 	}
-	// 账号协议取种子厂商 deepseek 的默认值 openai-chat，地址指向假上游；
+	// 账号的默认协议取种子厂商 deepseek 的 openai-chat，地址指向假上游；
 	// 不给 --models，探活会先同步一次模型列表。
-	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "deepseek",
-		"--base-url", up.srv.URL, "--key", "sk-test"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "deepseek", up.srv.URL, "", "--key", "sk-test"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	// 首轮：账号协议 chat 打 404，换 anthropic 成功，发现结果落库。
+	// 首轮：默认协议 chat 打 404，换 anthropic 成功，发现结果落库。
 	if code, _, stderr := run(t, "model", "probe", "--account", "ds1", "--json"); code != 0 {
 		t.Fatalf("首轮探活退出码 = %d，stderr = %s", code, stderr)
 	}
 	calls := up.postCalls()
 	if len(calls) != 2 || calls[0].path != "/v1/chat/completions" || calls[1].path != "/anthropic/v1/messages" {
-		t.Fatalf("首轮的上游调用 = %v，期望先账号协议 chat、再 anthropic", up.postPaths())
+		t.Fatalf("首轮的上游调用 = %v，期望先默认协议 chat、再 anthropic", up.postPaths())
 	}
 	if calls[0].bearer != "Bearer sk-test" || calls[0].apiKey != "" {
 		t.Fatalf("chat 的凭据头 = bearer %q / x-api-key %q，期望只有 Bearer sk-test", calls[0].bearer, calls[0].apiKey)
@@ -1373,8 +1372,7 @@ func TestModelSyncEndpointOnlyHitsSelectedProvider(t *testing.T) {
 		}
 	}
 	for _, c := range []struct{ account, provider string }{{"alpha1", "alpha"}, {"beta1", "beta"}} {
-		if code, _, stderr := run(t, "account", "add", c.account,
-			"--provider", c.provider, "--base-url", up.srv.URL, "--key", "sk-test"); code != 0 {
+		if code, _, stderr := addAccount(t, c.account, c.provider, up.srv.URL, "", "--key", "sk-test"); code != 0 {
 			t.Fatalf("account add %s 退出码 = %d，stderr = %s", c.account, code, stderr)
 		}
 	}

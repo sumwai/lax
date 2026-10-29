@@ -29,8 +29,8 @@ func mustAccountAdd(t *testing.T, out string) accountAddJSON {
 	return got
 }
 
-// TestAccountAddUsesProviderTable 覆盖 account add 从厂商表补默认地址与默认协议，
-// 以及 --base-url 与 --protocol 各自能覆盖它们。
+// TestAccountAddUsesProviderTable 覆盖 account add 的地址与协议来源：两个值都从厂商行读
+// （见 DESIGN 5.8），账号不再持有副本，因此也没有能覆盖它们的参数。
 func TestAccountAddUsesProviderTable(t *testing.T) {
 	sandbox(t)
 	if code, _, stderr := run(t, "init"); code != 0 {
@@ -39,7 +39,7 @@ func TestAccountAddUsesProviderTable(t *testing.T) {
 
 	// 默认协议取库里的有效默认协议：deepseek 显式存了 openai-chat，
 	// 单靠排序会得到 anthropic（anthropic 排在 openai-chat 前）。
-	code, out, stderr := run(t, "account", "add", "ds1", "--provider", "deepseek", "--key", "sk-1", "--json")
+	code, out, stderr := addAccount(t, "ds1", "deepseek", "", "", "--key", "sk-1", "--json")
 	if code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
@@ -48,84 +48,105 @@ func TestAccountAddUsesProviderTable(t *testing.T) {
 		t.Fatalf("deepseek 账号的默认值 = %+v，期望 base_url 取厂商表、协议取库里的 openai-chat", ds1)
 	}
 
-	// --protocol 覆盖默认协议，地址仍来自厂商表。
-	code, out, stderr = run(t, "account", "add", "ds2",
-		"--provider", "deepseek", "--protocol", "anthropic", "--key", "sk-2", "--json")
+	// 只声明了 anthropic 路由的厂商，默认协议因此是 anthropic。
+	code, out, stderr = addAccount(t, "an1", "anthco", "https://anth.example.com", "anthropic", "--key", "sk-2", "--json")
 	if code != 0 {
-		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+		t.Fatalf("anthropic 账号的退出码 = %d，stderr = %s", code, stderr)
 	}
-	ds2 := mustAccountAdd(t, out)
-	if ds2.BaseURL != "https://api.deepseek.com" || ds2.Protocol != "anthropic" {
-		t.Fatalf("--protocol 应覆盖默认协议 = %+v", ds2)
+	if got := mustAccountAdd(t, out); got.Protocol != "anthropic" || got.BaseURL != "https://anth.example.com" {
+		t.Fatalf("anthropic 账号 = %+v", got)
 	}
 
-	// --base-url 覆盖厂商地址，协议仍按厂商表补。
-	code, out, stderr = run(t, "account", "add", "ds3",
-		"--provider", "deepseek", "--base-url", "http://127.0.0.1:9", "--key", "sk-3", "--json")
-	if code != 0 {
-		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
-	}
-	ds3 := mustAccountAdd(t, out)
-	if ds3.BaseURL != "http://127.0.0.1:9" || ds3.Protocol != "openai-chat" {
-		t.Fatalf("--base-url 应覆盖厂商地址 = %+v", ds3)
-	}
-
-	// 只声明了 openai-responses 的账号也能加：三种线协议都收。
-	code, out, stderr = run(t, "account", "add", "oa1",
-		"--provider", "openai", "--protocol", "openai-responses", "--key", "sk-4", "--json")
+	// 只声明了 openai-responses 的厂商同样算得出默认协议：三种线协议都收。
+	code, out, stderr = addAccount(t, "oa1", "respco", "https://resp.example.com", "openai-responses", "--key", "sk-3", "--json")
 	if code != 0 {
 		t.Fatalf("openai-responses 账号的退出码 = %d，stderr = %s", code, stderr)
 	}
-	oa1 := mustAccountAdd(t, out)
-	if oa1.Protocol != "openai-responses" || oa1.BaseURL != "https://api.openai.com" {
-		t.Fatalf("openai-responses 账号 = %+v", oa1)
+	if got := mustAccountAdd(t, out); got.Protocol != "openai-responses" {
+		t.Fatalf("openai-responses 账号 = %+v", got)
 	}
 
-	// gemini 入站与出站都可用（DESIGN 5.9），账号上可以选它作出站协议。
-	code, out, stderr = run(t, "account", "add", "g1",
-		"--provider", "openai", "--protocol", "gemini", "--key", "sk-5", "--json")
+	// gemini 入站与出站都可用（DESIGN 5.9）：厂商把默认协议设成 gemini 时，账号也按它算。
+	code, out, stderr = addAccount(t, "g1", "gemco", "https://gem.example.com", "gemini", "--key", "sk-4", "--json")
 	if code != 0 {
 		t.Fatalf("gemini 账号的退出码 = %d，stderr = %s", code, stderr)
 	}
-	if g1 := mustAccountAdd(t, out); g1.Protocol != "gemini" {
-		t.Fatalf("gemini 账号 = %+v", g1)
+	if got := mustAccountAdd(t, out); got.Protocol != "gemini" {
+		t.Fatalf("gemini 账号 = %+v", got)
 	}
 
-	// 不认识的协议仍是用法错误，文案要列出全部可选值。
-	code, _, stderr = run(t, "account", "add", "bad", "--provider", "openai", "--protocol", "nope", "--key", "sk-6")
-	if code != 2 {
-		t.Fatalf("不支持的协议退出码 = %d，期望 2", code)
+	// 厂商的 base_url 为空是合法的（路由与 models_path 都是整条地址，见 DESIGN 5.8），
+	// 账号的派生地址因此也是空串，--json 里是空串而不是占位。
+	if code, _, stderr := run(t, "provider", "add", "splitco",
+		"--openai", "https://openai.example.com/v1/chat/completions"); code != 0 {
+		t.Fatalf("provider add splitco 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"anthropic", "openai-chat", "openai-responses", "gemini"} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("协议错误的文案应列出 %q: %s", want, stderr)
+	code, out, stderr = addAccount(t, "sp1", "splitco", "", "", "--key", "sk-5", "--json")
+	if code != 0 {
+		t.Fatalf("无 base_url 厂商的账号退出码 = %d，stderr = %s", code, stderr)
+	}
+	if got := mustAccountAdd(t, out); got.BaseURL != "" || got.Protocol != "openai-chat" {
+		t.Fatalf("无 base_url 厂商的账号 = %+v，期望地址为空串、协议 openai-chat", got)
+	}
+}
+
+// TestAccountAddRejectsRetiredFlags 钉住删掉的两个参数：--base-url 与 --protocol 是用法错误
+// （退出码 2），文案说清它们去了哪、下一步跑什么，而不是只报「参数不认识」。
+func TestAccountAddRejectsRetiredFlags(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	cases := []struct {
+		args []string
+		hint string
+	}{
+		{[]string{"--provider", "deepseek", "--base-url", "https://api.example.com", "--key", "sk-1"},
+			"switchboard provider add"},
+		{[]string{"--provider", "deepseek", "--protocol", "anthropic", "--key", "sk-1"},
+			"--default-protocol"},
+		{[]string{"--provider", "deepseek", "--base-url=https://api.example.com", "--key", "sk-1"},
+			"switchboard provider add"},
+	}
+	for _, c := range cases {
+		code, out, stderr := run(t, append([]string{"account", "add", "a1"}, c.args...)...)
+		if code != 2 {
+			t.Fatalf("%v 的退出码 = %d，期望 2（用法错误）", c.args, code)
+		}
+		if out != "" {
+			t.Fatalf("用法错误不该写 stdout: %s", out)
+		}
+		for _, want := range []string{c.hint, "用法：switchboard account add"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("%v 的 stderr 应提到 %q: %s", c.args, want, stderr)
+			}
 		}
 	}
 }
 
-// TestAccountAddHelpMentionsGemini 钉住 --protocol 的帮助文案：gemini 在可选值里，
-// 并且写明入站与出站都可用、两条入站路径是什么（见 DESIGN 4 的 account add 行）。
-func TestAccountAddHelpMentionsGemini(t *testing.T) {
+// TestAccountAddHelpFollowsProviderTable 钉住 --help 与新模型一致：参数里没有地址与协议，
+// 用法行指向先登记厂商。
+func TestAccountAddHelpFollowsProviderTable(t *testing.T) {
 	sandbox(t)
 
 	code, _, errOut := run(t, "account", "add", "--help")
 	if code != 0 {
 		t.Fatalf("account add --help 的退出码 = %d", code)
 	}
-	for _, want := range []string{
-		"anthropic | openai-chat | openai-responses | gemini",
-		"入站与出站都可用",
-		"/v1beta/models/{model}:generateContent",
-		":streamGenerateContent",
-	} {
+	for _, want := range []string{"--provider", "--key", "--models", "--price-in"} {
 		if !strings.Contains(errOut, want) {
-			t.Fatalf("account add --help 应提到 %q: %s", want, errOut)
+			t.Fatalf("account add --help 应列出 %q: %s", want, errOut)
+		}
+	}
+	for _, gone := range []string{"--base-url", "--protocol"} {
+		if strings.Contains(errOut, gone) {
+			t.Fatalf("account add --help 不该再列出 %q: %s", gone, errOut)
 		}
 	}
 }
 
-// TestAccountAddProviderWithoutRoutes 覆盖厂商行在、但一条路由都没声明的情况：
-// 没给 --protocol 也没给 --base-url 时报错并给出三条下一步，给了任一个都能加。
+// TestAccountAddProviderWithoutRoutes 覆盖厂商行在、但一条路由都没声明的情况：默认协议
+// 算不出来，但建账号本身不算错——转发时按厂商默认协议推导，推导为空由转发层报错
+// （见 DESIGN 5.8），所以这里不报错，地址照旧来自厂商行。
 func TestAccountAddProviderWithoutRoutes(t *testing.T) {
 	sandbox(t)
 	if code, _, stderr := run(t, "init"); code != 0 {
@@ -134,49 +155,33 @@ func TestAccountAddProviderWithoutRoutes(t *testing.T) {
 	// 命令行已经造不出零路由厂商（add 至少要求一条路由），老库里可能有，用 store 直接造。
 	seedProviderWithoutRoutes(t, "noroute", "https://api.example.com")
 
-	code, out, stderr := run(t, "account", "add", "n1", "--provider", "noroute", "--key", "sk-1")
-	if code != 1 {
-		t.Fatalf("厂商无路由的退出码 = %d，期望 1", code)
+	code, out, stderr := addAccount(t, "n1", "noroute", "", "", "--key", "sk-1", "--json")
+	if code != 0 {
+		t.Fatalf("厂商无路由时建账号的退出码 = %d，stderr = %s", code, stderr)
 	}
-	if out != "" {
-		t.Fatalf("报错时不该写 stdout: %s", out)
-	}
-	for _, want := range []string{"switchboard provider set noroute", "--protocol", "--base-url", "--openai"} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
-		}
+	if got := mustAccountAdd(t, out); got.Protocol != "" || got.BaseURL != "https://api.example.com" {
+		t.Fatalf("厂商无路由的账号 = %+v，期望协议为空串、地址取厂商行", got)
 	}
 
-	// 显式 --protocol 时照常能加，地址仍取厂商的 base_url。
-	code, out, stderr = run(t, "account", "add", "n2",
-		"--provider", "noroute", "--protocol", "anthropic", "--key", "sk-2", "--json")
+	// 人读输出里协议算不出来时写 -，不打出一个空括号。
+	code, out, stderr = addAccount(t, "n2", "noroute", "", "", "--key", "sk-2")
 	if code != 0 {
-		t.Fatalf("带 --protocol 的退出码 = %d，stderr = %s", code, stderr)
+		t.Fatalf("厂商无路由时建账号的退出码 = %d，stderr = %s", code, stderr)
 	}
-	if got := mustAccountAdd(t, out); got.Protocol != "anthropic" || got.BaseURL != "https://api.example.com" {
-		t.Fatalf("带 --protocol 的账号 = %+v", got)
-	}
-
-	// 只给 --base-url 时按自建地址加账号，协议回退 openai-chat（见 DESIGN 5.8）。
-	code, out, stderr = run(t, "account", "add", "n3",
-		"--provider", "noroute", "--base-url", "http://127.0.0.1:9", "--key", "sk-3", "--json")
-	if code != 0 {
-		t.Fatalf("带 --base-url 的退出码 = %d，stderr = %s", code, stderr)
-	}
-	if got := mustAccountAdd(t, out); got.Protocol != "openai-chat" || got.BaseURL != "http://127.0.0.1:9" {
-		t.Fatalf("带 --base-url 的账号 = %+v", got)
+	if want := "已添加 n2（noroute，-，凭据 "; !strings.Contains(out, want) {
+		t.Fatalf("协议算不出来时应写 -: %s", out)
 	}
 }
 
-// TestAccountAddUnknownProvider 覆盖厂商不在表里时的文案：已知厂商清单、最接近的名字、
-// 自建地址的走法。
+// TestAccountAddUnknownProvider 覆盖厂商不在表里时的文案：已知厂商清单、最接近的名字，
+// 以及先登记厂商的那条命令（账号已经没有自己的地址可填）。
 func TestAccountAddUnknownProvider(t *testing.T) {
 	sandbox(t)
 	if code, _, stderr := run(t, "init"); code != 0 {
 		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	// 拼错一个字：提示最接近的已知厂商。
+	// 拼错一个字：提示最接近的已知厂商，并给登记厂商的命令。
 	code, out, stderr := run(t, "account", "add", "x1", "--provider", "deepsek", "--key", "sk-1")
 	if code != 1 {
 		t.Fatalf("未知厂商的退出码 = %d，期望 1", code)
@@ -184,7 +189,8 @@ func TestAccountAddUnknownProvider(t *testing.T) {
 	if out != "" {
 		t.Fatalf("报错时不该写 stdout: %s", out)
 	}
-	for _, want := range []string{"deepseek", "已知：", "最接近", "--base-url"} {
+	for _, want := range []string{"deepseek", "已知：", "最接近",
+		"switchboard provider add deepsek --base-url <地址> --openai /v1/chat/completions"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 		}
@@ -202,19 +208,19 @@ func TestAccountAddUnknownProvider(t *testing.T) {
 		t.Fatalf("编辑距离超过 2 时不该给最接近的名字: %s", stderr)
 	}
 
-	// 自定义名加 --base-url 仍然可用。
-	code, out, stderr = run(t, "account", "add", "x3",
-		"--provider", "deepsek", "--base-url", "http://127.0.0.1:9", "--key", "sk-3", "--json")
+	// 先把厂商登记进表，同一个名字就能建账号，地址与协议从厂商行读。
+	ensureProvider(t, "deepsek", "http://127.0.0.1:9", routeFlagsForProtocol("")...)
+	code, out, stderr = run(t, "account", "add", "x3", "--provider", "deepsek", "--key", "sk-3", "--json")
 	if code != 0 {
-		t.Fatalf("自建地址的退出码 = %d，stderr = %s", code, stderr)
+		t.Fatalf("登记厂商后的退出码 = %d，stderr = %s", code, stderr)
 	}
 	if got := mustAccountAdd(t, out); got.Provider != "deepsek" || got.BaseURL != "http://127.0.0.1:9" {
-		t.Fatalf("自建地址的账号 = %+v", got)
+		t.Fatalf("登记厂商后的账号 = %+v", got)
 	}
 }
 
-// TestAccountAddWithoutProviders 覆盖厂商表被删空后的行为：
-// 带 --base-url 照常可用，不带时报错并指出两条下一步。
+// TestAccountAddWithoutProviders 覆盖厂商表被删空后的行为：没有厂商就既没有地址也没有协议，
+// 报错并指出先登记厂商；登记之后同一条命令就能建账号。
 func TestAccountAddWithoutProviders(t *testing.T) {
 	sandbox(t)
 	if code, _, stderr := run(t, "init"); code != 0 {
@@ -246,49 +252,102 @@ func TestAccountAddWithoutProviders(t *testing.T) {
 	if out != "" {
 		t.Fatalf("报错时不该写 stdout: %s", out)
 	}
-	for _, want := range []string{"switchboard provider ls", "--base-url"} {
+	for _, want := range []string{"厂商表是空的",
+		"switchboard provider add deepseek --base-url <地址> --openai /v1/chat/completions"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 		}
 	}
 
-	code, out, stderr = run(t, "account", "add", "a1",
-		"--provider", "deepseek", "--base-url", "http://127.0.0.1:9", "--key", "sk-1", "--json")
-	if code != 0 {
-		t.Fatalf("带 --base-url 的退出码 = %d，stderr = %s", code, stderr)
+	if code, _, stderr := run(t, "provider", "add", "deepseek",
+		"--base-url", "http://127.0.0.1:9", "--openai", "/v1/chat/completions"); code != 0 {
+		t.Fatalf("provider add deepseek 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if got := mustAccountAdd(t, out); got.BaseURL != "http://127.0.0.1:9" {
-		t.Fatalf("厂商表为空时 --base-url 应直接用上: %+v", got)
+	code, out, stderr = run(t, "account", "add", "a1", "--provider", "deepseek", "--key", "sk-1", "--json")
+	if code != 0 {
+		t.Fatalf("登记厂商后的退出码 = %d，stderr = %s", code, stderr)
+	}
+	if got := mustAccountAdd(t, out); got.BaseURL != "http://127.0.0.1:9" || got.Protocol != "openai-chat" {
+		t.Fatalf("登记厂商后的账号 = %+v", got)
 	}
 }
 
-// TestAccountAddBaseURLValidated 覆盖 account add --base-url 的校验：与 provider add/set 同一份
-// store.NormalizeBaseURL（见 DESIGN 5.8）。只有 scheme 的写法是用法错误、退出码 2，文案保留
-// store 的原话并附这个子命令的用法行；大写 scheme 与末尾斜杠被接受，落库存规整后的形态。
-func TestAccountAddBaseURLValidated(t *testing.T) {
+// TestAccountLsShowsProviderAddressAndProtocol 覆盖 account ls 的地址列与协议列：
+// 两列都从厂商行取（见 DESIGN 5.8），base_url 为空的厂商地址列写 -。
+func TestAccountLsShowsProviderAddressAndProtocol(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
 
-	code, out, stderr := run(t, "account", "add", "mine1",
-		"--provider", "custom", "--base-url", "https://", "--key", "sk-test")
-	if code != 2 || out != "" {
-		t.Fatalf("退出码 = %d，stdout = %q", code, out)
+	if code, _, stderr := run(t, "provider", "add", "splitco",
+		"--openai", "https://openai.example.com/v1/chat/completions"); code != 0 {
+		t.Fatalf("provider add splitco 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"里没有主机名", "https://api.deepseek.com", "用法：switchboard account add"} {
-		if !strings.Contains(stderr, want) {
-			t.Fatalf("stderr 应包含 %q: %s", want, stderr)
-		}
+	addAccount(t, "sp1", "splitco", "", "", "--key", "sk-1")
+	addAccount(t, "ds1", "deepseek", "", "", "--key", "sk-2")
+
+	code, out, stderr := run(t, "account", "ls", "--json")
+	if code != 0 {
+		t.Fatalf("account ls 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var rows []struct {
+		Name     string `json:"name"`
+		Protocol string `json:"protocol"`
+		BaseURL  string `json:"base_url"`
+	}
+	mustJSON(t, out, &rows)
+	byName := map[string]struct {
+		protocol string
+		baseURL  string
+	}{}
+	for _, r := range rows {
+		byName[r.Name] = struct {
+			protocol string
+			baseURL  string
+		}{r.Protocol, r.BaseURL}
+	}
+	if got := byName["sp1"]; got.baseURL != "" || got.protocol != "openai-chat" {
+		t.Fatalf("splitco 账号 = %+v，期望地址为空串、协议 openai-chat", got)
+	}
+	if got := byName["ds1"]; got.baseURL != "https://api.deepseek.com" || got.protocol != "openai-chat" {
+		t.Fatalf("deepseek 账号 = %+v", got)
 	}
 
-	// 校验失败不该留下半个账号：同名再加一次必须成功。
-	code, out, stderr = run(t, "account", "add", "mine1",
-		"--provider", "custom", "--base-url", "HTTPS://API.Example.com/", "--key", "sk-test", "--json")
+	// 厂商行在、但一条路由都没声明：地址照旧来自厂商行，默认协议算不出来写 -。
+	seedProviderWithoutRoutes(t, "noroute", "https://api.noroute.example.com")
+	addAccount(t, "nr1", "noroute", "", "", "--key", "sk-3")
+
+	code, out, stderr = run(t, "account", "ls")
 	if code != 0 {
-		t.Fatalf("大写 scheme 应被接受，退出码 = %d，stderr = %s", code, stderr)
+		t.Fatalf("account ls 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if got := mustAccountAdd(t, out); got.BaseURL != "https://API.Example.com" {
-		t.Fatalf("base_url = %q，期望 https://API.Example.com", got.BaseURL)
+	for _, want := range []string{"地址", "协议", "https://api.deepseek.com", "openai-chat"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("account ls 文本输出缺 %q:\n%s", want, out)
+		}
 	}
+	// base_url 与默认协议算不出来的两种空值都在列里写 -，与 provider ls 同一套写法。
+	for _, c := range []struct{ name, wantBase, wantProtocol string }{
+		{"sp1", "-", "openai-chat"},
+		{"nr1", "https://api.noroute.example.com", "-"},
+	} {
+		fields := strings.Fields(accountLsLine(t, out, c.name))
+		if fields[2] != c.wantBase || fields[3] != c.wantProtocol {
+			t.Fatalf("%s 的地址列与协议列 = %q / %q，期望 %q / %q", c.name, fields[2], fields[3], c.wantBase, c.wantProtocol)
+		}
+	}
+}
+
+// accountLsLine 从 account ls 的表格里挑出某个账号那一行：用例要逐列看地址与协议，
+// 只找子串分不清哪一列写了什么。
+func accountLsLine(t *testing.T, out, name string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		if fields := strings.Fields(line); len(fields) > 0 && fields[0] == name {
+			return line
+		}
+	}
+	t.Fatalf("account ls 的输出里没有账号 %s 那一行:\n%s", name, out)
+	return ""
 }
 
 // mustStore 打开当前沙箱的库与密钥，供用例直接检查 store 里的状态：
@@ -319,8 +378,7 @@ func TestAccountSetRotatesKey(t *testing.T) {
 	up := fakeUpstream(t) // 只接受 Bearer sk-test
 	mustInit(t)
 
-	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
-		"--base-url", up.URL, "--key", "sk-old", "--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "custom", up.URL, "", "--key", "sk-old", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -387,8 +445,7 @@ func TestAccountSetKeyFromStdin(t *testing.T) {
 	sandbox(t)
 	up := fakeUpstream(t)
 	mustInit(t)
-	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
-		"--base-url", up.URL, "--key", "sk-old", "--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "custom", up.URL, "", "--key", "sk-old", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -453,8 +510,7 @@ func TestAccountSetJSONMasksKey(t *testing.T) {
 	sandbox(t)
 	up := fakeUpstream(t)
 	mustInit(t)
-	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
-		"--base-url", up.URL, "--key", "sk-old", "--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "custom", up.URL, "", "--key", "sk-old", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -482,8 +538,7 @@ func TestAccountUpdateIsSynonymForSet(t *testing.T) {
 	sandbox(t)
 	up := fakeUpstream(t)
 	mustInit(t)
-	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
-		"--base-url", up.URL, "--key", "sk-old", "--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "custom", up.URL, "", "--key", "sk-old", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -518,8 +573,7 @@ func TestAccountTestWithoutModels(t *testing.T) {
 	})
 	mustInit(t)
 
-	if code, _, stderr := run(t, "account", "add", "fresh",
-		"--provider", "custom", "--base-url", up.srv.URL, "--key", "sk-test"); code != 0 {
+	if code, _, stderr := addAccount(t, "fresh", "custom", up.srv.URL, "", "--key", "sk-test"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -589,9 +643,7 @@ func TestAccountTestListOKStillChecksKey(t *testing.T) {
 	})
 	mustInit(t)
 
-	if code, _, stderr := run(t, "account", "add", "free",
-		"--provider", "custom", "--base-url", up.srv.URL, "--key", "sk-test",
-		"--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "free", "custom", up.srv.URL, "", "--key", "sk-test", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -640,9 +692,7 @@ func TestAccountTestPublicListDoesNotProveKey(t *testing.T) {
 	})
 	mustInit(t)
 
-	if code, _, stderr := run(t, "account", "add", "public",
-		"--provider", "custom", "--base-url", up.srv.URL, "--key", "sk-bad",
-		"--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "public", "custom", up.srv.URL, "", "--key", "sk-bad", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -689,9 +739,7 @@ func TestAccountTestFallsBackToCallStage(t *testing.T) {
 	})
 	mustInit(t)
 
-	if code, _, stderr := run(t, "account", "add", "fb",
-		"--provider", "custom", "--base-url", up.srv.URL, "--key", "sk-test",
-		"--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "fb", "custom", up.srv.URL, "", "--key", "sk-test", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -725,8 +773,7 @@ func TestAccountTestNeverPrintsKey(t *testing.T) {
 	})
 	mustInit(t)
 
-	if code, _, stderr := run(t, "account", "add", "leak",
-		"--provider", "custom", "--base-url", up.srv.URL, "--key", key, "--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "leak", "custom", up.srv.URL, "", "--key", key, "--models", "m1"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -760,11 +807,7 @@ func TestAccountAddStoresCachePrices(t *testing.T) {
 	mustInit(t)
 
 	const key = "sk-cache-price-secret"
-	code, out, stderr := run(t, "account", "add", "ds1",
-		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", key,
-		"--protocol", "openai-chat", "--models", "m1",
-		"--price-in", "2", "--price-out", "4",
-		"--price-cache-read", "0.5", "--price-cache-write", "3")
+	code, out, stderr := addAccount(t, "ds1", "mine", "http://127.0.0.1:9", "openai-chat", "--key", key, "--models", "m1", "--price-in", "2", "--price-out", "4", "--price-cache-read", "0.5", "--price-cache-write", "3")
 	if code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
@@ -790,9 +833,7 @@ func TestAccountAddStoresCachePrices(t *testing.T) {
 	}
 
 	// 不给价格参数时两列缓存单价为空：花费估算回退到输入价（见 DESIGN 5.5）。
-	if code, _, stderr := run(t, "account", "add", "ds2",
-		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", key,
-		"--protocol", "openai-chat", "--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds2", "mine", "http://127.0.0.1:9", "openai-chat", "--key", key, "--models", "m1"); code != 0 {
 		t.Fatalf("account add ds2 退出码 = %d，stderr = %s", code, stderr)
 	}
 	acc, err = st.GetAccount("ds2")
@@ -814,9 +855,7 @@ func TestAccountAddRejectsNegativePrices(t *testing.T) {
 	mustInit(t)
 
 	for _, flag := range []string{"--price-in", "--price-out", "--price-cache-read", "--price-cache-write"} {
-		code, out, stderr := run(t, "account", "add", "ds-"+flag,
-			"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", "sk-1",
-			"--protocol", "openai-chat", "--models", "m1", flag, "-0.5")
+		code, out, stderr := addAccount(t, "ds-"+flag, "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-1", "--models", "m1", flag, "-0.5")
 		if code != 2 || out != "" {
 			t.Fatalf("%s 负数的退出码 = %d，stdout = %q", flag, code, out)
 		}
@@ -843,10 +882,7 @@ func TestAccountSetOnlyTouchesPassedPrices(t *testing.T) {
 	mustInit(t)
 
 	const key = "sk-price-only-secret"
-	if code, _, stderr := run(t, "account", "add", "ds1",
-		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", key,
-		"--protocol", "openai-chat", "--models", "m1",
-		"--price-in", "2", "--price-out", "4", "--price-cache-write", "3"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "mine", "http://127.0.0.1:9", "openai-chat", "--key", key, "--models", "m1", "--price-in", "2", "--price-out", "4", "--price-cache-write", "3"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 

@@ -36,10 +36,7 @@ func accountID(t *testing.T, name string) int64 {
 // addPricedAccount 加一个带价格的账号，用来断言估算花费的具体金额。
 func addPricedAccount(t *testing.T, name, priceIn, priceOut string) {
 	t.Helper()
-	if code, _, stderr := run(t, "account", "add", name,
-		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", "sk-1",
-		"--protocol", "openai-chat", "--models", "m1",
-		"--price-in", priceIn, "--price-out", priceOut); code != 0 {
+	if code, _, stderr := addAccount(t, name, "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-1", "--models", "m1", "--price-in", priceIn, "--price-out", priceOut); code != 0 {
 		t.Fatalf("account add %s 退出码 = %d，stderr = %s", name, code, stderr)
 	}
 }
@@ -130,9 +127,7 @@ func logRowFields(t *testing.T, out, model string) []string {
 func TestLogTailShowsCacheTokens(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
-	if code, _, stderr := run(t, "account", "add", "ds1",
-		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", "sk-1",
-		"--protocol", "openai-chat", "--models", "m-cache,m-plain"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-1", "--models", "m-cache,m-plain"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 	id := accountID(t, "ds1")
@@ -195,9 +190,7 @@ func TestLogTailShowsCacheTokens(t *testing.T) {
 func TestUsageCacheTotalsPerDimension(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
-	if code, _, stderr := run(t, "account", "add", "ds1",
-		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", "sk-1",
-		"--protocol", "openai-chat", "--models", "m-a,m-b"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-1", "--models", "m-a,m-b"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 	id := accountID(t, "ds1")
@@ -272,9 +265,7 @@ func TestUsageCacheTotalsPerDimension(t *testing.T) {
 func TestUsageCacheHintOnlyWithCacheTokens(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
-	if code, _, stderr := run(t, "account", "add", "ds1",
-		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", "sk-1",
-		"--protocol", "openai-chat", "--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-1", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 	id := accountID(t, "ds1")
@@ -318,11 +309,7 @@ func TestUsageCacheHintOnlyWithCacheTokens(t *testing.T) {
 func TestUsageCostCountsCacheTokens(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
-	if code, _, stderr := run(t, "account", "add", "ds1",
-		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", "sk-1",
-		"--protocol", "openai-chat", "--models", "m1",
-		"--price-in", "2", "--price-out", "4",
-		"--price-cache-read", "0.5", "--price-cache-write", "3"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-1", "--models", "m1", "--price-in", "2", "--price-out", "4", "--price-cache-read", "0.5", "--price-cache-write", "3"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 	id := accountID(t, "ds1")

@@ -78,8 +78,7 @@ func TestModelSyncResponseShapesWriteModels(t *testing.T) {
 				"GET /v1/models": {status: http.StatusOK, body: c.body},
 			})
 			mustInit(t)
-			if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
-				"--base-url", up.srv.URL, "--key", "sk-test"); code != 0 {
+			if code, _, stderr := addAccount(t, "ds1", "custom", up.srv.URL, "", "--key", "sk-test"); code != 0 {
 				t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 			}
 
@@ -141,8 +140,7 @@ func TestModelSyncEmptyModelsFieldIsEmptyListFailure(t *testing.T) {
 				"GET /v1/models": {status: http.StatusOK, body: c.body},
 			})
 			mustInit(t)
-			if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
-				"--base-url", up.srv.URL, "--key", "sk-test"); code != 0 {
+			if code, _, stderr := addAccount(t, "ds1", "custom", up.srv.URL, "", "--key", "sk-test"); code != 0 {
 				t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 			}
 
@@ -184,8 +182,7 @@ func TestModelSyncUnknownShapeListsThreeShapes(t *testing.T) {
 		"GET /v1/models": {status: http.StatusOK, body: `{"ok":true}`},
 	})
 	mustInit(t)
-	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
-		"--base-url", up.srv.URL, "--key", "sk-test"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "custom", up.srv.URL, "", "--key", "sk-test"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -235,8 +232,7 @@ func TestModelSyncShapeDetectionKeepsModelsPathPriority(t *testing.T) {
 		"--models-path", lists.srv.URL+"/tags"); code != 0 {
 		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if code, _, stderr := run(t, "account", "add", "a1",
-		"--provider", "mine", "--base-url", base.srv.URL, "--key", "sk-test"); code != 0 {
+	if code, _, stderr := addAccount(t, "a1", "mine", base.srv.URL, "", "--key", "sk-test"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -256,7 +252,7 @@ func TestModelSyncShapeDetectionKeepsModelsPathPriority(t *testing.T) {
 		t.Fatalf("账号 base_url 收到 %+v，完整地址的 models_path 不该拼它", calls)
 	}
 	if calls := lists.all(); calls[0].bearer != "Bearer sk-test" || calls[0].apiKey != "" {
-		t.Fatalf("凭据头 = Bearer %q / x-api-key %q，期望按账号协议发 Bearer", calls[0].bearer, calls[0].apiKey)
+		t.Fatalf("凭据头 = Bearer %q / x-api-key %q，期望按厂商默认协议发 Bearer", calls[0].bearer, calls[0].apiKey)
 	}
 	if statuses := mustModelRowStatuses(t); len(statuses) != 1 || statuses["llama3:latest"] != "synced" {
 		t.Fatalf("model ls = %v，期望只有 llama3:latest 且为 synced", statuses)

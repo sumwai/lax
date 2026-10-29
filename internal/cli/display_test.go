@@ -8,15 +8,13 @@ import (
 )
 
 // TestModelLsShowsEffectiveProtocol 覆盖 model ls 的协议列：
-// 每个账号显示该模型的有效协议，模型行没有协议时回退到账号协议。
+// 每个账号显示该模型的有效协议，模型行没有协议时回退到厂商的有效默认协议（见 DESIGN 5.8）。
 func TestModelLsShowsEffectiveProtocol(t *testing.T) {
 	sandbox(t)
 	if code, _, stderr := run(t, "init"); code != 0 {
 		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if code, _, stderr := run(t, "account", "add", "acc1",
-		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", "sk-test",
-		"--protocol", "openai-chat", "--models", "m1,m2"); code != 0 {
+	if code, _, stderr := addAccount(t, "acc1", "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-test", "--models", "m1,m2"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -25,7 +23,7 @@ func TestModelLsShowsEffectiveProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读账号 acc1: %v", err)
 	}
-	// m1 探活时发现该走 anthropic；m2 的协议列为空，应当回退到账号协议。
+	// m1 探活时发现该走 anthropic；m2 的协议列为空，应当回退到厂商的默认协议。
 	if err := db.SetModelStatus(acc.ID, "m1", "usable", 200, ""); err != nil {
 		t.Fatalf("写 m1 状态: %v", err)
 	}
@@ -63,7 +61,7 @@ func TestModelLsShowsEffectiveProtocol(t *testing.T) {
 		t.Fatalf("m1 的有效协议 = %q，期望探活发现的 anthropic", byModel["m1"])
 	}
 	if byModel["m2"] != "openai-chat" {
-		t.Fatalf("m2 的有效协议 = %q，期望回退到账号协议 openai-chat", byModel["m2"])
+		t.Fatalf("m2 的有效协议 = %q，期望回退到厂商默认协议 openai-chat", byModel["m2"])
 	}
 
 	code, out, stderr = run(t, "model", "ls")
@@ -85,14 +83,10 @@ func TestAccountLsProtocolSummary(t *testing.T) {
 		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
 	}
 	// mixed 有两个模型，其中一个探活发现该走 anthropic；solo 只有一个协议。
-	if code, _, stderr := run(t, "account", "add", "mixed",
-		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", "sk-1",
-		"--protocol", "openai-chat", "--models", "m1,m2"); code != 0 {
+	if code, _, stderr := addAccount(t, "mixed", "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-1", "--models", "m1,m2"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if code, _, stderr := run(t, "account", "add", "solo",
-		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", "sk-2",
-		"--protocol", "openai-chat", "--models", "m1"); code != 0 {
+	if code, _, stderr := addAccount(t, "solo", "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-2", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -154,9 +148,7 @@ func TestAccountLsProtocolSummary(t *testing.T) {
 // addBareAccount 加一个没有任何模型信息的账号：不给 --models，也没有 account_models 行。
 func addBareAccount(t *testing.T, name, key string) {
 	t.Helper()
-	if code, _, stderr := run(t, "account", "add", name,
-		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", key,
-		"--protocol", "openai-chat"); code != 0 {
+	if code, _, stderr := addAccount(t, name, "mine", "http://127.0.0.1:9", "openai-chat", "--key", key); code != 0 {
 		t.Fatalf("account add %s 退出码 = %d，stderr = %s", name, code, stderr)
 	}
 }
@@ -168,9 +160,7 @@ func TestAccountLsModelsColumnNeverSaysUnlimited(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
 	addBareAccount(t, "bare", "sk-1")
-	if code, _, stderr := run(t, "account", "add", "filled",
-		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", "sk-2",
-		"--protocol", "openai-chat", "--models", "m1,m2"); code != 0 {
+	if code, _, stderr := addAccount(t, "filled", "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-2", "--models", "m1,m2"); code != 0 {
 		t.Fatalf("account add filled 退出码 = %d，stderr = %s", code, stderr)
 	}
 

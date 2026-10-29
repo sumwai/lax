@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -209,18 +210,41 @@ func cmdAccountSet(e *Env, args []string) error {
 	return nil
 }
 
-// accountAddUsage 是 account add 的用法行，用法错误与 --base-url 校验失败时都打出来。
-const accountAddUsage = "用法：switchboard account add <名称> --provider <厂商> --key <key> [--protocol <协议>] [--base-url <地址>] [--models <模型>] [--priority N] [--price-in N] [--price-out N] [--price-cache-read N] [--price-cache-write N]"
+// accountAddUsage 是 account add 的用法行，用法错误与厂商不在表里时都打出来。
+const accountAddUsage = "用法：switchboard account add <名称> --provider <厂商> --key <key> [--models <模型>] [--priority N] [--price-in N] [--price-out N] [--price-cache-read N] [--price-cache-write N]\n" +
+	"地址与默认协议不落在账号上：先 switchboard provider add <厂商> --base-url <地址> --openai /v1/chat/completions 登记厂商，再建账号"
+
+// retiredAccountAddFlags 是已经从 account add 上删掉的两个参数与各自的替代做法（见 DESIGN 4、5.8）：
+// 地址与默认协议只在厂商行上，账号不再持有副本。误用时给一句指出下一步的用法错误，
+// 而不是让人对着「参数不存在」自己找原因。
+var retiredAccountAddFlags = map[string]string{
+	"--base-url": "地址只在厂商行上，先用 switchboard provider add <厂商> --base-url <地址> --openai /v1/chat/completions 登记厂商",
+	"--protocol": "默认协议只在厂商行上，登记厂商时用 --default-protocol 指定，或改用 switchboard provider set <厂商> --default-protocol <协议>",
+}
+
+// rejectRetiredFlags 在 flag 包之前拦下已经删掉的参数：flag 只会说「参数不认识」，
+// 这里能说清它去了哪、下一步该跑什么命令。`--名字 值` 与 `--名字=值` 两种写法都拦。
+func rejectRetiredFlags(args []string, retired map[string]string, usageLine string) error {
+	for _, arg := range args {
+		name := arg
+		if i := strings.IndexByte(name, '='); i >= 0 {
+			name = name[:i]
+		}
+		if hint, ok := retired[name]; ok {
+			return usagef("%s 已经不在这个子命令上：%s\n%s", name, hint, usageLine)
+		}
+	}
+	return nil
+}
 
 func cmdAccountAdd(e *Env, args []string) error {
+	if err := rejectRetiredFlags(args, retiredAccountAddFlags, accountAddUsage); err != nil {
+		return err
+	}
 	fs := newFlagSet(e, "account add", "新增一个上游账号")
-	provider := fs.String("provider", "", "上游厂商标识，如 deepseek")
+	provider := fs.String("provider", "", "上游厂商标识，地址与默认协议都从这家厂商读，如 deepseek")
 	key := fs.String("key", "", "上游 API key；给 - 从标准输入读，留空则读环境变量 SWITCHBOARD_KEY")
 	name := fs.String("name", "", "账号名称，也可以用位置参数给出")
-	// gemini 入站与出站都可用（DESIGN 5.9）：账号上的 --protocol 说的是出站协议，
-	// 与它可以打的入站路径是两件事，帮助文案里写清楚两条入站路径。
-	protocol := fs.String("protocol", "", "上游线协议：anthropic | openai-chat | openai-responses | gemini，留空按厂商默认。四条协议入站与出站都可用，gemini 的入站是 /v1beta/models/{model}:generateContent 与 :streamGenerateContent（非流式与流式），这个参数说的是出站协议")
-	baseURL := fs.String("base-url", "", "上游地址，留空按厂商默认（必须是带主机名的完整地址，如 https://api.deepseek.com）")
 	models := fs.String("models", "", "该账号可提供的模型，逗号分隔")
 	priceIn := fs.Float64("price-in", 0, "输入价，每百万 token")
 	priceOut := fs.Float64("price-out", 0, "输出价，每百万 token")
@@ -242,29 +266,12 @@ func cmdAccountAdd(e *Env, args []string) error {
 		return err
 	}
 	if *provider == "" {
-		return usagef("--provider 必填，例如 --provider deepseek")
-	}
-
-	// --base-url 与 provider add/set 走同一份校验（store.NormalizeBaseURL，见 DESIGN 5.8）：
-	// 只有 scheme 没有主机名、或压根没写 scheme 的地址当场报成用法错误、退出码 2，
-	// 不落到库里再去发无效请求。空值仍是「按厂商默认」。
-	if flagWasSet(fs, "base-url") && strings.TrimSpace(*baseURL) != "" {
-		norm, err := checkBaseURL(*baseURL, accountAddUsage)
-		if err != nil {
-			return err
-		}
-		*baseURL = norm
+		return usagef("--provider 必填，例如 --provider deepseek\n%s", accountAddUsage)
 	}
 
 	keyValue, err := resolveKey(*key, "switchboard account add x --provider p --key - < key.txt", accountAddUsage)
 	if err != nil {
 		return err
-	}
-
-	if *protocol != "" && !isWireProtocol(*protocol) {
-		// 白名单只有 store.IsWireProtocol 一份（见 DESIGN 5.9）：四条线协议都能当账号的
-		// 出站协议，gemini 也不例外。
-		return usagef("不支持的协议 %q，可用 %s", *protocol, strings.Join(store.WireProtocols(), "、"))
 	}
 
 	a, err := openApp(e, true)
@@ -273,38 +280,15 @@ func cmdAccountAdd(e *Env, args []string) error {
 	}
 	defer a.Close()
 
-	// 厂商的默认地址与默认协议来自厂商表，不在代码里硬编码（见 DESIGN 5.8）。
-	proto := *protocol
-	base := *baseURL
-	defs, err := lookupProvider(a.st, *provider)
-	if err != nil {
+	// 地址与默认协议只在厂商行上（见 DESIGN 5.8）：账号只认厂商名，厂商不在表里就没有
+	// 地址可拼、没有协议可推导，先在厂商表里登记它。厂商行在但一条路由都没声明不算错：
+	// 转发时按厂商默认协议推导，推导为空由转发层报错。
+	if _, err := a.st.GetProvider(*provider); err != nil {
+		if errors.Is(err, store.ErrProviderNotFound) {
+			return unknownProviderError(a.st, *provider)
+		}
 		return err
 	}
-	if defs.Found {
-		if base == "" {
-			base = defs.BaseURL
-		}
-		if proto == "" {
-			proto = defs.Protocol
-		}
-	}
-	// 厂商行在但一条路由都没声明时 store 算不出默认协议：显式给了 --base-url
-	// 就按自建地址加账号，协议回退 openai-chat（见 DESIGN 5.8）；否则报错让人先声明路由。
-	if proto == "" && defs.NoRoutes {
-		if *baseURL == "" {
-			return fmt.Errorf("厂商 %q 在厂商表里但一条路由都没声明，算不出默认协议（地址 %s）；先运行 switchboard provider set %s --openai /v1/chat/completions（或 --anthropic / --responses）声明路由，或给本命令加 --protocol <协议> 指定，或给 --base-url 按自建地址加账号",
-				*provider, defs.BaseURL, *provider)
-		}
-		proto = gateway.ProtocolChat
-	}
-	if proto == "" {
-		proto = gateway.ProtocolChat
-	}
-	if base == "" && !defs.Found {
-		return unknownProviderError(a.st, *provider)
-	}
-	// 厂商行的 base_url 为空是合法的（见 DESIGN 5.8）：它表示这家的路由与 models_path 都是整条地址，
-	// 地址拼不进任何地方。这种厂商的账号也留空 base_url，转发与模型同步都走整条地址。
 
 	if _, err := a.st.GetAccount(accountName); err == nil {
 		return fmt.Errorf("账号 %q 已存在，换个名称或先运行 switchboard account rm %s", accountName, accountName)
@@ -318,8 +302,6 @@ func cmdAccountAdd(e *Env, args []string) error {
 	acc := store.Account{
 		Name:      accountName,
 		Provider:  *provider,
-		Protocol:  proto,
-		BaseURL:   base,
 		KeyCipher: cipher,
 		Models:    splitModels(*models),
 		Priority:  *priority,
@@ -333,6 +315,10 @@ func cmdAccountAdd(e *Env, args []string) error {
 	if err := a.st.CreateAccount(&acc); err != nil {
 		return fmt.Errorf("新增账号失败: %w", err)
 	}
+	// 地址与协议是厂商行派生出来的只读值，写完再读一次：输出报库里实际生效的那两个。
+	if acc, err = a.st.GetAccount(accountName); err != nil {
+		return err
+	}
 
 	if e.JSON {
 		return e.printJSON(map[string]any{
@@ -344,8 +330,17 @@ func cmdAccountAdd(e *Env, args []string) error {
 			"key":      secret.Mask(keyValue),
 		})
 	}
-	fmt.Fprintf(e.Stdout, "已添加 %s（%s，%s，凭据 %s）\n", acc.Name, acc.Provider, acc.Protocol, secret.Mask(keyValue))
+	fmt.Fprintf(e.Stdout, "已添加 %s（%s，%s，凭据 %s）\n", acc.Name, acc.Provider, dashIfEmpty(acc.Protocol), secret.Mask(keyValue))
 	return nil
+}
+
+// dashIfEmpty 把空值写成 -：账号的地址与默认协议都是厂商行派生来的，厂商没写 base_url
+// 或一条路由都没声明时它们就是空串，空单元格看不出是「没配」还是「渲染漏了」。
+func dashIfEmpty(v string) string {
+	if v == "" {
+		return "-"
+	}
+	return v
 }
 
 func envKey() string {
@@ -424,6 +419,8 @@ func cmdAccountLs(e *Env, args []string) error {
 		out := make([]map[string]any, 0, len(accounts))
 		for _, acc := range accounts {
 			c := counts[acc.ID]
+			// protocol 与 base_url 都是厂商行派生的只读值：协议取厂商的有效默认协议
+			// （见 DESIGN 5.8），地址取厂商的 base_url，厂商行不在时都是空串。
 			out = append(out, map[string]any{
 				"name":           acc.Name,
 				"provider":       acc.Provider,
@@ -455,13 +452,14 @@ func cmdAccountLs(e *Env, args []string) error {
 		rows = append(rows, []string{
 			acc.Name,
 			acc.Provider,
+			baseURLCell(acc.BaseURL),
 			protocolCell(acc.Protocol, counts[acc.ID].Protocols),
 			modelsCell(acc.Models, counts[acc.ID]),
 			fmt.Sprintf("%d", acc.Priority),
 			accountStatus(acc, now),
 		})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"名称", "厂商", "协议", "模型", "优先级", "状态"}, rows))
+	fmt.Fprint(e.Stdout, renderTable([]string{"名称", "厂商", "地址", "协议", "模型", "优先级", "状态"}, rows))
 	return nil
 }
 
@@ -502,8 +500,13 @@ func countModels(rows []store.AccountModel) map[int64]modelCount {
 
 // allProtocols 把默认协议排到前面，后面跟模型行上发现到的其它协议，去重后升序。
 // 默认协议自己不在发现结果里时也要出现：它是账号当前的出站协议。
+// 默认协议为空串（厂商行不在、或这家一条路由都没声明）时不把它放进列表：
+// 空串不是一个协议，`--json` 的 protocols 只列真正算得出来的那几种。
 func allProtocols(accountProtocol string, discovered []string) []string {
-	out := []string{accountProtocol}
+	out := make([]string, 0, len(discovered)+1)
+	if accountProtocol != "" {
+		out = append(out, accountProtocol)
+	}
 	for _, p := range discovered {
 		if p != accountProtocol {
 			out = append(out, p)
@@ -512,9 +515,14 @@ func allProtocols(accountProtocol string, discovered []string) []string {
 	return out
 }
 
-// protocolCell 是 account ls 的协议列：只有默认协议时就是它本身，
+// protocolCell 是 account ls 的协议列：默认协议（厂商的有效默认协议）就是它本身，
 // 存在与默认不同的已发现协议时标出「另 N 种」，一眼能看出这个账号不止走一种协议。
+// 默认协议算不出来（厂商行不在、或这家一条路由都没声明）时写 -，与地址列同一种写法：
+// 这一列说的是账号的默认协议，不是模型行上那些发现结果，后者只在 --json 的 protocols 里列。
 func protocolCell(accountProtocol string, discovered []string) string {
+	if accountProtocol == "" {
+		return "-"
+	}
 	all := allProtocols(accountProtocol, discovered)
 	if len(all) == 1 {
 		return accountProtocol
@@ -756,13 +764,14 @@ func cmdModelLs(e *Env, args []string) error {
 	if err != nil {
 		return err
 	}
-	// 有效协议只问 store：行不存在或协议列为空时 EffectiveProtocol 已经回退到账号协议。
+	// 有效协议只问 store：行不存在或协议列为空时 EffectiveProtocol 已经回退到厂商的有效
+	// 默认协议（见 DESIGN 5.7）。账号本身不存协议，cli 不在这里重算一份。
 	for _, r := range modelRows {
 		acc, ok := byID[r.AccountID]
 		if !ok {
 			continue
 		}
-		proto, err := a.st.EffectiveProtocol(acc.ID, acc.Protocol, r.Model)
+		proto, err := a.st.EffectiveProtocol(acc.ID, r.Model)
 		if err != nil {
 			return err
 		}
@@ -771,7 +780,7 @@ func cmdModelLs(e *Env, args []string) error {
 	if len(modelRows) == 0 {
 		for _, acc := range accounts {
 			for _, m := range acc.Models {
-				proto, err := a.st.EffectiveProtocol(acc.ID, acc.Protocol, m)
+				proto, err := a.st.EffectiveProtocol(acc.ID, m)
 				if err != nil {
 					return err
 				}
