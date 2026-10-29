@@ -575,6 +575,29 @@ gemini 的原生接口（Generative Language API 的 `generateContent`）与另�
 - 上游错误体由 `internal/gateway` 的 `errorMessageFromBody` 解包：它认 `error.message`（并最多解开三层套在 `message` 里的 JSON），gemini 的 `{"error":{"code":…,"message":…,"status":…}}` 因此直接取出上游原话。`code` 与 HTTP 状态码重复、`status`（`INVALID_ARGUMENT` 一类）没有各自的落点，两者都丢弃；这条规则四个出站协议共用，不为 gemini 单开一份。
 - 下发给 gemini 客户端的错误是 google 的形状：`{"error":{"code":<HTTP 状态码>,"message":…,"status":…}}`（`gateway.writeInboundError`），流内错误帧同形且没有事件名。`code` 与 `status` 由本次 HTTP 状态码算出，不搬上游正文里的同名字段——上游的 `code`、`status` 只用来解出那句话，解完就丢（见上一条）。
 
+### 5.10 厂商附加请求头
+
+有些上游除了标准的凭据头之外还要求别的头才能路由：opencode 的 Go 端点要求 `x-opencode-session: <每个对话一个稳定值>`（官方文档的原话是「send a stable session ID … so we can optimize routing」，缺了直接 400），Azure 一类要 `api-version`，还有厂商要求自定义的鉴权头。这些头的名字与值由厂商约定，不是我们要翻译的协议差异，因此不进 `setAuth`，也不为它们写代码分支：厂商行上存「附加头」的声明，转发时按声明加上去。
+
+形状：迁移 `0010` 的 `provider_headers(provider, protocol, name, value)`，`protocol` 为空串表示整个厂商的每条路由都加，非空表示只加给这条协议（同一名字按协议覆盖厂商级）。`name` 按 HTTP 头名的规矩校验（`token` 字符，大小写不敏感，落库时归一成小写），`value` 不能是空白串、也不能带 CR/LF/NUL，`protocol` 必须在 `store.IsWireProtocol` 认的四种里（空串除外）。写入时在同一个事务里确认厂商行还在，不在就报 `ErrProviderNotFound`：外键虽然也拦得住，但报数据库的错误说不清下一步该干什么。厂商行删掉时它的头跟着删（`ON DELETE CASCADE`，连接上 `foreign_keys` 开着），不会留孤儿行。读侧两个入口：`store.ProviderHeaders` 出这家厂商的全部声明，`store.EffectiveProviderHeaders(厂商, 协议)` 出「厂商级 + 这条协议」合并后的有效集合（协议级按同名覆盖厂商级，按头名排序），转发只读后者。
+
+头名在库里只有小写一种写法，因此覆盖、删除与「这个头有没有声明」都按头名比，写 `X-Opencode-Session` 与写 `x-opencode-session` 是同一行。`ProviderHeader` 的 `String` 只出「头名=前四位加省略号」，`slog.Any`、`%v` 与整片 `%v` 都走它，所以把一行或一片附加头交给日志不会带出值；要看原值直接读 `Value` 字段。
+
+值的四种写法（转发前展开，展开后为空则该头不发，并在网关日志里记一行）：
+
+| 写法 | 展开成 | 用途 |
+| --- | --- | --- |
+| 字面量 | 原样 | `api-version: 2024-10-21` 这类固定值 |
+| `{env:NAME}` | 进程环境变量的值 | 会话 token、自定义鉴权头这类不该落库的东西 |
+| `{session}` | 本次请求的会话键（见 5.3：`x-switchboard-session` 或 `metadata.user_id`），都没有时每次请求新生成一个 UUID | opencode 的 `x-opencode-session`：同一对话一个稳定值 |
+| `{model}` | 本次请求的模型名（裸名，不转义） | 少数按模型路由的网关 |
+
+- 只影响上游请求，不影响入站响应与 `/v1/models` 这类只读接口；也不进 `requests` 记录（头里可能是密钥，落库等于把它们写进请求记录）。日志里打印头名，不打印值。
+- 与协议凭据头冲突时按「声明优先」：显式写的头覆盖 `setAuth` 给的默认值（比如某些网关要 `Authorization: Bearer` 换成自定义 scheme）。冲突在写入时不管，只由转发时的「先设默认、再套声明」顺序决定，避免两层都做判断。
+- 命名：`provider header set <名称> <头名> <值> [--protocol <协议>]`、`provider header unset <名称> <头名> [--protocol <协议>]`、`provider header ls [<名称>]`（`--json` 输出；`set` 是覆盖语义，不存在时新建）。
+
+不做插件运行时：`magpie-community/plugins` 那套（一个文件、不许 import、跑在网关的 `onRequest`/`onResponse` 钩子上）解决的是「任意改写」，代价是一个 JS 引擎依赖与一段不受控的执行面，而它目录里的主体是订阅登录与逆向接口，正是第 9 节的非目标。已知需要注入的头全部能用上表四种写法表达；确实出现「按条件改请求体字段」的需求时再引入钩子，那时先在本节写清钩子的输入输出，再谈运行时。
+
 ## 6 数据模型
 
 ```sql
@@ -642,6 +665,14 @@ CREATE TABLE provider_routes (
   models_path TEXT NOT NULL DEFAULT '',     -- 同上，空串表示回退到同厂商其它协议
   PRIMARY KEY (provider, protocol)
 );
+
+CREATE TABLE provider_headers (
+  provider TEXT NOT NULL REFERENCES providers(name) ON DELETE CASCADE,  -- 删厂商时它的头一起走
+  protocol TEXT NOT NULL,                   -- 空串表示整个厂商，非空只加给这条协议
+  name     TEXT NOT NULL,                   -- HTTP 头名，落库归一成小写
+  value    TEXT NOT NULL,                   -- 字面量，或 {env:…}、{session}、{model} 占位符（见 5.10）
+  PRIMARY KEY (provider, protocol, name)
+);
 ```
 
 `account_models` 由迁移 `0003` 建立，`status` 取值就是 `synced`、`usable`、`forbidden`、`notfound`、`auth`、`error`（见 5.7）。`accounts.fail_streak` 由迁移 `0004` 加入，只用于冷却翻倍，写入口只有 `RecordFailure`（加一）、`ClearFailure`（清零）与 `RotateKey`（换凭据时清零，见 5.6）。`accounts.models` 仍是选号实际读的那份列表。删除账号时 `DeleteAccount` 在同一个事务里删掉它的 `account_models` 行：SQLite 的 rowid 会被复用，遗留子行会让新账号继承旧账号的探活状态。
@@ -666,6 +697,8 @@ gemini 的两行由迁移 `0009` 种入，逐字段照下表：
 gemini 路由的 `models_path` 必须显式给：写入侧的默认值只推导 openai-chat 一条（见 5.8），gemini 自己的列表路径没有推导规则。两条都用 `INSERT OR IGNORE`：升级时用户可能已经用 `provider add google-gemini` 自己建过这家（名字撞上、地址指向代理），那两行原样保留，迁移不覆盖用户的写法，也不因为主键冲突整笔失败。
 
 `provider_routes.path` 里的 `{model}` 是出站模型名占位符（见 5.9）：规整只合并斜杠，花括号与冒号原样保留，替换发生在网关拼好地址之后。协议取值的白名单只有一份 `store.IsWireProtocol`（四条线协议），厂商路由、默认协议、账号的 `--protocol` 与探活候选都读它。
+
+`provider_headers` 由迁移 `0010` 建立（见 5.10），一行是一条 `(厂商, 协议, 头名)` 的附加请求头声明：`protocol` 空串表示整个厂商的每条路由都加，非空表示只加给这条协议。`provider` 外键指向 `providers(name)` 并带 `ON DELETE CASCADE`，`store.Open` 的连接串带 `_pragma=foreign_keys(1)`，所以删厂商行时它的头由 SQLite 一起删掉；`provider_routes` 建于 `0006`、没有外键，才要在 `DeleteProvider` 里手删。写入口只有两处：`SetProviderHeader` 是覆盖语义（同一个 `(厂商, 协议, 头名)` 再写一次就是改值，UPSERT，不报错），`DeleteProviderHeader` 删不到时按情况报 `ErrProviderHeaderNotFound`（厂商在、头不在）或 `ErrProviderNotFound`（厂商不在）。两个写入口都先校验再进事务，并在事务里确认厂商行还在：外键虽然会拦住指向不存在厂商的写入，但报数据库的外键错误说不清下一步该干什么。头名按 HTTP `token` 校验（大小写不敏感，落库归一成小写），值不能是空白串、也不能带 CR/LF/NUL（那样拼进请求头会把一条头拆成两条），`protocol` 只能是空串或 `IsWireProtocol` 认的四种。读有两个入口：`ProviderHeaders` 返回这家厂商的全部声明（按 `protocol`、`name` 升序，厂商级在最前），`EffectiveProviderHeaders(厂商, 协议)` 返回那次请求真正要加的那一份——先铺厂商级，再用这个协议自己的声明按同名覆盖，返回时也是按 `name` 升序。转发侧只读后者，不在调用方拼覆盖规则。附加头不进 `requests`，日志里只出头名与截断到前四位的值（`ProviderHeader.String`，见 5.10）。
 
 `providers` 的三个写入口（`CreateProvider`、`SetProvider`、`AddProvider`）都在 `store` 里校验 `base_url` 的 scheme 与主机名并规整（只合并路径里的重复斜杠、去尾斜杠，查询串与 `#` 之后的内容不动，`store.NormalizeBaseURL`），`cli` 那层不再是唯一防线。`path` 与 `models_path` 三列同样在写入侧经 `store.NormalizeEndpoint` 解释后落库：相对路径只规整（路径写法不拒绝，`v1/chat/completions` 与 `/v1/chat/completions/` 落成同一个值），整条地址（含 `://`）校验 scheme 与主机名后按整条地址落库，读取侧拼地址时再用同一个入口过一遍，历史库里的不规整写法因此也拼得出正确地址。两列因此可能存整条地址，也可能存相对路径，判定只看有没有 `://`（`store.IsFullAddress`）。
 
@@ -747,6 +780,7 @@ internal/usage/         用量汇总与花费估算
 - 逆向接口、把订阅网页版包装成 API。
 - 改写其它客户端的配置文件，不论带不带备份。
 - 跨机部署与集群。
+- 插件运行时（内置 JS 引擎、任意请求改写与执行第三方插件）：已知需要注入的厂商头用 5.10 的声明式附加头表达。
 
 ## 10 需要外部信息才能定的点
 
