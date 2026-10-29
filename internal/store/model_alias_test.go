@@ -233,6 +233,120 @@ func TestSetModelAliasValidation(t *testing.T) {
 	}
 }
 
+// TestSetModelAliasShadowCatalogOnly 钉住 DESIGN 5.12 的目录那一段检查：目录里的名字是真名，
+// 眼下没有账号能用它也不算——账号一恢复可用，这个别名的行为就会突然改变。
+// 文案要写出是哪家厂商的目录：用户去账号里找一个没人声明的名字是找不到的。
+func TestSetModelAliasShadowCatalogOnly(t *testing.T) {
+	st := openTemp(t)
+
+	// 目录里有、账号不可用：账号的行被探活判成 forbidden，目录那一行还在。
+	acc := newAliasAccount(t, st, "ds1", "glm-4.7")
+	if err := st.SetAccountModelAccess(acc.ID, "glm-4.7", store.AccessForbidden, 403, "无权访问", 100); err != nil {
+		t.Fatalf("把 glm-4.7 判成无权访问: %v", err)
+	}
+	err := st.SetModelAlias("glm-4.7", "glm-4.6")
+	if !errors.Is(err, store.ErrModelAliasShadow) {
+		t.Fatalf("目录里有、账号不可用的名字应报 ErrModelAliasShadow，实际 %v", err)
+	}
+	if !strings.Contains(err.Error(), "deepseek") {
+		t.Fatalf("冲突文案要写出是哪个厂商的目录，实际 %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "目录") || !strings.Contains(err.Error(), "眼下没有账号") {
+		t.Fatalf("账号不可用时文案要说明眼下没人能用，实际 %q", err.Error())
+	}
+	if strings.Contains(err.Error(), "ds1") {
+		t.Fatalf("这个账号现在用不了该模型，不该被当成声明方列出来：%q", err.Error())
+	}
+
+	// 目录里有一条、一个账号都没有的厂商同样算真名。
+	if err := st.UpsertProviderModels("moonshot", []store.ProviderModel{{Model: "kimi-k2", Source: store.SourceSync}}); err != nil {
+		t.Fatalf("写目录: %v", err)
+	}
+	if err := st.SetModelAlias("kimi-k2", "glm-4.6"); !errors.Is(err, store.ErrModelAliasShadow) {
+		t.Fatalf("没有账号的目录行也应是真名，实际 %v", err)
+	}
+
+	// 同名模型出现在多家厂商的目录里时，厂商名最多列三个，其余只报个数。
+	for _, provider := range []string{"aliyun", "dashscope", "openrouter", "volcengine"} {
+		if err := st.UpsertProviderModels(provider, []store.ProviderModel{{Model: "qwen-max", Source: store.SourceSync}}); err != nil {
+			t.Fatalf("写 %s 的目录: %v", provider, err)
+		}
+	}
+	err = st.SetModelAlias("qwen-max", "glm-4.6")
+	if !errors.Is(err, store.ErrModelAliasShadow) {
+		t.Fatalf("应报 ErrModelAliasShadow，实际 %v", err)
+	}
+	if !strings.Contains(err.Error(), "等 4 家厂商") {
+		t.Fatalf("四家厂商时只报个数，文案里要有「等 4 家厂商」，实际 %q", err.Error())
+	}
+	for _, provider := range []string{"aliyun", "dashscope", "openrouter"} {
+		if !strings.Contains(err.Error(), provider) {
+			t.Fatalf("前三个厂商名要列出来（缺 %s），实际 %q", provider, err.Error())
+		}
+	}
+	if strings.Contains(err.Error(), "volcengine") {
+		t.Fatalf("第四个厂商名只该计入个数，不该列出来：%q", err.Error())
+	}
+
+	if aliases, err := st.ModelAliases(); err != nil {
+		t.Fatalf("读别名: %v", err)
+	} else if len(aliases) != 0 {
+		t.Fatalf("冲突不该留下任何一行，实际 %+v", aliases)
+	}
+}
+
+// TestSetModelAliasShadowReportsBothOnce 钉住「两处都命中时只报一次」：目录与账号各命中一次，
+// 合成一句话里既有厂商名又有账号名，而不是两条拼起来的错误。
+func TestSetModelAliasShadowReportsBothOnce(t *testing.T) {
+	st := openTemp(t)
+	newAliasAccount(t, st, "ds1", "glm-4.6")
+
+	err := st.SetModelAlias("glm-4.6", "deepseek-chat")
+	if !errors.Is(err, store.ErrModelAliasShadow) {
+		t.Fatalf("应报 ErrModelAliasShadow，实际 %v", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "deepseek") || !strings.Contains(msg, "ds1") {
+		t.Fatalf("文案要同时写出厂商（deepseek）与账号（ds1），实际 %q", msg)
+	}
+	if n := strings.Count(msg, store.ErrModelAliasShadow.Error()); n != 1 {
+		t.Fatalf("冲突只该报一次，哨兵文案出现了 %d 次：%q", n, msg)
+	}
+	if n := strings.Count(msg, "换个别名"); n != 1 {
+		t.Fatalf("建议只该出现一次，实际 %d 次：%q", n, msg)
+	}
+}
+
+// TestSetModelAliasNoShadowWrites 是上两个用例的反面：目录与账号都不命中时正常写入，
+// 名字相近（前缀、后缀）也不算同名，照旧按精确匹配处理。
+func TestSetModelAliasNoShadowWrites(t *testing.T) {
+	st := openTemp(t)
+	newAliasAccount(t, st, "ds1", "glm-4.6", "deepseek-chat")
+	if err := st.UpsertProviderModels("moonshot", []store.ProviderModel{{Model: "kimi-k2", Source: store.SourceSync}}); err != nil {
+		t.Fatalf("写目录: %v", err)
+	}
+
+	for _, pair := range [][2]string{
+		{"fast", "glm-4.6"},
+		{"kimi-k2-latest", "kimi-k2"},
+		{"glm", "glm-4.6"},
+	} {
+		if err := st.SetModelAlias(pair[0], pair[1]); err != nil {
+			t.Fatalf("目录与账号都不命中的别名 %s 应可写入: %v", pair[0], err)
+		}
+	}
+	aliases, err := st.ModelAliases()
+	if err != nil {
+		t.Fatalf("读别名: %v", err)
+	}
+	if len(aliases) != 3 {
+		t.Fatalf("应写入三行别名，实际 %+v", aliases)
+	}
+	if got, ok, err := st.ResolveModelAlias("kimi-k2-latest"); err != nil || !ok || got != "kimi-k2" {
+		t.Fatalf("解析 = (%q, %v, %v)，期望 (\"kimi-k2\", true, nil)", got, ok, err)
+	}
+}
+
 // TestResolveModelAliasChain 钉住链解析：一跳、多跳、8 跳上限、9 跳报错、成环报错（都带上链上的名字），
 // 以及「不是别名」时返回空名字与 false。
 func TestResolveModelAliasChain(t *testing.T) {

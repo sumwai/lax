@@ -13,10 +13,11 @@ import (
 // 把「别名写错了」与「数据库打不开」分开：删不到一律算失败，不静默当成功。
 var ErrModelAliasNotFound = errors.New("别名不存在")
 
-// ErrModelAliasShadow 表示要写的别名已经被某个账号声明为真实模型（见 DESIGN 5.12）。
-// 这种别名会遮蔽真名：客户端请求那个名字时，命中哪个模型会随账号增减而变，
-// 所以写入侧直接拒绝，而不是留到请求时才发现。
-var ErrModelAliasShadow = errors.New("该名字已被某账号声明为真实模型，别名会遮蔽它")
+// ErrModelAliasShadow 表示要写的别名已经是真实模型名，见 DESIGN 5.12。
+// 真名有两处：目录（provider_models）里有这一行，或者某个账号现在就能用它（account_models
+// 里 access='allowed'）。这种别名会遮蔽真名：客户端请求那个名字时，命中哪个模型会随账号增减
+// 而变，所以写入侧直接拒绝，而不是留到请求时才发现。
+var ErrModelAliasShadow = errors.New("该名字是真实模型名，别名会遮蔽它")
 
 // ErrModelAliasCycle 表示别名链绕回了链上已经出现过的名字。成环的链永远解析不出真实名字。
 var ErrModelAliasCycle = errors.New("别名链成环")
@@ -42,9 +43,12 @@ type ModelAlias struct {
 // 同一个别名再写一次就是改目标，不报错、不留旧行；覆盖时不改 created_at。
 //
 // 校验按 DESIGN 5.12：别名与目标都去首尾空白后不能为空（落库就是去空白后的值）、不能含控制
-// 字符、别名不能等于目标，别名也不能与任何账号已有的真实模型名同名——那会遮蔽真名。
+// 字符、别名不能等于目标，别名也不能与任何真实模型名同名——那会遮蔽真名。真名按两处认：
+// 目录（provider_models）里存在同名模型，或者某个账号现在就能用它（access='allowed'）。
+// 只查账号会漏掉「目录里有、眼下没有账号可用」的名字：账号一恢复可用，这个别名的行为
+// 就会突然改变，而那时再报错已经晚于别名写进库。
 // 目标可以暂时没有任何账号提供：先把别名写好，之后再补账号就能生效。
-// 校验与写入在同一个事务里，判定冲突与落库之间不会插进一条新账号。
+// 校验与写入在同一个事务里，判定冲突与落库之间不会插进一条新账号或一条新目录行。
 func (s *Store) SetModelAlias(alias, target string) error {
 	a, err := normalizeAliasName(alias, "别名")
 	if err != nil {
@@ -64,14 +68,16 @@ func (s *Store) SetModelAlias(alias, target string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	hits, err := aliasShadowingAccountsTx(tx, a)
+	providers, err := aliasCatalogProvidersTx(tx, a)
 	if err != nil {
 		return err
 	}
-	if len(hits) > 0 {
-		return fmt.Errorf("%w：%q 已被账号 %s 声明为真实模型，别名会遮蔽真名；"+
-			"客户端请求那个名字时会跟着账号增减换模型，换个别名（例如 fast-%s）或改掉账号的 --models",
-			ErrModelAliasShadow, a, shadowAccounts(hits), a)
+	accounts, err := aliasShadowingAccountsTx(tx, a)
+	if err != nil {
+		return err
+	}
+	if len(providers) > 0 || len(accounts) > 0 {
+		return aliasShadowErr(a, providers, accounts)
 	}
 
 	if _, err := tx.Exec(`INSERT INTO model_aliases (alias, target, created_at) VALUES (?, ?, ?)
@@ -191,8 +197,51 @@ func resolveAliasChain(targets map[string]string, name string) (string, bool, er
 	}
 }
 
-// aliasShadowingAccountsTx 在事务里找出把 alias 声明成真实模型名的账号，按名称升序。
-// 比的是该账号 access='allowed' 的模型名集合——迁移 0015 之后它就是「这个账号声明了哪些
+// aliasCatalogProvidersTx 在事务里找出目录里有 alias 这个模型的厂商，按名称升序。
+// 目录（provider_models）是真名的事实来源（DESIGN 5.13）：一家厂商能看到的模型与「眼下有没有
+// 账号能用它」是两件事，实测 bigmodel 的清单里就有某个 key 无权访问的模型。目录里的名字因此
+// 与当前可达性无关，仍然是会被别名遮蔽的真名。
+func aliasCatalogProvidersTx(tx *sql.Tx, alias string) ([]string, error) {
+	rows, err := tx.Query(`SELECT DISTINCT provider FROM provider_models
+		WHERE model = ? ORDER BY provider`, alias)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var hits []string
+	for rows.Next() {
+		var provider string
+		if err := rows.Scan(&provider); err != nil {
+			return nil, err
+		}
+		hits = append(hits, provider)
+	}
+	return hits, rows.Err()
+}
+
+// aliasShadowErr 把两处命中的结果合成一句话：目录与账号各说一半，两处都命中时也只报一次。
+// 只有账号命中时文案与引入目录检查之前一致（写歪的别名多半是撞上正在用的模型，那句最贴近现场）；
+// 只有目录命中时说明「眼下没人能用」——不然用户找不到一个声明了这个名字的账号。
+func aliasShadowErr(alias string, providers, accounts []string) error {
+	switch {
+	case len(providers) > 0 && len(accounts) > 0:
+		return fmt.Errorf("%w：%q 在 %s 的目录里是真实模型名，账号 %s 现在也在用它；"+
+			"客户端请求那个名字时会跟着账号增减换模型，换个别名（例如 fast-%s）或改掉账号的 --models",
+			ErrModelAliasShadow, alias, shadowNames(providers, "家厂商"), shadowNames(accounts, "个账号"), alias)
+	case len(providers) > 0:
+		return fmt.Errorf("%w：%q 在 %s 的目录里是真实模型名，眼下没有账号能用它；"+
+			"等账号恢复可用时客户端请求这个名字就会换模型，换个别名（例如 fast-%s）或改名目录里那条",
+			ErrModelAliasShadow, alias, shadowNames(providers, "家厂商"), alias)
+	default:
+		return fmt.Errorf("%w：%q 已被账号 %s 声明为真实模型，别名会遮蔽真名；"+
+			"客户端请求那个名字时会跟着账号增减换模型，换个别名（例如 fast-%s）或改掉账号的 --models",
+			ErrModelAliasShadow, alias, shadowNames(accounts, "个账号"), alias)
+	}
+}
+
+// aliasShadowingAccountsTx 在事务里找出把 alias 声明成真实模型名、且现在就能用的账号，按名称升序。
+// 比的是该账号 access='allowed' 的模型名集合——迁移 0015 之后它就是「这个账号现在能用哪些
 // 真实模型名」的那份清单（原来是 accounts.models 那一列 JSON），区分大小写的精确匹配（DESIGN 5.12）：
 // 名字发给上游时不会做大小写归一，`GLM-4.6` 与 `glm-4.6` 在上游看来是两个名字。
 func aliasShadowingAccountsTx(tx *sql.Tx, alias string) ([]string, error) {
@@ -215,13 +264,14 @@ func aliasShadowingAccountsTx(tx *sql.Tx, alias string) ([]string, error) {
 	return hits, rows.Err()
 }
 
-// shadowAccounts 把声明了真名的账号列成文案里的一截：最多列三个，其余的只报个数，
-// 免得一个名字被二十个账号声明时错误信息变成一屏名字。
-func shadowAccounts(names []string) string {
+// shadowNames 把一组名字列成文案里的一截：最多列三个，其余的只报个数，
+// 免得一个名字被二十个账号声明时错误信息变成一屏名字。unit 是数量词（「个账号」「家厂商」），
+// 目录与账号两处共用它，截断规则就只有一份。
+func shadowNames(names []string, unit string) string {
 	if len(names) <= 3 {
 		return strings.Join(names, "、")
 	}
-	return strings.Join(names[:3], "、") + fmt.Sprintf(" 等 %d 个账号", len(names))
+	return strings.Join(names[:3], "、") + fmt.Sprintf(" 等 %d %s", len(names), unit)
 }
 
 // normalizeAliasName 校验一个模型名（别名或目标）并去掉首尾空白。
