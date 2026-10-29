@@ -107,17 +107,48 @@ func TestCandidatesStickySession(t *testing.T) {
 }
 
 func TestCooldownGrowsAndCaps(t *testing.T) {
-	if d := account.Cooldown(429, 0); d != time.Minute {
-		t.Fatalf("429 首次冷却 = %v", d)
+	// 三档起始值、翻倍序列与上限都一样长，只有底数不同：连接层 2 秒、上游 5xx 10 秒、
+	// 限流 60 秒（见 DESIGN 5.3）。
+	cases := []struct {
+		name string
+		kind account.FailureKind
+		base time.Duration
+	}{
+		{"连接层", account.KindTransport, 2 * time.Second},
+		{"上游 5xx", account.KindServer, 10 * time.Second},
+		{"限流", account.KindRateLimit, time.Minute},
 	}
-	if d := account.Cooldown(500, 0); d != 10*time.Second {
-		t.Fatalf("5xx 首次冷却 = %v", d)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if d := account.Cooldown(c.kind, 0); d != c.base {
+				t.Fatalf("首次冷却 = %v，期望 %v", d, c.base)
+			}
+			if d := account.Cooldown(c.kind, 1); d != 2*c.base {
+				t.Fatalf("连败两次冷却 = %v，期望 %v", d, 2*c.base)
+			}
+			if d := account.Cooldown(c.kind, 2); d != 4*c.base {
+				t.Fatalf("连败三次冷却 = %v，期望 %v", d, 4*c.base)
+			}
+			if d := account.Cooldown(c.kind, 60); d != account.MaxCooldown {
+				t.Fatalf("冷却上限 = %v，期望 %v", d, account.MaxCooldown)
+			}
+		})
 	}
-	if d := account.Cooldown(503, 1); d != 20*time.Second {
-		t.Fatalf("连败两次冷却 = %v", d)
+}
+
+// TestFailureKind 钉住状态码与冷却档的对应，以及没有给出档位时按服务端那一档兜底：
+// 502 这类状态本身说明不了失败来自哪一层，定档要靠调用方显式给 KindTransport。
+func TestFailureKind(t *testing.T) {
+	if got := account.KindFromStatus(429); got != account.KindRateLimit {
+		t.Fatalf("429 的档位 = %v，期望限流", got)
 	}
-	if d := account.Cooldown(500, 60); d != account.MaxCooldown {
-		t.Fatalf("冷却上限 = %v，期望 %v", d, account.MaxCooldown)
+	for _, status := range []int{500, 502, 503} {
+		if got := account.KindFromStatus(status); got != account.KindServer {
+			t.Fatalf("%d 的档位 = %v，期望服务端", status, got)
+		}
+	}
+	if got := account.Cooldown(account.FailureKind(0), 0); got != account.CooldownServer {
+		t.Fatalf("零值档位的冷却 = %v，期望按服务端 %v", got, account.CooldownServer)
 	}
 }
 

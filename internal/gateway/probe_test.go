@@ -710,7 +710,7 @@ func TestProbeModelCountSharesSyncShapes(t *testing.T) {
 }
 
 // TestProbeNetworkErrorCooldowns 确认两阶段都连不上时结论取模型调用那次，并按转发路径的记法记 502：
-// 超时与连不上都要打冷却，不能只报一句错就结束。
+// 没有拿到任何 HTTP 响应的失败按连接层那一档冷却（2 秒起），不是按 5xx 的 10 秒。
 func TestProbeNetworkErrorCooldowns(t *testing.T) {
 	f := newFixture(t)
 	// 127.0.0.1:1 上没有服务，两条请求都是连不上。
@@ -737,8 +737,8 @@ func TestProbeNetworkErrorCooldowns(t *testing.T) {
 	if streak != 1 {
 		t.Fatalf("fail_streak = %d，期望 1", streak)
 	}
-	if want := before.Add(10 * time.Second).Unix(); cooldown < want-1 || cooldown > want+1 {
-		t.Fatalf("cooldown_until = %d，期望首次网络失败的 10 秒冷却（约 %d）", cooldown, want)
+	if want := before.Add(2 * time.Second).Unix(); cooldown < want-1 || cooldown > want+1 {
+		t.Fatalf("cooldown_until = %d，期望首次网络失败的 2 秒冷却（约 %d）", cooldown, want)
 	}
 }
 

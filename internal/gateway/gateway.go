@@ -165,6 +165,19 @@ type attempt struct {
 	wrote     bool
 	message   string
 	err       error
+	// transport 表示这一次没有拿到任何 HTTP 响应：连接没建立、请求没发出去、响应体没读完。
+	// status 对这类失败仍记 502（表示「网关没能拿到上游响应」），冷却却按连接层那一档算
+	// （见 DESIGN 5.3）。已经向客户端写出字节之后的断流不在此列，见 handleInbound 的冷却分支。
+	transport bool
+}
+
+// cooldownKind 把一次失败的来源折成冷却档位：没拿到 HTTP 响应的是连接层，拿到了状态的按
+// 状态码分限流与服务端失败。转发与探活两个入口都只经这一个函数定档，不各自算（见 DESIGN 5.3）。
+func cooldownKind(status int, noResponse bool) account.FailureKind {
+	if noResponse {
+		return account.KindTransport
+	}
+	return account.KindFromStatus(status)
 }
 
 func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
@@ -291,8 +304,13 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			state.Disable = true
 			state.LastError = res.message
 		case account.Retryable(res.status) && !res.wrote:
+			// 冷却档位看失败的来源：一条 HTTP 响应都没拿到的是连接层（res.transport），
+			// 拿到状态的按状态码分限流与服务端失败。
+			// 已经向客户端写出字节的失败不进冷却也不换号：流式断流（wrote 为真）发生在输出途中，
+			// 重试会把半截响应当成新请求再打一遍，而这一次的结局已经写在客户端那边了。
+			// 这类失败因此也不算连接层失败，它与「有没有拿到响应」无关。
 			state.Failure = true
-			state.CooldownUntil = s.now().Add(account.Cooldown(res.status, cand.FailStreak)).Unix()
+			state.CooldownUntil = s.now().Add(account.Cooldown(cooldownKind(res.status, res.transport), cand.FailStreak)).Unix()
 			state.LastError = res.message
 		}
 		if err := s.store.RecordAttempt(rec, state); err != nil {
@@ -388,12 +406,15 @@ func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store
 
 	upReq, err := s.buildRequest(ctx, a, outbound, inbound, inboundHeaders, raw, req, string(key), session)
 	if err != nil {
+		// 本地构造请求失败（编码、拼地址），请求根本没发出去：与网络无关，不走连接层档，
+		// 仍按 502 的 5xx 档冷却。
 		return attempt{status: http.StatusBadGateway, message: err.Error(), err: err}
 	}
 
 	resp, err := s.client.Do(upReq)
 	if err != nil {
-		return attempt{status: http.StatusBadGateway, message: "上游请求失败: " + err.Error(), err: err}
+		// 连接建立失败、请求发送失败、等响应头时超时：一条 HTTP 响应都没拿到。
+		return attempt{status: http.StatusBadGateway, transport: true, message: "上游请求失败: " + err.Error(), err: err}
 	}
 	defer resp.Body.Close()
 
@@ -495,7 +516,8 @@ func (s *Server) jsonSuccess(w http.ResponseWriter, resp *http.Response,
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
-		return attempt{status: http.StatusBadGateway, message: "读取上游响应失败: " + err.Error(), err: err}
+		// 状态码到了、响应体没读完：同样是一次没拿到完整响应，按连接层档冷却。
+		return attempt{status: http.StatusBadGateway, transport: true, message: "读取上游响应失败: " + err.Error(), err: err}
 	}
 
 	// 直通：字节原样返回，只用对应协议解析一次用量。
@@ -643,6 +665,9 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 		cacheRead: usage.CacheRead, cacheWrite: usage.CacheWrite,
 		reasoning: usage.Reasoning, total: usage.Total}
 	if failure != "" {
+		// 写出之后的断流：status 仍是 200、wrote 为真，handleInbound 因此不冷却也不换号。
+		// 它虽然是「读流的时候断了」，但已经向客户端写出了字节，不算可以重试的连接层失败，
+		// 也不改这一类失败的处理方式（见 DESIGN 5.3）。
 		// 记账用的摘要也过一遍脱敏：scanErr 的原文里可能带着上游回显的地址或凭据。
 		res.message = scrubSecret(failure, secretValue)
 		res.err = errStreamTruncated

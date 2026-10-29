@@ -39,6 +39,9 @@ type ProbeStep struct {
 	Model   string
 	Latency time.Duration
 	Message string
+	// Transport 表示这一步一条 HTTP 响应都没拿到（连不上、超时、握手失败）：Status 仍记 502。
+	// 结论取这一步时冷却按连接层那一档算（见 DESIGN 5.3）；列表那一段只退回最小调用，不打冷却。
+	Transport bool
 }
 
 // ProbeResult 是一次探活的结果。主结论（Stage、Status、OK、Latency、Message）取模型调用那一段：
@@ -145,8 +148,10 @@ func (s *Server) probeModelsEndpoint(ctx context.Context, a store.Account) (step
 	if err != nil {
 		// 连不上不是「这家没有列表接口」，可能只是这个地址被网关挡住或者网络抖动：
 		// 照样退回最小请求，两条路都试过再下结论，结论取模型调用那次。
-		// 状态照转发路径的记法记 502（网络失败没有状态码），冷却因此按 5xx 那档算。
+		// 状态照转发路径的记法记 502（网络失败没有状态码），冷却也在最小调用那次按连接层档算：
+		// 这一段自己不打冷却，结论没定之前不动账号状态。
 		step.Status = http.StatusBadGateway
+		step.Transport = true
 		step.Message = scrubSecret("上游请求失败："+err.Error(), secretValue)
 		return step, "模型列表接口不可用，改用最小请求（" + step.Message + "）", false, nil
 	}
@@ -255,8 +260,9 @@ func (s *Server) probeMinimalCall(ctx context.Context, a store.Account, listNote
 	resp, err := s.client.Do(upReq)
 	step.Latency = s.now().Sub(start)
 	if err != nil {
-		// 网络失败没有状态码，按转发路径的记法记 502：超时与连不上都该打冷却（见 DESIGN 5.2、5.3）。
+		// 网络失败没有状态码，按转发路径的记法记 502，冷却按连接层那一档算（见 DESIGN 5.3）。
 		step.Status = http.StatusBadGateway
+		step.Transport = true
 		step.Message = withNote("模型调用失败："+scrubSecret(err.Error(), secretValue), note)
 		return step, s.applyProbeState(a, step)
 	}
@@ -278,8 +284,9 @@ func (s *Server) probeMinimalCall(ctx context.Context, a store.Account, listNote
 
 // applyProbeState 按结论更新账号状态，是 `account test` 唯一的写入路径：两段都只经它落库，
 // 冷却、清零与停用不会长出第二套算法（见 DESIGN 5.3、6）。2xx 启用账号并清零（冷却、last_error
-// 与 fail_streak 一起），401 停用并把错误写进 last_error，429/5xx 按连续失败次数打冷却，
-// 其它 4xx 只报原话、不动状态。同一份结论永远算出同一个时长，冷却不加抖动。
+// 与 fail_streak 一起），401 停用并把错误写进 last_error，429/5xx 与连接层失败按连续失败次数
+// 与三档冷却（见 cooldownKind），其它 4xx 只报原话、不动状态。同一份结论永远算出同一个时长，
+// 冷却不加抖动。
 func (s *Server) applyProbeState(a store.Account, step ProbeStep) error {
 	switch {
 	case step.OK:
@@ -291,7 +298,7 @@ func (s *Server) applyProbeState(a store.Account, step ProbeStep) error {
 		// 401 才是凭据问题。403 多为套餐或模型权限，凭据本身可用，不停用账号。
 		return s.store.SetEnabled(a.ID, false, step.Message)
 	case account.Retryable(step.Status):
-		until := s.now().Add(account.Cooldown(step.Status, a.FailStreak)).Unix()
+		until := s.now().Add(account.Cooldown(cooldownKind(step.Status, step.Transport), a.FailStreak)).Unix()
 		return s.store.RecordFailure(a.ID, until, step.Message)
 	}
 	return nil
