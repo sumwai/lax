@@ -1,0 +1,11 @@
+{
+  "from": "openai-chat",
+  "to": "gemini",
+  "kind": "stream",
+  "model": "gemini-2.5-flash",
+  "frames": [
+    {"candidates": [{"content": {"role": "model", "parts": [{"text": "po"}]}, "index": 0}]},
+    {"candidates": [{"content": {"role": "model", "parts": [{"functionCall": {"name": "weather", "args": {"city": "北京"}}}]}, "index": 0}]},
+    {"candidates": [{"content": {"role": "model", "parts": []}, "index": 0, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 2, "totalTokenCount": 5}}
+  ]
+}

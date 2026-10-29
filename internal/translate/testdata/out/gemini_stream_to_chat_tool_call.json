@@ -1,0 +1,120 @@
+[
+  {
+    "data": {
+      "choices": [
+        {
+          "delta": {
+            "content": "",
+            "role": "assistant"
+          },
+          "finish_reason": null,
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-switchboard",
+      "model": "gemini-2.5-flash",
+      "object": "chat.completion.chunk"
+    }
+  },
+  {
+    "data": {
+      "choices": [
+        {
+          "delta": {
+            "content": "po"
+          },
+          "finish_reason": null,
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-switchboard",
+      "model": "gemini-2.5-flash",
+      "object": "chat.completion.chunk"
+    }
+  },
+  {
+    "data": {
+      "choices": [
+        {
+          "delta": {
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "",
+                  "name": "weather"
+                },
+                "id": "gemini_call_1",
+                "index": 0,
+                "type": "function"
+              }
+            ]
+          },
+          "finish_reason": null,
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-switchboard",
+      "model": "gemini-2.5-flash",
+      "object": "chat.completion.chunk"
+    }
+  },
+  {
+    "data": {
+      "choices": [
+        {
+          "delta": {
+            "tool_calls": [
+              {
+                "function": {
+                  "arguments": "{\"city\": \"北京\"}"
+                },
+                "index": 0
+              }
+            ]
+          },
+          "finish_reason": null,
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-switchboard",
+      "model": "gemini-2.5-flash",
+      "object": "chat.completion.chunk"
+    }
+  },
+  {
+    "data": {
+      "choices": [
+        {
+          "delta": {},
+          "finish_reason": "tool_calls",
+          "index": 0
+        }
+      ],
+      "created": 0,
+      "id": "chatcmpl-switchboard",
+      "model": "gemini-2.5-flash",
+      "object": "chat.completion.chunk"
+    }
+  },
+  {
+    "data": {
+      "choices": [],
+      "created": 0,
+      "id": "chatcmpl-switchboard",
+      "model": "gemini-2.5-flash",
+      "object": "chat.completion.chunk",
+      "usage": {
+        "completion_tokens": 2,
+        "prompt_tokens": 3,
+        "total_tokens": 5
+      }
+    }
+  },
+  {
+    "data": "[DONE]"
+  }
+]

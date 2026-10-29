@@ -1,0 +1,14 @@
+{
+  "from": "gemini",
+  "to": "openai-chat",
+  "kind": "stream",
+  "model": "gemini-2.5-flash",
+  "frames": [
+    {"id": "c1", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "po"}}]},
+    {"id": "c1", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "weather", "arguments": "{\"city\":"}}]}}]},
+    {"id": "c1", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "\"北京\"}"}}]}}]},
+    {"id": "c1", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]},
+    {"id": "c1", "choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 2}},
+    "[DONE]"
+  ]
+}

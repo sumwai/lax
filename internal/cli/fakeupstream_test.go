@@ -13,11 +13,12 @@ import (
 // 只看 path 看不出 base_url 那一半拼得对不对（多一个斜杠、前缀被吃掉都藏在前面），
 // 规整相关的断言要比的是整条地址。
 type recorderCall struct {
-	method string
-	url    string
-	path   string
-	apiKey string
-	bearer string
+	method  string
+	url     string
+	path    string
+	apiKey  string
+	bearer  string
+	googKey string // gemini 的凭据头，与前两种分开记（见 DESIGN 5.9）
 }
 
 // recorderUpstream 是按方法加路径回固定响应的假上游：用例只声明「这条请求该回什么」，
@@ -43,11 +44,12 @@ func newRecorderUpstream(t *testing.T, routes map[string]fakeResponse) *recorder
 	up.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		up.mu.Lock()
 		up.calls = append(up.calls, recorderCall{
-			method: r.Method,
-			url:    "http://" + r.Host + r.URL.Path,
-			path:   r.URL.Path,
-			apiKey: r.Header.Get("x-api-key"),
-			bearer: r.Header.Get("Authorization"),
+			method:  r.Method,
+			url:     "http://" + r.Host + r.URL.Path,
+			path:    r.URL.Path,
+			apiKey:  r.Header.Get("x-api-key"),
+			bearer:  r.Header.Get("Authorization"),
+			googKey: r.Header.Get("x-goog-api-key"),
 		})
 		up.mu.Unlock()
 
