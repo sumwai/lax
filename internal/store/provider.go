@@ -166,8 +166,8 @@ func (s *Store) ProviderProtocols(provider string) ([]string, error) {
 }
 
 // IsWireProtocol 判断一个取值是不是线协议。四个值都认：三条入站协议加 gemini。
-// gemini 只作出站且只做非流式（DESIGN 5.9），但它同样是线上的协议取值，账号的 --protocol、
-// 厂商路由与默认协议、探活候选都用这一个判定：cli 不另写一份名单，两处名单迟早会对不上。
+// gemini 入站有两条路径、两个方向的流式都支持（DESIGN 5.9），它同样是线上的协议取值，账号的
+// --protocol、厂商路由与默认协议、探活候选都用这一个判定：cli 不另写一份名单，两处名单迟早会对不上。
 func IsWireProtocol(protocol string) bool {
 	switch protocol {
 	case translate.ProtocolAnthropic, translate.ProtocolChat, translate.ProtocolResponses, translate.ProtocolGemini:

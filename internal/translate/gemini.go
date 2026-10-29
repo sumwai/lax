@@ -469,7 +469,7 @@ func (d *geminiStreamDecoder) Decode(data []byte) ([]Delta, error) {
 		// 提示词自己被拦：上游给出了结论，当成错误增量，与 DecodeGeminiResponse 同一条规则。
 		if frame.PromptFeedback != nil && frame.PromptFeedback.BlockReason != "" {
 			return []Delta{{Kind: DeltaError, Text: fmt.Sprintf(
-				"上游拒绍了这次请求（promptFeedback.blockReason=%s），没有候选",
+				"上游拒绝了这次请求（promptFeedback.blockReason=%s），没有候选",
 				frame.PromptFeedback.BlockReason)}}, nil
 		}
 		return nil, nil

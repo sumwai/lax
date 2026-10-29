@@ -101,8 +101,9 @@ const maxModelListPages = 10
 // SyncModelsWithEndpoint 是 `model sync --endpoint <路径>` 的入口：endpoint 非空时只影响这一次调用，
 // 相对路径取厂商 base_url 拼上它、整条地址直接访问，忽略厂商的 models_path 覆盖与路由里的值。
 //
-// 模型列表可能分页：每页带 pageSize，响应里有 nextPageToken 就接着取下一页，最多 maxModelListPages 页，
-// 取完再统一排序去重。页数超上限时报错，不静默截断。
+// 模型列表可能分页：gemini 的清单按 pageSize / pageToken 翻页，响应里有 nextPageToken 就接着取下一页，
+// 最多 maxModelListPages 页，取完再统一排序去重。页数超上限时报错，不静默截断。
+// 其它上游的列表地址一个字节都不改（见 modelListPageURL）。
 func (s *Server) SyncModelsWithEndpoint(ctx context.Context, a store.Account, endpoint string) ([]string, error) {
 	key, err := secret.Decrypt(s.key, a.KeyCipher)
 	if err != nil {
@@ -115,11 +116,17 @@ func (s *Server) SyncModelsWithEndpoint(ctx context.Context, a store.Account, en
 		return nil, err
 	}
 
+	// 只有 gemini 的清单按 pageSize / pageToken 翻页；其它上游的地址原样使用（见 modelListPageURL）。
+	paginated := protocol == ProtocolGemini
+
 	var models []string
 	seen := map[string]bool{}
+	// seenTokens 记上游已经给过的游标：上游反复返回同一个 nextPageToken 时立即报错，
+	// 不白打满 maxModelListPages 页。
+	seenTokens := map[string]bool{}
 	pageToken := ""
 	for page := 1; ; page++ {
-		pageURL, err := modelListPageURL(target, pageToken)
+		pageURL, err := modelListPageURL(target, pageToken, paginated)
 		if err != nil {
 			return nil, fmt.Errorf("模型列表地址 %q 不合法，检查账号 %s 的 base-url: %w", target, a.Name, err)
 		}
@@ -142,6 +149,11 @@ func (s *Server) SyncModelsWithEndpoint(ctx context.Context, a store.Account, en
 		if next == "" {
 			break
 		}
+		if seenTokens[next] {
+			return nil, fmt.Errorf("上游重复返回同一个分页游标（GET %s，pageToken=%s）：清单接口可能不认 pageToken，检查上游的分页写法、或改用 --models 手填",
+				target, next)
+		}
+		seenTokens[next] = true
 		if page >= maxModelListPages {
 			return nil, fmt.Errorf("上游的模型清单超过 %d 页还没取完（GET %s，每页 pageSize=%d）：清单过大，检查上游是否按页返回、或改用 --models 手填",
 				maxModelListPages, target, modelListPageSize)
@@ -158,20 +170,30 @@ func (s *Server) SyncModelsWithEndpoint(ctx context.Context, a store.Account, en
 	return models, nil
 }
 
-// modelListPageURL 给模型列表地址加上分页参数：pageSize 每页都带，pageToken 从第二页起带。
-// 地址里原有的查询串原样保留（整条地址的写法可以带 `?api-version=…` 这类参数），同名参数以这里为准。
-func modelListPageURL(target, pageToken string) (string, error) {
-	u, err := url.Parse(target)
-	if err != nil {
+// modelListPageURL 给需要分页的上游追加分页参数：pageSize 每页都带，pageToken 从第二页起带。
+// 只有 gemini 的清单按 pageSize / pageToken 翻页，paginated 为假时原样返回 target：地址里可能带
+// 签名（`?sig=…`），经 url.Parse 再 Encode 会重排参数、改写转义，签名当场失效（见 DESIGN 5.7）。
+// 追加时也只往原有查询串后面接一段，原有查询串的编码一个字节不改。
+func modelListPageURL(target, pageToken string, paginated bool) (string, error) {
+	if !paginated {
+		return target, nil
+	}
+	if _, err := url.Parse(target); err != nil {
 		return "", err
 	}
-	q := u.Query()
-	q.Set("pageSize", strconv.Itoa(modelListPageSize))
+	query := "pageSize=" + strconv.Itoa(modelListPageSize)
 	if pageToken != "" {
-		q.Set("pageToken", pageToken)
+		query += "&pageToken=" + url.QueryEscape(pageToken)
 	}
-	u.RawQuery = q.Encode()
-	return u.String(), nil
+	base, fragment := target, ""
+	if i := strings.IndexByte(target, '#'); i >= 0 {
+		base, fragment = target[:i], target[i:]
+	}
+	sep := "?"
+	if strings.Contains(base, "?") {
+		sep = "&"
+	}
+	return base + sep + query + fragment, nil
 }
 
 // fetchModelPage 取一页模型列表的原始响应体。凭据只在这里作为参数出现，错误文本一并过
@@ -442,13 +464,14 @@ type probeAttempt struct {
 
 // defaultProbeProtocols 是探活候选的兜底顺序：账号没有厂商行（或该厂商一个路由都没声明）
 // 时三条入站协议全试。厂商声明过路由的只试那些（见 routeProtocolOrder），循环本身不认识厂商。
-// 兜底里不含 gemini：它只作出站，没有厂商声明 gemini 路由时不该拿它去打一个猜出来的地址。
+// 兜底里不含 gemini：没有厂商声明 gemini 路由时，模型名与地址都没有确定的形状，
+// 不该拿它去打一个猜出来的地址。
 var defaultProbeProtocols = []string{
 	translate.ProtocolAnthropic, translate.ProtocolChat, translate.ProtocolResponses,
 }
 
 // isWireProtocol 判断一个取值是不是线协议。判定只有 store.IsWireProtocol 一份：gemini
-// 也是线协议（只作出站，见 DESIGN 5.9），厂商声明了 gemini 路由时探活要能用它。
+// 也是线协议（入站两条路径、流式双向都支持，见 DESIGN 5.9），厂商声明了 gemini 路由时探活要能用它。
 // 别的值不能进探活：编码器遇见未知协议会报错，静默落进 chat 分支更糟——那会把一条配置
 // 错误变成对错误地址的上游调用。
 func isWireProtocol(p string) bool {

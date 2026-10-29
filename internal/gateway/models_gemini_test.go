@@ -242,3 +242,42 @@ func TestSyncModelsWithoutGenerationMethodsUnfiltered(t *testing.T) {
 		})
 	}
 }
+
+// TestSyncModelsRepeatedNextPageToken 钉住「上游反复给同一个游标」：不白打满 10 页，
+// 第二次拿到同一个 nextPageToken 就报错，文案说明接口可能不认 pageToken。
+func TestSyncModelsRepeatedNextPageToken(t *testing.T) {
+	f := newFixture(t)
+	var mu sync.Mutex
+	var queries []string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		queries = append(queries, r.URL.RawQuery)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"models":[{"name":"models/gemini-2.5-pro",
+			"supportedGenerationMethods":["generateContent"]}],"nextPageToken":"page-2"}`)
+	}))
+	t.Cleanup(up.Close)
+
+	acc := f.addAs(t, "gem", "google-gemini", gateway.ProtocolGemini, up.URL, shapeKey, nil)
+	gs, logs := newGatewayWith(t, f, gateway.Options{})
+	models, err := gs.SyncModels(context.Background(), acc)
+	if err == nil {
+		t.Fatalf("重复的游标应报错，得到 %v", models)
+	}
+	if len(models) != 0 {
+		t.Fatalf("出错时不应返回模型: %v", models)
+	}
+	if !strings.Contains(err.Error(), "重复") || !strings.Contains(err.Error(), "page-2") {
+		t.Fatalf("错误文案应说明游标重复并带上游标: %v", err)
+	}
+
+	mu.Lock()
+	got := append([]string(nil), queries...)
+	mu.Unlock()
+	want := []string{"pageSize=1000", "pageSize=1000&pageToken=page-2"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("上游收到的查询串 = %v，期望 %v（第二个游标重复即停，不再往下打）", got, want)
+	}
+	mustNotLeak(t, shapeKey, models, err, logs())
+}

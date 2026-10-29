@@ -215,9 +215,10 @@ func TestSyncModelsFullAddressModelsPath(t *testing.T) {
 		if len(got) != 1 || got[0] != "m-a" {
 			t.Fatalf("模型 = %v", got)
 		}
-		// 模型列表每页都带 pageSize（见 DESIGN 5.7），路径本身不带多出来的段。
-		if lists.hits != 1 || lists.uri != "/v1/models?pageSize=1000" {
-			t.Fatalf("模型列表上游收到 %d 次、URI %q，期望 1 次 /v1/models?pageSize=1000", lists.hits, lists.uri)
+		// 非 gemini 上游的列表地址原样使用，一个查询参数都不加（见 modelListPageURL），
+		// 路径本身也不带多出来的段。
+		if lists.hits != 1 || lists.uri != "/v1/models" {
+			t.Fatalf("模型列表上游收到 %d 次、URI %q，期望 1 次 /v1/models", lists.hits, lists.uri)
 		}
 		if lists.bearer != "Bearer "+key || lists.apiKey != "" {
 			t.Fatalf("凭据头 = Bearer %q / x-api-key %q，期望按 chat 路由发 Bearer", lists.bearer, lists.apiKey)
@@ -253,8 +254,9 @@ func TestSyncModelsFullAddressModelsPath(t *testing.T) {
 		if _, err := gs.SyncModels(context.Background(), acc); err != nil {
 			t.Fatalf("同步: %v", err)
 		}
-		if want := "/v9/models?api-version=2024-05-01&pageSize=1000"; lists.uri != want {
-			t.Fatalf("模型列表 RequestURI = %q，期望 %q（路径规整、查询串原样保留，另加一个 pageSize）", lists.uri, want)
+		// 查询串原样保留：不重排、不重新转义、也不追加分页参数（非 gemini 上游不分页）。
+		if want := "/v9/models?api-version=2024-05-01"; lists.uri != want {
+			t.Fatalf("模型列表 RequestURI = %q，期望 %q（路径规整、查询串一个字节不改）", lists.uri, want)
 		}
 		if base.hits != 0 {
 			t.Fatalf("base_url 域名收到 %d 次请求", base.hits)
@@ -290,7 +292,7 @@ func TestSyncModelsWithEndpointFullAddress(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("模型 = %v", got)
 	}
-	if want := "/v1/model?api-version=2024-05-01&pageSize=1000"; other.uri != want {
+	if want := "/v1/model?api-version=2024-05-01"; other.uri != want {
 		t.Fatalf("RequestURI = %q，期望 %q", other.uri, want)
 	}
 	if other.bearer != "Bearer "+key {
@@ -304,8 +306,8 @@ func TestSyncModelsWithEndpointFullAddress(t *testing.T) {
 	if _, err := gs.SyncModelsWithEndpoint(context.Background(), acc, "v1/models"); err != nil {
 		t.Fatalf("同步: %v", err)
 	}
-	if base.uri != "/v1/models?pageSize=1000" || base.hits != 1 {
-		t.Fatalf("相对路径的 RequestURI = %q（%d 次），期望 1 次 /v1/models?pageSize=1000", base.uri, base.hits)
+	if base.uri != "/v1/models" || base.hits != 1 {
+		t.Fatalf("相对路径的 RequestURI = %q（%d 次），期望 1 次 /v1/models", base.uri, base.hits)
 	}
 	if other.hits != 1 {
 		t.Fatalf("相对路径那次不该碰另一个域名，实际总共 %d 次", other.hits)
@@ -349,4 +351,34 @@ func TestSyncModelsWithEndpointRejectsBadFullAddress(t *testing.T) {
 	if leaked := logs(); strings.Contains(leaked, key) {
 		t.Fatalf("日志里出现了 key 明文: %s", leaked)
 	}
+}
+
+// TestSyncModelsNonGeminiKeepsModelsURL 钉住非 gemini 上游的模型列表地址一个字节都不改：
+// 不追加 pageSize / pageToken，也不经 url.Parse 重编码查询串。带签名的 models_path
+// （`?sig=…` 里的 %2F 这类转义）重排一次就失效，所以这里连转义写法一起断言。
+func TestSyncModelsNonGeminiKeepsModelsURL(t *testing.T) {
+	models := `{"object":"list","data":[{"id":"m-a"}]}`
+	lists := newURIUpstream(t, models)
+
+	f := newFixture(t)
+	if err := f.st.CreateProvider(store.Provider{Name: "signed", BaseURL: lists.url},
+		[]store.ProviderRoute{{
+			Protocol:   translate.ProtocolChat,
+			Path:       "/v1/chat/completions",
+			ModelsPath: "/v1/models?api-version=2024-05-01&sig=a%2Fb%2Bc&expires=1700000000",
+		}}); err != nil {
+		t.Fatalf("加厂商: %v", err)
+	}
+	acc := f.addAs(t, "a1", "signed", translate.ProtocolChat, lists.url, shapeKey, nil)
+	gs, logs := newGatewayWith(t, f, gateway.Options{})
+
+	if _, err := gs.SyncModels(context.Background(), acc); err != nil {
+		t.Fatalf("同步: %v", err)
+	}
+	want := "/v1/models?api-version=2024-05-01&sig=a%2Fb%2Bc&expires=1700000000"
+	if lists.hits != 1 || lists.uri != want {
+		t.Fatalf("模型列表上游收到 %d 次、RequestURI %q，期望 1 次 %q（原样，不加分页参数）",
+			lists.hits, lists.uri, want)
+	}
+	mustNotLeak(t, shapeKey, nil, nil, logs())
 }

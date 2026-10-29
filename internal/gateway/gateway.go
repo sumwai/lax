@@ -383,7 +383,7 @@ func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store
 	}
 
 	if req.Stream {
-		return s.streamSuccess(w, resp, inbound, outbound, req)
+		return s.streamSuccess(w, resp, inbound, outbound, req, string(key))
 	}
 	return s.jsonSuccess(w, resp, inbound, outbound, req)
 }
@@ -502,7 +502,7 @@ func (s *Server) jsonSuccess(w http.ResponseWriter, resp *http.Response,
 }
 
 func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
-	inbound, outbound string, req *translate.Request) attempt {
+	inbound, outbound string, req *translate.Request, secretValue string) attempt {
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -541,6 +541,9 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 	var usage translate.Usage
 	// upstreamErr 记上游自己发过来的错误帧正文：客户端已经收到那条错误，这里不再补一个，
 	// 但它仍然说明这次请求失败了，请求记录要写上游的原话而不是一句泛泛的断流。
+	// 这条正文会同时写进 requests.error 与发给客户端的错误帧，与非 2xx 路径一样过 scrubSecret：
+	// gemini 的 {"error":{…}} 是新增入口，上游把凭据回显在 message 里时不能落库（DESIGN 5.6）。
+	// 四个出站协议的错误增量都走这一个分支，脱敏只在这一处做。
 	var upstreamErr string
 	emit := func(deltas []translate.Delta) error {
 		for _, d := range deltas {
@@ -551,6 +554,7 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 				s.logf("上游 %s 的结束原因 %s 在中间表示里没有对应取值，按 %s 编给客户端", outbound, d.StopNote, d.StopReason)
 			}
 			if d.Kind == translate.DeltaError {
+				d.Text = scrubSecret(d.Text, secretValue)
 				upstreamErr = d.Text
 			}
 			if err := write(enc.Emit(d)); err != nil {
@@ -601,7 +605,8 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 	res := attempt{status: http.StatusOK, wrote: true, inTok: usage.In, outTok: usage.Out,
 		cacheRead: usage.CacheRead, cacheWrite: usage.CacheWrite}
 	if failure != "" {
-		res.message = failure
+		// 记账用的摘要也过一遍脱敏：scanErr 的原文里可能带着上游回显的地址或凭据。
+		res.message = scrubSecret(failure, secretValue)
 		res.err = errStreamTruncated
 		if scanErr != nil {
 			res.err = scanErr
@@ -935,25 +940,34 @@ func modelEndpoint(endpoint, model string) string {
 	return strings.ReplaceAll(endpoint, modelPlaceholder, url.PathEscape(model))
 }
 
-// geminiStreamEndpoint 把非流式的 gemini 地址改成流式形状：末尾的 :generateContent 换成
+// geminiStreamEndpoint 把非流式的 gemini 地址改成流式形状：路径末尾的 :generateContent 换成
 // :streamGenerateContent，并加一个 alt=sse（不加的话上游返回的是一段 JSON 数组，不是 SSE）。
-// 路由如果本来就写的 :streamGenerateContent，只补 alt=sse；没有这个后缀（自定义路由）时
-// 路径不动，只加 alt=sse。字符串拼接而不经 url.Parse：路径里的 `:` 与模型名的转义形式
-// （org%2Fgemini）原样保留。
+// 路由如果本来就写的 :streamGenerateContent，只补 alt=sse；路径末尾没有这两个动作后缀
+// （自定义路由）时路径不动，只加 alt=sse。字符串拼接而不经 url.Parse：路径里的 `:` 与模型名
+// 的转义形式（org%2Fgemini）原样保留。
+//
+// 只认路径末尾（查询串之前）的后缀：模型名里可以带 `:`（url.PathEscape 不转义它），路由本身
+// 没有这个后缀时模型名里的 :generateContent 就会留在路径中间；在整个地址里找子串会把它改掉，
+// 同一个模型的流式与非流式因此打到两个不同地址（DESIGN 5.9）。
 func geminiStreamEndpoint(endpoint string) string {
-	if !strings.Contains(endpoint, geminiStreamAction) {
-		if idx := strings.LastIndex(endpoint, geminiGenerateAction); idx >= 0 {
-			endpoint = endpoint[:idx] + geminiStreamAction + endpoint[idx+len(geminiGenerateAction):]
-		}
+	pathPart, query := endpoint, ""
+	if i := strings.IndexByte(endpoint, '?'); i >= 0 {
+		pathPart, query = endpoint[:i], endpoint[i:]
 	}
-	if strings.Contains(endpoint, "alt=sse") {
-		return endpoint
+	switch {
+	case strings.HasSuffix(pathPart, geminiStreamAction):
+		// 路由本来就写的流式动作：只补 alt=sse。
+	case strings.HasSuffix(pathPart, geminiGenerateAction):
+		pathPart = strings.TrimSuffix(pathPart, geminiGenerateAction) + geminiStreamAction
+	}
+	if strings.Contains(query, "alt=sse") {
+		return pathPart + query
 	}
 	sep := "?"
-	if strings.Contains(endpoint, "?") {
+	if query != "" {
 		sep = "&"
 	}
-	return endpoint + sep + "alt=sse"
+	return pathPart + query + sep + "alt=sse"
 }
 
 // setAuth 按协议给上游请求配好凭据头：gemini 用 x-goog-api-key，anthropic 用 x-api-key
