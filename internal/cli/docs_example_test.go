@@ -192,6 +192,52 @@ func TestREADMEProviderGeminiExample(t *testing.T) {
 	}
 }
 
+// TestREADMEProviderHeaderExamples 逐字跑 README「自己加一家厂商」一节末尾的附加请求头示例：
+// set 一条协议级的 x-opencode-session、ls 看这家声明了什么（值脱敏）、unset 删掉它。
+// README 里说 ls 只输出前四位，这里就按前四位断言，不只看「不是明文」。
+func TestREADMEProviderHeaderExamples(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	// README 的 opencode 示例以这家厂商已经登记过为前提。
+	if code, _, stderr := run(t, "provider", "add", "opencode",
+		"--base-url", "https://opencode.example.com",
+		"--openai", "/v1/chat/completions"); code != 0 {
+		t.Fatalf("README 示例 provider add opencode 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	code, out, stderr := run(t, "provider", "header", "set", "opencode", "x-opencode-session", "{session}", "--protocol", "openai-chat")
+	if code != 0 {
+		t.Fatalf("README 示例 provider header set 退出码 = %d，stderr = %s", code, stderr)
+	}
+	for _, want := range []string{"已声明 opencode 的附加头 x-opencode-session（openai-chat）", "值 {ses…"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("provider header set 的输出与 README 不符：\n得到 %s\n期望包含 %q", out, want)
+		}
+	}
+
+	code, out, stderr = run(t, "provider", "header", "ls", "opencode")
+	if code != 0 {
+		t.Fatalf("README 示例 provider header ls 退出码 = %d，stderr = %s", code, stderr)
+	}
+	for _, want := range []string{"厂商", "协议", "头名", "值（脱敏）", "x-opencode-session", "openai-chat", "{ses…"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("provider header ls 的输出与 README 不符：\n得到 %s\n期望包含 %q", out, want)
+		}
+	}
+
+	code, out, stderr = run(t, "provider", "header", "unset", "opencode", "x-opencode-session", "--protocol", "openai-chat")
+	if code != 0 {
+		t.Fatalf("README 示例 provider header unset 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if want := "opencode 已删掉附加头 x-opencode-session（openai-chat）"; !strings.Contains(out, want) {
+		t.Fatalf("provider header unset 的输出与 README 不符：\n得到 %s\n期望包含 %q", out, want)
+	}
+	if rows := mustHeaderRows(t, "opencode"); len(rows) != 0 {
+		t.Fatalf("删完应一条不剩，实际 %+v", rows)
+	}
+}
+
 // TestREADMEModelFlowExamples 逐字跑 README 快速上手与「模型从上游拉」两节的
 // account add / model sync / model probe 命令；唯一加的参数是 --base-url 指向假上游。
 func TestREADMEModelFlowExamples(t *testing.T) {

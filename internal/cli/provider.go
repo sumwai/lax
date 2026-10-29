@@ -19,6 +19,7 @@ var providerSubs = []groupItem{
 	{"set", "改一家厂商的地址、路由、默认协议或备注"},
 	{"unset", "删掉一条路由，或清掉模型列表覆盖、默认协议、备注"},
 	{"rm", "删除厂商与它的全部路由，账号还在用时要求 --force"},
+	{"header", "声明上游除凭据头之外还要的附加请求头：set / unset / ls"},
 }
 
 // 四个协议 flag 的取值有两种写法（见 DESIGN 5.8）：相对厂商 base_url 的完整路径，或整条地址
@@ -64,7 +65,7 @@ func cmdProvider(e *Env, args []string) error {
 		return nil
 	}
 	if len(args) == 0 {
-		return usagef("需要子命令：ls | add | set | unset | rm\n用 switchboard provider --help 查看子命令")
+		return usagef("需要子命令：ls | add | set | unset | rm | header\n用 switchboard provider --help 查看子命令")
 	}
 	switch args[0] {
 	case "ls":
@@ -77,8 +78,10 @@ func cmdProvider(e *Env, args []string) error {
 		return cmdProviderUnset(e, args[1:])
 	case "rm":
 		return cmdProviderRm(e, args[1:])
+	case "header":
+		return cmdProviderHeader(e, args[1:])
 	default:
-		return usagef("未知子命令 %q，可用：ls | add | set | unset | rm\n用 switchboard provider --help 查看子命令", args[0])
+		return usagef("未知子命令 %q，可用：ls | add | set | unset | rm | header\n用 switchboard provider --help 查看子命令", args[0])
 	}
 }
 
@@ -355,6 +358,13 @@ func checkModelsPathFlag(value string, setCmd bool, usageLine string) error {
 // 线协议全名（anthropic、openai-chat、openai-responses、gemini）也认：输入 openai 就是 chat，
 // gemini 两种写法同形。
 func protocolFromCLI(value string) (string, error) {
+	return protocolFromCLIName(value, "--default-protocol",
+		"switchboard provider add acme --base-url https://api.example.com --openai /v1/chat/completions --default-protocol openai")
+}
+
+// protocolFromCLIName 是 protocolFromCLI 的同一套映射，只把错误文案里的参数名与示例换成调用方那一个：
+// provider header 的 --protocol 也收这四个命令行写法，落库的必须是线协议全名（见 DESIGN 5.10）。
+func protocolFromCLIName(value, flagName, example string) (string, error) {
 	switch v := strings.TrimSpace(value); v {
 	case "":
 		return "", nil
@@ -367,7 +377,7 @@ func protocolFromCLI(value string) (string, error) {
 	case gateway.ProtocolGemini:
 		return gateway.ProtocolGemini, nil
 	}
-	return "", usagef("--default-protocol %q 不认识，可用 anthropic、openai、responses、gemini（也认线协议全名 openai-chat、openai-responses），例如 switchboard provider add acme --base-url https://api.example.com --openai /v1/chat/completions --default-protocol openai", value)
+	return "", usagef("%s %q 不认识，可用 anthropic、openai、responses、gemini（也认线协议全名 openai-chat、openai-responses），例如 %s", flagName, value, example)
 }
 
 // emptyValueError 是「给了参数但值是空」的统一文案，路径参数规整之后为空也算空。

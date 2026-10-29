@@ -99,6 +99,21 @@ switchboard provider unset myco anthropic
 
 `provider unset` 幂等：要删的项本来就不存在时不报错，只说明一句「myco 本来就没有 anthropic 路由」。删到一条路由都不剩会被拒绝，那是不想要这家厂商了，用 `provider rm`。`--models-path <路径>` 是厂商级的模型列表覆盖，`provider unset myco models-path` 清掉它、回到按各路由取。
 
+有些上游除凭据头之外还要额外的头才路由（opencode 的 Go 端点缺了 `x-opencode-session` 直接 400）。这类头按厂商声明，写进数据库、不用重编译：`--protocol` 不给就是厂商级，这家厂商的每条路由都带上它；给了就只加给那条协议，同名头协议级覆盖厂商级。值四种写法：字面量原样发出，`{env:NAME}` 取环境变量（适合不该落库的会话 token），`{session}` 取本次请求的会话键（一个对话一个稳定值），`{model}` 取本次请求的模型名，都是转发前才展开。值可能是密钥，所以 `ls` 与 `--json` 只输出脱敏后的前四位：
+
+```bash
+# 只加给 openai-chat 那条路由，值随对话稳定
+switchboard provider header set opencode x-opencode-session '{session}' --protocol openai-chat
+
+# 看这家声明了什么：厂商 / 协议（厂商级显示 -）/ 头名 / 值（脱敏）
+switchboard provider header ls opencode
+
+# 删一条：删不到会报错并列出这家现有的声明
+switchboard provider header unset opencode x-opencode-session --protocol openai-chat
+```
+
+完整规则（四种写法、与凭据头冲突时声明优先、不进请求记录）见 DESIGN 5.10。
+
 换 key 不删号重建：`account add` 时那份 key 失效了，用 `account set` 覆盖掉就行，探活结果、协议发现与请求记录的账号归属都留着。旧凭据留下的冷却与失败计数在同一个事务里清零，账号重新启用：
 
 ```bash
