@@ -163,17 +163,18 @@ func TestREADMEProviderGeminiExample(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
 
-	code, out, stderr := run(t, "provider", "add", "google-gemini",
-		"--base-url", "https://generativelanguage.googleapis.com",
+	// google-gemini 已经内置（迁移 0009），README 的示例改成指向自建代理的一家同名形状的厂商。
+	code, out, stderr := run(t, "provider", "add", "gem-proxy",
+		"--base-url", "https://gemini-proxy.example.com",
 		"--gemini", "/v1beta/models/{model}:generateContent",
 		"--default-protocol", "gemini")
 	if code != 0 {
-		t.Fatalf("README 示例 provider add google-gemini 退出码 = %d，stderr = %s", code, stderr)
+		t.Fatalf("README 示例 provider add gem-proxy 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if want := "已添加厂商 google-gemini（https://generativelanguage.googleapis.com），1 条路由，默认协议 gemini"; !strings.Contains(out, want) {
-		t.Fatalf("provider add google-gemini 的输出与 README 不符：\n得到 %s\n期望包含 %q", out, want)
+	if want := "已添加厂商 gem-proxy（https://gemini-proxy.example.com），1 条路由，默认协议 gemini"; !strings.Contains(out, want) {
+		t.Fatalf("provider add gem-proxy 的输出与 README 不符：\n得到 %s\n期望包含 %q", out, want)
 	}
-	got := mustProviderLs(t)["google-gemini"]
+	got := mustProviderLs(t)["gem-proxy"]
 	if got.DefaultProtocol != "gemini" {
 		t.Fatalf("README 示例的默认协议 = %q，期望 gemini", got.DefaultProtocol)
 	}
@@ -182,11 +183,11 @@ func TestREADMEProviderGeminiExample(t *testing.T) {
 	}
 
 	// README：这家只有这一条路由时 unset 会被拒绝，要撤就撤整个厂商。
-	code, out, stderr = run(t, "provider", "unset", "google-gemini", "gemini")
+	code, out, stderr = run(t, "provider", "unset", "gem-proxy", "gemini")
 	if code != 1 || out != "" {
 		t.Fatalf("删掉唯一一条路由的退出码 = %d，stdout = %q", code, out)
 	}
-	if !strings.Contains(stderr, "switchboard provider rm google-gemini") {
+	if !strings.Contains(stderr, "switchboard provider rm gem-proxy") {
 		t.Fatalf("拒绝文案应指向 provider rm: %s", stderr)
 	}
 }

@@ -14,7 +14,7 @@ import (
 
 // TestMigration0008UpgradesOldDatabase 模拟一个停在 0007 的库：升级只给 providers 加一列
 // models_path，默认空串；provider_routes 的形状与数据一个字段都不动（每协议的 models_path 还在），
-// user_version 推到 8。
+// user_version 推到最新。
 func TestMigration0008UpgradesOldDatabase(t *testing.T) {
 	path := t.TempDir() + "/old.db"
 
@@ -58,13 +58,8 @@ func TestMigration0008UpgradesOldDatabase(t *testing.T) {
 	}
 	defer st.Close()
 
-	var version int
-	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		t.Fatalf("读 user_version: %v", err)
-	}
-	if version != 8 {
-		t.Fatalf("user_version = %d，期望 8（0008 执行过）", version)
-	}
+	// 0008 之后的迁移也一并跑（0009 种 gemini 厂商），所以只断言走到了最新。
+	assertLatestVersion(t, st)
 
 	// providers.models_path 加上了，老行的值一律空串（不覆盖，按路由取）。
 	for _, name := range []string{"deepseek", "anthropic", "myco"} {

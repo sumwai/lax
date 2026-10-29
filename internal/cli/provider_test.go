@@ -106,8 +106,8 @@ func TestProviderLsSeeded(t *testing.T) {
 	mustInit(t)
 
 	byName := mustProviderLs(t)
-	if len(byName) != 8 {
-		t.Fatalf("种子厂商应有 8 家，实际 %d 家", len(byName))
+	if len(byName) != 9 {
+		t.Fatalf("种子厂商应有 9 家（0006 的 8 家加 0009 的 google-gemini），实际 %d 家", len(byName))
 	}
 
 	ds, ok := byName["deepseek"]
@@ -881,18 +881,18 @@ func TestProviderGeminiRoute(t *testing.T) {
 	const geminiPath = "/v1beta/models/{model}:generateContent"
 
 	// 相对路径加占位符，与 --default-protocol gemini 一起写。
-	code, out, stderr := run(t, "provider", "add", "google-gemini",
+	code, out, stderr := run(t, "provider", "add", "gem-proxy",
 		"--base-url", "https://generativelanguage.googleapis.com",
 		"--gemini", geminiPath, "--default-protocol", "gemini")
 	if code != 0 {
 		t.Fatalf("provider add --gemini 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if want := "已添加厂商 google-gemini（https://generativelanguage.googleapis.com），1 条路由，默认协议 gemini"; !strings.Contains(out, want) {
+	if want := "已添加厂商 gem-proxy（https://generativelanguage.googleapis.com），1 条路由，默认协议 gemini"; !strings.Contains(out, want) {
 		t.Fatalf("provider add --gemini 的输出 = %s，期望包含 %q", out, want)
 	}
 
 	// provider ls --json 里带出 gemini 路由，path 是命令行里那一串：{model} 不展开、不转义。
-	added := mustProviderLs(t)["google-gemini"]
+	added := mustProviderLs(t)["gem-proxy"]
 	if added.DefaultProtocol != "gemini" {
 		t.Fatalf("--default-protocol gemini 应原样落库，实际 %q", added.DefaultProtocol)
 	}
@@ -927,27 +927,27 @@ func TestProviderGeminiRoute(t *testing.T) {
 	}
 
 	// provider set 给已有厂商补一条 gemini 路由，同时把默认协议换成已声明的 responses。
-	if code, _, stderr = run(t, "provider", "set", "google-gemini",
+	if code, _, stderr = run(t, "provider", "set", "gem-proxy",
 		"--responses", "/v1/responses", "--default-protocol", "responses"); code != 0 {
 		t.Fatalf("provider set 退出码 = %d，stderr = %s", code, stderr)
 	}
 	// 默认协议已经不是 gemini，删这条路由不会被默认协议挡住。
-	code, out, stderr = run(t, "provider", "unset", "google-gemini", "gemini")
+	code, out, stderr = run(t, "provider", "unset", "gem-proxy", "gemini")
 	if code != 0 {
 		t.Fatalf("provider unset gemini 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"google-gemini 已清掉 gemini 路由", "现有 1 条路由，默认协议 openai-responses"} {
+	for _, want := range []string{"gem-proxy 已清掉 gemini 路由", "现有 1 条路由，默认协议 openai-responses"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("provider unset gemini 的输出缺 %q: %s", want, out)
 		}
 	}
-	if _, ok := routeMap(mustProviderLs(t)["google-gemini"])["gemini"]; ok {
+	if _, ok := routeMap(mustProviderLs(t)["gem-proxy"])["gemini"]; ok {
 		t.Fatal("unset 之后 gemini 路由应该不在了")
 	}
 
 	// 再来一次是幂等的：不报错，只说明本来就没有。
-	code, out, stderr = run(t, "provider", "unset", "google-gemini", "gemini")
-	if code != 0 || !strings.Contains(out, "google-gemini 本来就没有 gemini 路由") {
+	code, out, stderr = run(t, "provider", "unset", "gem-proxy", "gemini")
+	if code != 0 || !strings.Contains(out, "gem-proxy 本来就没有 gemini 路由") {
 		t.Fatalf("幂等 unset gemini 退出码 = %d，输出 = %s，stderr = %s", code, out, stderr)
 	}
 }

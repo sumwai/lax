@@ -215,8 +215,9 @@ func TestSyncModelsFullAddressModelsPath(t *testing.T) {
 		if len(got) != 1 || got[0] != "m-a" {
 			t.Fatalf("模型 = %v", got)
 		}
-		if lists.hits != 1 || lists.uri != "/v1/models" {
-			t.Fatalf("模型列表上游收到 %d 次、URI %q，期望 1 次 /v1/models", lists.hits, lists.uri)
+		// 模型列表每页都带 pageSize（见 DESIGN 5.7），路径本身不带多出来的段。
+		if lists.hits != 1 || lists.uri != "/v1/models?pageSize=1000" {
+			t.Fatalf("模型列表上游收到 %d 次、URI %q，期望 1 次 /v1/models?pageSize=1000", lists.hits, lists.uri)
 		}
 		if lists.bearer != "Bearer "+key || lists.apiKey != "" {
 			t.Fatalf("凭据头 = Bearer %q / x-api-key %q，期望按 chat 路由发 Bearer", lists.bearer, lists.apiKey)
@@ -252,8 +253,8 @@ func TestSyncModelsFullAddressModelsPath(t *testing.T) {
 		if _, err := gs.SyncModels(context.Background(), acc); err != nil {
 			t.Fatalf("同步: %v", err)
 		}
-		if want := "/v9/models?api-version=2024-05-01"; lists.uri != want {
-			t.Fatalf("模型列表 RequestURI = %q，期望 %q（路径规整、查询串原样保留）", lists.uri, want)
+		if want := "/v9/models?api-version=2024-05-01&pageSize=1000"; lists.uri != want {
+			t.Fatalf("模型列表 RequestURI = %q，期望 %q（路径规整、查询串原样保留，另加一个 pageSize）", lists.uri, want)
 		}
 		if base.hits != 0 {
 			t.Fatalf("base_url 域名收到 %d 次请求", base.hits)
@@ -289,7 +290,7 @@ func TestSyncModelsWithEndpointFullAddress(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("模型 = %v", got)
 	}
-	if want := "/v1/model?api-version=2024-05-01"; other.uri != want {
+	if want := "/v1/model?api-version=2024-05-01&pageSize=1000"; other.uri != want {
 		t.Fatalf("RequestURI = %q，期望 %q", other.uri, want)
 	}
 	if other.bearer != "Bearer "+key {
@@ -303,8 +304,8 @@ func TestSyncModelsWithEndpointFullAddress(t *testing.T) {
 	if _, err := gs.SyncModelsWithEndpoint(context.Background(), acc, "v1/models"); err != nil {
 		t.Fatalf("同步: %v", err)
 	}
-	if base.uri != "/v1/models" || base.hits != 1 {
-		t.Fatalf("相对路径的 RequestURI = %q（%d 次），期望 1 次 /v1/models", base.uri, base.hits)
+	if base.uri != "/v1/models?pageSize=1000" || base.hits != 1 {
+		t.Fatalf("相对路径的 RequestURI = %q（%d 次），期望 1 次 /v1/models?pageSize=1000", base.uri, base.hits)
 	}
 	if other.hits != 1 {
 		t.Fatalf("相对路径那次不该碰另一个域名，实际总共 %d 次", other.hits)

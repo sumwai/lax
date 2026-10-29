@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -80,57 +82,128 @@ func (s *Server) modelsEndpoint(a store.Account, override string) (endpoint, pro
 }
 
 // SyncModels 按厂商覆盖与路由的 models_path 拉取上游的模型列表，按名字排序去重。
-// 响应形状三种都认（见 parseModelList 与 DESIGN 5.7）：`{data:[…]}`、`{models:[…]}`
+// 响应形状三种都认（见 parseModelListPage 与 DESIGN 5.7）：`{data:[…]}`、`{models:[…]}`
 // 与顶层数组，形状不同的上游（例如 ollama 的 /api/tags）不必再靠 --models 手填。
+// gemini 的 `{models:[{name:"models/…"}]}` 复用第二种形状，另加两条后处理：按
+// `supportedGenerationMethods` 过滤、条目名去掉一个 `models/` 前缀；分页按 `nextPageToken` 取完。
 func (s *Server) SyncModels(ctx context.Context, a store.Account) ([]string, error) {
 	return s.SyncModelsWithEndpoint(ctx, a, "")
 }
 
+// modelListPageSize 是请求模型列表时带的页大小（见 DESIGN 5.7）。gemini 的清单分页返回，
+// 不带页大小时按服务端的默认值分页，模型多的账号要多打好几次；其它上游不认识这个参数，原样忽略。
+const modelListPageSize = 1000
+
+// maxModelListPages 是模型列表最多取几页。超过上限时报错而不是静默截断：截断会让同步看起来成功，
+// 实际少掉一部分模型，那几个模型永远选不到号，症状是「上游明明有这个模型却一直 404」。
+const maxModelListPages = 10
+
 // SyncModelsWithEndpoint 是 `model sync --endpoint <路径>` 的入口：endpoint 非空时只影响这一次调用，
 // 相对路径取厂商 base_url 拼上它、整条地址直接访问，忽略厂商的 models_path 覆盖与路由里的值。
+//
+// 模型列表可能分页：每页带 pageSize，响应里有 nextPageToken 就接着取下一页，最多 maxModelListPages 页，
+// 取完再统一排序去重。页数超上限时报错，不静默截断。
 func (s *Server) SyncModelsWithEndpoint(ctx context.Context, a store.Account, endpoint string) ([]string, error) {
 	key, err := secret.Decrypt(s.key, a.KeyCipher)
 	if err != nil {
 		return nil, err
 	}
+	secretValue := string(key)
 
 	target, protocol, err := s.modelsEndpoint(a, endpoint)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+
+	var models []string
+	seen := map[string]bool{}
+	pageToken := ""
+	for page := 1; ; page++ {
+		pageURL, err := modelListPageURL(target, pageToken)
+		if err != nil {
+			return nil, fmt.Errorf("模型列表地址 %q 不合法，检查账号 %s 的 base-url: %w", target, a.Name, err)
+		}
+		raw, err := fetchModelPage(ctx, s.client, pageURL, target, protocol, a, secretValue)
+		if err != nil {
+			return nil, err
+		}
+		names, next, isModelList := parseModelListPage(raw)
+		if !isModelList {
+			return nil, fmt.Errorf("上游返回的不是模型列表：认 %s 三种形状，检查 base-url %s 是否指向模型列表接口（三种形状都不匹配时用 --models 手填）",
+				modelShapeList(), a.BaseURL)
+		}
+		for _, name := range names {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			models = append(models, name)
+		}
+		if next == "" {
+			break
+		}
+		if page >= maxModelListPages {
+			return nil, fmt.Errorf("上游的模型清单超过 %d 页还没取完（GET %s，每页 pageSize=%d）：清单过大，检查上游是否按页返回、或改用 --models 手填",
+				maxModelListPages, target, modelListPageSize)
+		}
+		pageToken = next
+	}
+	if len(models) == 0 {
+		// 清单被方法过滤干净时也是这里报错（gemini 的账号只有一个 embedding 模型），
+		// 文案里点一句过滤规则，否则用户会先去怀疑地址与凭据。
+		return nil, fmt.Errorf("上游没有返回模型，检查 base-url %s 是否正确（含 supportedGenerationMethods 的清单只保留带 generateContent 的条目）",
+			a.BaseURL)
+	}
+	sort.Strings(models)
+	return models, nil
+}
+
+// modelListPageURL 给模型列表地址加上分页参数：pageSize 每页都带，pageToken 从第二页起带。
+// 地址里原有的查询串原样保留（整条地址的写法可以带 `?api-version=…` 这类参数），同名参数以这里为准。
+func modelListPageURL(target, pageToken string) (string, error) {
+	u, err := url.Parse(target)
 	if err != nil {
-		return nil, fmt.Errorf("模型列表地址 %q 不合法，检查账号 %s 的 base-url: %w", target, a.Name, err)
+		return "", err
+	}
+	q := u.Query()
+	q.Set("pageSize", strconv.Itoa(modelListPageSize))
+	if pageToken != "" {
+		q.Set("pageToken", pageToken)
+	}
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+// fetchModelPage 取一页模型列表的原始响应体。凭据只在这里作为参数出现，错误文本一并过
+// scrubSecret，明文不进错误信息与日志（见 DESIGN 5.6）。错误信息里写的是 target（配置里的地址），
+// 不带这次追加的分页参数，便于照着命令里的取值排查。
+func fetchModelPage(ctx context.Context, client *http.Client, pageURL, target, protocol string,
+	a store.Account, secretValue string) ([]byte, error) {
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("模型列表地址 %q 不合法，检查账号 %s 的 base-url: %w", pageURL, a.Name, err)
 	}
 	req.Header.Set("Accept", "application/json")
 	// 凭据头跟着取到这条路径的协议走，不是账号协议。
-	setAuth(req, protocol, string(key))
+	setAuth(req, protocol, secretValue)
 
-	resp, err := s.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("拉取模型列表失败（GET %s）：%s", target,
-			scrubSecret(err.Error(), string(key)))
+		return nil, fmt.Errorf("拉取模型列表失败（GET %s）：%s", target, scrubSecret(err.Error(), secretValue))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("上游返回 %d（GET %s，按 %s 发凭据）：%s；检查该账号的 base-url 与凭据",
-			resp.StatusCode, target, protocol, scrubSecret(readErrorBody(resp.Body), string(key)))
+			resp.StatusCode, target, protocol, scrubSecret(readErrorBody(resp.Body), secretValue))
 	}
 
 	var raw json.RawMessage
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("模型列表不是合法 JSON: %w", err)
 	}
-	models, isModelList := parseModelList(raw)
-	if !isModelList {
-		return nil, fmt.Errorf("上游返回的不是模型列表：认 %s 三种形状，检查 base-url %s 是否指向模型列表接口（三种形状都不匹配时用 --models 手填）",
-			modelShapeList(), a.BaseURL)
-	}
-	if len(models) == 0 {
-		return nil, fmt.Errorf("上游没有返回模型，检查 base-url %s 是否正确", a.BaseURL)
-	}
-	return models, nil
+	return raw, nil
 }
 
 // modelListShape 是模型列表响应的一种已知形状，按数组里的顺序依次尝试（见 DESIGN 5.7）。
@@ -157,29 +230,30 @@ func modelShapeList() string {
 	return strings.Join(desc, "、")
 }
 
-// parseModelList 按 modelListShapes 的顺序解析上游的模型列表响应，返回按名字排序去重后的模型名。
-// 第二个返回值为 false 表示三种形状的字段都不存在，响应不是模型列表。
+// parseModelListPage 按 modelListShapes 的顺序解析上游的模型列表响应，返回按名字排序去重后的模型名
+// 与下一页的游标（`nextPageToken`）。第三个返回值为 false 表示三种形状的字段都不存在，响应不是模型列表。
 // 只有字段不存在才试下一种形状：字段在但不是数组、或数组为空，都算「上游返回空列表」（返回空
 // 切片与 true），不再拿下一个形状兜底——`{"data":[]}` 与 `{"models":[]}` 都是空列表，不是形状不对。
-func parseModelList(raw []byte) ([]string, bool) {
+// 游标只看顶层 `nextPageToken`：没有、不是字符串或为空白都当作「没有下一页」。
+func parseModelListPage(raw []byte) (models []string, nextToken string, isModelList bool) {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 {
-		return nil, false
+		return nil, "", false
 	}
 	// 顶层数组：整个响应就是条目列表，可以混着写字符串与对象。
 	if raw[0] == '[' {
 		var entries []json.RawMessage
 		if err := json.Unmarshal(raw, &entries); err != nil {
-			return nil, false
+			return nil, "", false
 		}
-		return modelNames(entries), true
+		return modelNames(entries), "", true
 	}
 	if raw[0] != '{' {
-		return nil, false
+		return nil, "", false
 	}
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &top); err != nil {
-		return nil, false
+		return nil, "", false
 	}
 	for _, shape := range modelListShapes {
 		if shape.field == "" {
@@ -192,16 +266,42 @@ func parseModelList(raw []byte) ([]string, bool) {
 		// 字段存在但解不成数组（null、对象、字符串）按空列表处理：这种形状已经命中，不再往下试。
 		var entries []json.RawMessage
 		_ = json.Unmarshal(value, &entries)
-		return modelNames(entries), true
+		return modelNames(entries), nextPageToken(top), true
 	}
-	return nil, false
+	return nil, "", false
+}
+
+// nextPageToken 取响应顶层的分页游标（gemini 的清单分页返回它）。没有、不是字符串或为空白
+// 都当作「没有下一页」。
+func nextPageToken(top map[string]json.RawMessage) string {
+	value, ok := top["nextPageToken"]
+	if !ok {
+		return ""
+	}
+	var token string
+	if err := json.Unmarshal(value, &token); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(token)
 }
 
 // modelNames 从条目列表里取模型名，按名字排序去重。缺名字的条目（一个字段都没有、或全是空白）跳过。
+//
+// 响应里真的出现 supportedGenerationMethods 字段时（gemini）按它过滤：只保留该方法列表里含
+// generateContent 的条目，embedding 一类没有这个方法的条目不进清单。没出现这个字段的响应
+// （ollama 的 `/api/tags` 这类）不过滤，否则没有方法列表的上游会被过滤成空列表。
+//
+// 去前缀与形状无关：凡是以 `models/` 开头的名字都去一个前缀。名字里带前缀的不只 gemini，
+// 而路由的 `{model}` 占位符在请求时只放回裸名，库里存带前缀的名字会让上游收到
+// `models/models/…`（见 DESIGN 5.7）。
 func modelNames(entries []json.RawMessage) []string {
+	filterMethods := hasGenerationMethods(entries)
 	seen := map[string]bool{}
 	var models []string
 	for _, entry := range entries {
+		if filterMethods && !supportsGenerateContent(entry) {
+			continue
+		}
 		name := modelEntryName(entry)
 		if name == "" || seen[name] {
 			continue
@@ -213,12 +313,53 @@ func modelNames(entries []json.RawMessage) []string {
 	return models
 }
 
+// hasGenerationMethods 判断这批条目里有没有 supportedGenerationMethods 字段：有就说明这是
+// 「带方法列表」的形状（gemini），按它过滤；一个都没有时（ollama 风格的 `{models:[{name}]}`）
+// 不过滤，否则一个字段都没有的上游会被过滤成空列表。
+func hasGenerationMethods(entries []json.RawMessage) bool {
+	for _, entry := range entries {
+		if _, ok := generationMethods(entry); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// generationMethods 取条目的 supportedGenerationMethods，第二个返回值是字段在不在。
+// 字段在但解不成字符串数组时返回空列表与 true：那种条目没有可用的方法列表，过滤时落选。
+func generationMethods(entry json.RawMessage) ([]string, bool) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(entry, &obj); err != nil {
+		return nil, false
+	}
+	value, ok := obj["supportedGenerationMethods"]
+	if !ok {
+		return nil, false
+	}
+	var methods []string
+	_ = json.Unmarshal(value, &methods)
+	return methods, true
+}
+
+// supportsGenerateContent 判断条目的方法列表里有没有 generateContent。没有这个字段的条目
+// 在过滤生效时同样落选：上游既没说它支持生成，就不进清单，宁少不错。
+func supportsGenerateContent(entry json.RawMessage) bool {
+	methods, _ := generationMethods(entry)
+	for _, m := range methods {
+		if m == "generateContent" {
+			return true
+		}
+	}
+	return false
+}
+
 // modelEntryName 取一个条目的模型名：按 id → name → model 的顺序取第一个非空字符串。
-// 条目本身是字符串时直接用它（顶层数组的 `["m1"]` 写法）。
+// 条目本身是字符串时直接用它（顶层数组的 `["m1"]` 写法）。名字以 `models/` 开头时去掉一个前缀
+// （gemini 的清单这么写，见 modelNames 的注释）。
 func modelEntryName(entry json.RawMessage) string {
 	var s string
 	if err := json.Unmarshal(entry, &s); err == nil {
-		return strings.TrimSpace(s)
+		return bareModelName(strings.TrimSpace(s))
 	}
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(entry, &obj); err != nil {
@@ -234,10 +375,20 @@ func modelEntryName(entry json.RawMessage) string {
 			continue
 		}
 		if v = strings.TrimSpace(v); v != "" {
-			return v
+			return bareModelName(v)
 		}
 	}
 	return ""
+}
+
+// bareModelName 去掉名字开头的一个 `models/` 前缀，只去一个：`models/models/x` 落成 `models/x`。
+// 名字里是否带前缀与上游形状无关，这一条对所有形状都生效（见 DESIGN 5.7）——路由的 `{model}`
+// 占位符在请求时把裸名放回路径，库里存带前缀的名字会让上游收到两层前缀。
+func bareModelName(name string) string {
+	if rest, ok := strings.CutPrefix(name, "models/"); ok {
+		return rest
+	}
+	return name
 }
 
 // countModels 数出模型列表响应里的上游模型个数，形状按 `{data:[{id}]}` 解析（id 为空时认 name），

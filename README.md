@@ -66,17 +66,17 @@ switchboard provider add myco --base-url https://api.deepseek.com \
 已添加厂商 myco（https://api.deepseek.com），2 条路由，默认协议 openai-chat
 ```
 
-gemini 只作出站，原生接口把模型名放在路径里，所以它的路由可以写 `{model}` 占位符：占位符原样落库，发请求之前才换成模型名（按路径段转义），相对路径与整条地址两种写法都行。只加 gemini 一家时写成这样：
+gemini 只作出站，原生接口把模型名放在路径里，所以它的路由可以写 `{model}` 占位符：占位符原样落库，发请求之前才换成模型名（按路径段转义），相对路径与整条地址两种写法都行。`google-gemini` 这家（`https://generativelanguage.googleapis.com`）已经内置，模型列表在 `/v1beta/models`、转发在 `/v1beta/models/{model}:generateContent`，`provider ls` 能看到；要指向自己搭的代理就照同一个形状另加一家：
 
 ```bash
 # 只声明 gemini 一条路由，默认协议跟着写成 gemini
-switchboard provider add google-gemini --base-url https://generativelanguage.googleapis.com \
+switchboard provider add gem-proxy --base-url https://gemini-proxy.example.com \
     --gemini /v1beta/models/{model}:generateContent \
     --default-protocol gemini
-已添加厂商 google-gemini（https://generativelanguage.googleapis.com），1 条路由，默认协议 gemini
+已添加厂商 gem-proxy（https://gemini-proxy.example.com），1 条路由，默认协议 gemini
 ```
 
-删掉这条路由是 `provider unset google-gemini gemini`；这家只有这一条路由时会被拒绝，那是不想要这家厂商了，用 `provider rm`。账号一侧用 `account add --provider google-gemini --protocol gemini`，gemini 只作出站，客户端的入站路径仍是那三条。
+删掉这条路由是 `provider unset gem-proxy gemini`；这家只有这一条路由时会被拒绝，那是不想要这家厂商了，用 `provider rm`。账号一侧用 `account add --provider google-gemini --protocol gemini`（自建代理就把 `--provider` 换成那家的名字），gemini 只作出站，客户端的入站路径仍是那三条。
 
 `provider set` 只设值：补一条路由、改默认协议或地址，没传的字段一律保留。传空值是用法错误，删除要显式声明：
 
@@ -120,6 +120,8 @@ switchboard model sync --account ds --endpoint /v1/models # 临时指定列表�
 switchboard model probe --account ds --limit 5            # 只探这个账号的前 5 个模型
 switchboard serve
 ```
+
+模型列表的形状不用管：`{data:[…]}`、`{models:[…]}`、顶层数组三种都认，gemini 的 `{models:[{"name":"models/…"}]}` 走第二种，清单按 `supportedGenerationMethods` 过滤、名字去掉 `models/` 前缀；分页带 `pageSize=1000`，有 `nextPageToken` 就接着取，最多 10 页。
 
 探活会真实调用上游：`--limit 5` 限制每个账号这一次最多探几个，`--model deepseek-v4-pro` 只试一个。某个账号没探出可用模型时只写探活结果，它原有的模型列表保持不变；全部账号都没探出可用模型时退出码 1。终端里探活时 stderr 上有一行原地刷新的进度（账号、已完成 / 待探数、最近探完的模型），账号探完补一个换行再打汇总与表格；stderr 不是终端或加了 `--json` 时没有这一行，管道、CI 与日志里不会多出噪声。碰到 401 时命令停下并停用该账号：凭据被拒，后面的结论不作数。同步失败的账号同样不影响其余账号，只是最终退出码为 1。`account ls` 与 `model ls` 会带上每个账号的模型状态（可用 / 待探活 / 无权 / 不存在 / 凭据被拒 / 失败）。空模型列表的账号不参与选号，所以 `account ls` 的模型列不会写「不限」：只有手填的名字时直接列出模型名，同步过但没探出可用模型时写「0 可用 / N 同步」，完全没有模型信息时写「无模型（先 model sync）」；`model ls` 一条模型都没有时同样把下一步指到 `model sync` 与 `model probe`。
 
@@ -167,4 +169,4 @@ make check        # go vet + go test + go build
 
 ## 已知边界
 
-gemini 的入站与出站都支持非流式与流式；模型列表同步还没做（`GET /v1beta/models` 的响应形状与已知三种都不同，名字还带 `models/` 前缀），gemini 账号的模型名暂时用 `--models` 手填。gemini 的模型名在 URL 路径里，路由的 `path` 因此可以写 `{model}` 占位符（相对路径与整条地址都行，替换时按路径段转义）；入站 gemini 的错误体沿用统一形状，不带 google 的 `error.code` 与 `error.status`；非正常的 `finishReason`（`SAFETY` 一类）按正常结束转给客户端，原值只进网关日志；gemini 的内置工具（`googleSearch` 等）与思考内容（`thought` 标记、`thinkingConfig`）不搬。转换时搬运文本、图片、思考内容、工具调用与工具结果五类块：思考内容只在响应方向搬运，请求方向不回填——chat 的 `reasoning_content` 与 responses 的 `reasoning` item 是上游自己产生的字段，回填给推理模型会被以 400 拒掉整条请求；响应方向仍照旧搬运。签名只有 anthropic 有落点，没有签名的思考块不写进 anthropic 的请求与响应（不伪造签名，伪造会被上游以 400 拒绝），所以 chat 与 responses 的思考内容转到 anthropic 时丢弃；流式转换下发给 anthropic 客户端的思考块没有签名，客户端若把这些块回填进下一轮请求，上游会报 400。工具结果之后紧跟的追问并进同一条 user 消息，因为 anthropic 不接受两条相邻的 user 消息。思考配置参数（anthropic 的 `thinking`、chat 的 `reasoning_effort`）、`redacted_thinking` 的不透明 `data` 与 responses 的 `encrypted_content` 跨协议不搬，reasoning token 不单独记账（算进输出 token）。音频与文件类内容丢弃；anthropic 的服务端内置工具（`web_search` 等）跨协议时整条丢弃，chat 与 responses 的工具定义只认 function，编回 anthropic 时才原样保留 `type`；`tools[].strict` 不搬运，`is_error` 只有 anthropic 有落点，`allowed_tools` 降级为 `auto`。流式转换下断在工具参数中间时，已下发的参数片段撤不回来，收尾的错误帧会写明「工具调用参数在上游中断，内容不完整」，这一次记失败，程序不伪造闭合的 JSON。跨协议只搬运图片地址，没有其它多模态变换。不改写任何客户端配置文件；冷却时长按单次失败计算；探活调用不计入用量汇总；估算花费需要给账号填 `--price-in` 与 `--price-out`。
+gemini 的入站与出站都支持非流式与流式，模型列表可同步（`google-gemini` 内置，`GET /v1beta/models` 的清单按 `supportedGenerationMethods` 只留 `generateContent`、名字去掉 `models/` 前缀、按 `nextPageToken` 翻页）。gemini 的模型名在 URL 路径里，路由的 `path` 因此可以写 `{model}` 占位符（相对路径与整条地址都行，替换时按路径段转义）；入站 gemini 的错误体沿用统一形状，不带 google 的 `error.code` 与 `error.status`；非正常的 `finishReason`（`SAFETY` 一类）按正常结束转给客户端，原值只进网关日志；gemini 的内置工具（`googleSearch` 等）与思考内容（`thought` 标记、`thinkingConfig`）不搬。转换时搬运文本、图片、思考内容、工具调用与工具结果五类块：思考内容只在响应方向搬运，请求方向不回填——chat 的 `reasoning_content` 与 responses 的 `reasoning` item 是上游自己产生的字段，回填给推理模型会被以 400 拒掉整条请求；响应方向仍照旧搬运。签名只有 anthropic 有落点，没有签名的思考块不写进 anthropic 的请求与响应（不伪造签名，伪造会被上游以 400 拒绝），所以 chat 与 responses 的思考内容转到 anthropic 时丢弃；流式转换下发给 anthropic 客户端的思考块没有签名，客户端若把这些块回填进下一轮请求，上游会报 400。工具结果之后紧跟的追问并进同一条 user 消息，因为 anthropic 不接受两条相邻的 user 消息。思考配置参数（anthropic 的 `thinking`、chat 的 `reasoning_effort`）、`redacted_thinking` 的不透明 `data` 与 responses 的 `encrypted_content` 跨协议不搬，reasoning token 不单独记账（算进输出 token）。音频与文件类内容丢弃；anthropic 的服务端内置工具（`web_search` 等）跨协议时整条丢弃，chat 与 responses 的工具定义只认 function，编回 anthropic 时才原样保留 `type`；`tools[].strict` 不搬运，`is_error` 只有 anthropic 有落点，`allowed_tools` 降级为 `auto`。流式转换下断在工具参数中间时，已下发的参数片段撤不回来，收尾的错误帧会写明「工具调用参数在上游中断，内容不完整」，这一次记失败，程序不伪造闭合的 JSON。跨协议只搬运图片地址，没有其它多模态变换。不改写任何客户端配置文件；冷却时长按单次失败计算；探活调用不计入用量汇总；估算花费需要给账号填 `--price-in` 与 `--price-out`。

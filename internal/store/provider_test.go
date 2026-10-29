@@ -14,7 +14,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// seedRoutes 是迁移 0006 种入的全部路由，逐行写死。
+// seedRoutes 是迁移种入的全部路由，逐行写死。migration 记的是哪一次迁移种下它：
+// 0006 是升级前就有的 8 家，0009 是 gemini 那一条。
 // 完整地址 = 厂商 base_url 去掉末尾斜杠后直接拼 path / models_path，不推 /v1、不猜后缀。
 var seedRoutes = []struct {
 	provider   string
@@ -22,18 +23,34 @@ var seedRoutes = []struct {
 	protocol   string
 	path       string
 	modelsPath string
+	migration  int
 }{
-	{"anthropic", "https://api.anthropic.com", "anthropic", "/v1/messages", "/v1/models"},
-	{"openai", "https://api.openai.com", "openai-chat", "/v1/chat/completions", "/v1/models"},
-	{"openai", "https://api.openai.com", "openai-responses", "/v1/responses", "/v1/models"},
-	{"deepseek", "https://api.deepseek.com", "openai-chat", "/v1/chat/completions", "/v1/models"},
-	{"deepseek", "https://api.deepseek.com", "anthropic", "/anthropic/v1/messages", ""},
-	{"moonshot", "https://api.moonshot.cn", "openai-chat", "/v1/chat/completions", "/v1/models"},
-	{"kimi", "https://api.moonshot.cn", "openai-chat", "/v1/chat/completions", "/v1/models"},
-	{"openrouter", "https://openrouter.ai/api", "openai-chat", "/v1/chat/completions", "/v1/models"},
-	{"ollama", "http://127.0.0.1:11434", "openai-chat", "/v1/chat/completions", "/v1/models"},
-	{"commandcode", "https://api.commandcode.ai/provider/v1", "openai-chat", "/chat/completions", "/models"},
-	{"commandcode", "https://api.commandcode.ai/provider/v1", "anthropic", "/messages", ""},
+	{"anthropic", "https://api.anthropic.com", "anthropic", "/v1/messages", "/v1/models", 6},
+	{"openai", "https://api.openai.com", "openai-chat", "/v1/chat/completions", "/v1/models", 6},
+	{"openai", "https://api.openai.com", "openai-responses", "/v1/responses", "/v1/models", 6},
+	{"deepseek", "https://api.deepseek.com", "openai-chat", "/v1/chat/completions", "/v1/models", 6},
+	{"deepseek", "https://api.deepseek.com", "anthropic", "/anthropic/v1/messages", "", 6},
+	{"moonshot", "https://api.moonshot.cn", "openai-chat", "/v1/chat/completions", "/v1/models", 6},
+	{"kimi", "https://api.moonshot.cn", "openai-chat", "/v1/chat/completions", "/v1/models", 6},
+	{"openrouter", "https://openrouter.ai/api", "openai-chat", "/v1/chat/completions", "/v1/models", 6},
+	{"ollama", "http://127.0.0.1:11434", "openai-chat", "/v1/chat/completions", "/v1/models", 6},
+	{"commandcode", "https://api.commandcode.ai/provider/v1", "openai-chat", "/chat/completions", "/models", 6},
+	{"commandcode", "https://api.commandcode.ai/provider/v1", "anthropic", "/messages", "", 6},
+	// 0009 种的 gemini 厂商：模型列表在 /v1beta/models，转发路径把模型名放在路径里（占位符原样落库）。
+	{"google-gemini", "https://generativelanguage.googleapis.com", "gemini",
+		"/v1beta/models/{model}:generateContent", "/v1beta/models", 9},
+}
+
+// seedRoutesBefore 给出某一次迁移之前就已经在库里的路由，用来搭「停在那个版本」的老库：
+// 手抄一份老形状会随新种子漂移，而这里要的正是当时那份。
+func seedRoutesBefore(version int) []int {
+	var idx []int
+	for i, route := range seedRoutes {
+		if route.migration <= version {
+			idx = append(idx, i)
+		}
+	}
+	return idx
 }
 
 // seedDefaults 是迁移 0007 种入的默认协议，逐行写死。
@@ -51,9 +68,11 @@ var seedDefaults = []struct {
 	{"openrouter", "openai-chat"},
 	{"ollama", "openai-chat"},
 	{"commandcode", "openai-chat"},
+	// 0009 种的 gemini 厂商：这家只有 gemini 一条路由，默认协议显式写成 gemini。
+	{"google-gemini", "gemini"},
 }
 
-// assertSeedDefaults 逐行比对 8 家厂商的默认协议，并确认没有多余的行。
+// assertSeedDefaults 逐行比对种子厂商的默认协议，并确认没有多余的行。
 func assertSeedDefaults(t *testing.T, st *store.Store) {
 	t.Helper()
 
@@ -83,7 +102,7 @@ func assertSeedDefaults(t *testing.T, st *store.Store) {
 }
 
 // TestProvidersSeededByMigration 确认空库跑到最新版本后种子齐全：
-// 8 家厂商、11 条路由，每条拼出的完整地址与模型列表地址都逐一对上，默认协议也逐行对上。
+// 9 家厂商、12 条路由，每条拼出的完整地址与模型列表地址都逐一对上，默认协议也逐行对上。
 func TestProvidersSeededByMigration(t *testing.T) {
 	st := openTemp(t)
 
@@ -96,8 +115,9 @@ func TestProvidersSeededByMigration(t *testing.T) {
 	if err := st.DB().QueryRow("SELECT COUNT(*) FROM provider_routes").Scan(&nRoutes); err != nil {
 		t.Fatalf("数路由行: %v", err)
 	}
-	if nProviders != 8 || nRoutes != len(seedRoutes) {
-		t.Fatalf("种子规模 = %d 家 / %d 条，期望 8 家 / %d 条", nProviders, nRoutes, len(seedRoutes))
+	if nProviders != len(seedDefaults) || nRoutes != len(seedRoutes) {
+		t.Fatalf("种子规模 = %d 家 / %d 条，期望 %d 家 / %d 条",
+			nProviders, nRoutes, len(seedDefaults), len(seedRoutes))
 	}
 	assertSeedDefaults(t, st)
 
@@ -153,7 +173,7 @@ func TestProvidersSeededByMigration(t *testing.T) {
 }
 
 // TestMigration0006UpgradesOldDatabase 模拟一个停在 0005 的库：升上来之后两张表在、种子齐全，
-// 老账号与它的模型行一个字段都不动，user_version 推到 7。
+// 老账号与它的模型行一个字段都不动，user_version 推到最新。
 func TestMigration0006UpgradesOldDatabase(t *testing.T) {
 	path := t.TempDir() + "/old.db"
 
@@ -210,8 +230,8 @@ func TestMigration0006UpgradesOldDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("列厂商: %v", err)
 	}
-	if len(providers) != 8 {
-		t.Fatalf("升级后的厂商数 = %d，期望 8", len(providers))
+	if len(providers) != len(seedDefaults) {
+		t.Fatalf("升级后的厂商数 = %d，期望 %d", len(providers), len(seedDefaults))
 	}
 	assertSeedDefaults(t, st)
 	var nRoutes int
@@ -240,7 +260,8 @@ func TestMigration0006UpgradesOldDatabase(t *testing.T) {
 }
 
 // TestMigration0007UpgradesOldDatabase 模拟一个停在 0006 的库：升级只加 default_protocol 一列，
-// 8 家厂商逐行重新种上升级前的默认协议，用户自建的厂商保持空串，路由与地址一个都不动。
+// 种子里的 8 家厂商逐行拿上升级前的默认协议（0009 那家由它自己种），用户自建的厂商保持空串，
+// 路由与地址一个都不动。
 func TestMigration0007UpgradesOldDatabase(t *testing.T) {
 	path := t.TempDir() + "/old.db"
 
@@ -256,8 +277,10 @@ func TestMigration0007UpgradesOldDatabase(t *testing.T) {
 			provider TEXT NOT NULL, protocol TEXT NOT NULL, path TEXT NOT NULL,
 			models_path TEXT NOT NULL DEFAULT '', PRIMARY KEY (provider, protocol))`,
 	}
-	// 种子行照 0006 写回，保证升级前的库与真实老库同一个形状。
-	for _, want := range seedRoutes {
+	// 种子行照 0006 写回，保证升级前的库与真实老库同一个形状。0009 才种下的 gemini 厂商
+	// 那时候还不存在，这里不回放：模拟的是真实的 0006 库，不是「倒着算」的库。
+	for _, i := range seedRoutesBefore(6) {
+		want := seedRoutes[i]
 		ddl = append(ddl,
 			fmt.Sprintf(`INSERT OR IGNORE INTO providers (name, base_url) VALUES ('%s', '%s')`, want.provider, want.baseURL),
 			fmt.Sprintf(`INSERT INTO provider_routes (provider, protocol, path, models_path)
@@ -283,7 +306,7 @@ func TestMigration0007UpgradesOldDatabase(t *testing.T) {
 
 	assertLatestVersion(t, st)
 
-	// 种子 8 家逐行断言。升级路径与空库路径必须得出同一份默认协议。
+	// 种子逐行断言。升级路径与空库路径必须得出同一份默认协议。
 	for _, want := range seedDefaults {
 		p, err := st.GetProvider(want.provider)
 		if err != nil {
@@ -762,7 +785,7 @@ func TestMigrationChainFrom0001ToLatest(t *testing.T) {
 		t.Fatalf("user_version = %d，期望 %d（从 0001 一路升到最新）", version, want)
 	}
 
-	// providers：8 家种子在，默认协议逐行对上。
+	// providers：种子都在，默认协议逐行对上。
 	providers, err := st.ListProviders()
 	if err != nil {
 		t.Fatalf("列厂商: %v", err)
