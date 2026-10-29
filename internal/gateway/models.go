@@ -29,21 +29,29 @@ func ModelsEndpoint(base string) string {
 
 // modelsEndpoint 解析账号的模型列表地址，同时返回这条地址该用哪种协议发凭据头（见 DESIGN 5.7）：
 //
-//  1. override 非空（`model sync --endpoint`）时用它，压过下面全部，协议取账号协议；
+//  1. override 非空（`model sync --endpoint`）时用它，压过下面全部，协议取账号协议；取值可以是
+//     相对 base_url 的路径，也可以是整条地址（整条地址直接访问，不再拼 base_url）；
 //  2. 厂商行不存在（自建地址）、或厂商行在但既没有路由也没有 models_path 覆盖时，按 base_url 后缀猜，
 //     与升级前一致；
 //  3. 厂商级 models_path 非空时用它，协议取账号协议（覆盖是厂商级设置，没有自己的协议）；
 //  4. 否则从路由取：账号协议那条的 models_path，为空再退到同厂商按协议名排序的第一条非空值；
 //  5. 厂商声明了路由但一个非空 models_path 都没有时报错，提示手填或 `provider set --models-path`。
 //
+// 第 2 步之后的取值都可能是整条地址：地址来自路由时由 joinEndpoint 判断就不拼 base_url。
 // 协议必须与路径一起回去：凭据头按协议选（anthropic 用 x-api-key，另两家用 Bearer），
 // 地址来自哪条路由就用哪条路由的协议。deepseek 的 anthropic 账号取到的是 chat 的 /v1/models，
 // 用账号协议发 x-api-key 上去只会换回一个 401/403，却把错误指到「凭据无效」上。
 func (s *Server) modelsEndpoint(a store.Account, override string) (endpoint, protocol string, err error) {
-	// --endpoint 的取值同样只规整、不拒绝：`v1/models`、`//v1//models` 都当 /v1/models。
-	// 规整之后为空视为这次没给，回到厂商覆盖与路由。
-	if path := store.NormalizePath(override); path != "" {
-		return joinEndpoint(a.BaseURL, path), a.Protocol, nil
+	// --endpoint 的取值与路由取值同一套解释（store.NormalizeEndpoint）：相对路径只规整、不拒绝，
+	// 整条地址校验后直接使用。规整之后为空视为这次没给，回到厂商覆盖与路由。
+	if override != "" {
+		target, err := store.NormalizeEndpoint(override)
+		if err != nil {
+			return "", "", fmt.Errorf("model sync --endpoint：%w", err)
+		}
+		if target != "" {
+			return joinEndpoint(a.BaseURL, target), a.Protocol, nil
+		}
 	}
 
 	p, err := s.store.GetProvider(a.Provider)
@@ -76,7 +84,7 @@ func (s *Server) SyncModels(ctx context.Context, a store.Account) ([]string, err
 }
 
 // SyncModelsWithEndpoint 是 `model sync --endpoint <路径>` 的入口：endpoint 非空时只影响这一次调用，
-// 地址取厂商 base_url 拼上它，忽略厂商的 models_path 覆盖与路由里的值。
+// 相对路径取厂商 base_url 拼上它、整条地址直接访问，忽略厂商的 models_path 覆盖与路由里的值。
 func (s *Server) SyncModelsWithEndpoint(ctx context.Context, a store.Account, endpoint string) ([]string, error) {
 	key, err := secret.Decrypt(s.key, a.KeyCipher)
 	if err != nil {

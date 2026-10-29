@@ -738,8 +738,9 @@ func appendStreamTail(w io.Writer, flush func(), written []byte, events []transl
 	flush()
 }
 
-// Endpoint 是 base_url 加协议的后缀猜测，作为没有厂商路由时的兜底：末尾带不带 /v1 都行。
-// 正常路径上的地址走 Server.endpoint（按 (厂商, 协议) 查 provider_routes）。
+// Endpoint 是 base_url 加协议后缀的兜底猜测，作为没有厂商路由时的兜底：末尾带不带 /v1 都行。
+// 正常路径上的地址走 Server.endpoint（按 (厂商, 协议) 查 provider_routes，路由的值可以是
+// 相对路径，也可以是整条地址，见 joinEndpoint）。
 func Endpoint(base, protocol string) string {
 	base = normalizedBase(base)
 	suffix := "/chat/completions"
@@ -755,9 +756,9 @@ func Endpoint(base, protocol string) string {
 	return base + "/v1" + suffix
 }
 
-// endpoint 解析账号在某种协议上的上游地址：厂商在 provider_routes 里声明过这条协议就用
-// base_url 拼上它的 path；没有厂商行、或这家没有该协议的路由时退回后缀猜测（见 DESIGN 5.8）。
-// 自建地址的账号（provider 不在表里）因此仍然可用。
+// endpoint 解析账号在某种协议上的上游地址：厂商在 provider_routes 里声明过这条协议就用它的取值——
+// 相对路径拼 base_url、整条地址直接用（见 joinEndpoint）；没有厂商行、或这家没有该协议的路由时
+// 退回后缀猜测（见 DESIGN 5.8）。自建地址的账号（provider 不在表里）因此仍然可用。
 func (s *Server) endpoint(a store.Account, protocol string) string {
 	route, ok, err := s.store.LookupProviderRoute(a.Provider, protocol)
 	if err != nil {
@@ -779,12 +780,21 @@ func normalizedBase(base string) string {
 	return strings.TrimRight(strings.TrimSpace(base), "/")
 }
 
-// joinEndpoint 把 base_url 与路由里的完整路径拼起来，两者都按 store 的同一套规则规整：
-// base_url 去尾斜杠（scheme 之后合并重复斜杠），路径补一个前导斜杠、合并重复斜杠、去尾斜杠，
-// 因此最终地址的路径部分不出现 `//`，`base_url` 里真实存在的前缀（如 /api/paas/v4）原样保留。
-// 规整只碰路径（DESIGN 5.8）：`base_url` 里的查询串与 `#` 之后的内容照抄，拼路径时不改动它们。
-// 其余一律照抄，不推 /v1、不猜后缀。
+// joinEndpoint 把 base_url 与路由里的端点取值拼起来。取值是整条地址（含 `://`）时直接用它，
+// 不再拼 base_url：同一厂商的不同协议可以落在不同域名上（openai 兼容端点在 openai.example.com、
+// anthropic 端点在 claude.example.com），此时 base_url 只是其中一家的地址。整条地址按
+// store.NormalizeEndpoint 规整：scheme 归一成小写、路径合并重复斜杠去尾斜杠，
+// 授权部分、查询串与 `#` 之后的内容照抄。相对路径仍与 base_url 拼接：base_url 去尾斜杠、
+// 路径补一个前导斜杠并去尾斜杠，因此最终地址的路径部分不出现 `//`，`base_url` 里真实存在的前缀
+// （如 /api/paas/v4）原样保留。规整只碰路径（DESIGN 5.8）。其余一律照抄，不推 /v1、不猜后缀。
+// 校验不过的脏取值原样返回，交给 http.NewRequest 报错：读侧不改写用户数据。
 func joinEndpoint(base, path string) string {
+	if store.IsFullAddress(path) {
+		if endpoint, err := store.NormalizeEndpoint(path); err == nil {
+			return endpoint
+		}
+		return strings.TrimSpace(path)
+	}
 	return normalizedBase(base) + store.NormalizePath(path)
 }
 
