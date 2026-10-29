@@ -1,0 +1,14 @@
+{
+  "from": "openai-responses",
+  "to": "anthropic",
+  "kind": "stream",
+  "model": "m1",
+  "frames": [
+    {"type": "message_start", "message": {"id": "msg_1", "type": "message", "role": "assistant", "model": "up", "content": [], "usage": {"input_tokens": 9, "output_tokens": 1}}},
+    {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "甲"}},
+    {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "weather"}},
+    {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"city\":\"北京\"}"}},
+    {"type": "content_block_delta", "index": 2, "delta": {"type": "text_delta", "text": "乙"}},
+    {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 6}}
+  ]
+}

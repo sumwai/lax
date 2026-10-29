@@ -15,10 +15,24 @@
   },
   {
     "data": {
+      "item": {
+        "content": [],
+        "status": "in_progress",
+        "type": "message",
+        "role": "assistant"
+      },
+      "output_index": 0,
+      "sequence_number": 1,
+      "type": "response.output_item.added"
+    },
+    "event": "response.output_item.added"
+  },
+  {
+    "data": {
       "content_index": 0,
       "delta": "稍等",
       "output_index": 0,
-      "sequence_number": 1,
+      "sequence_number": 2,
       "type": "response.output_text.delta"
     },
     "event": "response.output_text.delta"
@@ -33,7 +47,7 @@
         "type": "function_call"
       },
       "output_index": 1,
-      "sequence_number": 2,
+      "sequence_number": 3,
       "type": "response.output_item.added"
     },
     "event": "response.output_item.added"
@@ -42,7 +56,7 @@
     "data": {
       "delta": "{\"city\":",
       "output_index": 1,
-      "sequence_number": 3,
+      "sequence_number": 4,
       "type": "response.function_call_arguments.delta"
     },
     "event": "response.function_call_arguments.delta"
@@ -51,10 +65,29 @@
     "data": {
       "delta": "\"北京\"}",
       "output_index": 1,
-      "sequence_number": 4,
+      "sequence_number": 5,
       "type": "response.function_call_arguments.delta"
     },
     "event": "response.function_call_arguments.delta"
+  },
+  {
+    "data": {
+      "item": {
+        "content": [
+          {
+            "text": "稍等",
+            "type": "output_text"
+          }
+        ],
+        "status": "completed",
+        "type": "message",
+        "role": "assistant"
+      },
+      "output_index": 0,
+      "sequence_number": 6,
+      "type": "response.output_item.done"
+    },
+    "event": "response.output_item.done"
   },
   {
     "data": {
@@ -62,7 +95,7 @@
       "item_id": "fc_call_1",
       "name": "weather",
       "output_index": 1,
-      "sequence_number": 5,
+      "sequence_number": 7,
       "type": "response.function_call_arguments.done"
     },
     "event": "response.function_call_arguments.done"
@@ -78,7 +111,7 @@
         "type": "function_call"
       },
       "output_index": 1,
-      "sequence_number": 6,
+      "sequence_number": 8,
       "type": "response.output_item.done"
     },
     "event": "response.output_item.done"
@@ -90,6 +123,17 @@
         "model": "gpt-5",
         "object": "response",
         "output": [
+          {
+            "content": [
+              {
+                "text": "稍等",
+                "type": "output_text"
+              }
+            ],
+            "status": "completed",
+            "type": "message",
+            "role": "assistant"
+          },
           {
             "arguments": "{\"city\":\"北京\"}",
             "call_id": "call_1",
@@ -106,7 +150,7 @@
           "total_tokens": 20
         }
       },
-      "sequence_number": 7,
+      "sequence_number": 9,
       "type": "response.completed"
     },
     "event": "response.completed"

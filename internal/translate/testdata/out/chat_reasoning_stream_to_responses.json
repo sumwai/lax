@@ -47,10 +47,24 @@
   },
   {
     "data": {
+      "item": {
+        "content": [],
+        "status": "in_progress",
+        "type": "message",
+        "role": "assistant"
+      },
+      "output_index": 1,
+      "sequence_number": 4,
+      "type": "response.output_item.added"
+    },
+    "event": "response.output_item.added"
+  },
+  {
+    "data": {
       "content_index": 0,
       "delta": "42",
       "output_index": 1,
-      "sequence_number": 4,
+      "sequence_number": 5,
       "type": "response.output_text.delta"
     },
     "event": "response.output_text.delta"
@@ -68,7 +82,26 @@
         "type": "reasoning"
       },
       "output_index": 0,
-      "sequence_number": 5,
+      "sequence_number": 6,
+      "type": "response.output_item.done"
+    },
+    "event": "response.output_item.done"
+  },
+  {
+    "data": {
+      "item": {
+        "content": [
+          {
+            "text": "42",
+            "type": "output_text"
+          }
+        ],
+        "status": "completed",
+        "type": "message",
+        "role": "assistant"
+      },
+      "output_index": 1,
+      "sequence_number": 7,
       "type": "response.output_item.done"
     },
     "event": "response.output_item.done"
@@ -89,6 +122,17 @@
               }
             ],
             "type": "reasoning"
+          },
+          {
+            "content": [
+              {
+                "text": "42",
+                "type": "output_text"
+              }
+            ],
+            "status": "completed",
+            "type": "message",
+            "role": "assistant"
           }
         ],
         "status": "completed",
@@ -98,7 +142,7 @@
           "total_tokens": 17
         }
       },
-      "sequence_number": 6,
+      "sequence_number": 8,
       "type": "response.completed"
     },
     "event": "response.completed"

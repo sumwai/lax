@@ -472,10 +472,12 @@ func TestChatToolStreamToResponsesInboundDoneEvents(t *testing.T) {
 
 	want := []string{
 		"response.created",
+		"response.output_item.added",
 		"response.output_text.delta",
 		"response.output_item.added",
 		"response.function_call_arguments.delta",
 		"response.function_call_arguments.delta",
+		"response.output_item.done",
 		"response.function_call_arguments.done",
 		"response.output_item.done",
 		"response.completed",
@@ -535,15 +537,19 @@ func TestChatToolStreamToResponsesInboundDoneEvents(t *testing.T) {
 	if completed.Response.Status != "completed" {
 		t.Fatalf("response.completed 的 status = %q，期望 completed", completed.Response.Status)
 	}
-	if len(completed.Response.Output) != 1 {
-		t.Fatalf("output 条数 = %d，期望 1（回填的那个 function_call）", len(completed.Response.Output))
+	if len(completed.Response.Output) != 2 {
+		t.Fatalf("output 条数 = %d，期望 2（文本 item 与回填的那个 function_call）", len(completed.Response.Output))
 	}
-	got0 := completed.Response.Output[0]
+	// 文本 item 排在前面：正文整段落在 message 的 content 里，序号与事件里的 output_index 一致。
+	if msg := completed.Response.Output[0]; msg.Type != "message" {
+		t.Fatalf("output[0] = %+v，期望文本 item", msg)
+	}
+	got0 := completed.Response.Output[1]
 	if got0.Type != "function_call" || got0.CallID != "call_1" || got0.Name != "weather" {
-		t.Fatalf("output[0] = %+v，期望 function_call/call_1/weather", got0)
+		t.Fatalf("output[1] = %+v，期望 function_call/call_1/weather", got0)
 	}
 	if got0.Arguments != `{"city":"北京"}` {
-		t.Fatalf("output[0] 的参数 = %q，期望完整的 {\"city\":\"北京\"}", got0.Arguments)
+		t.Fatalf("output[1] 的参数 = %q，期望完整的 {\"city\":\"北京\"}", got0.Arguments)
 	}
 
 	recs, err := f.st.RecentRequests(5)

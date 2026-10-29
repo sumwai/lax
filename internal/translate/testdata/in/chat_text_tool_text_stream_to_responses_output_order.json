@@ -1,0 +1,13 @@
+{
+  "from": "openai-responses",
+  "to": "openai-chat",
+  "kind": "stream",
+  "model": "m1",
+  "frames": [
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "先查"}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "weather", "arguments": "{\"city\":\"北京\"}"}}]}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"content": "再答"}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 12, "completion_tokens": 9}},
+    "[DONE]"
+  ]
+}

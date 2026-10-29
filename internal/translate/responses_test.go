@@ -2,8 +2,10 @@ package translate
 
 import (
 	"encoding/json"
+	"log/slog"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -568,16 +570,33 @@ func TestResponsesStreamEncode(t *testing.T) {
 	responsesEventType(t, start[0])
 
 	textEvents := e.Emit(Delta{Kind: DeltaText, Text: "你好"})
-	if len(textEvents) != 1 || textEvents[0].Event != "response.output_text.delta" {
-		t.Fatalf("文本事件 = %+v", textEvents)
+	if len(textEvents) != 2 || textEvents[0].Event != "response.output_item.added" ||
+		textEvents[1].Event != "response.output_text.delta" {
+		t.Fatalf("文本事件 = %+v，期望先开 message item 再发增量", textEvents)
 	}
 	responsesEventType(t, textEvents[0])
+	responsesEventType(t, textEvents[1])
+	var addedData struct {
+		OutputIndex int `json:"output_index"`
+		Item        struct {
+			Type    string `json:"type"`
+			Status  string `json:"status"`
+			Content []any  `json:"content"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal(textEvents[0].Data, &addedData); err != nil {
+		t.Fatalf("文本 item 的 added 不是合法 JSON: %v", err)
+	}
+	if addedData.OutputIndex != 0 || addedData.Item.Type != "message" ||
+		addedData.Item.Status != "in_progress" || len(addedData.Item.Content) != 0 {
+		t.Fatalf("文本 item 的 added 字段 = %+v，期望 message/in_progress 与空 content", addedData)
+	}
 	var textData struct {
 		OutputIndex  int    `json:"output_index"`
 		ContentIndex int    `json:"content_index"`
 		Delta        string `json:"delta"`
 	}
-	if err := json.Unmarshal(textEvents[0].Data, &textData); err != nil {
+	if err := json.Unmarshal(textEvents[1].Data, &textData); err != nil {
 		t.Fatalf("文本事件不是合法 JSON: %v", err)
 	}
 	if textData.Delta != "你好" || textData.OutputIndex != 0 || textData.ContentIndex != 0 {
@@ -624,16 +643,38 @@ func TestResponsesStreamEncode(t *testing.T) {
 	}
 
 	stopEvents := e.Emit(Delta{Kind: DeltaStop, StopReason: StopEndTurn, Usage: &Usage{In: 10, Out: 2}})
-	if len(stopEvents) != 3 {
-		t.Fatalf("收尾应发 arguments.done、output_item.done 与 completed 三帧，实际 %d", len(stopEvents))
+	// 收尾按 output 序号逐条补 done：文本 item 先关（序号 0），再是工具 item（序号 1）。
+	if len(stopEvents) != 4 {
+		t.Fatalf("收尾应发文本 output_item.done、arguments.done、工具 output_item.done 与 completed 四帧，实际 %d", len(stopEvents))
 	}
-	if stopEvents[0].Event != "response.function_call_arguments.done" ||
-		stopEvents[1].Event != "response.output_item.done" ||
-		stopEvents[2].Event != "response.completed" {
-		t.Fatalf("收尾事件顺序 = %s/%s/%s", stopEvents[0].Event, stopEvents[1].Event, stopEvents[2].Event)
+	if stopEvents[0].Event != "response.output_item.done" ||
+		stopEvents[1].Event != "response.function_call_arguments.done" ||
+		stopEvents[2].Event != "response.output_item.done" ||
+		stopEvents[3].Event != "response.completed" {
+		t.Fatalf("收尾事件顺序 = %s/%s/%s/%s",
+			stopEvents[0].Event, stopEvents[1].Event, stopEvents[2].Event, stopEvents[3].Event)
 	}
 	for _, ev := range stopEvents {
 		responsesEventType(t, ev)
+	}
+	var textDone struct {
+		OutputIndex int `json:"output_index"`
+		Item        struct {
+			Type    string `json:"type"`
+			Status  string `json:"status"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal(stopEvents[0].Data, &textDone); err != nil {
+		t.Fatalf("文本 output_item.done 不是合法 JSON: %v", err)
+	}
+	if textDone.OutputIndex != 0 || textDone.Item.Type != "message" || textDone.Item.Status != "completed" ||
+		len(textDone.Item.Content) != 1 || textDone.Item.Content[0].Type != "output_text" ||
+		textDone.Item.Content[0].Text != "你好" {
+		t.Fatalf("文本 output_item.done = %+v，期望 message/completed 与全文", textDone)
 	}
 	var doneData struct {
 		OutputIndex int    `json:"output_index"`
@@ -641,7 +682,7 @@ func TestResponsesStreamEncode(t *testing.T) {
 		Name        string `json:"name"`
 		Arguments   string `json:"arguments"`
 	}
-	if err := json.Unmarshal(stopEvents[0].Data, &doneData); err != nil {
+	if err := json.Unmarshal(stopEvents[1].Data, &doneData); err != nil {
 		t.Fatalf("arguments.done 不是合法 JSON: %v", err)
 	}
 	if doneData.OutputIndex != 1 || doneData.Name != "get_weather" ||
@@ -658,7 +699,7 @@ func TestResponsesStreamEncode(t *testing.T) {
 			Status    string `json:"status"`
 		} `json:"item"`
 	}
-	if err := json.Unmarshal(stopEvents[1].Data, &itemDone); err != nil {
+	if err := json.Unmarshal(stopEvents[2].Data, &itemDone); err != nil {
 		t.Fatalf("output_item.done 不是合法 JSON: %v", err)
 	}
 	if itemDone.OutputIndex != 1 || itemDone.Item.Type != "function_call" ||
@@ -675,6 +716,10 @@ func TestResponsesStreamEncode(t *testing.T) {
 				CallID    string `json:"call_id"`
 				Name      string `json:"name"`
 				Arguments string `json:"arguments"`
+				Content   []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				} `json:"content"`
 			} `json:"output"`
 			Usage struct {
 				InputTokens  int64 `json:"input_tokens"`
@@ -683,7 +728,7 @@ func TestResponsesStreamEncode(t *testing.T) {
 			} `json:"usage"`
 		} `json:"response"`
 	}{}
-	if err := json.Unmarshal(stopEvents[2].Data, &stopData); err != nil {
+	if err := json.Unmarshal(stopEvents[3].Data, &stopData); err != nil {
 		t.Fatalf("收尾事件不是合法 JSON: %v", err)
 	}
 	if stopData.Response.Status != "completed" ||
@@ -692,14 +737,19 @@ func TestResponsesStreamEncode(t *testing.T) {
 		stopData.Response.Usage.TotalTokens != 12 {
 		t.Fatalf("收尾事件字段 = %+v", stopData.Response)
 	}
-	// output 要回填完整的 function_call，不能一直是空数组。
-	if len(stopData.Response.Output) != 1 {
-		t.Fatalf("收尾事件的 output = %+v，期望一个 function_call", stopData.Response.Output)
+	// output 要回填文本 item 与完整的 function_call，不能一直是空数组：按 output_index 排序，
+	// 文本 item（序号 0）在工具 item（序号 1）之前。
+	if len(stopData.Response.Output) != 2 {
+		t.Fatalf("收尾事件的 output = %+v，期望一个 message 与一个 function_call", stopData.Response.Output)
 	}
-	call := stopData.Response.Output[0]
+	if msg := stopData.Response.Output[0]; msg.Type != "message" || len(msg.Content) != 1 ||
+		msg.Content[0].Type != "output_text" || msg.Content[0].Text != "你好" {
+		t.Fatalf("收尾事件 output[0] = %+v，期望正文为「你好」的 message", msg)
+	}
+	call := stopData.Response.Output[1]
 	if call.Type != "function_call" || call.CallID != "call_1" || call.Name != "get_weather" ||
 		call.Arguments != `{"city":"北京"}` || !json.Valid([]byte(call.Arguments)) {
-		t.Fatalf("收尾事件 output[0] = %+v", call)
+		t.Fatalf("收尾事件 output[1] = %+v", call)
 	}
 
 	if after := e.Emit(Delta{Kind: DeltaText, Text: "多余"}); len(after) != 0 {
@@ -713,16 +763,17 @@ func TestResponsesStreamEncode(t *testing.T) {
 // TestResponsesStreamEncodeFinish 覆盖没收到 DeltaStop 时的收尾。
 func TestResponsesStreamEncodeFinish(t *testing.T) {
 	e := newResponsesStreamEncoder("gpt-5")
-	if events := e.Emit(Delta{Kind: DeltaText, Text: "你"}); len(events) != 2 {
-		// 一帧 response.created 加一帧文本增量。
+	if events := e.Emit(Delta{Kind: DeltaText, Text: "你"}); len(events) != 3 {
+		// 一帧 response.created、一帧文本 item 的 output_item.added 加一帧文本增量。
 		t.Fatalf("Emit = %+v", events)
 	}
 
 	finish := e.Finish()
-	if len(finish) != 1 || finish[0].Event != "response.completed" {
-		t.Fatalf("Finish = %+v", finish)
+	if len(finish) != 2 || finish[0].Event != "response.output_item.done" || finish[1].Event != "response.completed" {
+		t.Fatalf("Finish = %+v，期望先补文本 output_item.done 再发 completed", finish)
 	}
 	responsesEventType(t, finish[0])
+	responsesEventType(t, finish[1])
 	if again := e.Finish(); len(again) != 0 {
 		t.Fatalf("重复 Finish 不应再发事件: %+v", again)
 	}
@@ -949,5 +1000,125 @@ func TestResponsesStreamDecodeItemDoneWithoutOutputIndex(t *testing.T) {
 	}
 	if args.String() != `{"city":"北京"}` {
 		t.Fatalf("参数增量 = %q", args.String())
+	}
+}
+
+// responsesCaptureLog 接管标准库 logger，返回一个取回已记日志文案的函数。
+func responsesCaptureLog(t *testing.T) func() []string {
+	t.Helper()
+	var mu sync.Mutex
+	var lines []string
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(writerFunc(func(p []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, string(p))
+		return len(p), nil
+	}), nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), lines...)
+	}
+}
+
+// writerFunc 让测试把日志收进内存。
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// TestResponsesStreamEncoderErrorKeepsTextOutOfOutput 确认断流时不把半截正文写进 output：
+// 正文已经按增量下发过，但 response.failed 的 output 仍是空数组（DESIGN 5.4）。
+func TestResponsesStreamEncoderErrorKeepsTextOutOfOutput(t *testing.T) {
+	e := newResponsesStreamEncoder("gpt-5")
+	e.Emit(Delta{Kind: DeltaText, Text: "说到一半"})
+
+	events := e.Emit(Delta{Kind: DeltaError, Text: "上游流式响应中断: 收尾帧之前连接就结束了"})
+	if len(events) != 2 || events[1].Event != "response.failed" {
+		t.Fatalf("断流事件 = %+v", events)
+	}
+	var failed struct {
+		Response struct {
+			Output []any `json:"output"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(events[1].Data, &failed); err != nil {
+		t.Fatalf("response.failed 不是合法 JSON: %v", err)
+	}
+	if len(failed.Response.Output) != 0 {
+		t.Fatalf("response.failed 的 output = %+v，期望空数组：半截正文不进 output", failed.Response.Output)
+	}
+	// 断流之后不再补任何 item 的收尾事件。
+	if finish := e.Finish(); len(finish) != 0 {
+		t.Fatalf("response.failed 之后 Finish 不应再发事件: %+v", finish)
+	}
+}
+
+// TestResponsesStreamEncoderTextCap 确认正文总长超过 1MB 后停止继续攒：收尾的 output 里
+// 放弃攒不全的文本 item（客户端仍能从增量拼），其它 item 与 completed 的字段照旧给出。
+func TestResponsesStreamEncoderTextCap(t *testing.T) {
+	logs := responsesCaptureLog(t)
+	e := newResponsesStreamEncoder("gpt-5")
+
+	chunk := strings.Repeat("x", 64<<10)
+	// 17 个 64KiB 的增量刚好越过 1MB 上限（第 17 个越线）。
+	for i := 0; i < 17; i++ {
+		e.Emit(Delta{Kind: DeltaText, Text: chunk})
+	}
+	// 超限之后的正文一律不攒。
+	if e.textCapped != true || e.textTotal != 16*(64<<10) {
+		t.Fatalf("超限后 textCapped=%v、已攒 %d 字节，期望停止在 1MiB 以内", e.textCapped, e.textTotal)
+	}
+	if seg := e.textSegments[0]; !seg.dropped || seg.text.Len() != 16*(64<<10) {
+		t.Fatalf("文本 item = dropped %v、%d 字节，期望标记成 dropped 且停在 1MiB 以内", seg.dropped, seg.text.Len())
+	}
+
+	// 夹一次工具调用，确认超限只影响文本 item，不影响别的 item 与 completed 的其它字段。
+	e.Emit(Delta{Kind: DeltaToolStart, Index: 0, ToolID: "call_1", ToolName: "weather"})
+	e.Emit(Delta{Kind: DeltaToolArgs, Index: 0, ArgsJSON: `{"city":"北京"}`})
+	e.Emit(Delta{Kind: DeltaText, Text: "超限之后的正文"})
+	events := e.Emit(Delta{Kind: DeltaStop, StopReason: StopEndTurn, Usage: &Usage{In: 3, Out: 4}})
+
+	var names []string
+	for _, ev := range events {
+		names = append(names, ev.Event)
+	}
+	// 收尾只剩工具 item 的 arguments.done 与 output_item.done，文本 item 不给收尾。
+	want := []string{"response.function_call_arguments.done", "response.output_item.done", "response.completed"}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Fatalf("收尾事件 = %v，期望 %v", names, want)
+	}
+
+	var completed struct {
+		Response struct {
+			Status string `json:"status"`
+			Output []struct {
+				Type string `json:"type"`
+			} `json:"output"`
+			Usage struct {
+				InputTokens  int64 `json:"input_tokens"`
+				OutputTokens int64 `json:"output_tokens"`
+			} `json:"usage"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(events[len(events)-1].Data, &completed); err != nil {
+		t.Fatalf("response.completed 不是合法 JSON: %v", err)
+	}
+	if completed.Response.Status != "completed" || completed.Response.Usage.InputTokens != 3 ||
+		completed.Response.Usage.OutputTokens != 4 {
+		t.Fatalf("response.completed = %+v，期望状态与用量照旧给出", completed.Response)
+	}
+	if len(completed.Response.Output) != 1 || completed.Response.Output[0].Type != "function_call" {
+		t.Fatalf("response.completed 的 output = %+v，期望只剩 function_call", completed.Response.Output)
+	}
+
+	lines := logs()
+	if len(lines) != 1 {
+		t.Fatalf("超限日志行数 = %d，期望 1 行：%v", len(lines), lines)
+	}
+	if !strings.Contains(lines[0], "超过") || !strings.Contains(lines[0], "上限") ||
+		!strings.Contains(lines[0], "增量") {
+		t.Fatalf("超限日志 = %q，期望写明超过上限、客户端仍可从增量拼出全文", lines[0])
 	}
 }

@@ -1,0 +1,13 @@
+{
+  "from": "openai-responses",
+  "to": "openai-chat",
+  "kind": "stream",
+  "model": "m1",
+  "frames": [
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"content": "你好"}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"content": "，世界"}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 7, "completion_tokens": 4}},
+    "[DONE]"
+  ]
+}

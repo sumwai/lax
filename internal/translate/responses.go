@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 )
 
 // 本文件实现 openai-responses 的编解码：入站 /v1/responses 与 IR 互转，
-// 以及流式事件、直通流用量读取。全部是纯函数与纯状态机，不读环境、不发网络。
+// 以及流式事件、直通流用量读取。全部是纯函数与纯状态机，不读环境、不发网络；
+// 唯一的副作用是流式正文超过上限时的一行日志（见 responsesTextCap）。
 
 // responsesRequest 是 POST /v1/responses 的请求体。
 // input 是字符串或 item 数组，tool_choice 是字符串或对象，两者都先留原文再按需解析。
@@ -1128,8 +1130,17 @@ type responsesStreamEncoder struct {
 	// 收尾要补 output_item.done 并把 item 回填进 output（DESIGN 5.4）。
 	reasoningIndex int
 	reasoning      strings.Builder
-	textIndex      int
-	toolIndex      map[int]int
+	// textSegments 是按 output 序号攒正文的文本 item：每个文本块一个 message item，
+	// 收尾时给出全文并按序号进 output（DESIGN 5.4）。openText 是当前还开着的那个块，
+	// textKey 记它的上游块号：块号变了、或者中间插进了工具与思考 item，就另起一个 item。
+	textSegments []*responsesTextBuffer
+	openText     *responsesTextBuffer
+	textKey      int
+	// textTotal 是已攒的正文总长（字节），textCapped 记有没有到过上限：到了之后整条响应
+	// 不再攒，攒不全的 item 收尾时不写进 output，客户端仍可从增量拼出全文。
+	textTotal  int
+	textCapped bool
+	toolIndex  map[int]int
 	// toolBuffers 按 output 序号缓存工具 item 的名称、call_id 与已转发的参数：
 	// 收尾要补 function_call_arguments.done 与 output_item.done，并把 output 回填（DESIGN 5.4）。
 	toolBuffers map[int]*responsesToolBuffer
@@ -1144,6 +1155,51 @@ type streamItem struct {
 	index int
 	item  map[string]any
 	t     *responsesToolBuffer
+}
+
+// responsesTextCap 是单条流式响应攒的正文总长上限（1MB）。到过之后就停止继续攒：
+// 这是内存上限，不是内容校验；增量照旧下发给客户端，收尾时只是不再给全文（DESIGN 5.4）。
+const responsesTextCap = 1 << 20
+
+// responsesTextBuffer 是一个正在流式下发的文本 item：正文按增量攒在 text 里，
+// 收尾时整段写进 message item 的 content。dropped 表示这个 item 攒不全（到过上限），
+// 收尾时既不补 output_item.done 也不进 output。
+type responsesTextBuffer struct {
+	index   int
+	text    strings.Builder
+	dropped bool
+}
+
+// addedItem 是 output_item.added 里的 item：文本 item 开出来时只有类型、角色与状态，
+// content 是空数组，正文随增量给出（DESIGN 5.4）。
+func (b *responsesTextBuffer) addedItem() map[string]any {
+	return map[string]any{
+		"type":    "message",
+		"role":    "assistant",
+		"status":  "in_progress",
+		"content": []any{},
+	}
+}
+
+// doneItem 是 output_item.done 与收尾 output 数组里的 item：正文整段落在
+// content 的 output_text 里，与非流式响应的 message item 同一形状。
+func (b *responsesTextBuffer) doneItem() map[string]any {
+	return map[string]any{
+		"type":   "message",
+		"role":   "assistant",
+		"status": "completed",
+		"content": []any{map[string]any{
+			"type": "output_text",
+			"text": b.text.String(),
+		}},
+	}
+}
+
+// logResponsesTextCap 记一行日志：正文超过上限，收尾的 output 里放弃这个文本 item。
+// translate 不读环境也不带 logger 参数，只能走标准库的默认 logger；gateway 与 cli 没有
+// 别的入口能知道这件事（客户端仍能拿到全文，只是要自己拼增量）。
+func logResponsesTextCap() {
+	slog.Warn(fmt.Sprintf("responses 流式响应攒的正文超过 %d 字节上限，response.completed.response.output 里放弃文本 item；客户端仍可从 response.output_text.delta 的增量拼出全文", responsesTextCap))
 }
 
 // responsesToolBuffer 是一个正在流式下发的工具 item。
@@ -1190,7 +1246,6 @@ func newResponsesStreamEncoder(model string) *responsesStreamEncoder {
 		model:          model,
 		id:             "resp_switchboard",
 		reasoningIndex: -1,
-		textIndex:      -1,
 		toolIndex:      map[int]int{},
 		toolBuffers:    map[int]*responsesToolBuffer{},
 	}
@@ -1227,6 +1282,7 @@ func (e *responsesStreamEncoder) Emit(d Delta) []SSEEvent {
 		if d.Text == "" {
 			break
 		}
+		e.closeText()
 		if e.reasoningIndex < 0 {
 			e.reasoningIndex = e.allocIndex()
 			events = append(events, e.event("response.output_item.added", map[string]any{
@@ -1242,16 +1298,22 @@ func (e *responsesStreamEncoder) Emit(d Delta) []SSEEvent {
 		}))
 
 	case DeltaText:
-		if e.textIndex < 0 {
-			e.textIndex = e.allocIndex()
+		buf, opened := e.textSegment(d.Index)
+		if opened {
+			events = append(events, e.event("response.output_item.added", map[string]any{
+				"output_index": buf.index,
+				"item":         buf.addedItem(),
+			}))
 		}
+		e.appendText(buf, d.Text)
 		events = append(events, e.event("response.output_text.delta", map[string]any{
-			"output_index":  e.textIndex,
+			"output_index":  buf.index,
 			"content_index": 0,
 			"delta":         d.Text,
 		}))
 
 	case DeltaToolStart:
+		e.closeText()
 		idx, buf := e.toolBuffer(d.Index)
 		buf.callID = d.ToolID
 		buf.name = d.ToolName
@@ -1265,6 +1327,7 @@ func (e *responsesStreamEncoder) Emit(d Delta) []SSEEvent {
 		}))
 
 	case DeltaToolArgs:
+		e.closeText()
 		idx, buf := e.toolBuffer(d.Index)
 		buf.arguments.WriteString(d.ArgsJSON)
 		e.toolOpen = true
@@ -1367,12 +1430,18 @@ func (e *responsesStreamEncoder) outputItems() []any {
 	return out
 }
 
-// streamItems 按 output 序号列出已经发过增量的 item 及其收尾形状：思考 item 与工具
-// item 都有收尾，文本 item 只发增量、不攒正文（DESIGN 5.4）。
+// streamItems 按 output 序号列出已经发过增量的 item 及其收尾形状：思考 item、文本 item
+// 与工具 item 都有收尾；正文超过上限攒不全的文本 item 不给收尾，也不进 output（DESIGN 5.4）。
 func (e *responsesStreamEncoder) streamItems() []streamItem {
 	var items []streamItem
 	if e.reasoningIndex >= 0 {
 		items = append(items, streamItem{index: e.reasoningIndex, item: e.reasoningItem()})
+	}
+	for _, buf := range e.textSegments {
+		if buf.dropped {
+			continue
+		}
+		items = append(items, streamItem{index: buf.index, item: buf.doneItem()})
 	}
 	for _, idx := range e.toolOrder {
 		buf := e.toolBuffers[idx]
@@ -1396,6 +1465,45 @@ func (e *responsesStreamEncoder) reasoningItem() map[string]any {
 			"text": e.reasoning.String(),
 		}},
 	}
+}
+
+// textSegment 取当前要攒正文的文本块：上一个块已经关了、或上游块号变了，就新开一个
+// message item，调用方先给它发 response.output_item.added（DESIGN 5.4）。
+func (e *responsesStreamEncoder) textSegment(upstream int) (*responsesTextBuffer, bool) {
+	if e.openText != nil && e.textKey == upstream {
+		return e.openText, false
+	}
+	buf := &responsesTextBuffer{index: e.allocIndex()}
+	if e.textCapped {
+		// 已经到过上限：这一条也攒不全，收尾时不写进 output。
+		buf.dropped = true
+	}
+	e.textSegments = append(e.textSegments, buf)
+	e.openText = buf
+	e.textKey = upstream
+	return buf, true
+}
+
+// closeText 关掉当前文本块：后面再来正文（哪怕是同一个上游块号）就是另一个 message item。
+// 上游把文本与工具、思考混排时靠它分块，chat 与 gemini 的文本增量没有块号可用。
+func (e *responsesStreamEncoder) closeText() {
+	e.openText = nil
+}
+
+// appendText 把一段增量攒进文本 item，同时守住单条响应的正文总长上限。
+// 超限时不再攒、记一行日志，这个 item 标记成 dropped：收尾时不给全文，但增量照旧发。
+func (e *responsesStreamEncoder) appendText(buf *responsesTextBuffer, text string) {
+	if e.textCapped || buf.dropped {
+		return
+	}
+	if e.textTotal+len(text) > responsesTextCap {
+		e.textCapped = true
+		buf.dropped = true
+		logResponsesTextCap()
+		return
+	}
+	buf.text.WriteString(text)
+	e.textTotal += len(text)
 }
 
 // toolBuffer 取某个上游块号对应的工具缓冲；没有就新开一个（先来参数后到开始也算）。
