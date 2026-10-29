@@ -771,7 +771,7 @@ gemini 的原生接口（Generative Language API 的 `generateContent`）与另�
 - `/v1/models` 只列 `access='allowed'` 的行（另见 5.12 的别名）：客户端不该看到自己用不了的名字。
 - 元数据大部分只存不用：上下文长度、最大输出与能力位还没有消费者，等做「按能力过滤/超长提示」时再接，先不为了有消费者而临时定规则。`protocols` 已经有消费者——探活候选的顺序（见 5.7）与有效协议的定序（见下面 `EffectiveModels`）。价格是已有消费者的那一列：`store.Usage` 按「账号 + 模型」现算单价，取 `account_models` 覆盖值 → `provider_models` 厂商级标价（见 5.5）。
 
-价格不落在账号上：`accounts` 的四个价格列已删除（迁移 `0016`），账号级价格是模型事实还没拆出账号时的过渡形态。同一家供应商的同一个模型只该有一份标价，账号只在套餐不同时覆盖——否则改一次价要改 N 个账号，`usage` 还会给同一件事算出 N 个单价。写入口两个：`store.SetProviderModelPrices`（厂商级标价，`(供应商, 模型)` 必须已在目录里）与 `store.SetAccountModelPriceOverride`（账号覆盖，该账号必须有这个模型的可达性行）。
+价格不落在账号上：`accounts` 的四个价格列已删除（迁移 `0016`），账号级价格是模型事实还没拆出账号时的过渡形态。同一家供应商的同一个模型只该有一份标价，账号只在套餐不同时覆盖——否则改一次价要改 N 个账号，`usage` 还会给同一件事算出 N 个单价。写入口两个：`store.SetProviderModelPrices`（厂商级标价，`(供应商, 模型)` 必须已在目录里）与 `store.SetAccountModelPrices`（账号覆盖，该账号必须有这个模型的可达性行）；清值走 `ClearProviderModelPrices` 与 `ClearAccountModelPrices`，字段名只有 `in`、`out`、`cache-read`、`cache-write` 四个，取值链与字段解析都只在 `internal/store/model_price.go` 一处。
 
 目录的写入口只有 `store.UpsertProviderModels(厂商, 行)`，按 `(provider, model)` upsert，一批行在同一个事务里写：
 
