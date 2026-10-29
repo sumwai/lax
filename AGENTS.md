@@ -77,7 +77,7 @@ Conventional Commits：`feat(gateway): …`、`fix(translate): …`、`docs: …
 - Fumadocs + Next.js，只在本机跑：`make docs`（127.0.0.1:3000，改文件热更新）、`make docs-build`（生产构建，顺带类型检查）、`make docs-install`。Node 依赖只在 `docs-site/` 内，`make check` 不包含站点。
 - 页面手写在 `docs-site/content/docs/`，侧边栏顺序在各级 `meta.json`。新增页面要同时加 `meta.json` 条目，否则页面存在但侧边栏里进不去。
 - 站点面向使用者：`DESIGN.md`、`LESSONS.md` 与 `lessons/` 的内容不进站点，站点也不写开发过程与设计取舍。
-- 站点页面不引用仓库文档的编号与路径：不写「见 DESIGN 5.5」「第 7 节」「见 lessons/…」「那个提交」，读者手里没有这些文件。要么把规则在页内写完，要么指向站内页面（如「见『用量与日志』」）。
+- 站点页面不引用仓库文档的编号与路径：不写「见 DESIGN 5.5」「第 7 节」「见 lessons/…」「那个提交」，读者手里没有这些文件。要么把规则在页内写完，要么用链接指向站内页面：`[用量汇总](/docs/using/usage#用量汇总)`，路由是 `/docs/<目录>/<页面>`，锚点取小标题原文（中文不转写），不写「见『页面名』」这种口吻。
 - 示例输出要脱敏（token、key、账号名用占位），不写本机绝对路径与用户名；`--json` 示例保持真实键名。
 - 能用表格或列表表达的不写段落：参数、取值、优先级、字段来源、边界条件一律上表或列项，段落只用于讲“为什么”。
 - 改完跑 `make docs-build`：它同时做类型检查与生产构建。`node_modules`、`.next`、`.next-build` 已在 `.gitignore` 里，不入库。
