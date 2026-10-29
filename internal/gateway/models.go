@@ -424,20 +424,22 @@ func bareModelName(name string) string {
 // 按更小的上限截断会让同步拿到完整清单、`account test` 却报「上游返回的不是模型列表」（见 DESIGN 5.7）。
 const maxModelListBytes = 8 << 20
 
-// countModels 数出模型列表响应里的上游模型个数。形状判定复用 parseModelListPage，与 `model sync`
-// 是同一份代码、同一套取值规则（`{data:[…]}`、`{models:[…]}`、顶层数组，按名字去重、去 `models/` 前缀），
-// 不再有第二套只认 `{data}` 的逻辑：一份清单在这两条路径上必须数出同一个数。
-// 第二个返回值为 false 表示上游返回的不是模型列表：`account test` 只用它报个数，形状不对不判失败。
-func countModels(r io.Reader) (int, bool) {
+// readModelList 读出一份模型清单的模型名（排序去重后）。形状判定复用 parseModelListPage，与
+// `model sync` 是同一份代码、同一套取值规则（`{data:[…]}`、`{models:[…]}`、顶层数组，按名字去重、
+// 去 `models/` 前缀），不再有第二套只认 `{data}` 的逻辑：一份清单在这两条路径上必须数出同一个数、
+// 挑出同一个名字。
+// 第二个返回值为 false 表示上游返回的不是模型列表：`account test` 只用它报个数与挑一个模型名打
+// 最小请求，形状不对不判这一段失败。
+func readModelList(r io.Reader) ([]string, bool) {
 	raw, err := io.ReadAll(io.LimitReader(r, maxModelListBytes))
 	if err != nil {
-		return 0, false
+		return nil, false
 	}
 	models, _, isModelList := parseModelListPage(raw)
 	if !isModelList {
-		return 0, false
+		return nil, false
 	}
-	return len(models), true
+	return models, true
 }
 
 // ModelProbe 是单个模型在一次探活里的结论。

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"switchboard/internal/account"
@@ -31,8 +32,13 @@ type ProbeStep struct {
 	// 「上游有 0 个模型」与「不知道几个」要能分开：输出里前者显示 0，后者显示 -。
 	Models      int
 	ModelsKnown bool
-	Latency     time.Duration
-	Message     string
+	// Model 也只有列表那一段有意义：清单里的第一个模型名（与 model sync 同一份解析、排序去重后的
+	// 第一项）。账号自己还没有模型时，最小调用拿它当模型名——列表已经给出了一个真实存在的名字，
+	// 再用固定名字去打会把「模型名不对」误报成账号失败。空串表示这一步没拿到名字
+	// （列表接口没成，或上游返回的不是模型列表）。
+	Model   string
+	Latency time.Duration
+	Message string
 }
 
 // ProbeResult 是一次探活的结果。主结论（Stage、Status、OK、Latency、Message）取模型调用那一段：
@@ -51,9 +57,11 @@ type ProbeResult struct {
 	List        ProbeStep
 }
 
-// probeFallbackModel 是模型列表为空的账号探活时用的模型名。刚建好、还没跑过
-// `model sync` / `model probe` 的账号就是这种状态：没有模型名也得打一条请求，
-// 因为 `account test` 检验的是凭据与账号整体可用性，与具体模型无关。
+// probeFallbackModel 是探活最小调用的最后一个模型名候选：账号的 `accounts.models` 里没有名字、
+// 列表那一步也没拿到名字（列表接口 404/405/403、连不上，或上游返回的不是模型列表）时用它。
+// 刚建好、还没跑过 `model sync` / `model probe` 的账号就是这种状态：没有模型名也得打一条请求，
+// 因为 `account test` 检验的是凭据与账号整体可用性，与具体模型无关。它是第三顺位，
+// 前两档都是真实存在的名字（见 probeMinimalCall 与 ProbeStep.Model），走到这里只是没有名字可用。
 const probeFallbackModel = "default"
 
 // Probe 分两步探活一个账号：先 GET 模型列表，证明地址通并报出上游模型数；列表 2xx 之后仍然发一条
@@ -71,7 +79,7 @@ func (s *Server) Probe(ctx context.Context, a store.Account) (ProbeResult, error
 		// 列表接口自己就给出了结论（401、429/5xx、其它 4xx）：结论取这一段。
 		return withList(resultFromStep(a.Name, list), list), nil
 	}
-	call, err := s.probeMinimalCall(ctx, a, note)
+	call, err := s.probeMinimalCall(ctx, a, note, list.Model)
 	return withList(resultFromStep(a.Name, call), list), err
 }
 
@@ -147,12 +155,17 @@ func (s *Server) probeModelsEndpoint(ctx context.Context, a store.Account) (step
 	step.Status = resp.StatusCode
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
-		count, known := countModels(resp.Body)
+		models, known := readModelList(resp.Body)
 		step.OK = true
-		step.Models = count
+		step.Models = len(models)
 		step.ModelsKnown = known
+		if len(models) > 0 {
+			// 记下清单第一项：账号还没同步过模型时，最小调用用它打，而不是用一个几乎肯定
+			// 不存在的固定名字（上游回 503「无法为模型 default 选择渠道」那种）。
+			step.Model = models[0]
+		}
 		if known {
-			step.Message = fmt.Sprintf("列表接口可用（GET %s，上游 %d 个模型）", target, count)
+			step.Message = fmt.Sprintf("列表接口可用（GET %s，上游 %d 个模型）", target, len(models))
 		} else {
 			// 形状不对只说明看不到模型个数，不代表地址不通：这一段仍算通过。
 			step.Message = fmt.Sprintf("列表接口可用（GET %s），但上游返回的不是模型列表", target)
@@ -181,19 +194,34 @@ func fallsBackToCall(status int) bool {
 	return false
 }
 
-// probeMinimalCall 是第二步：发一条 max_tokens=1 的请求，模型取 accounts.models 第一项，
-// 为空时用默认模型名并在备注里说明。列表接口 2xx 之后也要走这一步——那一步只证明地址通；
-// 列表接口不可用时同样走它，只是结论就是这一次调用。listNote 说明列表那一步的结果
-// （通了、上游几个模型，或为什么没成），与「还没有模型」的说明一起并进备注。
-func (s *Server) probeMinimalCall(ctx context.Context, a store.Account, listNote string) (ProbeStep, error) {
+// probeMinimalCall 是第二步：发一条 max_tokens=1 的请求。列表接口 2xx 之后也要走这一步——
+// 那一步只证明地址通；列表接口不可用时同样走它，只是结论就是这一次调用。
+//
+// 模型名按三档取，前两档都是真实存在的名字，第三档只是没有名字可用时的兜底：
+//
+//  1. 账号 `accounts.models` 的第一个非空名字——账号自己声明过模型时按它打；
+//  2. 列表那一步拿到的第一个模型名——账号还没同步过模型时，上游清单已经给出了一个真实的名字，
+//     再用固定名字去打只会把「模型名不对」误报成账号失败；
+//  3. probeFallbackModel——列表那一步没成或清单为空时只能用它，凭据好不好用仍要试出来。
+//
+// 备注写清这次用的是哪一个、来自哪一档（账号清单 / 上游清单 / 兜底默认名）：只说「模型调用返回 404」
+// 看不出是名字不对还是模型真的不能用。listNote 说明列表那一步的结果（通了、上游几个模型，或为什么
+// 没成），与模型名来源的说明一起并进备注。
+func (s *Server) probeMinimalCall(ctx context.Context, a store.Account, listNote, listModel string) (ProbeStep, error) {
 	step := ProbeStep{Stage: ProbeStageCall}
 
-	// 先判空再取：模型列表为空的账号（刚建好、还没同步过）在这里取下标会直接 panic。
-	model := probeFallbackModel
+	// 逐项跳过空名字：模型列表为空的账号（刚建好、还没同步过）直接取下标会 panic，
+	// 空白名字拿去请求上游也只会换回一个 400。
+	model := firstAccountModel(a.Models)
 	note := listNote
-	if len(a.Models) > 0 && a.Models[0] != "" {
-		model = a.Models[0]
-	} else {
+	switch {
+	case model != "":
+		note = withNote(note, "模型名取账号清单第一项 "+model)
+	case listModel != "":
+		model = listModel
+		note = withNote(note, "账号还没有模型，模型名取上游清单第一项 "+model)
+	default:
+		model = probeFallbackModel
 		note = withNote(note, "这个账号还没有模型，探活用默认模型名 "+probeFallbackModel)
 	}
 
@@ -267,6 +295,18 @@ func (s *Server) applyProbeState(a store.Account, step ProbeStep) error {
 		return s.store.RecordFailure(a.ID, until, step.Message)
 	}
 	return nil
+}
+
+// firstAccountModel 取账号自己声明的模型列表里的第一个非空名字，没有时返回空串。
+// 空白名字不算模型（与 /v1/models 的口径一致，见 DESIGN 5.2.1）：它是 --models 手填或上游清单
+// 留下的空档，拿它去请求上游只会换回一个 400，还把「模型名不对」记在凭据头上。
+func firstAccountModel(models []string) string {
+	for _, name := range models {
+		if name = strings.TrimSpace(name); name != "" {
+			return name
+		}
+	}
+	return ""
 }
 
 // withNote 把「账号还没有模型」「列表接口 404」这类说明并进备注。上游的错误文本与这些说明都要留着：

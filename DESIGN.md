@@ -146,7 +146,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | `account ls` | `--json` | 列账号、模型数、是否处在冷却；模型列分三种情况：`account_models` 有数据时显示「N 可用 / M 同步」（同步过但零可用就写作「0 可用 / M 同步」，说明这个账号眼下接不了任何模型），只有 `accounts.models` 里手填的名字时直接列出模型名，两者都没有时写「无模型（先 model sync）」——空模型列表表示该账号不提供任何模型、不参与选号（见 5.3），不写成「不限」这类看起来表示「什么模型都收」的文案；协议列显示账号默认协议，存在与它不同的已发现协议时写成「openai-chat + 另 1 种」；`--json` 每行多了 `models_usable`、`models_synced` 两个计数与 `protocols`（默认协议在前，其余是模型行上发现到的协议），模型列的三种情况由这两个计数与 `models` 分开：`models` 为空且 `models_synced` 为 0 是「无模型」，`models_synced` 大于 0 是同步过的「N 可用 / M 同步」，`models` 非空而 `models_synced` 为 0 是手填 | 表格 |
 | `account set` | `<名称> [--key <key>] [--price-in N] [--price-out N] [--price-cache-read N] [--price-cache-write N]` | 换掉已有账号的凭据、改它的价格，都不删号重建：删号会丢掉 `account_models` 里的探活结果、协议发现与请求记录的账号归属。`--key` 的三种给法与 `account add` 一致（直接写值、`--key -` 从标准输入读、留空读 `SWITCHBOARD_KEY`），没给价格参数又解析不出凭据时是用法错误（退出码 2 并打出用法）。key 走同一条加密路径覆盖 `key_cipher`，明文不进日志、不进 `--json` 输出。旧凭据的结论一并作废：同一个事务里清掉 `cooldown_until`、`fail_streak`、`last_error` 并把账号重新启用（`enabled=1`），写入口是 `store.RotateKey`。不动 `account_models`、`accounts.models` 与协议发现结果，也不碰厂商表。账号不存在时报错并提示先 `switchboard account add`。价格参数与 `account add` 同一套（每百万 token 的浮点，负数是用法错误、退出码 2），只写命令行上给过的那几项，其余价格列原样保留；写入口是 `store.SetAccountPrices`，与换凭据分开——换凭据会顺手清冷却，改价格不能把账号状态一起抹掉。只给价格参数时不必给 `--key`（改价格与换凭据是两件事），`--key` 没给就不换凭据、不清冷却；给了就照旧走 `store.RotateKey` | 确认一行（改了价格时列出输入 / 输出 / 缓存读 / 缓存写四个价，没填缓存单价写作「回退输入价」；换了凭据时是原来的那一行）；`--json` 含 `name`、`key_rotated`、`price_in`、`price_out`、`price_cache_read`、`price_cache_write`，换凭据时另有 `key`（掩码）、`cooldown_cleared`、`fail_streak_cleared`、`enabled` |
 | `account rm` | `<名称>` | 删账号，同时删掉它的 `account_models` 行；关联的请求记录保留 | 确认一行 |
-| `account test` | `<名称>` | 分两步探活，先证明地址通、再证明凭据有效。第一步 `GET` 模型列表，地址与凭据头跟 `model sync` 同一套规则解析（厂商级覆盖 → 账号协议那条路由 → 同厂商按协议名排序的第一条非空 `models_path`，整条地址直接访问；凭据头跟取到地址的那条路由的协议，见 5.7），2xx 只说明地址通、上游连得上，同时报出上游模型数（与 `model sync` 同一套形状解析，解析不了只说明「上游返回的不是模型列表」，不判失败）；**列表 2xx 之后仍然**发一条 `max_tokens=1` 的请求证明凭据有效——列表接口是公开接口时任何 key 都能换回 200，前者不作数。列表返回 404 或 405（这家没有列表接口）、403（可能被网关拦）、取不到列表地址或连不上时同样走这条最小调用；模型取 `accounts.models` 第一项、为空时用默认模型名 `default` 并在备注里说明。两段都通过才判正常，状态与退出码按调用那段算；列表接口自己回 401/429/5xx/其它 4xx 时已经是凭据或上游的结论，不再花一次调用。两段的状态处理一致：2xx → 启用账号并清掉冷却、`last_error` 与 `fail_streak`；401 → 停用账号并把错误写进 `last_error`；429/5xx/超时 → 按连续失败次数打冷却；其它 4xx → 只报原话、不动状态。它只判凭据与连通性，模型是否可用由 `model probe` 决定 | 表格（账号 / 状态 / HTTP / 耗时 / 上游模型数 / 备注），状态与 HTTP 取调用那段，耗时取得出结论那一阶段的耗时，上游模型数取列表那段（列表接口没通时显示 `-`），备注写清两段各自的结果（列表接口可用、上游几个模型；模型调用可用还是失败）；`--json` 含 `account`、`stage`（`models` 或 `call`）、`status`、`ok`、`models`（数量，未知为 0）、`latency`、`message`，以及 `list` 对象（列表那一段的 `stage`、`status`、`ok`、`models`、`latency`、`message`） |
+| `account test` | `<名称>` | 分两步探活，先证明地址通、再证明凭据有效。第一步 `GET` 模型列表，地址与凭据头跟 `model sync` 同一套规则解析（厂商级覆盖 → 账号协议那条路由 → 同厂商按协议名排序的第一条非空 `models_path`，整条地址直接访问；凭据头跟取到地址的那条路由的协议，见 5.7），2xx 只说明地址通、上游连得上，同时报出上游模型数（与 `model sync` 同一套形状解析，解析不了只说明「上游返回的不是模型列表」，不判失败）；**列表 2xx 之后仍然**发一条 `max_tokens=1` 的请求证明凭据有效——列表接口是公开接口时任何 key 都能换回 200，前者不作数。列表返回 404 或 405（这家没有列表接口）、403（可能被网关拦）、取不到列表地址或连不上时同样走这条最小调用；模型名按这个顺序取：账号 `accounts.models` 的第一个非空名字 → 列表那一步拿到的第一个模型名（与 `model sync` 同一份解析、按名字排序去重后的第一项）→ 默认模型名 `default`，备注写清用的是哪一个与来源（账号清单 / 上游清单 / 兜底默认名）。两段都通过才判正常，状态与退出码按调用那段算；列表接口自己回 401/429/5xx/其它 4xx 时已经是凭据或上游的结论，不再花一次调用。两段的状态处理一致：2xx → 启用账号并清掉冷却、`last_error` 与 `fail_streak`；401 → 停用账号并把错误写进 `last_error`；429/5xx/超时 → 按连续失败次数打冷却；其它 4xx → 只报原话、不动状态。它只判凭据与连通性，模型是否可用由 `model probe` 决定 | 表格（账号 / 状态 / HTTP / 耗时 / 上游模型数 / 备注），状态与 HTTP 取调用那段，耗时取得出结论那一阶段的耗时，上游模型数取列表那段（列表接口没通时显示 `-`），备注写清两段各自的结果（列表接口可用、上游几个模型；模型调用可用还是失败）；`--json` 含 `account`、`stage`（`models` 或 `call`）、`status`、`ok`、`models`（数量，未知为 0）、`latency`、`message`，以及 `list` 对象（列表那一段的 `stage`、`status`、`ok`、`models`、`latency`、`message`） |
 | `account enable` | `<名称>` | 重新启用账号并清冷却 | 确认一行 |
 | `account disable` | `<名称>` | 停用账号，不再参与选号 | 确认一行 |
 | `model ls` | `[--provider 厂商]` `[--account 账号]` `--json` | 按模型名列出可用账号与计价来源；`account_models` 有数据时每个账号带状态（可用 / 待探活 / 无权 / 不存在 / 凭据被拒 / 失败），没有任何模型行时回退到 `accounts.models` 并标「手填」，连手填的名字都没有时输出一行提示，下一步是 `model sync` 与 `model probe`；另有协议列，显示该模型在这个账号上的有效出站协议，取值只经 `store.EffectiveProtocol`，行不存在或协议列为空时由它回退到账号协议；`--json` 每个账号多了 `protocol` | 表格 |
@@ -403,6 +403,16 @@ anthropic 的 `allowed_tools` 另有一个可选的 `mode`（`auto` 或 `any`）
 
 `model probe` 的 `max_tokens=1` 调用同样记行：每次上游调用写一行，探活也不例外。换协议重试的中间尝试也各记一行，它们的 `ok` 为 0，`error` 以「换协议前的尝试，未作结论」开头并带上那次的上游错误摘要，与判定行区分开；一次 403 触发三次调用就是三行，账实一致比行数好看重要。这类行的取值：`ts` 是这次调用的开始时间；`inbound` 与 `outbound` 都取这一行实际使用的协议（每一行各自是那次试的协议），探活就是「用这个协议直连上游」；`model_requested` 与 `model_used` 都取被探的模型名；`account_id` 取账号 id；`http_status` 与 `ok` 取上游响应，`ok` 表示 2xx，网络错误时 `http_status` 记 0；`in_tokens`、`out_tokens`、`cache_read`、`cache_write` 都由这次所用协议的 usage scanner 从响应体读出：anthropic 的 scanner 四项齐全（`cache_read_input_tokens` 与 `cache_creation_input_tokens`），chat 与 responses 只读得到缓存读（`cached_tokens`），`cache_write` 记 0；非 2xx 与网络错误记 0；`latency_ms` 是这次请求的耗时；`error` 是错误摘要，与探活结果一样过 `scrubSecret`，凭据不进库。这类行因此也进 `usage` 的汇总，探活的花费不会被漏掉一部分。
 
+reasoning token 的口径：各家对「思考算不算输出」做法不同，入账时按上报的数字判定，不按协议猜。
+
+| 场景 | 判定 | `reasoning_tokens` |
+| --- | --- | --- |
+| `total > prompt + completion`（如只报 `completion_tokens` 与 `reasoning_tokens` 两项，total 把两者相加） | 思考是输出之外的一项 | 原值，计入花费 |
+| `total <= prompt + completion`（OpenAI 官方把 `reasoning_tokens` 当作 `completion_tokens` 的子集） | 思考已在输出里 | 原值，只显示不计价 |
+| 没报 `total` | 按子集处理 | 原值，只显示不计价 |
+
+计价的公式在下面那张表里多一行 `reasoning_tokens_extra × --price-out`：`reasoning_tokens_extra` 是「思考是独立一项」时的 reasoning 数，其余情况为 0。gemini 的 `thoughtsTokenCount` 与 chat 的 `completion_tokens_details.reasoning_tokens` 都走这条判定。
+
 估算花费的口径（价格表第一版放在账号上，单位每百万 token，缺省则花费记为 null，不猜价格）：
 
 | 项 | 取值 |
@@ -411,6 +421,7 @@ anthropic 的 `allowed_tools` 另有一个可选的 `mode`（`auto` 或 `any`）
 | 缓存读 | `cache_read × --price-cache-read`，未填时回退到 `--price-in` |
 | 缓存写 | `cache_write × --price-cache-write`，未填时回退到 `--price-in` |
 | 输出 | `out_tokens × --price-out` |
+| 独立的 reasoning | `reasoning_tokens_extra × --price-out`（判定见上表） |
 
 `in_tokens_uncached` 是入账时算好的一列，因为三种协议对「输入 token」的含不含缓存做法不一致：anthropic 的 `input_tokens` 已排除缓存读写，直接用它；chat 的 `prompt_tokens` 与 gemini 的 `promptTokenCount` 都包含命中缓存的部分，要减掉 `cache_read`（减到 0 为止）。记在 `requests.in_tokens` 里的仍是从上游读到的原值，展示不变；只有花费用归一化后的那一列。不归一化时两个方向都错：anthropic 的缓存读完全不算钱，chat 与 gemini 的缓存读按满价算。
 
@@ -465,7 +476,7 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 
 花费：先用账号协议试，成功时只花一次调用，只有失败才会多花一到两次。同一模型重复探活的结果稳定，代价最多是每次 `--refresh` 多一两次 `max_tokens=1` 的调用，跟 `--max-age` 省下的调用相比是小头。每次上游调用都在 `requests` 里各留一行（见 5.5），打出几次就记几行。
 
-`account test` 只判凭据与连通性，模型是否可用由 `model probe` 决定，所以它分两段验：先 `GET` 模型列表证明地址通，再发一条 `max_tokens=1` 的请求证明凭据有效。第一段：地址按 `model sync` 同一套规则解析（见 5.8），凭据头跟取到地址的那条路由的协议；2xx 说明地址通、上游连得上，顺带报出上游模型数，这一条不花 token，也不依赖某个模型名能不能用。列表那一段到此为止——列表接口可能是公开接口，commandcode 的 `GET /provider/v1/models` 对任何 key（甚至没有 key）都回 200 与整份清单，`POST /provider/v1/chat/completions` 才回 `401 Invalid 'Authorization' header or token`：光凭 2xx 判不出凭据好不好，所以 2xx 之后**仍然**发第二段。列表接口不可用时（404、405、403，或这家声明了路由却一个 `models_path` 都没有，或连不上）也走这条最小调用，只是备注里写清第一段为什么没成。第二段：按账号的 `protocol` 打，不看模型上的协议发现结果，模型取 `accounts.models` 第一项；模型列表为空的账号（刚建好、还没同步过）取不到 `accounts.models[0]`，回退到默认模型名 `default` 并在备注里说明这一句，既不 panic 也不要求先同步：凭据好不好用得先能试出来。两段都通过才判正常，状态与退出码按第二段算；例外是第一段自己就给出了结论（401 是凭据问题，429/5xx 要打冷却，其它 4xx 只报原话），这时不再花一次调用。两段的状态处理一致（见 5.3），备注与 `--json` 写清两段各自的结果（`--json` 的 `list` 对象是第一段自己的结论，`stage` 是判定成败的那一步），因此「列表 404 之后模型 403」与「列表接口自己 403」不会读成同一个结论。
+`account test` 只判凭据与连通性，模型是否可用由 `model probe` 决定，所以它分两段验：先 `GET` 模型列表证明地址通，再发一条 `max_tokens=1` 的请求证明凭据有效。第一段：地址按 `model sync` 同一套规则解析（见 5.8），凭据头跟取到地址的那条路由的协议；2xx 说明地址通、上游连得上，顺带报出上游模型数，这一条不花 token，也不依赖某个模型名能不能用。列表那一段到此为止——列表接口可能是公开接口，commandcode 的 `GET /provider/v1/models` 对任何 key（甚至没有 key）都回 200 与整份清单，`POST /provider/v1/chat/completions` 才回 `401 Invalid 'Authorization' header or token`：光凭 2xx 判不出凭据好不好，所以 2xx 之后**仍然**发第二段。列表接口不可用时（404、405、403，或这家声明了路由却一个 `models_path` 都没有，或连不上）也走这条最小调用，只是备注里写清第一段为什么没成。第二段：按账号的 `protocol` 打，不看模型上的协议发现结果，模型名按三档取：账号 `accounts.models` 的第一个非空名字 → 第一段列表那一步拿到的第一个模型名（按名字排序去重后的第一项）→ 默认模型名 `default`。前两档都是上游真实存在的名字，第三档只是没有名字可用时的兜底：刚建好、还没同步过模型的账号走第二档——列表已经报出了一个模型名，再拿固定名字去打只会把「模型名不对」误报成账号失败（只提供 `gemini-3.8-flash` 的中转对 `default` 回 503「无法从令牌路由为模型 default 选择渠道」）；列表接口不可用或清单为空时才回退到 `default`，既不 panic 也不要求先同步：凭据好不好用得先能试出来。备注写清这次用的是哪一个、来自哪一档（账号清单 / 上游清单 / 兜底默认名），否则「模型调用返回 404」看不出是名字不对还是模型真的不能用。两段都通过才判正常，状态与退出码按第二段算；例外是第一段自己就给出了结论（401 是凭据问题，429/5xx 要打冷却，其它 4xx 只报原话），这时不再花一次调用。两段的状态处理一致（见 5.3），备注与 `--json` 写清两段各自的结果（`--json` 的 `list` 对象是第一段自己的结论，`stage` 是判定成败的那一步），因此「列表 404 之后模型 403」与「列表接口自己 403」不会读成同一个结论。
 
 参数与处理顺序：
 
@@ -719,6 +730,8 @@ CREATE TABLE requests (
   out_tokens      INTEGER NOT NULL DEFAULT 0,
   cache_read      INTEGER NOT NULL DEFAULT 0,
   cache_write     INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens       INTEGER NOT NULL DEFAULT 0,
+  reasoning_tokens_extra INTEGER NOT NULL DEFAULT 0,
   latency_ms      INTEGER NOT NULL DEFAULT 0,
   error           TEXT
 );
@@ -825,7 +838,7 @@ M0 到 M13 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkel
 - gemini 的多模态只到「图片按 inlineData / fileData 搬运」为止：音频、视频与文件上传（Files API）不搬，`fileData.fileUri` 只接受 Files API 给出的 URI，把普通 http(s) 图片地址写进去很可能被上游拒（见第 10 节）。
 - 思考内容只在响应方向搬运：跨协议时请求里的思考内容（chat 的 `reasoning_content`、responses 的 `reasoning` item）整块丢弃，因为主流推理上游对回填这两种字段会直接回 400。代价是多轮对话里客户端带着的那段思考不再进入上下文；anthropic 带 `signature` 的思考块例外，回填是它要求的写法（见 5.4）。
 - 流式转换下发给 anthropic 客户端的 `thinking` 块没有 `signature`：上游不是 anthropic 时给不出签名。客户端若把这些块回填到下一轮请求，anthropic 上游会以 400 拒绝；非流式不写无签名的思考块（见 5.4），两条路径的代价不一样，因为流式的增量写出后撤不回来。
-- reasoning token 不单独记账：`requests` 表没有对应的列，思考内容只算进各协议上报的输出 token。
+- reasoning token 单独记账（见 5.5）：`completion_tokens_details.reasoning_tokens` 与 gemini 的 `thoughtsTokenCount` 记进 `requests.reasoning_tokens`，是否重复计入输出由 `total` 判定（`total > prompt + completion` 才算独立的一项）。
 - responses 的 `encrypted_content` 与 reasoning item 的 `id` 不搬：它们只有原厂商的上游认，搬过去只会让上游拒收。
 - 音频与文件类内容丢弃，只搬运文本、图片、思考内容、工具调用与工具结果五类块。
 - 工具定义的边界按已知行为处理：anthropic 的服务端内置工具（`tools[].type` 不是 `custom`，例如 `web_search_20250305`）跨协议时整条丢弃，chat 与 responses 的工具定义只认 function，编回 anthropic 时才原样保留 `type`；`tool_result.is_error` 只有 anthropic 有落点，从 chat 与 responses 进 anthropic 时恒为 false，反方向同样丢弃；工具调用的 `arguments` 只校验是不是合法 JSON，不校验是不是对象（`null`、`"x"` 都原样搬过去）。`tools[].strict` 与 `allowed_tools` 的搬运规则见 5.4 的工具定义与选择。

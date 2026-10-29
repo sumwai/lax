@@ -17,11 +17,13 @@ import (
 
 // probeCall 是一次打到假上游的探活请求：方法、路径与两种凭据头。
 // 「列表 2xx 之后还要发一次调用」这类断言要看得到方法，只看路径分不出两段。
+// body 是最小调用那一段的请求体原文：断言「这次打的是哪个模型名」靠它。
 type probeCall struct {
 	method string
 	path   string
 	apiKey string
 	bearer string
+	body   string
 }
 
 // probeUpstream 是按方法加路径回固定响应的假上游，认不出的请求回 404，
@@ -42,12 +44,14 @@ func newProbeUpstream(t *testing.T, routes map[string]probeReply) *probeUpstream
 	t.Helper()
 	up := &probeUpstream{}
 	up.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
 		up.mu.Lock()
 		up.calls = append(up.calls, probeCall{
 			method: r.Method,
 			path:   r.URL.Path,
 			apiKey: r.Header.Get("x-api-key"),
 			bearer: r.Header.Get("Authorization"),
+			body:   string(body),
 		})
 		up.mu.Unlock()
 
@@ -82,6 +86,19 @@ func (u *probeUpstream) mustCalls(t *testing.T, expected int) []probeCall {
 		t.Fatalf("上游调用 = %+v，期望正好 %d 次", calls, expected)
 	}
 	return calls
+}
+
+// callModel 取一次探活请求体里的 model 字段。chat、anthropic 与 responses 的请求体都是顶层 "model"，
+// 探活这两个以上游的模型名为准。
+func callModel(t *testing.T, call probeCall) string {
+	t.Helper()
+	var body struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal([]byte(call.body), &body); err != nil {
+		t.Fatalf("解析请求体失败（%s %s）：%v", call.method, call.path, err)
+	}
+	return body.Model
 }
 
 // exhausted 把账号打成「上一次撞了 401」的状态：停用、带错误、留着连续失败次数。
@@ -319,6 +336,145 @@ func TestProbeEmptyModelsKeepsNoteOnFailure(t *testing.T) {
 		if !strings.Contains(res.Message, want) {
 			t.Fatalf("备注 = %q，期望包含 %q", res.Message, want)
 		}
+	}
+}
+
+// TestProbeModelNameSourceNotes 钉住最小调用的模型名三档取值与备注文案：
+// 账号清单第一项 → 上游模型清单第一项 → 兜底默认名，备注写清用的是哪一个与来源。
+// 列表那一步没成或清单为空时行为不变（用兜底名、备注说明），只是备注按新顺序改准。
+func TestProbeModelNameSourceNotes(t *testing.T) {
+	cases := []struct {
+		name    string
+		models  []string
+		list    probeReply
+		want    string
+		note    string
+		andAlso string
+	}{
+		{
+			name:   "账号清单第一项",
+			models: []string{"m-b", "m-a"},
+			list:   probeReply{status: http.StatusOK, body: `{"data":[{"id":"m-z"}]}`},
+			want:   "m-b",
+			note:   "模型名取账号清单第一项 m-b",
+		},
+		{
+			// 空白名字不算模型（见 DESIGN 5.2.1）：跳过它们取第一个真名字。
+			name:   "账号清单里的空白名字",
+			models: []string{"", "  ", "m-c"},
+			list:   probeReply{status: http.StatusOK, body: `{"data":[{"id":"m-z"}]}`},
+			want:   "m-c",
+			note:   "模型名取账号清单第一项 m-c",
+		},
+		{
+			// 账号还没同步过模型：用列表那一步拿到的名字，按名字排序后的第一项 m-a（不是清单里的第一行）。
+			name: "上游清单第一项",
+			list: probeReply{status: http.StatusOK, body: `{"data":[{"id":"m-z"},{"id":"m-a"}]}`},
+			want: "m-a",
+			note: "账号还没有模型，模型名取上游清单第一项 m-a",
+		},
+		{
+			name: "清单为空用兜底名",
+			list: probeReply{status: http.StatusOK, body: `{"data":[]}`},
+			want: "default",
+			note: "这个账号还没有模型，探活用默认模型名 default",
+		},
+		{
+			name:    "列表失败用兜底名",
+			list:    probeReply{status: http.StatusNotFound, body: `{"error":{"message":"没有这个路由"}}`},
+			want:    "default",
+			note:    "这个账号还没有模型，探活用默认模型名 default",
+			andAlso: "列表接口返回 404",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t)
+			up := newProbeUpstream(t, map[string]probeReply{
+				"GET /v1/models":            c.list,
+				"POST /v1/chat/completions": {status: http.StatusOK, body: chatOK},
+			})
+			acc := f.add(t, "src", gateway.ProtocolChat, up.srv.URL, "sk-test", c.models, 100)
+			gs := newGateway(t, f)
+
+			res, err := gs.Probe(context.Background(), acc)
+			if err != nil {
+				t.Fatalf("探活失败: %v", err)
+			}
+			if !res.OK {
+				t.Fatalf("探活结果 = %+v，期望两个用例都通过", res)
+			}
+			calls := up.mustCalls(t, 2)
+			if got := callModel(t, calls[1]); got != c.want {
+				t.Fatalf("最小调用的模型名 = %q，期望 %q", got, c.want)
+			}
+			if !strings.Contains(res.Message, c.note) {
+				t.Fatalf("备注 = %q，期望包含 %q", res.Message, c.note)
+			}
+			if c.andAlso != "" && !strings.Contains(res.Message, c.andAlso) {
+				t.Fatalf("备注 = %q，期望包含 %q", res.Message, c.andAlso)
+			}
+		})
+	}
+}
+
+// TestProbeUsesListedModelWhenAccountHasNone 复现真实上游的失败：只提供 gemini-3.8-flash 的
+// openai 兼容中转对模型 default 回 503「无法从令牌路由为模型 default 选择渠道」，用固定名打时
+// 探活把「模型名不对」报成账号失败。列表那一步已经拿到名字，就该拿它去打。
+func TestProbeUsesListedModelWhenAccountHasNone(t *testing.T) {
+	f := newFixture(t)
+
+	var mu sync.Mutex
+	var probed []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/models" {
+			_, _ = io.WriteString(w, `{"data":[{"id":"gemini-3.8-flash"}]}`)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			Model string `json:"model"`
+		}
+		_ = json.Unmarshal(body, &req)
+		mu.Lock()
+		probed = append(probed, req.Model)
+		mu.Unlock()
+		if req.Model != "gemini-3.8-flash" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"message":"无法从令牌路由为模型 `+req.Model+` 选择渠道，路由可用模型=[gemini-3.8-flash]"}}`)
+			return
+		}
+		_, _ = io.WriteString(w, chatOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	acc := f.add(t, "listed", gateway.ProtocolChat, srv.URL, "sk-test", nil, 100)
+	gs := newGateway(t, f)
+
+	res, err := gs.Probe(context.Background(), acc)
+	if err != nil {
+		t.Fatalf("探活失败: %v", err)
+	}
+	if !res.OK || res.Status != http.StatusOK {
+		t.Fatalf("探活结果 = %+v，期望用上游清单里的模型名探活成功", res)
+	}
+	mu.Lock()
+	got := append([]string(nil), probed...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != "gemini-3.8-flash" {
+		t.Fatalf("最小调用的模型名 = %v，期望 [gemini-3.8-flash]", got)
+	}
+	if !strings.Contains(res.Message, "上游清单第一项 gemini-3.8-flash") {
+		t.Fatalf("备注 = %q，期望写清模型名来自上游清单", res.Message)
+	}
+	// 探活只挑一个名字打一次，不把上游清单写回 accounts.models（那是 model probe 的事）。
+	stored, err := f.st.GetAccount("listed")
+	if err != nil {
+		t.Fatalf("读账号: %v", err)
+	}
+	if len(stored.Models) != 0 {
+		t.Fatalf("accounts.models = %v，探活不该改动它", stored.Models)
 	}
 }
 
