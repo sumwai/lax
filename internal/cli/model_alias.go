@@ -66,7 +66,7 @@ func printModelAliasHelp(w io.Writer) {
 	b.WriteString("别名只影响请求方向：网关按解析出的真实名字选号、改请求体与路径，响应不重写，\n")
 	b.WriteString("响应里的模型名仍是上游的真实名字。\n")
 	b.WriteString("客户端请求别名时，请求记录里的请求模型名与使用模型名会不同：log tail 的模型列\n")
-	b.WriteString("打的是客户端请求的那个名字，一次别名命中因此一眼可见。\n\n")
+	b.WriteString("写成「别名 → 真名」，一次别名命中因此一眼能看出实际打了哪个模型。\n\n")
 	b.WriteString("别名精确匹配、区分大小写，可以指向另一个别名（链最长 8 跳）；名字已经被某个账号\n")
 	b.WriteString("或模型目录当成真实模型时写入会被拒绝，否则别名会遮蔽真名。目标眼下没有账号提供\n")
 	b.WriteString("也能先写，之后加账号即生效；解析不了时这条别名不参与选号。\n\n")

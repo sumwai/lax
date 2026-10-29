@@ -240,6 +240,7 @@ func printRecords(e *Env, records []store.RequestRecord, names map[int64]string)
 				"inbound":          r.Inbound,
 				"outbound":         r.Outbound,
 				"model":            r.ModelRequested,
+				"model_used":       r.ModelUsed,
 				"account":          names[r.AccountID],
 				"http_status":      r.HTTPStatus,
 				"ok":               r.OK,
@@ -273,7 +274,7 @@ func printRecords(e *Env, records []store.RequestRecord, names map[int64]string)
 		rows = append(rows, []string{
 			time.Unix(r.TS, 0).Format("01-02 15:04:05"),
 			r.Inbound + "→" + r.Outbound,
-			truncate(r.ModelRequested, 24),
+			modelCell(r.ModelRequested, r.ModelUsed),
 			account,
 			status,
 			fmt.Sprintf("%d", r.InTokens),
@@ -288,6 +289,17 @@ func printRecords(e *Env, records []store.RequestRecord, names map[int64]string)
 	fmt.Fprint(e.Stdout, renderTable(
 		[]string{"时间", "协议", "模型", "账号", "状态", "输入", "输出", "思考", "缓存读", "缓存写", "耗时", "错误"}, rows))
 	return nil
+}
+
+// modelCell 给出「模型」列的内容。客户端给的名字与真正打出去的名字不同时写成
+// `别名 → 真名`，一次别名命中因此一眼能看出实际打了哪个模型（DESIGN 5.12）；
+// 相同时只写一个名字，不让每一行都背上一次重复。两个名字各自按 24 个显示宽度截断，
+// 与单名字时的同一上限，`→` 只占一列，宽度对齐照旧交给 renderTable。
+func modelCell(requested, used string) string {
+	if used == "" || used == requested {
+		return truncate(requested, 24)
+	}
+	return truncate(requested, 24) + " → " + truncate(used, 24)
 }
 
 func cmdCall(e *Env, args []string) error {
