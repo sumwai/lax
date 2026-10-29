@@ -7,8 +7,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"switchboard/internal/translate"
 )
 
 // 模型事实与账号可达性分两张表存（迁移 0015，见 DESIGN 5.13）：
@@ -530,8 +528,10 @@ func (s *Store) EffectiveModels(accountID int64) ([]ModelInfo, error) {
 // 最后回退到厂商的有效默认协议（见 DESIGN 5.13）。
 //
 // 目录给出的是一组协议而不是一个，取值顺序固定，不受库里的行序影响：
-// 厂商的有效默认协议在这组里就用它（按厂商配置打是首选），否则按固定顺序
-// openai-chat → openai-responses → anthropic → gemini 取第一个，再没有就取字典序最小的那个。
+// 厂商的有效默认协议在这组里就用它（按厂商配置打是首选），否则按 modelProtocolOrder
+// （openai-chat → openai-responses → anthropic → gemini → systemone）取第一个，
+// 再没有就取字典序最小的那个。systemone 排在最后：决策协议不该在厂商同时声明 chat 与
+// systemone 时被选成默认（DESIGN 5.13、5.14）。
 func resolveModelProtocol(providerDefault string, modelProtocols []string, accountProtocol string) string {
 	if accountProtocol != "" {
 		return accountProtocol
@@ -540,7 +540,7 @@ func resolveModelProtocol(providerDefault string, modelProtocols []string, accou
 		if providerDefault != "" && containsString(modelProtocols, providerDefault) {
 			return providerDefault
 		}
-		for _, protocol := range append(append([]string{}, defaultProtocolOrder...), translate.ProtocolGemini) {
+		for _, protocol := range modelProtocolOrder {
 			if containsString(modelProtocols, protocol) {
 				return protocol
 			}
@@ -600,7 +600,7 @@ func (s *Store) SetAccountModelAccess(accountID int64, model, access string, htt
 // SetAccountModelProtocol 记录协议发现的结果，是 account_models.protocol 唯一的写入口。
 // 模型行还不存在时先落一行 allowed 占位（能测出协议就说明上游认这个模型名），
 // 已存在的行只改协议列：可达性与探活时间由 SetAccountModelAccess 写。
-// 协议只能是空串（回到继承）或四条线协议之一。
+// 协议只能是空串（回到继承）或五条线协议之一。
 func (s *Store) SetAccountModelProtocol(accountID int64, model, protocol string) error {
 	model = strings.TrimSpace(model)
 	if model == "" {

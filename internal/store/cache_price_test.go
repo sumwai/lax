@@ -16,6 +16,8 @@ func floatPtr(v float64) *float64 { return &v }
 // TestUncachedInTokensByOutboundProtocol 钉住输入 token 的协议差异（DESIGN 5.5）：
 // anthropic 的 input_tokens 已排除缓存读写，直接用；chat、responses 与 gemini 的上游
 // 把命中缓存的部分也算在输入里，要减掉 cache_read，减到 0 为止。
+// systemone 是决策协议，只报 input_tokens / output_tokens，没有缓存字段（DESIGN 5.14），
+// 与 anthropic 一样不减。
 func TestUncachedInTokensByOutboundProtocol(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -29,6 +31,8 @@ func TestUncachedInTokensByOutboundProtocol(t *testing.T) {
 		{"chat 减掉命中缓存的部分", "openai-chat", 100, 60, 40},
 		{"responses 同样减", "openai-responses", 100, 25, 75},
 		{"gemini 同样减", "gemini", 100, 40, 60},
+		{"systemone 的 input_tokens 不含缓存，不减", "systemone", 100, 60, 100},
+		{"systemone 没有缓存字段时原样", "systemone", 100, 0, 100},
 		{"缓存比输入还多时夹到 0", "openai-chat", 10, 50, 0},
 		{"刚好全命中", "gemini", 100, 100, 0},
 		{"没有用量时是 0", "openai-chat", 0, 0, 0},

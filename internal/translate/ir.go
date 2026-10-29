@@ -7,11 +7,14 @@ import (
 
 // 线协议名称。入站按路径区分，出站按账号的 protocol 字段区分。
 // gemini 两边都算一条线协议：入站路径是 /v1beta/models/{model}:generateContent（见 5.9）。
+// systemone 是决策协议（TypeSafe System One / Jev）：入站与出站都是 POST /v1/systemone，
+// 只与自己互通、不经中间表示转换，存储层只把它当成第五个协议取值（见 5.14）。
 const (
 	ProtocolAnthropic = "anthropic"
 	ProtocolChat      = "openai-chat"
 	ProtocolResponses = "openai-responses"
 	ProtocolGemini    = "gemini"
+	ProtocolSystemOne = "systemone"
 )
 
 // 结束原因统一成 anthropic 的四种说法，各协议编码时再翻回自己的词。

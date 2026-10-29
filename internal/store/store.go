@@ -527,11 +527,12 @@ func (s *Store) RecentRequests(limit int) ([]RequestRecord, error) {
 }
 
 // UncachedInTokens 把上游报的输入 token 归一成「没命中缓存的那部分」，入账时只算这一列的花费。
-// 三种出站协议对「输入 token 含不含缓存」的做法不同，不归一化时两个方向都错：
+// 各出站协议对「输入 token 含不含缓存」的做法不同，不归一化时两个方向都错：
 //
 //   - anthropic 的 input_tokens 已经排除缓存读写，直接用；
 //   - chat 的 prompt_tokens 与 gemini 的 promptTokenCount 都包含命中缓存的部分（
-//     prompt_tokens_details.cached_tokens 与 cachedContentTokenCount），要减掉 cache_read。
+//     prompt_tokens_details.cached_tokens 与 cachedContentTokenCount），要减掉 cache_read；
+//   - systemone（决策协议）只报 input_tokens 与 output_tokens，没有缓存字段（DESIGN 5.14）。
 //
 // 减到 0 为止：上游若报出自相矛盾的数（缓存比输入还多），负的输入 token 会让花费变成负数，
 // 库里的列与实际账目都比一个夹到 0 的估算更难解释。in_tokens 本身不改，展示与 log tail 不变。
@@ -543,6 +544,10 @@ func UncachedInTokens(outbound string, inTokens, cacheRead int64) int64 {
 			return rest
 		}
 		return 0
+	case translate.ProtocolSystemOne:
+		// systemone 的 input_tokens 不含缓存：决策端点没有缓存读写这一说（DESIGN 5.14），
+		// 减 cache_read 只会把花费算少。
+		return inTokens
 	default:
 		return inTokens
 	}

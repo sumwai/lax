@@ -43,7 +43,7 @@ func (h ProviderHeader) String() string {
 // SetProviderHeader 声明（或覆盖）一家厂商的一条附加头，是这张表的唯一写入口。
 // 同一个 (厂商, 协议, 头名) 只有一行：再写一次就是改值（UPSERT），不报错、不留旧行。
 // 校验：头名必须是合法 HTTP token（大小写不敏感，落库归一成小写），值不能是空白串，
-// 也不能带 CR/LF/NUL（那样拼进请求头会把请求拆成两条），协议只能是空串或 IsWireProtocol 认的四种。
+// 也不能带 CR/LF/NUL（那样拼进请求头会把请求拆成两条），协议只能是空串或 IsWireProtocol 认的五种。
 // 厂商不存在时报 ErrProviderNotFound：外键虽会拦住这次写入，但报数据库的外键错误等于没说清
 // 下一步该干什么。存在性检查与写入在同一个事务里，不会出现半条记录。
 func (s *Store) SetProviderHeader(provider, protocol, name, value string) error {
@@ -208,7 +208,7 @@ func headerScope(protocol string) string {
 	return protocol
 }
 
-// normalizeHeaderProtocol 校验声明的作用范围：空串（整个厂商）或四条线协议之一。
+// normalizeHeaderProtocol 校验声明的作用范围：空串（整个厂商）或五条线协议之一。
 // 别的值一律拒绝：写成 "openai" 这类命令行别名会让这条头永远匹配不上真实协议，
 // 症状是「明明声明了却发不出去」。
 func normalizeHeaderProtocol(protocol string) (string, error) {
