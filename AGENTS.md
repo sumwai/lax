@@ -78,6 +78,7 @@ Conventional Commits：`feat(gateway): …`、`fix(translate): …`、`docs: …
 - 页面手写在 `docs-site/content/docs/`，侧边栏顺序在各级 `meta.json`。新增页面要同时加 `meta.json` 条目，否则页面存在但侧边栏里进不去。
 - 站点面向使用者：`DESIGN.md`、`LESSONS.md` 与 `lessons/` 的内容不进站点，站点也不写开发过程与设计取舍。
 - 示例输出要脱敏（token、key、账号名用占位），不写本机绝对路径与用户名；`--json` 示例保持真实键名。
+- 能用表格或列表表达的不写段落：参数、取值、优先级、字段来源、边界条件一律上表或列项，段落只用于讲“为什么”。
 - 改完跑 `make docs-build`：它同时做类型检查与生产构建。`node_modules`、`.next`、`.next-build` 已在 `.gitignore` 里，不入库。
 - `/llms.txt` 与 `/llms-full.txt` 由 `content/docs` 自动生成（`docs-site/app/llms.txt/route.ts`），页面改了它们就跟着变，不要手写这两个地址下的内容。
 
