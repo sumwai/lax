@@ -670,7 +670,8 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 		res.Message = "按协议 " + protocol + " 编码探活请求失败: " + err.Error()
 		return att
 	}
-	upReq, err := s.buildRequest(ctx, a, protocol, protocol, raw, ir, key, "")
+	// 模型同步没有客户端请求可依，入站头传 nil：客户端头透传只作用于转发路径（DESIGN 5.11）。
+	upReq, err := s.buildRequest(ctx, a, protocol, protocol, nil, raw, ir, key, "")
 	if err != nil {
 		res.Status = store.ModelError
 		res.Message = "构造探活请求失败: " + err.Error()

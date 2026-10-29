@@ -187,7 +187,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 1. 收到入站请求，按路径定入站协议：`/v1/messages` 是 anthropic，`/v1/chat/completions` 是 openai-chat，`/v1/responses` 是 openai-responses，`/v1beta/models/{model}:generateContent` 与 `/v1beta/models/{model}:streamGenerateContent` 是 gemini（模型名从路径取、`url.PathUnescape` 还原，`:` 之后的后缀不算模型名的一部分，流式标志也由后缀定），其余路径返回 404。请求体解析失败返回 400，错误消息前缀协议名。定好协议后记下模型名与开始时间。
 2. 按模型名取候选账号：`enabled=1`、模型列表包含该模型（列表为空表示该账号不提供任何模型，不参与选号）、冷却已过。没有任何账号声明提供该模型时返回 404，错误消息说明「没有账号提供模型 X」并提示下一步：`switchboard model ls` 看现有清单、`switchboard model probe` 探活；错误类型按入站协议取：anthropic 入站是 `not_found_error`，两条 openai 入站是 `invalid_request_error`。有账号提供但全部在冷却或被停用时不算这种情况，仍按第 8 步返回 503。
 3. 按 `priority` 升序，同一会话（见 5.3）优先沿用上次的账号。
-4. 解密凭据，按该账号该模型的有效出站协议构造上游请求：入站协议与有效出站协议相同则直通，否则经中间表示转换（见 5.4）。上游路径、凭据头、请求体编码都跟有效出站协议走。
+4. 解密凭据，按该账号该模型的有效出站协议构造上游请求：入站协议与有效出站协议相同则直通，否则经中间表示转换（见 5.4）。上游路径、凭据头、请求体编码都跟有效出站协议走。上游请求头不从零开始也不照抄入站：先放 `Content-Type` 与流式时的 `Accept`，再用 `setAuth` 按出站协议设凭据头，再透传客户端白名单头（见 5.11），最后叠厂商附加头（5.10）。
 5. 发上游请求，读响应头。上游返回 429、5xx 或超时，且尚未向客户端写出任何字节时，把该账号打入冷却，换下一个候选。
 6. 已开始向客户端输出后不再换号；上游中断则向客户端发一个错误事件并结束本次请求。直通与转换两条路径在这里行为一致，判据同为「有没有见到上游的收尾帧」：收尾帧没到（读到这里就干净 EOF 也算）就是断流，两条路径都补一个错误帧加该入站协议的合法结尾，并把这一次请求记成失败；收尾帧到齐的完整流不追加任何字节。收尾帧按帧里的 `type` 字段或 SSE 的 `event` 名判定，不按字节子串（见 5.4）。
 7. 解析响应里的用量字段，写一行请求记录。
@@ -604,6 +604,26 @@ gemini 的原生接口（Generative Language API 的 `generateContent`）与另�
 
 不做插件运行时：`magpie-community/plugins` 那套（一个文件、不许 import、跑在网关的 `onRequest`/`onResponse` 钩子上）解决的是「任意改写」，代价是一个 JS 引擎依赖与一段不受控的执行面，而它目录里的主体是订阅登录与逆向接口，正是第 9 节的非目标。已知需要注入的头全部能用上表四种写法表达；确实出现「按条件改请求体字段」的需求时再引入钩子，那时先在本节写清钩子的输入输出，再谈运行时。
 
+### 5.11 客户端头透传
+
+上游请求头不全量照抄：照抄会把客户端自己的凭据送出去，也会把 `Host`、`Content-Length` 这类逐跳头拼坏。但一个头都不给也不行：客户端靠头开关上游特性，`anthropic-beta` 决定 1M 上下文、extended thinking 与 prompt caching 能不能用，`anthropic-version` 决定走哪一版报文，OpenAI 的两条协议用 `openai-organization` 与 `openai-project` 决定算到哪个组织。这些头全部丢掉时，客户端看到的是「特性没生效」而没有任何错误。
+
+规则是白名单 + 只在同协议时透传：
+
+| 入站 = 出站 | 透传的头 |
+| --- | --- |
+| anthropic | `anthropic-beta`、`anthropic-version` |
+| openai-chat、openai-responses | `openai-beta`、`openai-organization`、`openai-project` |
+| gemini | 无：gemini 的特性开关在查询串与请求体里，不在头里 |
+
+- 同一头名有多个值时按出现顺序全部带上（`anthropic-beta` 重复出现表示同时开多个 beta）；客户端没给或给的是空值时一个都不设，`anthropic-version` 因此保持 `setAuth` 写的默认值。
+- 入站协议与有效出站协议不同时一个都不透传：`anthropic-beta` 给 chat 上游只会换回 400，这些头只在同一协议内有意义。
+- 永远不透传：凭据类（`Authorization`、`x-api-key`、`x-goog-api-key`）与 `Cookie`；逐跳头（`Host`、`Connection`、`Content-Length`、`Transfer-Encoding`、`Expect`、`Upgrade`）；本网关自己的 `x-switchboard-session`（它只用于会话粘性，见 5.3）。白名单本身已经把这张名单挡在外面，名单仍单列一份当第二道闸：以后往白名单里加名字时，误加同名头不会漏出去。
+- 只作用于转发路径（`buildRequest`）：`model sync`、`account test` 与 `model probe` 是网关自己发起的，没有客户端请求可依，行为不变。
+- 优先级从低到高：`setAuth` 的默认值 → 透传的客户端头 → 厂商附加头声明（5.10）。声明是站点配置，要能压住客户端带来的值。同名时只由顺序决定：客户端这层先删同名头再按顺序追加，`anthropic-version` 给了就替换掉默认值而不是与它并存；附加头那层用覆盖写入，连客户端带来的多个值一起压掉。
+- 单个头值超过 8KB 时丢弃整个头并记一行日志（头名与长度，不记值）：异常客户端把一个头写爆不应该变成上游的 431。
+- 透传的头不进 `requests` 记录：它们对排查没有价值，落库只会把客户端带的东西搬进本机数据库。
+
 ## 6 数据模型
 
 ```sql
@@ -755,7 +775,7 @@ M0 到 M13 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkel
 - `account test` 报的上游模型数与 `model sync` 用同一套解析（三种形状都认，见 5.7），但两者共用同一个读取上限（8MB）：超过上限的清单两边都读不出来，`account test` 的模型数列是 `-`、备注写「上游返回的不是模型列表」，同步则直接报错。凭据与连通性的结论不受影响。
 - 模型列表的响应形状只认三种已知形状（见 5.7）：`{data:[…]}`、`{models:[…]}` 与顶层数组。三者都不匹配时报错并列出这三种形状，包了一层的响应（例如 `{"result":{"data":[…]}}`）同样算不匹配，这类上游仍只能用 `--models` 手填。
 - 两个模型清单接口每次 GET 都重新全表扫描 `accounts`（`ListAccounts` 之后逐行取 `accounts.models`），没有缓存。库只有一条连接，客户端若在每个请求之前拉一次清单，这次读会与转发写 `requests` 的写入排队，高并发时清单请求会拖慢对话请求。第一版不加缓存：缓存要一套失效规则（账号启停、`model probe` 回写 `accounts.models`、用户直接改库），错一次的代价比多一次读高。
-- 需要非标准请求头的上游不支持：opencode 的 Go 端点要求带 `x-opencode-session` 头才路由，缺了这个头直接回 `400 Request is missing x-opencode-session`（实测）。这是非标准 OpenAI 兼容接口，本程序不伪造该头，也不为单个厂商加头发送逻辑，把它的地址填进 `base_url` 只会在探活与转发时拿到这条 400。同类还有要求额外签名头的厂商（按时间戳或请求体算一个签名头），同样不支持。能接的是只认 `Authorization`、`x-api-key`、`x-goog-api-key` 三种凭据头的 OpenAI 兼容、anthropic 与 gemini 端点（见 5.8 最后一条）。
+- 需要非标准请求头的上游不支持：opencode 的 Go 端点要求带 `x-opencode-session` 头才路由，缺了这个头直接回 `400 Request is missing x-opencode-session`（实测）。这是非标准 OpenAI 兼容接口，本程序不伪造该头，也不为单个厂商加头发送逻辑，把它的地址填进 `base_url` 只会在探活与转发时拿到这条 400。客户端也不能靠自己带这个头绕过：转发只透传 5.11 白名单里的头，白名单之外一律丢弃。同类还有要求额外签名头的厂商（按时间戳或请求体算一个签名头），同样不支持，需要时用 5.10 的附加头声明手工配。能接的是只认 `Authorization`、`x-api-key`、`x-goog-api-key` 三种凭据头的 OpenAI 兼容、anthropic 与 gemini 端点（见 5.8 最后一条）。
 
 之后（不在第一版）：订阅账号登录，隐私遮蔽，配置档案（profiles），价格表内置。
 

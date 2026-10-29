@@ -216,8 +216,9 @@ func (s *Server) probeMinimalCall(ctx context.Context, a store.Account, listNote
 	}
 	secretValue := string(key)
 	// 账号探活按账号自己的协议打：它检验的是凭据与账号整体可用性，
-	// 不跟模型上的协议发现结果走（那个由 model probe 负责）。附加头由 buildRequest 叠上。
-	upReq, err := s.buildRequest(ctx, a, a.Protocol, a.Protocol, raw, ir, secretValue, "")
+	// 不跟模型上的协议发现结果走（那个由 model probe 负责）。附加头由 buildRequest 叠上；
+	// 探活没有客户端请求，入站头传 nil（客户端头透传只作用于转发路径，DESIGN 5.11）。
+	upReq, err := s.buildRequest(ctx, a, a.Protocol, a.Protocol, nil, raw, ir, secretValue, "")
 	if err != nil {
 		return step, err
 	}

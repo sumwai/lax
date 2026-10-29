@@ -248,7 +248,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		}
 
 		attemptStart := s.now()
-		res := s.tryUpstream(r.Context(), w, cand, outbound, inbound, raw, req, session)
+		res := s.tryUpstream(r.Context(), w, cand, outbound, inbound, r.Header, raw, req, session)
 		latency := s.now().Sub(attemptStart)
 
 		rec := &store.RequestRecord{
@@ -367,14 +367,14 @@ func sessionFromBody(raw []byte) string {
 }
 
 func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store.Account, outbound string,
-	inbound string, raw []byte, req *translate.Request, session string) attempt {
+	inbound string, inboundHeaders http.Header, raw []byte, req *translate.Request, session string) attempt {
 
 	key, err := secret.Decrypt(s.key, a.KeyCipher)
 	if err != nil {
 		return attempt{status: http.StatusInternalServerError, message: "解密账号凭据失败"}
 	}
 
-	upReq, err := s.buildRequest(ctx, a, outbound, inbound, raw, req, string(key), session)
+	upReq, err := s.buildRequest(ctx, a, outbound, inbound, inboundHeaders, raw, req, string(key), session)
 	if err != nil {
 		return attempt{status: http.StatusBadGateway, message: err.Error(), err: err}
 	}
@@ -398,8 +398,11 @@ func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store
 
 // buildRequest 按有效出站协议构造上游请求：路径、凭据头、附加头与请求体编码都跟它走。
 // 入站协议与它相同时直通（只改 model），不同时经中间表示转换。
+// inboundHeaders 是入站请求头，只有转发路径才给（模型同步与探活没有客户端请求，传 nil），
+// 白名单里的头按 DESIGN 5.11 透传。
 // session 是本次请求的会话键（必要时是空串），供附加头的 {session} 用；模型名取 req.Model。
-func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, inbound string, raw []byte,
+func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, inbound string,
+	inboundHeaders http.Header, raw []byte,
 	req *translate.Request, key, session string) (*http.Request, error) {
 
 	// 路由的 path 里可以有 {model} 占位符（gemini 的模型名在路径里，见 DESIGN 5.9）：
@@ -436,7 +439,13 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, in
 		httpReq.Header.Set("Accept", "text/event-stream")
 	}
 	setAuth(httpReq, outbound, key)
-	// 附加头压后叠加：同名时声明覆盖 setAuth 给的默认凭据头（DESIGN 5.10 的「声明优先」）。
+	// 客户端白名单头排在 setAuth 之后、附加头之前：头名冲突的优先级由顺序决定，不另写判断
+	// （DESIGN 5.11）：setAuth 的默认值 < 客户端头 < 厂商附加头声明。
+	for _, d := range applyClientHeaders(httpReq, inboundHeaders, inbound, outbound) {
+		s.logf("客户端头 %s 被丢弃：值有 %d 字节，超过 %d 字节上限，不往上游透传",
+			d.Name, d.Bytes, clientHeaderMaxBytes)
+	}
+	// 附加头压后叠加：同名时声明覆盖客户端头与 setAuth 给的默认凭据头（DESIGN 5.10 的「声明优先」）。
 	if err := s.applyProviderHeaders(httpReq, a, outbound, req.Model, session); err != nil {
 		return nil, err
 	}
