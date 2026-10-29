@@ -92,10 +92,10 @@ func TestSelectSkipsForbiddenAndMissingModels(t *testing.T) {
 
 // TestSyncModelsLeavesAccessAlone 确认拉清单这一步不写可达性：
 // 上游清单里有 m1 与 m2，账号上 m1 已经被探活判成 forbidden、m2 根本没有行，
-// SyncModels 只把名字交回调用方，一行都不改——同步不能把探活结论翻成 allowed。
+// SyncModels 只把名字交回调用方，account_models 一行都不改——同步不能把探活结论翻成 allowed。
 //
-// 写库是命令层的事（`UpsertProviderModels(source='sync')` 补目录、只给没有行的名字插 allowed），
-// gateway 这一层只负责按厂商与路由把清单拉对。
+// 目录由 gateway 自己写（`UpsertProviderModels(source='sync')`，带上清单里的元数据，见 DESIGN 5.7），
+// 可达性归命令层（`ReplaceModels` 只给没有行的名字插 allowed）。
 func TestSyncModelsLeavesAccessAlone(t *testing.T) {
 	f := newFixture(t)
 	up := newProbeUpstream(t, map[string]probeReply{

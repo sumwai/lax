@@ -285,20 +285,40 @@ func upsertProviderModelTx(tx *sql.Tx, m ProviderModel) error {
 	return err
 }
 
+// providerModelInsertOnly 只插新行，已存在的行一个字段都不动。
+//
+// 两个「只带名字」的写入口（`ReplaceModels`、`declareModelsTx`）用它而不是 providerModelUpsert：
+// 后者按来源等级判断，manual 会把这行改成 manual，而 manual 是最强的一档，此后 sync 再也写不进去，
+// 上游给的上下文长度与协议集合就永远停在第一次同步的值上。名字只说明「这个名字存在」，
+// 已有的模型事实不归它改（见 DESIGN 5.13）。
+const providerModelInsertOnly = `INSERT INTO provider_models
+	(provider, model, source, context_window, max_output, protocols, capabilities,
+	 price_in, price_out, price_cache_read, price_cache_write, updated_at)
+	VALUES (?, ?, ?, NULL, NULL, '', '', NULL, NULL, NULL, NULL, ?)
+	ON CONFLICT (provider, model) DO NOTHING`
+
+// ProviderModelProtocols 返回目录里这一行声明支持的协议（provider_models.protocols），
+// 行不存在时返回空。探活只读这一列，用它把上游自己声明的协议排在候选前面（见 DESIGN 5.7）。
+func (s *Store) ProviderModelProtocols(provider, model string) ([]string, error) {
+	m, ok, err := s.providerModel(strings.TrimSpace(provider), strings.TrimSpace(model))
+	if err != nil || !ok {
+		return nil, err
+	}
+	return m.Protocols, nil
+}
+
 // declareModelsTx 把一组名字落成「这个账号声明了这些模型」：目录里补 source='manual' 的行，
-// 可达性表里把该账号的这些名字标成 allowed。`account add --models` 与 ReplaceModels 共用它。
-// 厂商名为空时什么都不写（见 CreateAccount 的说明）；目录里已有的行不会被这份手填清单改写事实。
+// 可达性表里把该账号的这些名字标成 allowed。`account add --models` 用它。
+// 厂商名为空时什么都不写（见 CreateAccount 的说明）；目录里已有的行不会被这份手填清单改写事实
+// （只插新行，见 providerModelInsertOnly）。
 func declareModelsTx(tx *sql.Tx, accountID int64, provider string, models []string) error {
 	names := normalizeModelNames(models)
 	if len(names) == 0 || provider == "" {
 		return nil
 	}
 	for _, name := range names {
-		if err := upsertProviderModelTx(tx, ProviderModel{
-			Provider: provider,
-			Model:    name,
-			Source:   SourceManual,
-		}); err != nil {
+		// 目录里没有的名字补一行 manual；已有的行一个字段都不动，理由同 ReplaceModels。
+		if _, err := tx.Exec(providerModelInsertOnly, provider, name, SourceManual, time.Now().Unix()); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`INSERT INTO account_models (account_id, model, access, http_status, error, checked_at)
@@ -727,8 +747,9 @@ func (s *Store) accountProviderStrict(accountID int64) (string, error) {
 // ReplaceModels 把这些名字标成 allowed，其余模型行一行都不动，返回新增的行数。
 //
 // 这是 `model sync` 的写入口（DESIGN 5.13）：上游清单里出现的名字变成这个账号可达的模型，
-// 目录里没有的补一行 source='manual'——手填清单与上游清单都只说明「这个名字存在」，
-// 不提供长度、价格与能力位，因此只补来源、不改已有的事实。清单里没出现的行保持原状：
+// 目录里没有的补一行 source='manual'。名字只说明「这个名字存在」，长度、价格、能力位与协议集合
+// 都不归这里写：已有的目录行一个字段都不动（含 source），同步写进来的事实由同步自己刷新。
+// 清单里没出现的行保持原状：
 // 上游某一轮少给了几个名字不再等于「这些模型消失了」，可达性只由探活结论改动。
 //
 // 空列表等于「这次没有新名字」，不删任何行（迁移 0015 之前那种「清空」语义随 accounts.models
@@ -742,11 +763,9 @@ func (s *Store) ReplaceModels(accountID int64, models []string) (int, error) {
 	added := 0
 	err = s.withTx(func(tx *sql.Tx) error {
 		for _, name := range names {
-			if err := upsertProviderModelTx(tx, ProviderModel{
-				Provider: provider,
-				Model:    name,
-				Source:   SourceManual,
-			}); err != nil {
+			// 目录里没有的名字补一行 manual，已有的行一个字段都不动（含 source）：
+			// 同步写进来的元数据归同步刷新，一次清单不该把它降级成手填行（见 providerModelInsertOnly）。
+			if _, err := tx.Exec(providerModelInsertOnly, provider, name, SourceManual, time.Now().Unix()); err != nil {
 				return err
 			}
 			// 先按「不覆盖已有行」插一次，只为数清新增了几个名字；

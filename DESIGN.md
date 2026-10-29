@@ -446,11 +446,21 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 - 凭据头与地址一起定：地址来自哪条路由，就用那条路由的协议选凭据头（anthropic 用 `x-api-key`，gemini 用 `x-goog-api-key`，两条 openai 协议用 `Bearer`）；厂商级覆盖与 `--endpoint` 没有自己的协议，按厂商的有效默认协议发（账号行不再存协议，见 5.8）。deepseek 的 anthropic 账号取到的是 chat 路由上的 `/v1/models`，所以必须发 `Bearer`——按厂商默认协议发 `x-api-key` 只会换回 401/403，还把错误指到「凭据无效」上。模型列表请求也带厂商附加头：`setAuth` 设完凭据头再叠声明，`{model}` 在这里没有模型名，所以那条头不发（见 5.10）。
 - `model sync --endpoint <地址>` 只影响这一次调用：值是相对厂商 `base_url` 的完整路径，也可以是整条地址（地址只在厂商行上，见 5.8），相对路径按 5.8 的规则规整（`v1/models`、`//v1//models/` 都落成 `/v1/models`）、整条地址校验后直接访问、不再拼 `base_url`；给了就忽略厂商覆盖、路由的 `models_path` 与 `base_url` 兜底，作用于被选中的每个账号。
 - 响应形状自动识别，不加配置、不加 flag，按这个顺序试，第一个命中生效：`{data:[…]}`（OpenAI 兼容，主流）→ `{models:[…]}`（ollama 的 `/api/tags` 这类，gemini 也用它）→ 顶层数组（`["m1"]` 或 `[{"id":…}]`）。每个条目按 `id` → `name` → `model` 取第一个非空字符串，去空白、去重、排序，缺这些字段的条目跳过。判定只看字段在不在：只有字段不存在时才试下一种形状，字段存在但为空（`{"data":[]}`、`{"models":[]}`，或该字段是 `null`）就是「上游返回空列表」，算该账号失败，不拿后面的形状兜底——空列表与形状不对是两件事。三种形状都不匹配时报错，文案列出这三种形状并提示检查 `base-url`（也可以用 `--models` 手填）。
-- gemini 的清单是第二种形状：`{"models":[{"name":"models/gemini-2.5-pro","supportedGenerationMethods":["generateContent","countTokens"]}],"nextPageToken":"…"}`。形状判定与上面完全一样，`{"models":[…]}` 就是 `{"models":[…]}`；另加两条后处理，只在这一次解析里生效（纯函数 `parseModelListPage` 与 `modelNames`，见 `internal/gateway/models.go`）：
+- gemini 的清单是第二种形状：`{"models":[{"name":"models/gemini-2.5-pro","supportedGenerationMethods":["generateContent","countTokens"]}],"nextPageToken":"…"}`。形状判定与上面完全一样，`{"models":[…]}` 就是 `{"models":[…]}`；另加两条后处理，只在这一次解析里生效（纯函数 `parseModelListPage` 与 `modelEntries`，见 `internal/gateway/models.go`）：
   - 方法过滤：响应里真的出现 `supportedGenerationMethods` 字段时，只保留该方法列表含 `generateContent` 的条目，embedding 一类没有这个方法的条目（以及过滤生效时压根没写这个字段的条目）不进清单——上游没说它支持生成，宁少不错。一个条目都没有这个字段时（ollama 的 `/api/tags`）不过滤，否则没有方法列表的上游会被过滤成空列表。
   - 去前缀：条目名以 `models/` 开头时去掉一个前缀再入库，只去一个（`models/models/x` 落成 `models/x`）。这条与形状无关、对所有形状生效：路由的 `{model}` 占位符在请求时只把裸名放回路径，库里存带前缀的名字会让上游收到 `models/models/…`。
 - 分页：每个列表请求都带 `pageSize=1000`（不认识的厂商忽略这个参数），响应顶层有非空 `nextPageToken` 时带上 `pageToken` 取下一页，各页结果合并、去重、排序，最多 10 页。超过 10 页还在翻页时报错（文案说明清单过大、指出 `pageSize` 与地址），不静默截断：截断会让同步看起来成功，少掉的那几个模型永远选不到号，症状是「上游明明有这个模型却一直 404」。`nextPageToken` 是空串、只有空白或不是字符串时当作没有下一页。
-- 结果分两处写：清单里的名字按 `(厂商, 模型)` upsert 进目录 `provider_models`（`source='sync'`，只写上游给出的字段，见 5.13）；该账号对这些名字标 `access='allowed'`，但只给**还没有行**的名字插，已有行一个字段都不动。
+- 元数据来源：条目里除了名字还带几列模型事实，认得出就写进目录，认不出就留空——字段缺失、0、负数都算「上游没给」，不猜默认值。端点名到线协议的映射表（`internal/gateway` 的 `endpointProtocols`）放在 gateway 而不是 `translate`：它服务的是模型同步与探活这两件上游侧的事，`translate` 仍然只做协议编解码，不认识厂商清单的字段名。
+
+  | 上游 | 上下文 | 最大输出 | 支持的协议 | 其它（不解析） |
+  | --- | --- | --- | --- | --- |
+  | commandcode | `context_length` | - | `supported_endpoints`：`/messages` → `anthropic`、`/chat/completions` → `openai-chat`、`/responses` → `openai-responses` | `owned_by`、`name`（名字已按 `id` → `name` → `model` 取过） |
+  | openrouter | `context_length` | `top_provider.max_completion_tokens` | - | `supported_parameters`（能力位暂不解析，见 5.13） |
+  | gemini | `inputTokenLimit` | `outputTokenLimit` | `supportedGenerationMethods`：只有 `generateContent` 折成 `gemini` 协议，`countTokens`、`embedContent` 是接口动作而不是协议 | `displayName` |
+  | 其它 OpenAI 兼容 | - | - | - | 只有名字 |
+
+  三种形状（`{data:[…]}`、`{models:[…]}`、顶层数组）读的是同一批键，条目是字符串时只有名字、元数据留空。协议集合落库前按固定顺序 `anthropic` → `openai-chat` → `openai-responses` → `gemini` 排好、去重，空集合存空串（见 5.13）。未识别的端点名不计：猜一个相近的名字等于给探活安排一条这家未必声明过的路径。同名的条目只留第一次出现的那一条，元数据不跨页合并。
+- 结果分两处写：清单里的名字按 `(厂商, 模型)` upsert 进目录 `provider_models`（`source='sync'`，只写上游给出的字段，见 5.13）。目录由 gateway 在拉清单这一层写——路径、凭据头与解析都在这里，再让调用方读一遍 JSON 就是第二份解析规则；写目录失败整次同步失败，不静默丢元数据。可达性由命令层写：该账号对这些名字标 `access='allowed'`，但只给**还没有行**的名字插，已有行一个字段都不动。
 - 同步不推翻探活结论：可达性是账号侧的结论，探活说了 `forbidden` / `missing` 就不再被一次清单翻回 `allowed`——上游清单会列出这个 key 用不了的模型（实测 bigmodel 的清单里有 `glm-4.6-air`），翻回去就是把一个已知不可用的名字重新放进候选池。写入因此只有 `INSERT … ON CONFLICT(account_id, model) DO NOTHING` 这一种形状，已有行的 `access`、`http_status`、`error`、`checked_at` 与 `protocol` 原样保留，只有新出现的名字拿默认值。
 - 上游清单里消失的名字不删行：一次少给了几个名字不等于这些模型不可用，可达性只由探活结论改动（见 5.13）。
 - 这条命令同时改目录与可达性，所以新出现的名字同步完就能选号；已有行的可达性不变。
@@ -472,7 +482,7 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 - 账号所属厂商的默认协议一定要试一次，那一次的结论先存着，它就是「按厂商默认配置打」的真相：`401` 判定与候选用完后的结论都取它。它不一定排第一个（见下面「顺序」那条），所以循环按协议名认住这一行，而不是按位置。
 - 厂商默认协议那一次失败时，只有可能只是路径不对的才换协议再试：`404`（路径不存在）、`405`（方法不允许）、`403`（有的网关按路径拒，commandcode 对非 `/messages` 的 `claude-*` 就是 403），以及 `400` 且错误文本指向端点、路径或「不支持该协议」。其余失败（例如明确说模型不存在、`5xx`、网络错误）直接按上表判定，不再花调用。
 - 换协议之后的那几次失败都不作数：不管是什么原因，都接着试剩下的候选，直到候选用完，结论仍回厂商默认协议那次。中途停手会让排在后面的候选永远试不到，而换协议后的 `401` 本来就是常态（凭据头形状不对）。
-- 顺序：库里已经发现过这个模型的协议排最前，否则厂商的有效默认协议最前；其余按候选列表的顺序。账号行不再存协议，所以候选里没有「账号协议」这一档。库里已有的发现结果排前面是为了让 `--refresh` 重探已知模型时不再白打一次 `404`。顺序固定，同一模型多次探活得到同一个结论，不随运行顺序变化。
+- 顺序：库里已经发现过这个模型的协议排最前，接着是目录里这个模型声明的协议（`provider_models.protocols`，见上面的「元数据来源」），然后厂商的有效默认协议，其余按候选列表的顺序。清单声明的协议排在厂商默认协议前面是为了少打错协议的请求：commandcode 的 `claude-*` 只接受 `/messages`，按厂商默认的 chat 先打只会先换回一个 403。已发现的结果仍压过清单声明——前者意味着这个账号上真的用这条协议打通了，比上游清单更贴近事实。清单声明只在候选范围之内生效：这家没有声明那条路由时不打，否则就是去打一条没声明过的路径（见 5.8）。账号行不存协议，所以候选里没有「账号协议」这一档。库里已有的发现结果排前面是为了让 `--refresh` 重探已知模型时不再白打一次 `404`。顺序固定，同一模型多次探活得到同一个结论，不随运行顺序变化。
 - 候选协议由 `gateway.Options.RouteProtocols`（resolver）给出：入参是账号的厂商与模型名，默认实现取该厂商在 `provider_routes` 里声明过的协议（见 5.8）；没注入、或该厂商一个路由都没声明时它们就是三条入站协议全试（gemini 不在兜底里：只有声明过 gemini 路由时才进候选）。resolver 负责去重与校验，只认 `store.IsWireProtocol` 认的线协议，出现别的值直接报错——静默落进 chat 分支会把一条配置错误变成对错误地址的上游调用。循环本身不认识厂商，也不会对着不存在的端点白打一次。
 - 第一个 `2xx` 就是结论：可达性记 `allowed`，把这次用的协议写进 `account_models.protocol`，剩下的协议不再试。
 - `401` 一律不换协议：凭据问题与路径无关，照旧停用账号并立即停止整次探活。这一条只判厂商默认协议那一次；换协议之后的 `401` 多半是凭据头形状不对（anthropic 用 `x-api-key`，gemini 用 `x-goog-api-key`，两条 openai 协议用 `Bearer`），既不停用账号也不算凭据被拒。
@@ -524,7 +534,7 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 - 厂商行存在但没有该协议的路由时，退回原来的后缀猜测：末尾是 `/v1` 就补 `/chat/completions`、`/messages` 或 `/responses`，否则补 `/v1` 再接同样的后缀；模型列表同理补 `/models` 或 `/v1/models`。自建地址因此仍然可用——模型上的发现结果压过厂商默认协议、而这家没声明那条路由时走的就是这一条。猜后缀要用 `base_url`，厂商用的是整条地址路由（`base_url` 为空）时无后缀可猜，此时报错并提示用 `provider set <厂商> --<协议> <路径>` 声明这条路由。
 - 账号的 `provider` 在表里查不到（历史库里的孤儿行）是另一种情况：地址与默认协议都只从厂商行取，孤儿行两样都是空串，拼不出任何可用地址。转发以 503 结束（错误体按入站协议给形状，见 5.2），文案提示先 `switchboard provider add <厂商> --base-url <地址> --openai /v1/chat/completions` 重建厂商、或用 `switchboard account set <账号> --provider <厂商>` 把账号指到已有厂商；`model sync` 与 `account test` 同样在取地址这一步就报这条错。`provider rm --force` 之后的账号不落到这里：存储层已经在同一个事务里把它们停用（见上一条），选号不会选中。
 - 算不出有效出站协议时（一条路由都没声明，或默认协议落不到已声明的路由上——例如只声明了 gemini 一条路由却没给 `--default-protocol`，而模型上也没有发现结果），转发同样是 503 而不是编码器报「不支持的出站协议 ""」：错误体按入站协议给形状，文案给出下一步命令，例如 `switchboard provider set <厂商> --openai /v1/chat/completions` 声明一条路由，或 `switchboard model probe --account <账号>` 探出这个模型的协议。这一类失败不动账号的冷却与 `fail_streak`：它是一次配置缺口，不是这家上游打不通。
-- 探活的候选协议跟着路由收紧：只用该厂商在 `provider_routes` 里声明过的协议（含 gemini），不去打这家没有声明的路径；没有厂商行的账号仍三条入站协议全试。顺序（已发现的协议、厂商默认协议在前，其余按协议名排序）见 5.7。读库失败时报错，不放宽成全部协议全试——放宽等于去打这家没声明的路径，把一次读库故障变成对错误地址的上游调用。
+- 探活的候选协议跟着路由收紧：只用该厂商在 `provider_routes` 里声明过的协议（含 gemini），不去打这家没有声明的路径；没有厂商行的账号仍三条入站协议全试。顺序（已发现的协议、目录里声明的协议、厂商默认协议在前，其余按协议名排序）见 5.7。读库失败时报错，不放宽成全部协议全试——放宽等于去打这家没声明的路径，把一次读库故障变成对错误地址的上游调用。
 - 默认协议：显式值优先，但必须落在这家已声明的路由上；否则按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 取第一条已声明的路由，一条路由都没有时为空。有效出站协议在账号没有逐模型覆盖时就用它（见 5.7），`provider ls` 也显示它，两处同一个规则。规则是纯函数 `store.ResolveDefaultProtocol`，读库入口是 `store.EffectiveProviderProtocol`：厂商不存在返回 `ErrProviderNotFound`，厂商在但一条路由都没有时返回空串与 `ErrProviderNoRoutes`，提示文案由调用方写，`cli` 不再自己算这条回退。**不能靠协议名字典序兜底**：deepseek 与 commandcode 都同时声明了 `openai-chat` 与 `anthropic` 两条路由，字典序把 `anthropic` 排在前面，默认协议就会从升级前的 `openai-chat` 变成 `anthropic`，这两个厂商的账号在升级前后默认协议不一致。升级前的默认值因此由迁移 `0007` 逐家显式种进 `default_protocol`：`anthropic` 自己是 `anthropic`，其余 7 家是 `openai-chat`。
 - 默认协议的写入侧与读取侧分工：`provider add` 的 `--default-protocol` 必须落在这次声明的路由上，`provider set` 改完之后必须仍然指向一条存在的路由，`provider unset <协议>` 删掉的正好是默认协议时也整笔拒绝（提示先改默认协议再删），两处都是同一个事务，指不到就一条都不落库。读取侧对历史脏数据（旧版本删路由时没清默认协议）按固定顺序回退到仍然存在的路由，不静默交给后缀猜测。
 - `base_url` 的 `http://`、`https://` 前缀在 `store` 的三个写入口（`CreateProvider`、`SetProvider`、`AddProvider`）里校验并规整（合并重复斜杠、去掉末尾斜杠），整条地址的 `path` 与 `models_path` 用的是同一套校验（`store.NormalizeEndpoint`），`cli` 那层不再是唯一防线：脏地址一旦落库，转发与模型同步都会拿它拼路径。给了地址就必须是带主机名的完整地址；空地址的合法性由 `requireBaseURLCoverage` 单独判（每一条路由与 `models_path` 都是整条地址，见上一条）。读侧拼地址用的也是同一个 `store.NormalizeBaseURL`。
@@ -718,6 +728,8 @@ gemini 的原生接口（Generative Language API 的 `generateContent`）与另�
 模型的事实（上下文长度、最大输出、支持哪些协议、能力位、厂商级价格）属于上游，与哪个账号去访问无关；账号只该回答「我能不能用这个模型」以及在个别模型上「我这里的能力/价格与目录不同」。把这两件事混在一张表里，会出现「同一个模型在三个账号下有三份重复元数据」，改一次要改三处。
 
 - `provider_models(provider, model)` 存模型事实：`source`（`sync` / `manual` / `probe`）、`context_window`、`max_output`、`protocols`（该模型支持的协议集合，逗号分隔）、`capabilities`（能力位，逗号分隔）、四个价格列（厂商级默认价）、`updated_at`。主键 `(provider, model)`。
+- `protocols` 的取值口径：只存四条线协议全名（`anthropic`、`openai-chat`、`openai-responses`、`gemini`，即 `store.IsWireProtocol` 认的那些），按这个固定顺序排列、去重，**空串表示上游没声明**。来源只有 `model sync` 从清单条目里认出来的那几个端点名与方法名（见 5.7 的「元数据来源」），未识别的写法一律不计。这一列只用来给探活排候选的顺序（见 5.7），不改变「这条路由存不存在」：候选范围仍由厂商的 `provider_routes` 决定。
+- `capabilities` 暂时一律留空，**空表示未知，不表示不支持**：上游的 `supported_parameters` 这类字段各家形状不同，还没有消费者，先不为了填满一列而临时定规则。同理，`context_window`、`max_output` 为空是「上游没给」，不是 0 也不是「没有限制」。
 - `account_models(account_id, model)` 存账号侧的两件事：**可达性**（`access` 取 `allowed` / `forbidden` / `missing` / `error`，另有 `http_status`、`error`、`checked_at`）与**覆盖值**（`protocol`、`context_window`、`max_output`、四个价格列，NULL 表示继承目录）。主键 `(account_id, model)`。
 - `accounts.models` 那一列删除：它等价于「该账号 `access='allowed'` 的行集合」，是派生数据。
 
@@ -740,7 +752,7 @@ gemini 的原生接口（Generative Language API 的 `generateContent`）与另�
 
 - 目录是**同厂商所有账号的并集**：同一厂商不同账号能看到的模型可以不同（实测 bigmodel 的清单里有 `glm-4.6-air`，某个 key 无权访问），差异由 `account_models.access` 表达，不靠各自复制一份目录。
 - `/v1/models` 只列 `access='allowed'` 的行（另见 5.12 的别名）：客户端不该看到自己用不了的名字。
-- 元数据目前只存不用：上下文长度、最大输出与能力位还没有消费者，等做「按能力过滤/超长提示」时再接，先不为了有消费者而临时定规则。价格两列已经有记账这个语义上的消费者，但 `store.Usage` 仍按 `accounts.price_*` 汇总，还没改成读这里合并之后的值（见 5.5）。
+- 元数据大部分只存不用：上下文长度、最大输出与能力位还没有消费者，等做「按能力过滤/超长提示」时再接，先不为了有消费者而临时定规则。`protocols` 已经有消费者——探活候选的顺序（见 5.7）与有效协议的定序（见下面 `EffectiveModels`）。价格两列已经有记账这个语义上的消费者，但 `store.Usage` 仍按 `accounts.price_*` 汇总，还没改成读这里合并之后的值（见 5.5）。
 
 目录的写入口只有 `store.UpsertProviderModels(厂商, 行)`，按 `(provider, model)` upsert，一批行在同一个事务里写：
 
@@ -751,9 +763,9 @@ gemini 的原生接口（Generative Language API 的 `generateContent`）与另�
 `ReplaceModels(账号, 名字)` 是 `model sync` 的写入口，语义是「把这些名字标 `allowed`，其余不动」：
 
 - 只做加法：不删行、**已有行的可达性一个字节不改**（探活说了 `forbidden` / `missing` 的行不会被一次清单翻回 `allowed`），`http_status`、`error`、`checked_at` 与 `protocol` 也不动。旧语义里的「上游清单里消失的行删除」随 `accounts.models` 一起没了——可达性只由探活结论改动，一次少给了几个名字不等于这些模型不可用。
-- 目录里没有的名字补一行 `source='manual'`：手填清单与上游清单都只说明「这个名字存在」，不提供长度与价格，不该冒充 `sync` 那份元数据。
+- 目录里没有的名字补一行 `source='manual'`：这个入口拿到的只有名字，不提供长度、价格与协议集合，不该冒充 `sync` 那份元数据。**已有的目录行一个字段都不动，连 `source` 也不动**：把同步写进来的行改成 `manual` 会让它此后等级更高，下一次同步再也写不进去，上游给的上下文长度就永远停在第一次同步的值上（`providerModelInsertOnly` 只插新行）。
 - 空清单等于「这次没有新名字」，不删任何行。账号不存在时读不到它的厂商，写不了目录，报错而不是只写可达性。
-- `account add --models` 是同一个形状的一次性版本：名字落成 `source='manual'` 的目录行与该账号 `access='allowed'` 的可达性行，与账号本身一个事务。
+- `account add --models` 是同一个形状的一次性版本：名字落成 `source='manual'` 的目录行与该账号 `access='allowed'` 的可达性行，与账号本身一个事务。目录里已有的行同样一个字段都不动（含 `source`），理由同上。
 
 `store.EffectiveModels(账号)` 是合并之后的读入口，一次算出每个模型行的可达性与有效元数据：
 

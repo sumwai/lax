@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -94,6 +95,7 @@ func (s *Server) modelsEndpoint(a store.Account, override string) (endpoint, pro
 // 与顶层数组，形状不同的上游（例如 ollama 的 /api/tags）不必再靠 --models 手填。
 // gemini 的 `{models:[{name:"models/…"}]}` 复用第二种形状，另加两条后处理：按
 // `supportedGenerationMethods` 过滤、条目名去掉一个 `models/` 前缀；分页按 `nextPageToken` 取完。
+// 条目里能认出来的上下文长度、最大输出与协议集合跟着名字一起写进目录（`source='sync'`，见 DESIGN 5.7）。
 func (s *Server) SyncModels(ctx context.Context, a store.Account) ([]string, error) {
 	return s.SyncModelsWithEndpoint(ctx, a, "")
 }
@@ -112,6 +114,11 @@ const maxModelListPages = 10
 // 模型列表可能分页：gemini 的清单按 pageSize / pageToken 翻页，响应里有 nextPageToken 就接着取下一页，
 // 最多 maxModelListPages 页，取完再统一排序去重。页数超上限时报错，不静默截断。
 // 其它上游的列表地址一个字节都不改（见 modelListPageURL）。
+//
+// 清单里的元数据（上下文长度、最大输出、支持的协议）顺手写进目录 `provider_models`
+// （`source='sync'`，只写上游真的给出的字段，见 DESIGN 5.7 与 5.13）：路径与凭据头都在这里，
+// 调用方拿到的只是名字，再让它去读一次 JSON 就多一份解析规则。写目录失败整次同步失败——
+// 静默丢掉元数据会让下一次同步也补不回来，看起来却像成功。可达性仍由调用方写（`ReplaceModels`）。
 func (s *Server) SyncModelsWithEndpoint(ctx context.Context, a store.Account, endpoint string) ([]string, error) {
 	key, err := secret.Decrypt(s.key, a.KeyCipher)
 	if err != nil {
@@ -127,7 +134,7 @@ func (s *Server) SyncModelsWithEndpoint(ctx context.Context, a store.Account, en
 	// 只有 gemini 的清单按 pageSize / pageToken 翻页；其它上游的地址原样使用（见 modelListPageURL）。
 	paginated := protocol == ProtocolGemini
 
-	var models []string
+	var models []listModel
 	seen := map[string]bool{}
 	// seenTokens 记上游已经给过的游标：上游反复返回同一个 nextPageToken 时立即报错，
 	// 不白打满 maxModelListPages 页。
@@ -142,17 +149,18 @@ func (s *Server) SyncModelsWithEndpoint(ctx context.Context, a store.Account, en
 		if err != nil {
 			return nil, err
 		}
-		names, next, isModelList := parseModelListPage(raw)
+		listed, next, isModelList := parseModelListPage(raw)
 		if !isModelList {
 			return nil, fmt.Errorf("上游返回的不是模型列表：认 %s 三种形状，检查 base-url %s 是否指向模型列表接口（三种形状都不匹配时用 --models 手填）",
 				modelShapeList(), a.BaseURL)
 		}
-		for _, name := range names {
-			if seen[name] {
+		for _, model := range listed {
+			// 同名条目只留第一次出现的那一条：分页边界的重复与页内重复都按一个模型算。
+			if seen[model.name] {
 				continue
 			}
-			seen[name] = true
-			models = append(models, name)
+			seen[model.name] = true
+			models = append(models, model)
 		}
 		if next == "" {
 			break
@@ -174,8 +182,33 @@ func (s *Server) SyncModelsWithEndpoint(ctx context.Context, a store.Account, en
 		return nil, fmt.Errorf("上游没有返回模型，检查 base-url %s 是否正确（含 supportedGenerationMethods 的清单只保留带 generateContent 的条目）",
 			a.BaseURL)
 	}
-	sort.Strings(models)
-	return models, nil
+	sort.Slice(models, func(i, j int) bool { return models[i].name < models[j].name })
+	// 目录按 (厂商, 模型) 写：来源固定 sync，四列元数据只带上游给出的那几个，
+	// 没给的留空（UpsertProviderModels 只写非零/非空的值，不会把探活补的长度抹掉）。
+	if err := s.store.UpsertProviderModels(a.Provider, catalogModels(models)); err != nil {
+		return nil, fmt.Errorf("把上游清单写进厂商 %s 的模型目录失败: %w", a.Provider, err)
+	}
+	names := make([]string, len(models))
+	for i, model := range models {
+		names[i] = model.name
+	}
+	return names, nil
+}
+
+// catalogModels 把清单折成目录行：来源一律 `sync`，四列元数据里 capabilities 留空
+// （`supported_parameters` 的形状各家不同，等有消费者再解析，见 DESIGN 5.13）。
+func catalogModels(models []listModel) []store.ProviderModel {
+	rows := make([]store.ProviderModel, 0, len(models))
+	for _, model := range models {
+		rows = append(rows, store.ProviderModel{
+			Model:         model.name,
+			Source:        store.SourceSync,
+			ContextWindow: model.contextWindow,
+			MaxOutput:     model.maxOutput,
+			Protocols:     model.protocols,
+		})
+	}
+	return rows
 }
 
 // modelListPageURL 给需要分页的上游追加分页参数：pageSize 每页都带，pageToken 从第二页起带。
@@ -266,12 +299,63 @@ func modelShapeList() string {
 	return strings.Join(desc, "、")
 }
 
-// parseModelListPage 按 modelListShapes 的顺序解析上游的模型列表响应，返回按名字排序去重后的模型名
-// 与下一页的游标（`nextPageToken`）。第三个返回值为 false 表示三种形状的字段都不存在，响应不是模型列表。
-// 只有字段不存在才试下一种形状：字段在但不是数组、或数组为空，都算「上游返回空列表」（返回空
-// 切片与 true），不再拿下一个形状兜底——`{"data":[]}` 与 `{"models":[]}` 都是空列表，不是形状不对。
+// listModel 是模型清单里的一条：名字，加上从条目对象里认出来的元数据。
+//
+// 字段缺失时留空（nil 表示上游没给），不猜默认值：清单里没写上下文长度不等于它是 0。
+// 每列从哪来见 DESIGN 5.7 的「元数据来源」表，落库口径见 5.13。
+type listModel struct {
+	name          string
+	contextWindow *int64
+	maxOutput     *int64
+	// protocols 是这条条目声明的线协议集合，按 wireProtocolOrder 的固定顺序排列。
+	protocols []string
+}
+
+// generateContentMethod 是 gemini 清单里「这个模型能做生成」的方法名。它同时决定两件事：
+// 清单过滤（见 modelEntries）与协议折算（只有它折成 gemini 协议，countTokens 与 embedContent 不算）。
+const generateContentMethod = "generateContent"
+
+// endpointProtocols 是「上游清单里声明的端点名 → 线协议」的映射，放在 gateway 而不是 translate：
+// 它服务的是模型同步与探活这两件上游侧的事（同步时写进目录、探活时据此排候选），
+// 与协议编解码无关，translate 那边仍然是纯编解码、不认识厂商清单的字段名。
+//
+// 只认表里列出的写法，未识别的不计：端点名各家写法不同，猜一个相近的名字等于给探活安排一条
+// 这家未必声明过的路径，不如留空、由厂商路由决定（见 DESIGN 5.7、5.8）。
+var endpointProtocols = map[string]string{
+	"/messages":         ProtocolAnthropic,
+	"/chat/completions": ProtocolChat,
+	"/responses":        ProtocolResponses,
+	"/generateContent":  ProtocolGemini,
+	"generateContent":   ProtocolGemini,
+}
+
+// wireProtocolOrder 是协议集合落库与排候选的固定顺序（见 DESIGN 5.13）：同一份上游数据多跑几次
+// 得到同一串，与上游列出端点的先后无关。
+var wireProtocolOrder = []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini}
+
+// endpointProtocol 查端点名对应的线协议。表里没有的写法返回 false，调用方直接不计这个取值。
+func endpointProtocol(name string) (string, bool) {
+	protocol, ok := endpointProtocols[strings.TrimSpace(name)]
+	return protocol, ok
+}
+
+// orderedProtocols 把协议集合按 wireProtocolOrder 排好并去重，空集合返回 nil（落库成空串）。
+func orderedProtocols(set map[string]bool) []string {
+	var out []string
+	for _, protocol := range wireProtocolOrder {
+		if set[protocol] {
+			out = append(out, protocol)
+		}
+	}
+	return out
+}
+
+// parseModelListPage 按 modelListShapes 的顺序解析上游的模型列表响应，返回清单（名字加元数据，
+// 按名字排序去重）与下一页的游标（`nextPageToken`）。第三个返回值为 false 表示三种形状的字段都不存在，
+// 响应不是模型列表。只有字段不存在才试下一种形状：字段在但不是数组、或数组为空，都算「上游返回空列表」
+// （返回空切片与 true），不再拿下一个形状兜底——`{"data":[]}` 与 `{"models":[]}` 都是空列表，不是形状不对。
 // 游标只看顶层 `nextPageToken`：没有、不是字符串或为空白都当作「没有下一页」。
-func parseModelListPage(raw []byte) (models []string, nextToken string, isModelList bool) {
+func parseModelListPage(raw []byte) (models []listModel, nextToken string, isModelList bool) {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) == 0 {
 		return nil, "", false
@@ -282,7 +366,7 @@ func parseModelListPage(raw []byte) (models []string, nextToken string, isModelL
 		if err := json.Unmarshal(raw, &entries); err != nil {
 			return nil, "", false
 		}
-		return modelNames(entries), "", true
+		return modelEntries(entries), "", true
 	}
 	if raw[0] != '{' {
 		return nil, "", false
@@ -302,7 +386,7 @@ func parseModelListPage(raw []byte) (models []string, nextToken string, isModelL
 		// 字段存在但解不成数组（null、对象、字符串）按空列表处理：这种形状已经命中，不再往下试。
 		var entries []json.RawMessage
 		_ = json.Unmarshal(value, &entries)
-		return modelNames(entries), nextPageToken(top), true
+		return modelEntries(entries), nextPageToken(top), true
 	}
 	return nil, "", false
 }
@@ -321,7 +405,8 @@ func nextPageToken(top map[string]json.RawMessage) string {
 	return strings.TrimSpace(token)
 }
 
-// modelNames 从条目列表里取模型名，按名字排序去重。缺名字的条目（一个字段都没有、或全是空白）跳过。
+// modelEntries 从条目列表里折出清单：名字加元数据，按名字排序去重。缺名字的条目
+// （一个字段都没有、或全是空白）跳过；同名的条目只留第一次出现的那一条，后面的元数据不合并。
 //
 // 响应里真的出现 supportedGenerationMethods 字段时（gemini）按它过滤：只保留该方法列表里含
 // generateContent 的条目，embedding 一类没有这个方法的条目不进清单。没出现这个字段的响应
@@ -330,10 +415,10 @@ func nextPageToken(top map[string]json.RawMessage) string {
 // 去前缀与形状无关：凡是以 `models/` 开头的名字都去一个前缀。名字里带前缀的不只 gemini，
 // 而路由的 `{model}` 占位符在请求时只放回裸名，库里存带前缀的名字会让上游收到
 // `models/models/…`（见 DESIGN 5.7）。
-func modelNames(entries []json.RawMessage) []string {
+func modelEntries(entries []json.RawMessage) []listModel {
 	filterMethods := hasGenerationMethods(entries)
 	seen := map[string]bool{}
-	var models []string
+	var models []listModel
 	for _, entry := range entries {
 		if filterMethods && !supportsGenerateContent(entry) {
 			continue
@@ -343,9 +428,14 @@ func modelNames(entries []json.RawMessage) []string {
 			continue
 		}
 		seen[name] = true
-		models = append(models, name)
+		models = append(models, listModel{
+			name:          name,
+			contextWindow: entryContextWindow(entry),
+			maxOutput:     entryMaxOutput(entry),
+			protocols:     entryProtocols(entry),
+		})
 	}
-	sort.Strings(models)
+	sort.Slice(models, func(i, j int) bool { return models[i].name < models[j].name })
 	return models
 }
 
@@ -364,10 +454,7 @@ func hasGenerationMethods(entries []json.RawMessage) bool {
 // generationMethods 取条目的 supportedGenerationMethods，第二个返回值是字段在不在。
 // 字段在但解不成字符串数组时返回空列表与 true：那种条目没有可用的方法列表，过滤时落选。
 func generationMethods(entry json.RawMessage) ([]string, bool) {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(entry, &obj); err != nil {
-		return nil, false
-	}
+	obj := entryObject(entry)
 	value, ok := obj["supportedGenerationMethods"]
 	if !ok {
 		return nil, false
@@ -381,12 +468,92 @@ func generationMethods(entry json.RawMessage) ([]string, bool) {
 // 在过滤生效时同样落选：上游既没说它支持生成，就不进清单，宁少不错。
 func supportsGenerateContent(entry json.RawMessage) bool {
 	methods, _ := generationMethods(entry)
-	for _, m := range methods {
-		if m == "generateContent" {
-			return true
+	return slices.Contains(methods, generateContentMethod)
+}
+
+// entryContextWindow 取条目的上下文长度：commandcode 与 openrouter 写在 `context_length`，
+// gemini 写在 `inputTokenLimit`。两个键都没有、或者不是正数时留空。
+func entryContextWindow(entry json.RawMessage) *int64 {
+	obj := entryObject(entry)
+	if n := jsonPositiveInt(obj["context_length"]); n != nil {
+		return n
+	}
+	return jsonPositiveInt(obj["inputTokenLimit"])
+}
+
+// entryMaxOutput 取条目的最大输出：gemini 写在 `outputTokenLimit`，openrouter 藏在
+// `top_provider.max_completion_tokens` 里。其它上游没有这一项，两个键都缺失时留空。
+func entryMaxOutput(entry json.RawMessage) *int64 {
+	obj := entryObject(entry)
+	if n := jsonPositiveInt(obj["outputTokenLimit"]); n != nil {
+		return n
+	}
+	var topProvider map[string]json.RawMessage
+	if err := json.Unmarshal(obj["top_provider"], &topProvider); err != nil {
+		return nil
+	}
+	return jsonPositiveInt(topProvider["max_completion_tokens"])
+}
+
+// entryProtocols 把条目声明支持的协议折成线协议集合，按 wireProtocolOrder 的固定顺序返回：
+//
+//   - `supported_endpoints`（commandcode）里每个端点名按 endpointProtocols 折算，未识别的不计；
+//   - `supportedGenerationMethods`（gemini）只有 generateContent 折成 gemini 协议，
+//     countTokens、embedContent 这些是接口动作而不是协议，不算。
+//
+// 两个键都没有时返回 nil：上游没声明支持哪些协议，落库就是空串，探活按厂商默认协议与路由的顺序试。
+func entryProtocols(entry json.RawMessage) []string {
+	obj := entryObject(entry)
+	set := map[string]bool{}
+	var endpoints []string
+	if err := json.Unmarshal(obj["supported_endpoints"], &endpoints); err == nil {
+		for _, name := range endpoints {
+			if protocol, ok := endpointProtocol(name); ok {
+				set[protocol] = true
+			}
 		}
 	}
-	return false
+	if methods, ok := generationMethods(entry); ok && slices.Contains(methods, generateContentMethod) {
+		set[ProtocolGemini] = true
+	}
+	return orderedProtocols(set)
+}
+
+// entryObject 把条目解成键值表。条目本身是字符串（顶层数组的 `["m1"]` 写法）时没有对象可读，
+// 返回 nil：名字照取，元数据一律留空。
+func entryObject(entry json.RawMessage) map[string]json.RawMessage {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(entry, &obj); err != nil {
+		return nil
+	}
+	return obj
+}
+
+// jsonPositiveInt 取一个 JSON 数字。键缺失、解不成数字、或不是正数时返回 nil：
+// 0 与负数在这几列上没有意义，当作「上游没给」，不拿 0 冒充上下文长度。
+// 整数写法之外只收整数值的浮点（`200000.0` 收，`1.5` 不收）。
+func jsonPositiveInt(value json.RawMessage) *int64 {
+	// 只认裸数字：`json.Number` 连 `"200000"` 这种带引号的写法也收，而上游把长度写成字符串
+	// 属于另一套形状，不当成同一个字段。
+	if len(value) == 0 || value[0] == '"' {
+		return nil
+	}
+	var number json.Number
+	if err := json.Unmarshal(value, &number); err != nil {
+		return nil
+	}
+	if n, err := number.Int64(); err == nil {
+		if n <= 0 {
+			return nil
+		}
+		return &n
+	}
+	f, err := number.Float64()
+	if err != nil || f <= 0 || f != float64(int64(f)) {
+		return nil
+	}
+	n := int64(f)
+	return &n
 }
 
 // modelEntryName 取一个条目的模型名：按 id → name → model 的顺序取第一个非空字符串。
@@ -397,10 +564,7 @@ func modelEntryName(entry json.RawMessage) string {
 	if err := json.Unmarshal(entry, &s); err == nil {
 		return bareModelName(strings.TrimSpace(s))
 	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(entry, &obj); err != nil {
-		return ""
-	}
+	obj := entryObject(entry)
 	for _, key := range []string{"id", "name", "model"} {
 		value, ok := obj[key]
 		if !ok {
@@ -443,9 +607,13 @@ func readModelList(r io.Reader) ([]string, bool) {
 	if err != nil {
 		return nil, false
 	}
-	models, _, isModelList := parseModelListPage(raw)
+	listed, _, isModelList := parseModelListPage(raw)
 	if !isModelList {
 		return nil, false
+	}
+	models := make([]string, len(listed))
+	for i, model := range listed {
+		models[i] = model.name
 	}
 	return models, true
 }
@@ -505,12 +673,16 @@ func isWireProtocol(p string) bool {
 //
 //  1. 库里已经发现过这个模型的协议排最前，它是「按事实打」的那次，省掉每次 --refresh
 //     白打的一次 404；
-//  2. 厂商的有效默认协议紧接其后，它既是对厂商配置的验证，也是 401 判定与全失败结论的依据；
-//  3. 其余按 resolver 给的顺序：Options.RouteProtocols 注入时用它，否则用该厂商在
+//  2. 目录里这个模型声明支持的协议（provider_models.protocols）紧接着：上游自己说了它支持哪些协议
+//     （commandcode 的 supported_endpoints、gemini 的 supportedGenerationMethods），先按它打就少打几次
+//     错协议的请求。范围仍是第 3 步那批候选，声明了这家没有路由的协议时不打——那等于去撞一条
+//     没声明过的路径（见 DESIGN 5.7、5.8）；与第 1 步冲突时第 1 步优先；
+//  3. 厂商的有效默认协议紧接其后，它既是对厂商配置的验证，也是 401 判定与全失败结论的依据；
+//  4. 其余按 resolver 给的顺序：Options.RouteProtocols 注入时用它，否则用该厂商在
 //     provider_routes 里声明过的协议（按协议名排序），都没有则三种全试。
 //
 // 账号行不再存协议（迁移 0014），a.Protocol 是厂商默认协议的派生值：厂商没有路由时它是空串，
-// 候选就只剩第 3 步的三种全试。override 非 nil 时顶替第 3 步的来源（探活自己指定候选时用）。
+// 候选就只剩第 4 步的三种全试。override 非 nil 时顶替第 4 步的来源（探活自己指定候选时用）。
 // 出现线协议以外的值直接报错。
 func (s *Server) routeProtocolOrder(a store.Account, model string, override []string) ([]string, error) {
 	var order []string
@@ -537,9 +709,6 @@ func (s *Server) routeProtocolOrder(a store.Account, model string, override []st
 	if err := add(discovered, "account_models.protocol"); err != nil {
 		return nil, err
 	}
-	if err := add(a.Protocol, fmt.Sprintf("厂商 %s 的默认协议", a.Provider)); err != nil {
-		return nil, err
-	}
 
 	candidates := override
 	if candidates == nil {
@@ -552,12 +721,38 @@ func (s *Server) routeProtocolOrder(a store.Account, model string, override []st
 	if len(candidates) == 0 {
 		candidates = defaultProbeProtocols
 	}
+
+	// 目录里声明的协议排在厂商默认协议之前，但只在这次候选范围之内：
+	// 声明了这家没有路由的协议时不打，理由同第 4 步。
+	for _, p := range s.declaredProtocols(a, model) {
+		if !slices.Contains(candidates, p) {
+			continue
+		}
+		if err := add(p, fmt.Sprintf("厂商 %s 的模型目录", a.Provider)); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := add(a.Protocol, fmt.Sprintf("厂商 %s 的默认协议", a.Provider)); err != nil {
+		return nil, err
+	}
 	for _, p := range candidates {
 		if err := add(p, fmt.Sprintf("厂商 %s 的路由", a.Provider)); err != nil {
 			return nil, err
 		}
 	}
 	return order, nil
+}
+
+// declaredProtocols 读目录里这个模型声明支持的协议（provider_models.protocols，见 DESIGN 5.13）。
+// 读不出来就当没有：一次读库失败不该让探活停下，候选仍按厂商路由与默认协议排。
+func (s *Server) declaredProtocols(a store.Account, model string) []string {
+	protocols, err := s.store.ProviderModelProtocols(a.Provider, model)
+	if err != nil {
+		s.logf("读厂商 %s 的模型 %s 声明的协议失败，按未声明处理: %v", a.Provider, model, err)
+		return nil
+	}
+	return protocols
 }
 
 // providerProtocols 是 resolver 的默认实现：该厂商在 provider_routes 里声明过的协议。

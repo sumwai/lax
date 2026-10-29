@@ -366,7 +366,8 @@ func TestReplaceModelsMarksAllowed(t *testing.T) {
 }
 
 // TestReplaceModelsWritesManualCatalog 确认同步进来的名字在目录里补成 source='manual' 的行，
-// 且不覆盖已有的目录元数据（同步只说明名字存在，不提供长度与价格）。
+// 且不覆盖已有的目录行（同步只说明名字存在，不提供长度、价格与协议；已有的行连 source 都不动，
+// 否则这一行会被钉成 manual，之后同步再也写不进去，见 providerModelInsertOnly）。
 func TestReplaceModelsWritesManualCatalog(t *testing.T) {
 	st := openTemp(t)
 	acc := newAccount(t, st, "ds1", nil)
@@ -390,8 +391,11 @@ func TestReplaceModelsWritesManualCatalog(t *testing.T) {
 	if len(models) != 2 {
 		t.Fatalf("目录里的模型数 = %d，期望 2", len(models))
 	}
-	if models[0].Model != "m1" || models[0].Source != store.SourceManual {
-		t.Fatalf("m1 的来源 = %q，期望 manual（手填清单压过同步）", models[0].Source)
+	if models[0].Model != "m1" || models[0].Source != store.SourceSync {
+		t.Fatalf("m1 的来源 = %q，期望保持 sync（已有的目录行一个字段都不动）", models[0].Source)
+	}
+	if got := strings.Join(models[0].Protocols, ","); got != "openai-chat" {
+		t.Fatalf("m1 声明的协议 = %q，期望原样保留", got)
 	}
 	if models[0].ContextWindow == nil || *models[0].ContextWindow != window {
 		t.Fatalf("m1 的上下文长度被抹掉: %+v", models[0])
