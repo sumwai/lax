@@ -132,12 +132,12 @@ func TestAccountAddHelpFollowsProviderTable(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("account add --help 的退出码 = %d", code)
 	}
-	for _, want := range []string{"--provider", "--key", "--models", "--price-in"} {
+	for _, want := range []string{"--provider", "--key", "--models", "--priority"} {
 		if !strings.Contains(errOut, want) {
 			t.Fatalf("account add --help 应列出 %q: %s", want, errOut)
 		}
 	}
-	for _, gone := range []string{"--base-url", "--protocol"} {
+	for _, gone := range []string{"--base-url", "--protocol", "--price-in", "--price-out", "--price-cache-read", "--price-cache-write"} {
 		if strings.Contains(errOut, gone) {
 			t.Fatalf("account add --help 不该再列出 %q: %s", gone, errOut)
 		}
@@ -403,7 +403,7 @@ func TestAccountSetRotatesKey(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("account set 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"已更新 ds1 的凭据", "sk-t…", "冷却与失败计数已清零", "账号已启用"} {
+	for _, want := range []string{"已更新 ds1（custom）的凭据", "sk-t…", "冷却与失败计数已清零", "账号已启用"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("输出应包含 %q: %s", want, out)
 		}
@@ -531,6 +531,12 @@ func TestAccountSetJSONMasksKey(t *testing.T) {
 			t.Fatalf("--json 的 %s = %v，期望 true", field, got[field])
 		}
 	}
+	// 价格不在账号上：这条命令的 --json 不再有四个价格字段（见 DESIGN 第 4 节的 account set）。
+	for _, gone := range []string{"price_in", "price_out", "price_cache_read", "price_cache_write"} {
+		if _, ok := got[gone]; ok {
+			t.Fatalf("account set --json 不该再有 %s: %s", gone, out)
+		}
+	}
 }
 
 // TestAccountUpdateIsSynonymForSet 确认 update 与 set 等价：都换凭据，帮助里只列 set。
@@ -544,7 +550,7 @@ func TestAccountUpdateIsSynonymForSet(t *testing.T) {
 
 	if code, out, stderr := run(t, "account", "update", "ds1", "--key", "sk-test"); code != 0 {
 		t.Fatalf("account update 退出码 = %d，stderr = %s", code, stderr)
-	} else if !strings.Contains(out, "已更新 ds1 的凭据") {
+	} else if !strings.Contains(out, "已更新 ds1（custom）的凭据") {
 		t.Fatalf("account update 的输出 = %s，期望与 set 同一段文案", out)
 	}
 	if code, _, stderr := run(t, "call", "hi", "--model", "m1"); code != 0 {
@@ -800,67 +806,31 @@ func TestAccountTestNeverPrintsKey(t *testing.T) {
 	}
 }
 
-// TestAccountAddStoresCachePrices 覆盖四个价格参数：给过的都落库，没给的是空（回退输入价），
-// 输出与 --json 里一个字的凭据明文都没有。
-func TestAccountAddStoresCachePrices(t *testing.T) {
+// TestAccountAddRejectsPriceFlags 确认四个价格参数已经从 account add 上删掉：
+// 单价搬到模型目录之后账号不再是价格的落点，误敲仍是用法错误（退出码 2），
+// 文案说明价格在哪、并给出 model price set 的命令形状；一个账号都不落库。
+func TestAccountAddRejectsPriceFlags(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
 
-	const key = "sk-cache-price-secret"
-	code, out, stderr := addAccount(t, "ds1", "mine", "http://127.0.0.1:9", "openai-chat", "--key", key, "--models", "m1", "--price-in", "2", "--price-out", "4", "--price-cache-read", "0.5", "--price-cache-write", "3")
-	if code != 0 {
-		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
-	}
-	if strings.Contains(out+stderr, key) {
-		t.Fatalf("account add 的输出泄漏了凭据明文: %s / %s", out, stderr)
-	}
-
-	st, _ := mustStore(t)
-	acc, err := st.GetAccount("ds1")
-	if err != nil {
-		t.Fatalf("读账号: %v", err)
-	}
-	for name, got := range map[string]*float64{
-		"price_in": acc.PriceIn, "price_out": acc.PriceOut,
-		"price_cache_read": acc.PriceCacheRead, "price_cache_write": acc.PriceCacheWrite,
-	} {
-		if got == nil {
-			t.Fatalf("%s 没落库", name)
-		}
-	}
-	if *acc.PriceCacheRead != 0.5 || *acc.PriceCacheWrite != 3 {
-		t.Fatalf("缓存单价 = %v / %v，期望 0.5 / 3", *acc.PriceCacheRead, *acc.PriceCacheWrite)
-	}
-
-	// 不给价格参数时两列缓存单价为空：花费估算回退到输入价（见 DESIGN 5.5）。
-	if code, _, stderr := addAccount(t, "ds2", "mine", "http://127.0.0.1:9", "openai-chat", "--key", key, "--models", "m1"); code != 0 {
-		t.Fatalf("account add ds2 退出码 = %d，stderr = %s", code, stderr)
-	}
-	acc, err = st.GetAccount("ds2")
-	if err != nil {
-		t.Fatalf("读 ds2: %v", err)
-	}
-	if acc.PriceCacheRead != nil || acc.PriceCacheWrite != nil {
-		t.Fatalf("没给缓存单价时应留空，实际 %v / %v", acc.PriceCacheRead, acc.PriceCacheWrite)
-	}
-	if acc.PriceIn != nil || acc.PriceOut != nil {
-		t.Fatalf("一个价都没给时应全部留空，实际 %v / %v", acc.PriceIn, acc.PriceOut)
-	}
-}
-
-// TestAccountAddRejectsNegativePrices 确认负价格是用法错误（退出码 2），
-// 报错里点名是哪个参数，并且一个账号都不落库。
-func TestAccountAddRejectsNegativePrices(t *testing.T) {
-	sandbox(t)
-	mustInit(t)
-
+	// `--flag 值` 与 `--flag=值` 两种写法都要拦：先给 flag 包之前就认出来。
 	for _, flag := range []string{"--price-in", "--price-out", "--price-cache-read", "--price-cache-write"} {
-		code, out, stderr := addAccount(t, "ds-"+flag, "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-1", "--models", "m1", flag, "-0.5")
-		if code != 2 || out != "" {
-			t.Fatalf("%s 负数的退出码 = %d，stdout = %q", flag, code, out)
-		}
-		if !strings.Contains(stderr, flag) || !strings.Contains(stderr, "不能是负数") {
-			t.Fatalf("%s 的错误文案应点名这个参数: %s", flag, stderr)
+		for _, arg := range []string{flag, flag + "=-0.5"} {
+			args := []string{"--key", "sk-1", "--models", "m1"}
+			if arg == flag {
+				args = append(args, flag, "2")
+			} else {
+				args = append(args, arg)
+			}
+			code, out, stderr := addAccount(t, "ds1", "mine", "http://127.0.0.1:9", "openai-chat", args...)
+			if code != 2 || out != "" {
+				t.Fatalf("%s 的退出码 = %d，stdout = %q，期望 2 与空 stdout", arg, code, out)
+			}
+			for _, want := range []string{flag, "switchboard model price set", "--in N --out N", "用法：switchboard account add"} {
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("%s 的 stderr 应包含 %q: %s", arg, want, stderr)
+				}
+			}
 		}
 	}
 
@@ -874,88 +844,54 @@ func TestAccountAddRejectsNegativePrices(t *testing.T) {
 	}
 }
 
-// TestAccountSetOnlyTouchesPassedPrices 钉住 account set 的价格改动是增量的：
-// 只改传进来的那几列，其余价格、凭据密文与账号状态（冷却、失败计数）都不动；
-// 只改价格时不需要 --key，输出与 --json 里也没有凭据明文。
-func TestAccountSetOnlyTouchesPassedPrices(t *testing.T) {
+// TestAccountSetRejectsPriceFlags 确认 account set 也不再收价格参数：单价在模型目录上，
+// 改价走 model price set。误敲是用法错误（退出码 2），并把正确用法打出来；
+// 账号的凭据与状态一个字节都不动。
+func TestAccountSetRejectsPriceFlags(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
 
-	const key = "sk-price-only-secret"
-	if code, _, stderr := addAccount(t, "ds1", "mine", "http://127.0.0.1:9", "openai-chat", "--key", key, "--models", "m1", "--price-in", "2", "--price-out", "4", "--price-cache-write", "3"); code != 0 {
+	const key = "sk-old"
+	if code, _, stderr := addAccount(t, "ds1", "mine", "http://127.0.0.1:9", "openai-chat", "--key", key, "--models", "m1"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	st, _ := mustStore(t)
+	st, cipherKey := mustStore(t)
 	before, err := st.GetAccount("ds1")
 	if err != nil {
 		t.Fatalf("读账号: %v", err)
 	}
-	if err := st.RecordFailure(before.ID, time.Now().Add(time.Hour).Unix(), "上游 429"); err != nil {
-		t.Fatalf("造失败状态: %v", err)
-	}
 
-	// 只给缓存读价：不用 --key，也不用重复其它价格。
-	code, out, stderr := run(t, "account", "set", "ds1", "--price-cache-read", "0.5")
-	if code != 0 {
-		t.Fatalf("account set 退出码 = %d，stderr = %s", code, stderr)
-	}
-	if strings.Contains(out+stderr, key) {
-		t.Fatalf("account set 的输出泄漏了凭据明文: %s / %s", out, stderr)
-	}
-	if !strings.Contains(out, "已更新 ds1 的价格") {
-		t.Fatalf("输出应说明改的是价格: %s", out)
-	}
-	if strings.Contains(out, "已更新 ds1 的凭据") {
-		t.Fatalf("只改价格时不该说换了凭据: %s", out)
+	for _, flag := range []string{"--price-in", "--price-out", "--price-cache-read", "--price-cache-write"} {
+		code, out, stderr := run(t, "account", "set", "ds1", flag, "1.5")
+		if code != 2 || out != "" {
+			t.Fatalf("%s 的退出码 = %d，stdout = %q，期望 2 与空 stdout", flag, code, out)
+		}
+		for _, want := range []string{flag, "switchboard model price set", "--in N --out N", "用法：switchboard account set"} {
+			if !strings.Contains(stderr, want) {
+				t.Fatalf("%s 的 stderr 应包含 %q: %s", flag, want, stderr)
+			}
+		}
 	}
 
 	after, err := st.GetAccount("ds1")
 	if err != nil {
 		t.Fatalf("再读账号: %v", err)
 	}
-	if after.PriceCacheRead == nil || *after.PriceCacheRead != 0.5 {
-		t.Fatalf("缓存读价 = %v，期望 0.5", after.PriceCacheRead)
-	}
-	if after.PriceIn == nil || *after.PriceIn != 2 || after.PriceOut == nil || *after.PriceOut != 4 {
-		t.Fatalf("没传的输入输出价被改动: %v / %v", after.PriceIn, after.PriceOut)
-	}
-	if after.PriceCacheWrite == nil || *after.PriceCacheWrite != 3 {
-		t.Fatalf("没传的缓存写价被改动: %v", after.PriceCacheWrite)
-	}
 	if !bytes.Equal(before.KeyCipher, after.KeyCipher) {
-		t.Fatal("只改价格却换了凭据密文")
+		t.Fatal("用法错误却换了凭据密文")
 	}
-	if after.FailStreak != 1 || after.CooldownUntil == 0 || after.LastError != "上游 429" {
-		t.Fatalf("只改价格却动了账号状态: %+v", after)
+	if plain, err := secret.Decrypt(cipherKey, after.KeyCipher); err != nil || string(plain) != key {
+		t.Fatalf("凭据被改动: %q, %v", plain, err)
 	}
-
-	// --json 里报的是库里实际的价，凭据只可能以掩码出现（这里连凭据都不换，干脆没有 key 字段）。
-	code, out, stderr = run(t, "account", "set", "ds1", "--price-in", "1.5", "--json")
+	// 账号上不再有价格：单价在目录里，account ls --json 也不再报价格字段。
+	code, out, stderr := run(t, "account", "ls", "--json")
 	if code != 0 {
-		t.Fatalf("account set --json 退出码 = %d，stderr = %s", code, stderr)
+		t.Fatalf("account ls 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if strings.Contains(out, key) {
-		t.Fatalf("--json 泄漏了凭据明文: %s", out)
-	}
-	var got map[string]any
-	mustJSON(t, out, &got)
-	if got["key_rotated"] != false {
-		t.Fatalf("--json 的 key_rotated = %v，期望 false", got["key_rotated"])
-	}
-	if got["price_in"] != 1.5 || got["price_cache_read"] != 0.5 {
-		t.Fatalf("--json 的价格 = %+v，期望输入 1.5、缓存读 0.5", got)
-	}
-	if _, ok := got["key"]; ok {
-		t.Fatalf("没换凭据时 --json 不该有 key 字段: %s", out)
-	}
-
-	// 负价格在 set 上同样是用法错误。
-	code, out, stderr = run(t, "account", "set", "ds1", "--price-cache-write", "-1")
-	if code != 2 || out != "" {
-		t.Fatalf("负价格的退出码 = %d，stdout = %q", code, out)
-	}
-	if !strings.Contains(stderr, "不能是负数") {
-		t.Fatalf("stderr 应说明负价格不可用: %s", stderr)
+	for _, gone := range []string{"price_in", "price_out", "price_cache_read", "price_cache_write"} {
+		if strings.Contains(out, gone) {
+			t.Fatalf("account ls --json 不该再有 %s: %s", gone, out)
+		}
 	}
 }

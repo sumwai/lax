@@ -26,6 +26,8 @@ switchboard log tail                                        # 看请求记录
 | `model ls` | 列出模型、可用账号与状态，可按厂商与账号筛选 |
 | `model sync` | 从上游拉模型列表，写进本地，可按厂商与账号筛选 |
 | `model probe` | 逐个模型探活，把能用的写进账号，可按厂商与账号筛选 |
+| `model alias set\|unset\|ls` | 模型别名：把客户端写死的模型名指到真实模型名上，只影响请求方向 |
+| `model price set\|unset\|ls` | 模型单价：目录里的厂商级标价与某账号的覆盖价，`usage` 与 `model ls` 都读它 |
 | `usage` | 按账号、模型或日期汇总用量，含输入、输出与缓存读写 token |
 | `log tail` | 最近的请求记录 |
 | `call` | 手工打一条请求，打印选号过程；默认 anthropic 入站，`--protocol` 可切换四种入站，gemini 也支持 `--stream` |
@@ -150,6 +152,30 @@ switchboard serve
 
 探活会真实调用上游：`--limit 5` 限制每个账号这一次最多探几个，`--model deepseek-v4-pro` 只试一个。某个账号没探出可用模型时只写探活结果，它原有的模型列表保持不变；全部账号都没探出可用模型时退出码 1。终端里探活时 stderr 上有一行原地刷新的进度（账号、已完成 / 待探数、最近探完的模型），账号探完补一个换行再打汇总与表格；stderr 不是终端或加了 `--json` 时没有这一行，管道、CI 与日志里不会多出噪声。碰到 401 时命令停下并停用该账号：凭据被拒，后面的结论不作数。同步失败的账号同样不影响其余账号，只是最终退出码为 1。`account ls` 与 `model ls` 会带上每个账号的模型状态（可用 / 待探活 / 无权 / 不存在 / 凭据被拒 / 失败）。空模型列表的账号不参与选号，所以 `account ls` 的模型列不会写「不限」：只有手填的名字时直接列出模型名，同步过但没探出可用模型时写「0 可用 / N 同步」，完全没有模型信息时写「无模型（先 model sync）」；`model ls` 一条模型都没有时同样把下一步指到 `model sync` 与 `model probe`。
 
+模型名还可以起别名。客户端里的模型名往往写死（`claude-3-5-sonnet`、`gpt-4o`），而账号声明的是上游的真实名字；`model alias` 把那个写死的名字指到一个真实模型名上，网关按真名选号、改请求体与路径，客户端不必改：
+
+```bash
+switchboard model alias set fast glm-4.6   # 客户端请求 fast 时按 glm-4.6 走；同名再写一次就是改目标
+switchboard model alias ls                 # 别名 / 目标 / 状态 / 解析
+switchboard model alias ls fast            # 只看一条
+switchboard model alias unset fast
+```
+
+别名只影响请求方向：响应不重写，里面的模型名仍是上游的真实名字。客户端请求别名时，请求记录里的请求模型名与使用模型名会不同，`log tail` 的模型列打的是客户端请求的那个名字，一次别名命中一眼可见。别名精确匹配、区分大小写，可以指向另一个别名，链最长 8 跳；名字已经被某个账号或模型目录当成真实模型时写入会被拒绝，否则别名会遮蔽真名。目标眼下没有账号提供也能先写，之后加账号即生效；`model alias ls` 的解析列写的是链走到的真实名字，链断了（成环、超过 8 跳）时显示成不可解析并给出原因。
+
+模型单价也挂在模型目录上，不在账号上：同一家上游的同一个模型只有一份标价，否则改一次价要改 N 个账号，`usage` 还会给同一件事算出 N 个单价。管理员先用 `model price set` 定厂商级标价，套餐真的不同时才对某个账号加一份覆盖价：
+
+```bash
+switchboard model price set glm-4.6 --in 0.6 --out 2.2           # 厂商级标价，模型名只在一家目录里时不用 --provider
+switchboard model price set glm-4.6 --in 0.6 --out 2.2 --provider bigmodel  # 同名模型出现在多家时用 --provider 指定
+switchboard model price set glm-4.6 --account ds --out 2.5       # 只给这个账号的覆盖价，不影响别的账号
+switchboard model price ls                                       # 模型 / 供应商 / 输入价 / 输出价 / 缓存读 / 缓存写
+switchboard model price ls glm-4.6 --account ds                  # 目录价与这个账号的有效价并排
+switchboard model price unset glm-4.6 cache-read                 # 清掉某一项；清第二次不报错，只说「本来就没有」
+```
+
+价格单位是每百万 token，0 合法（免费或打包），负数是用法错误。只写命令行上给过的那几项，没给的留空表示继承：账号级的「留空」就是回到厂商级标价（`model price unset` 同理，账号级清掉不是「免费」），缓存读写没定价时按输入价算（`model price ls` 的缓存那格写「回退输入价」）。`account add` 与 `account set` 因此不再收 `--price-*`：误敲会得到一个指向 `model price set` 的用法错误。
+
 ## 决策请求：switchboard decide
 
 systemone 是第五条线协议，不是对话：一条请求由一个 `state` 加一组带名字的问题组成，回的是每个问题的答案与概率（是非题给概率，选择题与打分题给置信度），不产文本。这类模型的入站与出站都是 `POST /v1/systemone`，只与自己互通，也不参与跨协议转换，所以发对话的 `call` 对它一律拒绝（退出码 1，文案指向 `decide`）。厂商一侧多了一条 `--systemone` 路由：
@@ -217,11 +243,13 @@ make docs         # 本地预览，127.0.0.1:3000，改文件自动刷新
 make docs-build   # 生产构建，顺带跑一次类型检查
 ```
 
-站点用 Fumadocs（Next.js）渲染，代码在 `docs-site/`，页面手写在 `docs-site/content/docs/`。内容面向使用者：安装、快速开始、厂商与路由、账号、模型、网关与协议、客户端接入、用量与日志、命令行约定、常见问题。
+站点用 Fumadocs（Next.js）渲染，代码在 `docs-site/`。内容可以放在仓库里，也可以单独成仓：构建前 `docs-site/scripts/fetch-content.mjs` 按 `DOCS_CONTENT_DIR` 或 `DOCS_CONTENT_REPO` 把内容同步进 `docs-site/content/docs`，两个变量都不设时沿用现有目录。内容面向使用者：安装、快速开始、厂商与路由、账号、模型、网关与协议、客户端接入、用量与日志、命令行参考、常见问题。
 
 `DESIGN.md`、`LESSONS.md` 与 `lessons/` 是仓库内部的开发文档，不进站点。
 
 需要 Node.js 与 npm，首次 `make docs` 会装依赖。`make check` 不包含文档站，Go 工具链仍可单独跑通。
+
+部署方式（Docker 镜像、systemd、反向代理）与内容分仓的环境变量、更新触发方式见 [`docs-site/README.md`](docs-site/README.md)。
 
 ## 数据在哪
 
@@ -235,4 +263,4 @@ make docs-build   # 生产构建，顺带跑一次类型检查
 
 ## 已知边界
 
-gemini 的入站与出站都支持非流式与流式，模型列表可同步（`google-gemini` 内置，`GET /v1beta/models` 的清单按 `supportedGenerationMethods` 只留 `generateContent`、名字去掉 `models/` 前缀、按 `nextPageToken` 翻页）。gemini 的模型名在 URL 路径里，路由的 `path` 因此可以写 `{model}` 占位符（相对路径与整条地址都行，替换时按路径段转义）；入站 gemini 的错误体是 google 的形状（`error.code` 是 HTTP 状态码、`error.status` 是状态名），四条入站路径各自的形状见 DESIGN 5.2；非正常的 `finishReason`（`SAFETY` 一类）按正常结束转给客户端，原值只进网关日志；gemini 的内置工具（`googleSearch` 等）与思考内容（`thought` 标记、`thinkingConfig`）不搬。转换时搬运文本、图片、思考内容、工具调用与工具结果五类块：思考内容只在响应方向搬运，请求方向不回填——chat 的 `reasoning_content` 与 responses 的 `reasoning` item 是上游自己产生的字段，回填给推理模型会被以 400 拒掉整条请求；响应方向仍照旧搬运。签名只有 anthropic 有落点，没有签名的思考块不写进 anthropic 的请求与响应（不伪造签名，伪造会被上游以 400 拒绝），所以 chat 与 responses 的思考内容转到 anthropic 时丢弃；流式转换下发给 anthropic 客户端的思考块没有签名，客户端若把这些块回填进下一轮请求，上游会报 400。工具结果之后紧跟的追问并进同一条 user 消息，因为 anthropic 不接受两条相邻的 user 消息。思考配置参数（anthropic 的 `thinking`、chat 的 `reasoning_effort`）、`redacted_thinking` 的不透明 `data` 与 responses 的 `encrypted_content` 跨协议不搬，reasoning token 不单独记账（算进输出 token）。音频与文件类内容丢弃；anthropic 的服务端内置工具（`web_search` 等）跨协议时整条丢弃，chat 与 responses 的工具定义只认 function，编回 anthropic 时才原样保留 `type`；`tools[].strict` 不搬运，`is_error` 只有 anthropic 有落点，`allowed_tools` 降级为 `auto`。流式转换下断在工具参数中间时，已下发的参数片段撤不回来，收尾的错误帧会写明「工具调用参数在上游中断，内容不完整」，这一次记失败，程序不伪造闭合的 JSON。跨协议只搬运图片地址，没有其它多模态变换。不改写任何客户端配置文件；需要非标准请求头的上游通过 `provider header` 声明（见 DESIGN 5.10），例如 opencode 的 Go 端点要求 `x-opencode-session`，声明 `{session}` 即可路由，要求按请求计算的签名的上游仍然接不了；冷却时长按单次失败计算；探活调用不计入用量汇总；估算花费需要给账号填 `--price-in` 与 `--price-out`，缓存读写按 `--price-cache-read` 与 `--price-cache-write` 折价（未填时回退到输入价，单价单位都是每百万 token）；`usage` 与 `log tail` 里仍分别显示缓存读写的 token。
+gemini 的入站与出站都支持非流式与流式，模型列表可同步（`google-gemini` 内置，`GET /v1beta/models` 的清单按 `supportedGenerationMethods` 只留 `generateContent`、名字去掉 `models/` 前缀、按 `nextPageToken` 翻页）。gemini 的模型名在 URL 路径里，路由的 `path` 因此可以写 `{model}` 占位符（相对路径与整条地址都行，替换时按路径段转义）；入站 gemini 的错误体是 google 的形状（`error.code` 是 HTTP 状态码、`error.status` 是状态名），四条入站路径各自的形状见 DESIGN 5.2；非正常的 `finishReason`（`SAFETY` 一类）按正常结束转给客户端，原值只进网关日志；gemini 的内置工具（`googleSearch` 等）与思考内容（`thought` 标记、`thinkingConfig`）不搬。转换时搬运文本、图片、思考内容、工具调用与工具结果五类块：思考内容只在响应方向搬运，请求方向不回填——chat 的 `reasoning_content` 与 responses 的 `reasoning` item 是上游自己产生的字段，回填给推理模型会被以 400 拒掉整条请求；响应方向仍照旧搬运。签名只有 anthropic 有落点，没有签名的思考块不写进 anthropic 的请求与响应（不伪造签名，伪造会被上游以 400 拒绝），所以 chat 与 responses 的思考内容转到 anthropic 时丢弃；流式转换下发给 anthropic 客户端的思考块没有签名，客户端若把这些块回填进下一轮请求，上游会报 400。工具结果之后紧跟的追问并进同一条 user 消息，因为 anthropic 不接受两条相邻的 user 消息。思考配置参数（anthropic 的 `thinking`、chat 的 `reasoning_effort`）、`redacted_thinking` 的不透明 `data` 与 responses 的 `encrypted_content` 跨协议不搬，reasoning token 不单独记账（算进输出 token）。音频与文件类内容丢弃；anthropic 的服务端内置工具（`web_search` 等）跨协议时整条丢弃，chat 与 responses 的工具定义只认 function，编回 anthropic 时才原样保留 `type`；`tools[].strict` 不搬运，`is_error` 只有 anthropic 有落点，`allowed_tools` 降级为 `auto`。流式转换下断在工具参数中间时，已下发的参数片段撤不回来，收尾的错误帧会写明「工具调用参数在上游中断，内容不完整」，这一次记失败，程序不伪造闭合的 JSON。跨协议只搬运图片地址，没有其它多模态变换。不改写任何客户端配置文件；需要非标准请求头的上游通过 `provider header` 声明（见 DESIGN 5.10），例如 opencode 的 Go 端点要求 `x-opencode-session`，声明 `{session}` 即可路由，要求按请求计算的签名的上游仍然接不了；冷却时长按单次失败计算；探活调用不计入用量汇总；估算花费需要给模型定价（`model price set` 的 `--in` 与 `--out`，账号只在套餐不同时用 `--account` 覆盖），缓存读写按 `--cache-read` 与 `--cache-write` 折价（未填时回退到输入价，单价单位都是每百万 token）；`usage` 与 `log tail` 里仍分别显示缓存读写的 token。

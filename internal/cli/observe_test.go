@@ -33,11 +33,15 @@ func accountID(t *testing.T, name string) int64 {
 	return acc.ID
 }
 
-// addPricedAccount 加一个带价格的账号，用来断言估算花费的具体金额。
+// addPricedAccount 加一个账号并给它的模型定好价，用来断言估算花费的具体金额。
+// 单价在模型目录上（见 DESIGN 5.13），所以定价是第二步 model price set，不再走 account add。
 func addPricedAccount(t *testing.T, name, priceIn, priceOut string) {
 	t.Helper()
-	if code, _, stderr := addAccount(t, name, "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-1", "--models", "m1", "--price-in", priceIn, "--price-out", priceOut); code != 0 {
+	if code, _, stderr := addAccount(t, name, "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-1", "--models", "m1"); code != 0 {
 		t.Fatalf("account add %s 退出码 = %d，stderr = %s", name, code, stderr)
+	}
+	if code, _, stderr := run(t, "model", "price", "set", "m1", "--provider", "mine", "--in", priceIn, "--out", priceOut); code != 0 {
+		t.Fatalf("model price set 退出码 = %d，stderr = %s", code, stderr)
 	}
 }
 
@@ -309,8 +313,12 @@ func TestUsageCacheHintOnlyWithCacheTokens(t *testing.T) {
 func TestUsageCostCountsCacheTokens(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
-	if code, _, stderr := addAccount(t, "ds1", "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-1", "--models", "m1", "--price-in", "2", "--price-out", "4", "--price-cache-read", "0.5", "--price-cache-write", "3"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-1", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := run(t, "model", "price", "set", "m1", "--provider", "mine",
+		"--in", "2", "--out", "4", "--cache-read", "0.5", "--cache-write", "3"); code != 0 {
+		t.Fatalf("model price set 退出码 = %d，stderr = %s", code, stderr)
 	}
 	id := accountID(t, "ds1")
 

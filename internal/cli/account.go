@@ -106,21 +106,32 @@ func cmdAccountSetEnabled(e *Env, args []string, sub string, enabled bool) error
 }
 
 // accountSetUsage 是 account set 的用法行，用法错误与账号不存在时都打出来。
-const accountSetUsage = "用法：switchboard account set <名称> [--key <key>] [--price-in N] [--price-out N] [--price-cache-read N] [--price-cache-write N]\n" +
+const accountSetUsage = "用法：switchboard account set <名称> [--key <key>]\n" +
 	"--key 三种给法：直接写值、写 - 从标准输入读、留空读环境变量 SWITCHBOARD_KEY\n" +
-	"--price-* 只改传入的那几项，其余列保持不动；只改价格时不必给 --key"
+	"价格不在账号上：模型单价属于「供应商 × 模型」，改价用 switchboard model price set <模型> --in N --out N"
 
-// cmdAccountSet 改一个已有账号的凭据与价格，不删号重建：删了会丢掉探活结果、协议发现与请求记录归属。
+// retiredAccountPriceFlags 是从 account add 与 account set 上删掉的四个价格参数（见 DESIGN 4、5.13）。
+// 单价搬到模型目录之后账号不再是价格的落点：同一家上游的同一个模型只该有一份标价，
+// 账号只在套餐不同时覆盖。误敲这四个参数仍是用法错误（退出码 2），文案说清它去了哪、下一步跑什么。
+const retiredAccountPriceHint = "模型单价已经只存在模型目录上：同一家上游的同一个模型只该有一份标价，账号不再是价格的落点；改价用 switchboard model price set <模型> --in N --out N，套餐不同时才对某个账号加 --account 覆盖"
+
+var retiredAccountPriceFlags = map[string]string{
+	"--price-in":          retiredAccountPriceHint,
+	"--price-out":         retiredAccountPriceHint,
+	"--price-cache-read":  retiredAccountPriceHint,
+	"--price-cache-write": retiredAccountPriceHint,
+}
+
+// cmdAccountSet 换掉一个已有账号的凭据，不删号重建：删了会丢掉探活结果、协议发现与请求记录归属。
 // 换 key 之后旧凭据的结论作废，同一个事务里清掉冷却、最近错误与连续失败次数并重新启用账号（见 DESIGN 4、5.6）。
-// 价格改动走 store.SetAccountPrices，只写传入的那几列：换凭据会清冷却，改价格不能顺手抹掉账号状态。
-// `account_models` 里的可达性、覆盖值与协议发现结果一个字不动，也不碰厂商表。
+// 价格不在这条命令上：单价属于「供应商 × 模型」，改价走 model price set（见 DESIGN 5.13）。
+// `account_models` 里的可达性、覆盖值与协议发现结果一个字不动，也不碰厂商表与模型目录。
 func cmdAccountSet(e *Env, args []string) error {
-	fs := newFlagSet(e, "account set", "换掉账号的凭据或改价格，换凭据时冷却与失败计数随之清零并重新启用")
+	if err := rejectRetiredFlags(args, retiredAccountPriceFlags, accountSetUsage); err != nil {
+		return err
+	}
+	fs := newFlagSet(e, "account set", "换掉账号的凭据，冷却与失败计数随之清零并重新启用")
 	key := fs.String("key", "", "新的上游 API key；给 - 从标准输入读，留空则读环境变量 SWITCHBOARD_KEY")
-	priceIn := fs.Float64("price-in", 0, "输入价，每百万 token")
-	priceOut := fs.Float64("price-out", 0, "输出价，每百万 token")
-	priceCacheRead := fs.Float64("price-cache-read", 0, "缓存读价，每百万 token，留空回退到输入价")
-	priceCacheWrite := fs.Float64("price-cache-write", 0, "缓存写价，每百万 token，留空回退到输入价")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -128,21 +139,12 @@ func cmdAccountSet(e *Env, args []string) error {
 		return usagef("%s", accountSetUsage)
 	}
 	name := fs.Arg(0)
-	if err := checkPrices(accountSetUsage, knownPriceFlags(fs, priceIn, priceOut, priceCacheRead, priceCacheWrite)...); err != nil {
-		return err
-	}
 
-	// 给了价格参数就可以不换凭据：改价格与换 key 是两件事，只改价的调用不该顺带换一个凭据。
-	// 没给价格参数时仍是原来的行为：必须能解析出凭据，否则是用法错误。
-	rotate := flagWasSet(fs, "key") || !anyPriceFlagSet(fs)
-	var keyValue string
-	if rotate {
-		// 三种给法与 account add 完全一致，共用 resolveKey：两处判定不一致时，换 key 会突然多出一个坑。
-		v, err := resolveKey(*key, "switchboard account set "+name+" --key - < key.txt", accountSetUsage)
-		if err != nil {
-			return err
-		}
-		keyValue = v
+	// 换凭据是这条子命令唯一的作用，因此在动库之前就要能解析出凭据。
+	// 三种给法与 account add 完全一致，共用 resolveKey：两处判定不一致时，换 key 会突然多出一个坑。
+	keyValue, err := resolveKey(*key, "switchboard account set "+name+" --key - < key.txt", accountSetUsage)
+	if err != nil {
+		return err
 	}
 
 	a, err := openApp(e, true)
@@ -157,62 +159,33 @@ func cmdAccountSet(e *Env, args []string) error {
 		return fmt.Errorf("账号 %q 不存在，先运行 switchboard account add %s --provider <厂商> --key <key>\n%s", name, name, accountSetUsage)
 	}
 
-	if rotate {
-		// 与 account add 走同一条加密路径；明文不进日志，也不进 --json 输出（那里只有掩码）。
-		cipher, err := secret.Encrypt(a.key, []byte(keyValue))
-		if err != nil {
-			return err
-		}
-		if err := a.st.RotateKey(acc.ID, cipher); err != nil {
-			return fmt.Errorf("更新 %s 的凭据失败: %w", name, err)
-		}
-	}
-
-	prices := store.AccountPrices{
-		In:         pricePatch(fs, "price-in", priceIn),
-		Out:        pricePatch(fs, "price-out", priceOut),
-		CacheRead:  pricePatch(fs, "price-cache-read", priceCacheRead),
-		CacheWrite: pricePatch(fs, "price-cache-write", priceCacheWrite),
-	}
-	if err := a.st.SetAccountPrices(acc.ID, prices); err != nil {
-		return fmt.Errorf("更新 %s 的价格失败: %w", name, err)
-	}
-	// 写完再读一次：输出与 --json 里报的是库里实际的价，而不是命令行上期望的值。
-	if acc, err = a.st.GetAccount(name); err != nil {
+	// 与 account add 走同一条加密路径；明文不进日志，也不进 --json 输出（那里只有掩码）。
+	cipher, err := secret.Encrypt(a.key, []byte(keyValue))
+	if err != nil {
 		return err
+	}
+	if err := a.st.RotateKey(acc.ID, cipher); err != nil {
+		return fmt.Errorf("更新 %s 的凭据失败: %w", name, err)
 	}
 
 	if e.JSON {
-		out := map[string]any{
-			"name":              name,
-			"key_rotated":       rotate,
-			"price_in":          acc.PriceIn,
-			"price_out":         acc.PriceOut,
-			"price_cache_read":  acc.PriceCacheRead,
-			"price_cache_write": acc.PriceCacheWrite,
-		}
-		if rotate {
-			// 换凭据顺带清零的那几项只在真的换了凭据时为 true，只改价格时它们没有发生。
-			out["key"] = secret.Mask(keyValue)
-			out["cooldown_cleared"] = true
-			out["fail_streak_cleared"] = true
-			out["enabled"] = true
-		}
-		return e.printJSON(out)
+		return e.printJSON(map[string]any{
+			"name":                name,
+			"key_rotated":         true,
+			"key":                 secret.Mask(keyValue),
+			"cooldown_cleared":    true,
+			"fail_streak_cleared": true,
+			"enabled":             true,
+		})
 	}
-	if rotate {
-		fmt.Fprintf(e.Stdout, "已更新 %s 的凭据（%s）；冷却与失败计数已清零，账号已启用\n", name, secret.Mask(keyValue))
-	}
-	if anyPriceFlagSet(fs) {
-		fmt.Fprintf(e.Stdout, "已更新 %s 的价格（每百万 token）：输入 %s、输出 %s、缓存读 %s、缓存写 %s\n",
-			name, priceText(acc.PriceIn), priceText(acc.PriceOut),
-			cachePriceText(acc.PriceCacheRead), cachePriceText(acc.PriceCacheWrite))
-	}
+	// 厂商是厂商行派生的只读值（见 DESIGN 5.8），确认行里带上它才知道换的是哪个上游的凭据。
+	fmt.Fprintf(e.Stdout, "已更新 %s（%s）的凭据（%s）；冷却与失败计数已清零，账号已启用\n",
+		name, dashIfEmpty(acc.Provider), secret.Mask(keyValue))
 	return nil
 }
 
 // accountAddUsage 是 account add 的用法行，用法错误与厂商不在表里时都打出来。
-const accountAddUsage = "用法：switchboard account add <名称> --provider <厂商> --key <key> [--models <模型>] [--priority N] [--price-in N] [--price-out N] [--price-cache-read N] [--price-cache-write N]\n" +
+const accountAddUsage = "用法：switchboard account add <名称> --provider <厂商> --key <key> [--models <模型>] [--priority N]\n" +
 	"地址与默认协议不落在账号上：先 switchboard provider add <厂商> --base-url <地址> --openai /v1/chat/completions 登记厂商，再建账号\n" +
 	"--models 手填的名字写进模型目录（不带长度与价格），并把这个账号标成可用；留空则等 model sync 与 model probe"
 
@@ -243,15 +216,14 @@ func cmdAccountAdd(e *Env, args []string) error {
 	if err := rejectRetiredFlags(args, retiredAccountAddFlags, accountAddUsage); err != nil {
 		return err
 	}
+	if err := rejectRetiredFlags(args, retiredAccountPriceFlags, accountAddUsage); err != nil {
+		return err
+	}
 	fs := newFlagSet(e, "account add", "新增一个上游账号")
 	provider := fs.String("provider", "", "上游厂商标识，地址与默认协议都从这家厂商读，如 deepseek")
 	key := fs.String("key", "", "上游 API key；给 - 从标准输入读，留空则读环境变量 SWITCHBOARD_KEY")
 	name := fs.String("name", "", "账号名称，也可以用位置参数给出")
 	models := fs.String("models", "", "该账号可用的模型，逗号分隔：名字进模型目录，账号侧记一条可用")
-	priceIn := fs.Float64("price-in", 0, "输入价，每百万 token")
-	priceOut := fs.Float64("price-out", 0, "输出价，每百万 token")
-	priceCacheRead := fs.Float64("price-cache-read", 0, "缓存读价，每百万 token，留空回退到 --price-in")
-	priceCacheWrite := fs.Float64("price-cache-write", 0, "缓存写价，每百万 token，留空回退到 --price-in")
 	priority := fs.Int("priority", 100, "同模型多个账号时的优先级，小的先试")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -263,9 +235,6 @@ func cmdAccountAdd(e *Env, args []string) error {
 	}
 	if accountName == "" {
 		return usagef("%s", accountAddUsage)
-	}
-	if err := checkPrices(accountAddUsage, knownPriceFlags(fs, priceIn, priceOut, priceCacheRead, priceCacheWrite)...); err != nil {
-		return err
 	}
 	if *provider == "" {
 		return usagef("--provider 必填，例如 --provider deepseek\n%s", accountAddUsage)
@@ -308,11 +277,7 @@ func cmdAccountAdd(e *Env, args []string) error {
 		Models:    splitModels(*models),
 		Priority:  *priority,
 		Enabled:   true,
-		// 价格只写命令行上真的给过的那几项：没给就留空，花费记为 null，不猜价格（见 DESIGN 5.5）。
-		PriceIn:         pricePatch(fs, "price-in", priceIn),
-		PriceOut:        pricePatch(fs, "price-out", priceOut),
-		PriceCacheRead:  pricePatch(fs, "price-cache-read", priceCacheRead),
-		PriceCacheWrite: pricePatch(fs, "price-cache-write", priceCacheWrite),
+		// 价格不在这里：单价属于「供应商 × 模型」，写入口是 model price set（见 DESIGN 5.13）。
 	}
 	if err := a.st.CreateAccount(&acc); err != nil {
 		return fmt.Errorf("新增账号失败: %w", err)
@@ -693,16 +658,17 @@ var modelSubs = []groupItem{
 	{"sync", "从上游拉取模型列表，名字进模型目录并把这个账号标成可用"},
 	{"probe", "逐个模型探活（对话模型发一条 max_tokens=1 的请求，决策模型发一条最小决策请求），把可达性写进账号"},
 	{"alias", "维护模型别名：客户端写死的模型名指到真实模型名上（set / unset / ls）"},
+	{"price", "模型单价：目录里的厂商级标价与某账号的覆盖价（set / unset / ls）"},
 }
 
 // cmdModel 是 model 这一组子命令的入口。
 func cmdModel(e *Env, args []string) error {
 	if isHelpRequest(args) {
-		printGroupHelp(e.Stdout, "model", "模型同步、探活与别名", modelSubs)
+		printGroupHelp(e.Stdout, "model", "模型同步、探活、别名与单价", modelSubs)
 		return nil
 	}
 	if len(args) == 0 {
-		return usagef("需要子命令：ls | sync | probe | alias\n用 switchboard model --help 查看子命令")
+		return usagef("需要子命令：ls | sync | probe | alias | price\n用 switchboard model --help 查看子命令")
 	}
 	switch args[0] {
 	case "ls":
@@ -713,8 +679,10 @@ func cmdModel(e *Env, args []string) error {
 		return cmdModelProbe(e, args[1:])
 	case "alias":
 		return cmdModelAlias(e, args[1:])
+	case "price":
+		return cmdModelPrice(e, args[1:])
 	default:
-		return usagef("未知子命令 %q，可用：ls | sync | probe | alias\n用 switchboard model --help 查看子命令", args[0])
+		return usagef("未知子命令 %q，可用：ls | sync | probe | alias | price\n用 switchboard model --help 查看子命令", args[0])
 	}
 }
 
@@ -811,11 +779,11 @@ func cmdModelLs(e *Env, args []string) error {
 			ent, ok := byModel[r.Model]
 			if !ok {
 				ent = &entry{
-					model:    r.Model,
-					priceIn:  acc.PriceIn,
-					priceOut: acc.PriceOut,
-					// 目录元数据取第一个给出这个模型的账号：同一个模型在多个账号上取值不同
-					// 只可能来自账号侧的覆盖值，那一列今天还没有写入命令（见 DESIGN 5.13）。
+					model: r.Model,
+					// 价格列读合并之后的单价（账号覆盖 → 厂商级标价，见 DESIGN 5.13）：
+					// 单价不在 accounts 上，账号的 PriceIn 只是历史遗留，不再是这一列的来源。
+					priceIn:       info.PriceIn,
+					priceOut:      info.PriceOut,
 					contextWindow: info.ContextWindow,
 					maxOutput:     info.MaxOutput,
 					protocols:     cat[r.Model].Protocols,
@@ -1450,80 +1418,9 @@ func selectAccounts(st *store.Store, provider, name string) ([]store.Account, er
 
 func priceText(v *float64) string {
 	if v == nil {
-		return "?"
+		return "-"
 	}
 	return fmt.Sprintf("%.2f", *v)
-}
-
-// cachePriceText 是缓存单价的展示：未填时不是一个数，而是「回退输入价」这个实际行为，
-// 写成 0.00 会让人以为缓存读不花钱（见 DESIGN 5.5 的公式）。
-func cachePriceText(v *float64) string {
-	if v == nil {
-		return "回退输入价"
-	}
-	return fmt.Sprintf("%.2f", *v)
-}
-
-// 价格参数的四个名字。校验、拼库与输出都读这一份，名字写错时不会静默少改一列。
-const (
-	priceFlagIn         = "price-in"
-	priceFlagOut        = "price-out"
-	priceFlagCacheRead  = "price-cache-read"
-	priceFlagCacheWrite = "price-cache-write"
-)
-
-// priceFlags 是一组价格参数的取值：name 用于错误文案，value 是解析出来的数。
-type priceFlag struct {
-	name  string
-	value float64
-}
-
-// knownPriceFlags 收集命令行上真的给过的价格参数，供 checkPrices 校验。
-// 没给的不进列表：没给就是「不写库」，不该因为默认值 0 而被当成「填了 0 元」。
-func knownPriceFlags(fs *flagSet, in, out, cacheRead, cacheWrite *float64) []priceFlag {
-	all := []priceFlag{
-		{priceFlagIn, *in},
-		{priceFlagOut, *out},
-		{priceFlagCacheRead, *cacheRead},
-		{priceFlagCacheWrite, *cacheWrite},
-	}
-	given := make([]priceFlag, 0, len(all))
-	for _, p := range all {
-		if flagWasSet(fs, p.name) {
-			given = append(given, p)
-		}
-	}
-	return given
-}
-
-// checkPrices 拒绝负价格：单价是「每百万 token 多少钱」，负数是用法错误，不是折扣。
-// 0 是合法值（本地模型就是免费），因此只查 < 0。
-func checkPrices(usageLine string, flags ...priceFlag) error {
-	for _, p := range flags {
-		if p.value < 0 {
-			return usagef("--%s 不能是负数（单位是每百万 token 的价格），现在是 %v\n%s", p.name, p.value, usageLine)
-		}
-	}
-	return nil
-}
-
-// anyPriceFlagSet 报告这次调用里有没有价格参数：account set 靠它决定要不要要求 --key。
-func anyPriceFlagSet(fs *flagSet) bool {
-	for _, name := range []string{priceFlagIn, priceFlagOut, priceFlagCacheRead, priceFlagCacheWrite} {
-		if flagWasSet(fs, name) {
-			return true
-		}
-	}
-	return false
-}
-
-// pricePatch 是只给过的那一项变成的写入值：nil 表示不动这一列（store.SetAccountPrices 的增量语义）。
-func pricePatch(fs *flagSet, name string, v *float64) *float64 {
-	if !flagWasSet(fs, name) {
-		return nil
-	}
-	value := *v
-	return &value
 }
 
 func splitModels(s string) []string {
