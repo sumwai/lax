@@ -192,10 +192,13 @@ func resolveAliasChain(targets map[string]string, name string) (string, bool, er
 }
 
 // aliasShadowingAccountsTx 在事务里找出把 alias 声明成真实模型名的账号，按名称升序。
-// 比的是 accounts.models 解析出来的名字集合，区分大小写的精确匹配（DESIGN 5.12）：
+// 比的是该账号 access='allowed' 的模型名集合——迁移 0015 之后它就是「这个账号声明了哪些
+// 真实模型名」的那份清单（原来是 accounts.models 那一列 JSON），区分大小写的精确匹配（DESIGN 5.12）：
 // 名字发给上游时不会做大小写归一，`GLM-4.6` 与 `glm-4.6` 在上游看来是两个名字。
 func aliasShadowingAccountsTx(tx *sql.Tx, alias string) ([]string, error) {
-	rows, err := tx.Query(`SELECT name, models FROM accounts ORDER BY name`)
+	rows, err := tx.Query(`SELECT DISTINCT a.name FROM accounts a
+		JOIN account_models m ON m.account_id = a.id
+		WHERE m.access = ? AND m.model = ? ORDER BY a.name`, AccessAllowed, alias)
 	if err != nil {
 		return nil, err
 	}
@@ -203,16 +206,11 @@ func aliasShadowingAccountsTx(tx *sql.Tx, alias string) ([]string, error) {
 
 	var hits []string
 	for rows.Next() {
-		var name, models string
-		if err := rows.Scan(&name, &models); err != nil {
+		var name string
+		if err := rows.Scan(&name); err != nil {
 			return nil, err
 		}
-		for _, m := range decodeModels(models) {
-			if m == alias {
-				hits = append(hits, name)
-				break
-			}
-		}
+		hits = append(hits, name)
 	}
 	return hits, rows.Err()
 }

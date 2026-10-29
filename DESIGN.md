@@ -740,7 +740,28 @@ gemini 的原生接口（Generative Language API 的 `generateContent`）与另�
 - 目录是**同厂商所有账号的并集**：同一厂商不同账号能看到的模型可以不同（实测 bigmodel 的清单里有 `glm-4.6-air`，某个 key 无权访问），差异由 `account_models.access` 表达，不靠各自复制一份目录。
 - `/v1/models` 只列 `access='allowed'` 的行（另见 5.12 的别名）：客户端不该看到自己用不了的名字。
 - 元数据目前只存不用：上下文长度、能力位还没有消费者，等做「按能力过滤/超长提示」时再接，先不为了有消费者而临时定规则。
-- 迁移 `0015`：把现有 `account_models` 的每一行搬进 `provider_models`（`source='probe'`，只填在表里的字段），`status` 映射成 `access`（`usable`→`allowed`，`forbidden`→`forbidden`，`notfound`→`missing`，其余→`error`）；`accounts.models` 里出现但 `account_models` 没有的名字补一行 `source='manual'` 与 `access='allowed'`；最后删掉 `accounts.models`。
+
+目录的写入口只有 `store.UpsertProviderModels(厂商, 行)`，按 `(provider, model)` upsert，一批行在同一个事务里写：
+
+- **来源不降级**：`manual` 压过 `sync` 与 `probe`，`sync` 压过 `probe`。传来来源的等级低于库里那一行时整行不写——不只是 `source` 那一列不写，长度、价格也不写，否则一次同步能把用户手填的元数据改回上游那份；等级够时 `source` 落成传来的值，同等级重复写等于刷新这一行。等级判定只有一份，在 `UpsertProviderModels` 的 SQL 里。
+- 其余列只写非零/非空的那几个：传 nil 的长度与价格、空的协议与能力位都表示「这一项不知道」，保留库里已有的值。一条只带名字的清单因此不会把探活补上的元数据抹掉。
+- `updated_at` 每次写都刷新成当前秒；迁移回填的行是 0，旧表没有时间可用。
+
+`ReplaceModels(账号, 名字)` 是 `model sync` 的写入口，语义是「把这些名字标 `allowed`，其余不动」：
+
+- 只做加法：不删行、不改已有行的可达性、也不动 `http_status`、`error`、`checked_at` 与 `protocol`。旧语义里的「上游清单里消失的行删除」随 `accounts.models` 一起没了——可达性只由探活结论改动，一次少给了几个名字不等于这些模型不可用。
+- 目录里没有的名字补一行 `source='manual'`：手填清单与上游清单都只说明「这个名字存在」，不提供长度与价格，不该冒充 `sync` 那份元数据。
+- 空清单等于「这次没有新名字」，不删任何行。账号不存在时读不到它的厂商，写不了目录，报错而不是只写可达性。
+- `account add --models` 是同一个形状的一次性版本：名字落成 `source='manual'` 的目录行与该账号 `access='allowed'` 的可达性行，与账号本身一个事务。
+
+`store.EffectiveModels(账号)` 是合并之后的读入口，一次算出每个模型行的可达性与有效元数据：
+
+- 返回该账号的全部模型行，不按可达性过滤：调用方自己看 `Access`（`/v1/models` 只列 `allowed`）。
+- 长度与价格按「账号覆盖 → 目录」取值，覆盖值是 NULL 就继承目录；两边都没有就是空，不拿 0 冒充。
+- 有效协议在这一处定序：账号覆盖非空就用它；否则看目录里这个模型支持的协议集合，厂商的有效默认协议在集合里就用它，不在就按 `openai-chat` → `openai-responses` → `anthropic` → `gemini` 取第一个，再没有就取集合里字典序最小的那个；集合为空才回退到厂商的有效默认协议。集合不按库里的行序解释，同一份数据多跑几次结论一致。
+- 单模型的 `store.EffectiveProtocol(账号, 模型)` 走同一条规则，转发与展示用它。
+
+迁移 `0015`：`account_models` 的每一行按账号的 `provider` 搬进 `provider_models`（`source='probe'`，`protocol` 列落到 `protocols`，其余列留空、`updated_at` 为 0；同一厂商的多个账号各探到不同协议时取非空的那个，结果与行序无关），`status` 映射成 `access`（`usable`→`allowed`，`forbidden`→`forbidden`，`notfound`→`missing`，其余→`error`：`synced` 与 `auth` 在旧库里本来就不是选号依据）；`accounts.models` 里出现但 `account_models` 没有的名字补一行 `source='manual'` 与 `access='allowed'`，已有的行一个字段都不动；最后删掉 `accounts.models`。五步在同一个事务里，`json_valid` 挡住历史脏值——一条坏 JSON 不该让整次升级失败。
 
 ## 6 数据模型
 
@@ -848,7 +869,11 @@ CREATE TABLE model_aliases (
 );
 ```
 
-`account_models` 由迁移 `0003` 建立，`status` 取值就是 `synced`、`usable`、`forbidden`、`notfound`、`auth`、`error`（见 5.7）。`accounts.fail_streak` 由迁移 `0004` 加入，只用于冷却翻倍，写入口只有 `RecordFailure`（加一）、`ClearFailure`（清零）与 `RotateKey`（换凭据时清零，见 5.6）。`accounts.models` 仍是选号实际读的那份列表。删除账号时 `DeleteAccount` 在同一个事务里删掉它的 `account_models` 行：SQLite 的 rowid 会被复用，遗留子行会让新账号继承旧账号的探活状态。
+`account_models` 由迁移 `0003` 建立，迁移 `0015` 把它改成上表的形状：`status` 那一列换成了 `access`（取值 `allowed`、`forbidden`、`missing`、`error`，见 5.13），并加上账号侧的覆盖值列。`accounts.fail_streak` 由迁移 `0004` 加入，只用于冷却翻倍，写入口只有 `RecordFailure`（加一）、`ClearFailure`（清零）与 `RotateKey`（换凭据时清零，见 5.6）。删除账号时 `DeleteAccount` 在同一个事务里删掉它的 `account_models` 行：SQLite 的 rowid 会被复用，遗留子行会让新账号继承旧账号的探活状态。目录 `provider_models` 是按厂商共享的，删账号不动它：另一个账号可能还在用同一批模型事实。
+
+三个写入口各管一行的一部分，谁都不顺手改别人的列：`SetAccountModelAccess` 写 `access`、`http_status`、`error`、`checked_at`（探活结论，时间是调用方给的）；`SetAccountModelProtocol` 只写 `protocol`；`SetAccountModelOverride` 整体写六个覆盖值列，nil 就是 NULL（继承目录），不是「不动」。后两个在模型行还不存在时先落一行 `allowed` 占位：能测出协议、能给这个模型写覆盖值，就说明这个账号要用它。`ReplaceModels` 只把名字标成 `allowed`，不碰这三组列（见 5.13）。
+
+旧的状态词表（`synced`、`usable`、`forbidden`、`notfound`、`auth`、`error`）库里已经不再存，只在 `store` 里留了一层过渡视图：`store.ModelUsable` 一类的常量、`AccountModel.Status` 与写入口 `SetModelStatus` 还在，读出来的 `Status` 由 `access` 与 `checked_at` 反推（`allowed` 且探过是 `usable`、没探过是 `synced`），写进去的旧词表由 `accessFromStatus` 映射回来。`auth` 与新词表没有对应，两个方向都落到 `error`。这层只为尚未改完的 `internal/gateway` 与 `internal/cli` 保留，两边改完就删掉。
 
 `accounts.base_url` 与 `accounts.protocol` 由迁移 `0014` 删掉（见 5.8）：地址、默认协议与路由都只留在厂商行上。迁移先给「`provider` 不在 `providers` 表里」的账号补一行厂商——名字取账号的 `provider`，`base_url` 取该账号的地址（同名账号有多个地址时取最小的那个，结果与行序、与重跑都无关），`note` 写「由迁移 0014 从账号地址补建」，`default_protocol` 取账号的 `protocol` 但只认四条线协议（别的值留空，回到固定顺序回退）；已有厂商一律 `INSERT OR IGNORE` 跳过，账号上的历史协议不会覆盖 `0007` 种好的默认协议。删列用的是 `ALTER TABLE … DROP COLUMN`：本仓库依赖的 `modernc.org/sqlite` 内置 SQLite 3.54.1 支持它（自 3.35 起），因此不走「建新表 + 搬数据 + 重建索引 + 改引用」那一套；两列不在任何索引、外键、视图与触发器里，索引不必重建。迁移之后 `Account.BaseURL` 与 `Account.Protocol` 是只读派生值：读账号的 `ListAccounts`、`GetAccount`、`ListAccountsByProvider` 共用 `queryAccounts`，写入的 `CreateAccount` 不再碰这两列。
 
@@ -856,9 +881,9 @@ CREATE TABLE model_aliases (
 
 `requests.reasoning_tokens` 与 `requests.reasoning_tokens_extra` 由迁移 `0012` 加入（见 5.5）。前者是上游上报的思考 token 原值，后者是其中被判成「输出之外的一项」的那部分，只给后者按输出价再计一次；判定只有一处，纯函数 `store.ReasoningExtra`。两列都没给历史行回填：当时上游报了什么已经无从复原，留默认值 0 让升级前后的金额完全一致。anthropic 没有独立的思考字段，它的行这两列都是 0，`out_tokens` 本来就含思考。
 
-`account_models.protocol` 由迁移 `0005` 加入，记录「这个模型该用哪种协议」，取值是 anthropic、openai-chat、openai-responses 与 gemini（见 5.9）。**空字符串表示继承厂商的默认协议**：有效出站协议是「列非空就用列，否则用账号所属厂商的有效默认协议（见 5.8）」，纯规则在 `store.ResolveProtocol(providerProtocol, modelProtocol)`，读库入口是 `store.EffectiveProtocol(accountID, model)`——账号行不再存协议，所以第二个参数就是模型名；行不存在、列为空、厂商行不存在或这家一条路由都没声明时都回退到空串，不报错。转发与展示只读这个有效协议，不在调用方拼规则；`cli` 要显示协议时也只调它。旧的三参数写法 `EffectiveProtocol(accountID, accountProtocol, model)` 还留着作兼容包装（第二个参数是已经无用的账号协议、被忽略），只为 `internal/gateway` 与 `internal/cli` 里尚未改完的调用点继续能编译，两边走的是同一条规则。
+`account_models.protocol` 由迁移 `0005` 加入，记录「这个模型该用哪种协议」，取值是 anthropic、openai-chat、openai-responses 与 gemini（见 5.9）。**空字符串表示没有账号级覆盖**：有效出站协议按「账号覆盖 → 目录里这个模型支持的协议 → 厂商的有效默认协议」算（5.13 给了定序），纯规则在 `store.resolveModelProtocol`（`store.ResolveProtocol(providerProtocol, modelProtocol)` 是它最后两步的旧写法），读库入口是 `store.EffectiveProtocol(accountID, model)`——账号行不再存协议，所以第二个参数就是模型名；行不存在、列为空、厂商行不存在或这家一条路由都没声明时都回退到空串，不报错。转发与展示只读这个有效协议，不在调用方拼规则；`cli` 要显示协议时也只调它。旧的三参数写法 `EffectiveProtocol(accountID, accountProtocol, model)` 还留着作兼容包装（第二个参数是已经无用的账号协议、被忽略），只为 `internal/gateway` 与 `internal/cli` 里尚未改完的调用点继续能编译，两边走的是同一条规则。
 
-这个列只有一个写入口 `SetModelProtocol`，由探活发现协议后调用（见 5.7）。`SetModelStatus` 只改 `status`、`http_status`、`error`、`checked_at`，不动 `protocol`；`ReplaceModels` 的 `ON CONFLICT DO NOTHING` 也只给新行写默认值，同步不会覆盖已发现的协议。旧库升上来时整列默认空串，也就是全部回退到账号协议，行为与 M7 一致。
+这个列只有一个写入口 `SetAccountModelProtocol`（旧名 `SetModelProtocol` 是兼容包装），由探活发现协议后调用（见 5.7）。`SetAccountModelAccess` 只改可达性与探活那几列，不动 `protocol` 与覆盖值；`ReplaceModels` 也不动它，同步不会覆盖已发现的协议。旧库升上来时整列默认空串，也就是全部由目录与厂商默认协议算。
 
 `providers` 与 `provider_routes` 由迁移 `0006` 建立并种入已知厂商，`providers.default_protocol` 由迁移 `0007` 加入并显式种入升级前的默认协议，`providers.models_path` 由迁移 `0008` 加入（老行一律空串，表示不覆盖），行里没有凭据，只有地址与路径。`providers` 一行只提供 `base_url`、备注、默认协议与模型列表覆盖，协议细节全在 `provider_routes` 的 `(厂商, 协议)` 上；两者之间没有外键，所以删厂商行时必须连带删它的路由行，`DeleteProvider` 在一个事务里一起做（`provider rm --force` 走 `DeleteProviderForce`，同一个事务里还要停用指向它的账号，见 5.8）。`providers` 表为空不算错误：种子行可以被用户删光，此时所有账号回退到后缀猜测。账号行不存地址，`Account.BaseURL` 与 `Account.Protocol` 都是读的时候从厂商行派生出来的只读值（见 5.8），改厂商表立刻影响所有引用它的账号。写入口是 `CreateProvider`（`provider add`，名称已存在时报 `ErrProviderExists`，不隐式更新）与 `SetProvider`（`provider set` 与 `provider unset` 的共同入口：patch 里为 nil 的字段不动，`Routes` 里传空串表示删掉那条路由——`provider unset <名称> <协议>` 就是这么调的；命令面上空值仍是用法错误）：两者都在一个事务里写厂商行与路由，`CreateProvider` 至少要一条路由，`SetProvider` 删到一条不剩时报错，另有一个 `AddProvider`（upsert，允许零路由），它是第二条 upsert 入口：`cli` 不走它，生产代码里也没有其它调用者，现在只有 `store` 自己的用例在用；新建与改仍分别走 `CreateProvider`、`SetProvider`。读路由只有 `LookupProviderRoute` 一个入口，转发、模型同步与探活都经过它。
 
@@ -877,7 +902,7 @@ gemini 路由的 `models_path` 必须显式给：写入侧的默认值只推导 
 
 `provider_routes.path` 里的 `{model}` 是出站模型名占位符（见 5.9）：规整只合并斜杠，花括号与冒号原样保留，替换发生在网关拼好地址之后。协议取值的白名单只有一份 `store.IsWireProtocol`（四条线协议），厂商路由、默认协议、账号的 `--protocol` 与探活候选都读它。
 
-`model_aliases` 由迁移 `0013` 建立：`alias` 是主键，`target` 是真实模型名（或另一个别名），`created_at` 是 Unix 秒（覆盖改目标时不动它）。写入口只有两处：`SetModelAlias` 是覆盖语义（同一个别名再写一次就是改目标，UPSERT，不报错），校验全部在事务里做完再落库：别名与目标去空白后不能为空、不能含控制字符、别名不等于目标，别名也不能与任何账号 `accounts.models` 里的真实模型名同名（区分大小写），否则报 `ErrModelAliasShadow` 并列出声明了那个名字的账号（最多三个）；`DeleteModelAlias` 删不到时按情况报 `ErrModelAliasNotFound`。读入口也只有两处：`ModelAliases` 按别名升序返回全表（SQLite 的 TEXT 默认二进制序，也就是区分大小写），`ResolveModelAlias` 把入站名字解析成真实名字——它先把全表一次读出来，再在内存里沿链走，不按跳查库，因此不会出现链走到一半表被改掉、前半段用旧目标后半段用新目标；名字不是别名时返回 `("", false, nil)`，成环报 `ErrModelAliasCycle`、超过 8 跳报 `ErrModelAliasTooDeep`，两种错误都把串起来的名字写进文案。别名与真实名字的冲突只在写入时判定，读取不做二次校验（见 5.12）。
+`model_aliases` 由迁移 `0013` 建立：`alias` 是主键，`target` 是真实模型名（或另一个别名），`created_at` 是 Unix 秒（覆盖改目标时不动它）。写入口只有两处：`SetModelAlias` 是覆盖语义（同一个别名再写一次就是改目标，UPSERT，不报错），校验全部在事务里做完再落库：别名与目标去空白后不能为空、不能含控制字符、别名不等于目标，别名也不能与任何账号可达的真实模型名同名（区分大小写，比的是该账号 `access='allowed'` 的行，也就是迁移 `0015` 之后 `accounts.models` 的等价物，见 5.13），否则报 `ErrModelAliasShadow` 并列出声明了那个名字的账号（最多三个）；`DeleteModelAlias` 删不到时按情况报 `ErrModelAliasNotFound`。读入口也只有两处：`ModelAliases` 按别名升序返回全表（SQLite 的 TEXT 默认二进制序，也就是区分大小写），`ResolveModelAlias` 把入站名字解析成真实名字——它先把全表一次读出来，再在内存里沿链走，不按跳查库，因此不会出现链走到一半表被改掉、前半段用旧目标后半段用新目标；名字不是别名时返回 `("", false, nil)`，成环报 `ErrModelAliasCycle`、超过 8 跳报 `ErrModelAliasTooDeep`，两种错误都把串起来的名字写进文案。别名与真实名字的冲突只在写入时判定，读取不做二次校验（见 5.12）。
 
 `provider_headers` 由迁移 `0010` 建立（见 5.10），一行是一条 `(厂商, 协议, 头名)` 的附加请求头声明：`protocol` 空串表示整个厂商的每条路由都加，非空表示只加给这条协议。`provider` 外键指向 `providers(name)` 并带 `ON DELETE CASCADE`，`store.Open` 的连接串带 `_pragma=foreign_keys(1)`，所以删厂商行时它的头由 SQLite 一起删掉；`provider_routes` 建于 `0006`、没有外键，才要在 `DeleteProvider` 里手删。写入口只有两处：`SetProviderHeader` 是覆盖语义（同一个 `(厂商, 协议, 头名)` 再写一次就是改值，UPSERT，不报错），`DeleteProviderHeader` 删不到时按情况报 `ErrProviderHeaderNotFound`（厂商在、头不在）或 `ErrProviderNotFound`（厂商不在）。两个写入口都先校验再进事务，并在事务里确认厂商行还在：外键虽然会拦住指向不存在厂商的写入，但报数据库的外键错误说不清下一步该干什么。头名按 HTTP `token` 校验（大小写不敏感，落库归一成小写），值不能是空白串、也不能带 CR/LF/NUL（那样拼进请求头会把一条头拆成两条），`protocol` 只能是空串或 `IsWireProtocol` 认的四种。读有两个入口：`ProviderHeaders` 返回这家厂商的全部声明（按 `protocol`、`name` 升序，厂商级在最前），`EffectiveProviderHeaders(厂商, 协议)` 返回那次请求真正要加的那一份——先铺厂商级，再用这个协议自己的声明按同名覆盖，返回时也是按 `name` 升序。转发侧只读后者，不在调用方拼覆盖规则。附加头不进 `requests`，日志只在没发时记头名与原因，正常发送不记；`ProviderHeader.String`（值截断到前四位）只给 `provider header ls` 与错误文案用。
 

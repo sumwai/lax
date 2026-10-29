@@ -277,6 +277,8 @@ func TestReplaceModelsFirstInsert(t *testing.T) {
 	}
 }
 
+// TestReplaceModelsKeepsProbeState 钉住同步只做加法：清单里没出现的名字不删、不清状态
+// （迁移 0015 之前那种「消失的行删除」随 accounts.models 一起没了，见 DESIGN 5.13）。
 func TestReplaceModelsKeepsProbeState(t *testing.T) {
 	st := openTemp(t)
 	acc := newAccount(t, st, "ds1", nil)
@@ -298,13 +300,15 @@ func TestReplaceModelsKeepsProbeState(t *testing.T) {
 	}
 
 	got := strings.Join(modelStates(t, st, acc.ID), ",")
-	want := "m1/usable,m3/synced"
+	want := "m1/usable,m2/synced,m3/synced"
 	if got != want {
-		t.Fatalf("刷新后 = %s，期望 %s（usable 保留、m2 删除、m3 记为 synced）", got, want)
+		t.Fatalf("刷新后 = %s，期望 %s（usable 保留、m2 不删、m3 记为 synced）", got, want)
 	}
 }
 
-func TestReplaceModelsEmptyClearsOnlyOneAccount(t *testing.T) {
+// TestReplaceModelsMarksAllowed 钉住新语义：清单里的名字一律标 allowed，
+// 其余行与另外的账号都不受影响；空清单等于什么都不做。
+func TestReplaceModelsMarksAllowed(t *testing.T) {
 	st := openTemp(t)
 	one := newAccount(t, st, "ds1", nil)
 	two := newAccount(t, st, "ds2", nil)
@@ -315,29 +319,89 @@ func TestReplaceModelsEmptyClearsOnlyOneAccount(t *testing.T) {
 	if _, err := st.ReplaceModels(two.ID, []string{"m9"}); err != nil {
 		t.Fatalf("刷新 ds2: %v", err)
 	}
+	// 上一轮探出 m2 无权：下一次同步再看到它时标回 allowed，但不碰探活时间与备注。
+	if err := st.SetAccountModelAccess(one.ID, "m2", store.AccessForbidden, 403, "套餐不含该模型", 111); err != nil {
+		t.Fatalf("记录无权: %v", err)
+	}
 
-	added, err := st.ReplaceModels(one.ID, nil)
+	added, err := st.ReplaceModels(one.ID, []string{"m2", "m3"})
 	if err != nil {
-		t.Fatalf("清空 ds1: %v", err)
+		t.Fatalf("再刷新 ds1: %v", err)
 	}
-	if added != 0 {
-		t.Fatalf("清空时新增数 = %d，期望 0", added)
+	if added != 1 {
+		t.Fatalf("新增数 = %d，期望 1（只有 m3 是新的）", added)
 	}
-	if got := modelStates(t, st, one.ID); len(got) != 0 {
-		t.Fatalf("ds1 应被清空，剩下 %v", got)
+
+	rows, err := st.AccountModels(one.ID)
+	if err != nil {
+		t.Fatalf("读 ds1 的模型行: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("ds1 的模型行数 = %d，期望 3（m1、m2、m3 都在）", len(rows))
+	}
+	for _, r := range rows {
+		if r.Access != store.AccessAllowed {
+			t.Fatalf("%s 的可达性 = %q，期望 %q", r.Model, r.Access, store.AccessAllowed)
+		}
+		if r.Model == "m2" && (r.HTTPStatus != 403 || r.Error != "套餐不含该模型" || r.CheckedAt != 111) {
+			t.Fatalf("标 allowed 不该动上一轮的探活结论: %+v", r)
+		}
+	}
+
+	// 空清单不删任何行：这是「这次没有新名字」，不是「清空账号」。
+	if added, err := st.ReplaceModels(one.ID, nil); err != nil || added != 0 {
+		t.Fatalf("空清单: added = %d, err = %v，期望什么都不做", added, err)
+	}
+	if got := modelStates(t, st, one.ID); len(got) != 3 {
+		t.Fatalf("空清单之后 ds1 还剩 %v，期望 3 行不动", got)
 	}
 	if got := modelStates(t, st, two.ID); len(got) != 1 || got[0] != "m9/synced" {
 		t.Fatalf("ds2 不应受影响，得到 %v", got)
 	}
 
-	all, err := st.AllAccountModels()
-	if err != nil {
-		t.Fatalf("读全部模型状态: %v", err)
-	}
-	if len(all) != 1 || all[0].AccountID != two.ID {
-		t.Fatalf("全部模型状态 = %+v，期望只剩 ds2 的一行", all)
+	// 账号不存在时读不到厂商，目录写不了：这一条要报错，不能悄悄只写可达性。
+	if _, err := st.ReplaceModels(9999, []string{"m1"}); err == nil {
+		t.Fatal("账号不存在时应报错")
 	}
 }
+
+// TestReplaceModelsWritesManualCatalog 确认同步进来的名字在目录里补成 source='manual' 的行，
+// 且不覆盖已有的目录元数据（同步只说明名字存在，不提供长度与价格）。
+func TestReplaceModelsWritesManualCatalog(t *testing.T) {
+	st := openTemp(t)
+	acc := newAccount(t, st, "ds1", nil)
+
+	window := int64(200000)
+	if err := st.UpsertProviderModels("test", []store.ProviderModel{{
+		Model: "m1", Source: store.SourceSync, ContextWindow: &window,
+		PriceIn: floatPtr(1.5), Protocols: []string{"openai-chat"},
+	}}); err != nil {
+		t.Fatalf("写目录: %v", err)
+	}
+
+	if _, err := st.ReplaceModels(acc.ID, []string{"m1", "m2"}); err != nil {
+		t.Fatalf("刷新模型: %v", err)
+	}
+
+	models, err := st.ProviderModels("test")
+	if err != nil {
+		t.Fatalf("读目录: %v", err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("目录里的模型数 = %d，期望 2", len(models))
+	}
+	if models[0].Model != "m1" || models[0].Source != store.SourceManual {
+		t.Fatalf("m1 的来源 = %q，期望 manual（手填清单压过同步）", models[0].Source)
+	}
+	if models[0].ContextWindow == nil || *models[0].ContextWindow != window {
+		t.Fatalf("m1 的上下文长度被抹掉: %+v", models[0])
+	}
+	if models[1].Model != "m2" || models[1].Source != store.SourceManual || models[1].ContextWindow != nil {
+		t.Fatalf("m2 应是只有名字的 manual 行: %+v", models[1])
+	}
+}
+
+func intPtr(v int64) *int64 { return &v }
 
 func TestSetModelStatusUpserts(t *testing.T) {
 	st := openTemp(t)
@@ -373,30 +437,49 @@ func TestSetModelStatusUpserts(t *testing.T) {
 	}
 }
 
-func TestSetModelsUpdatesAccount(t *testing.T) {
+// TestAccountModelsDerivedFromAccess 钉住 Account.Models 是派生值：
+// 它等于该账号 access='allowed' 的行集合，`account add --models` 与探活各写一半。
+func TestAccountModelsDerivedFromAccess(t *testing.T) {
 	st := openTemp(t)
 	acc := newAccount(t, st, "ds1", []string{"init"})
 
 	if err := st.SetModels(acc.ID, []string{"m1", "m2"}); err != nil {
-		t.Fatalf("改写模型列表: %v", err)
+		t.Fatalf("标 allowed: %v", err)
 	}
 	got, err := st.GetAccount("ds1")
 	if err != nil {
 		t.Fatalf("读账号: %v", err)
 	}
-	if len(got.Models) != 2 || got.Models[0] != "m1" || got.Models[1] != "m2" {
-		t.Fatalf("账号模型列表 = %v，期望 [m1 m2]", got.Models)
+	// 加法语义：init 仍在，新名字按模型名升序排在后面。
+	if strings.Join(got.Models, ",") != "init,m1,m2" {
+		t.Fatalf("账号模型列表 = %v，期望 [init m1 m2]", got.Models)
 	}
 
+	// 标成不可达就从选号列表里消失，但行本身还在（结论是探活的一部分）。
+	if err := st.SetAccountModelAccess(acc.ID, "m1", store.AccessForbidden, 403, "无权", 222); err != nil {
+		t.Fatalf("记无权: %v", err)
+	}
+	if got, err = st.GetAccount("ds1"); err != nil {
+		t.Fatalf("再读账号: %v", err)
+	}
+	if strings.Join(got.Models, ",") != "init,m2" {
+		t.Fatalf("账号模型列表 = %v，期望 [init m2]", got.Models)
+	}
+	if allowed, err := st.AllowedModels(acc.ID); err != nil {
+		t.Fatalf("读可达性: %v", err)
+	} else if strings.Join(allowed, ",") != "init,m2" {
+		t.Fatalf("AllowedModels = %v，期望 [init m2]", allowed)
+	}
+
+	// 空列表不删行：SetModels 只剩加法。
 	if err := st.SetModels(acc.ID, nil); err != nil {
-		t.Fatalf("清空模型列表: %v", err)
+		t.Fatalf("空列表: %v", err)
 	}
-	got, err = st.GetAccount("ds1")
-	if err != nil {
-		t.Fatalf("清空后再读账号: %v", err)
+	if got, err = st.GetAccount("ds1"); err != nil {
+		t.Fatalf("空列表后读账号: %v", err)
 	}
-	if len(got.Models) != 0 {
-		t.Fatalf("清空后模型列表 = %v，期望空", got.Models)
+	if strings.Join(got.Models, ",") != "init,m2" {
+		t.Fatalf("空列表后模型列表 = %v，期望原样不动", got.Models)
 	}
 }
 
@@ -510,14 +593,25 @@ func TestMigration0005UpgradesOldDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读老行: %v", err)
 	}
-	if len(rows) != 1 {
-		t.Fatalf("老库的模型行数 = %d，期望 1", len(rows))
+	// 老库里的 m1 有一条 usable 的探活行，手填清单里还有 m2：0015 之后前者是 allowed 的可达性行，
+	// 后者补成一行 allowed（迁移 0015，见 DESIGN 5.13）。
+	if len(rows) != 2 || rows[0].Model != "m1" || rows[1].Model != "m2" {
+		t.Fatalf("老库的模型行 = %+v，期望 m1 与 m2", rows)
 	}
-	if rows[0].Protocol != "" {
-		t.Fatalf("老行的协议应为空串（继承账号协议），实际 %q", rows[0].Protocol)
+	for _, r := range rows {
+		if r.Protocol != "" {
+			t.Fatalf("%s 的协议应为空串（继承厂商默认协议），实际 %q", r.Model, r.Protocol)
+		}
+		if r.Access != store.AccessAllowed {
+			t.Fatalf("%s 的可达性 = %q，期望 %q", r.Model, r.Access, store.AccessAllowed)
+		}
 	}
+	// 探活结论原样保留：usable 与它的时间戳都在。
 	if rows[0].Status != store.ModelUsable || rows[0].HTTPStatus != 200 || rows[0].CheckedAt != 12345 {
 		t.Fatalf("老行的探活结论被改动: %+v", rows[0])
+	}
+	if rows[1].CheckedAt != 0 {
+		t.Fatalf("手填清单补的行不带探活时间，实际 %+v", rows[1])
 	}
 
 	acc, err := st.GetAccount("ds1")

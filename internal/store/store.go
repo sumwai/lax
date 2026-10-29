@@ -4,7 +4,6 @@ package store
 import (
 	"database/sql"
 	"embed"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -44,9 +43,13 @@ type Account struct {
 	// 逐模型的协议覆盖仍在 account_models.protocol，见 EffectiveProtocol。
 	Protocol  string
 	KeyCipher []byte
-	Models    []string
-	PriceIn   *float64
-	PriceOut  *float64
+	// Models 是运行期派生的字段：读账号时它等于该账号 access='allowed' 的模型行集合
+	// （迁移 0015 删掉了 accounts.models 列，见 DESIGN 5.13），按模型名升序。
+	// 写账号时（CreateAccount）它表示「这个账号要声明哪些模型」：这些名字会被落成
+	// provider_models 里 source='manual' 的行与该账号 access='allowed' 的可达性行。
+	Models   []string
+	PriceIn  *float64
+	PriceOut *float64
 	// PriceCacheRead 与 PriceCacheWrite 是缓存读写的单价（每百万 token），可空：
 	// 空表示没填，花费估算回退到输入价（见 Usage）。
 	PriceCacheRead  *float64
@@ -203,26 +206,10 @@ func (s *Store) execScript(script string, version int) error {
 	return tx.Commit()
 }
 
-func encodeModels(models []string) string {
-	if models == nil {
-		models = []string{}
-	}
-	b, _ := json.Marshal(models)
-	return string(b)
-}
-
-func decodeModels(s string) []string {
-	var models []string
-	if err := json.Unmarshal([]byte(s), &models); err != nil {
-		return nil
-	}
-	return models
-}
-
 // accountSelect 是读账号的唯一列清单：账号自己的列，加上厂商行上的地址。
 // Protocol 不在这里取：它是这家厂商路由算出来的有效默认协议，一条 JOIN 算不出来，
 // 由 fillDerivedProtocols 填（规则只有 ResolveDefaultProtocol 一份）。
-const accountSelect = `SELECT a.id, a.name, a.provider, a.key_cipher, a.models,
+const accountSelect = `SELECT a.id, a.name, a.provider, a.key_cipher,
 	a.price_in, a.price_out, a.price_cache_read, a.price_cache_write,
 	a.priority, a.enabled, COALESCE(a.cooldown_until, 0), COALESCE(a.last_error, ''), a.fail_streak,
 	a.created_at, COALESCE(p.base_url, '')
@@ -231,6 +218,9 @@ const accountSelect = `SELECT a.id, a.name, a.provider, a.key_cipher, a.models,
 // CreateAccount 插入账号，名称重复时返回错误。
 // 只写账号自己的列：地址与默认协议在厂商行上（见迁移 0014 与 DESIGN 5.8），
 // 传进来的 BaseURL 与 Protocol 不落库，读回来的是派生值。
+// a.Models 是「这个账号要声明哪些模型」（`account add --models`）：名字去空白去重之后落成
+// provider_models 的 manual 行与该账号 access='allowed' 的可达性行，与账号本身同一个事务（DESIGN 5.13）。
+// 没有厂商名的账号不写目录：目录以厂商为键，空厂商名只会造出一批谁都用不上的行。
 func (s *Store) CreateAccount(a *Account) error {
 	if a.CreatedAt == 0 {
 		a.CreatedAt = time.Now().Unix()
@@ -238,17 +228,21 @@ func (s *Store) CreateAccount(a *Account) error {
 	if a.Priority == 0 {
 		a.Priority = 100
 	}
-	res, err := s.db.Exec(`INSERT INTO accounts
-		(name, provider, key_cipher, models, price_in, price_out,
-		 price_cache_read, price_cache_write, priority, enabled, cooldown_until, last_error, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', ?)`,
-		a.Name, a.Provider, a.KeyCipher, encodeModels(a.Models),
-		a.PriceIn, a.PriceOut, a.PriceCacheRead, a.PriceCacheWrite, a.Priority, boolInt(a.Enabled), a.CreatedAt)
-	if err != nil {
-		return err
-	}
-	a.ID, err = res.LastInsertId()
-	return err
+	return s.withTx(func(tx *sql.Tx) error {
+		res, err := tx.Exec(`INSERT INTO accounts
+			(name, provider, key_cipher, price_in, price_out,
+			 price_cache_read, price_cache_write, priority, enabled, cooldown_until, last_error, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', ?)`,
+			a.Name, a.Provider, a.KeyCipher,
+			a.PriceIn, a.PriceOut, a.PriceCacheRead, a.PriceCacheWrite, a.Priority, boolInt(a.Enabled), a.CreatedAt)
+		if err != nil {
+			return err
+		}
+		if a.ID, err = res.LastInsertId(); err != nil {
+			return err
+		}
+		return declareModelsTx(tx, a.ID, a.Provider, a.Models)
+	})
 }
 
 // ListAccounts 按 priority、id 升序返回全部账号。
@@ -276,23 +270,24 @@ func (s *Store) queryAccounts(where string, args ...any) ([]Account, error) {
 	if err := s.fillDerivedProtocols(list); err != nil {
 		return nil, err
 	}
+	if err := s.fillDerivedModels(list); err != nil {
+		return nil, err
+	}
 	return list, nil
 }
 
 // scanAccounts 把一行账号读成 Account，账号列表的几个查询共用它。
-// Protocol 此时还是零值，由 fillDerivedProtocols 填。
+// Protocol 与 Models 此时还是零值，由 fillDerivedProtocols 与 fillDerivedModels 填。
 func scanAccounts(rows *sql.Rows) ([]Account, error) {
 	var out []Account
 	for rows.Next() {
 		var a Account
-		var models string
 		var enabled int
 		if err := rows.Scan(&a.ID, &a.Name, &a.Provider, &a.KeyCipher,
-			&models, &a.PriceIn, &a.PriceOut, &a.PriceCacheRead, &a.PriceCacheWrite,
+			&a.PriceIn, &a.PriceOut, &a.PriceCacheRead, &a.PriceCacheWrite,
 			&a.Priority, &enabled, &a.CooldownUntil, &a.LastError, &a.FailStreak, &a.CreatedAt, &a.BaseURL); err != nil {
 			return nil, err
 		}
-		a.Models = decodeModels(models)
 		a.Enabled = enabled == 1
 		out = append(out, a)
 	}
@@ -390,7 +385,7 @@ func (s *Store) SetEnabled(id int64, enabled bool, lastErr string) error {
 // 清冷却、清最近错误与连续失败次数，并把账号重新启用（`account set --key`，见 DESIGN 4、5.6）。
 // 换 key 意味着之前那些失败都是上一个凭据的结果，留在库里会让新 key 一上来就排在候选之外：
 // 干净的凭据应该从干净的账号状态开始。冷却、清零与启停的 SQL 复用 clearFailureTx 与 setEnabledTx，
-// 不另拼一份；`account_models`、`accounts.models` 与协议发现结果一个字不动，只换凭据与失败状态。
+// 不另拼一份；`account_models` 的可达性、协议发现与覆盖值一个字不动，只换凭据与失败状态。
 func (s *Store) RotateKey(id int64, cipher []byte) error {
 	return s.withTx(func(tx *sql.Tx) error {
 		if _, err := tx.Exec(`UPDATE accounts SET key_cipher = ? WHERE id = ?`, cipher, id); err != nil {
@@ -635,212 +630,6 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 		out = append(out, u)
 	}
 	return out, rows.Err()
-}
-
-// 模型在某个账号上的状态。
-const (
-	// ModelSynced 表示刚从上游列表里拉下来，还没探活。
-	ModelSynced = "synced"
-	// ModelUsable 表示探活通过，账号能用这个模型。
-	ModelUsable = "usable"
-	// ModelForbidden 表示上游拒绝：套餐不含或无权使用。
-	ModelForbidden = "forbidden"
-	// ModelNotFound 表示上游不认识这个模型名。
-	ModelNotFound = "notfound"
-	// ModelAuthFailed 表示凭据在这个账号上不成立。
-	ModelAuthFailed = "auth"
-	// ModelError 表示其他临时错误，结论不可用。
-	ModelError = "error"
-)
-
-// AccountModel 是一个账号上一个模型的探活状态。
-// Protocol 是探活发现的「这个模型该用哪种协议」，空字符串表示继承厂商的有效默认协议（见 5.8）。
-type AccountModel struct {
-	AccountID  int64
-	Model      string
-	Status     string
-	HTTPStatus int
-	Error      string
-	CheckedAt  int64
-	Protocol   string
-}
-
-// ResolveProtocol 是有效出站协议的纯规则：模型行上有协议就用它，否则用厂商的有效默认协议
-// （账号行不再存协议，见迁移 0014 与 DESIGN 5.8）。两部分都是空串时结果就是空串。
-func ResolveProtocol(providerProtocol, modelProtocol string) string {
-	if modelProtocol != "" {
-		return modelProtocol
-	}
-	return providerProtocol
-}
-
-// ModelProtocol 读一个模型行的协议发现结果。没有这一行时返回空字符串（也就是继承），
-// 不当作错误。
-func (s *Store) ModelProtocol(accountID int64, model string) (string, error) {
-	var protocol string
-	err := s.db.QueryRow(`SELECT protocol FROM account_models WHERE account_id = ? AND model = ?`,
-		accountID, model).Scan(&protocol)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return protocol, nil
-}
-
-// EffectiveProtocol 返回账号在某个模型上的有效出站协议，转发与展示共用这一次读。
-// 写法是 (accountID, model)：模型行的协议非空就用它，否则用账号所属厂商的有效默认协议
-// （与 Account.Protocol 同一个规则）；行不存在、列为空、厂商行不存在或这家没有路由时都回退到
-// 空串，不报错。账号行不再存协议，所以第二个参数也从旧写法里的「账号协议」换成了模型名。
-//
-// Deprecated: 三参数写法 EffectiveProtocol(accountID, accountProtocol, model) 只为尚未改完的调用点
-// 保留（internal/gateway、internal/cli），第二个参数是账号协议，现在已经无用且被忽略；
-// 两个写法走的是同一条规则，改完调用点后就收回这个口子。
-func (s *Store) EffectiveProtocol(accountID int64, model string, legacyAccountProtocol ...string) (string, error) {
-	if len(legacyAccountProtocol) > 1 {
-		return "", fmt.Errorf("EffectiveProtocol 只收 (accountID, model) 两个参数：账号不再存协议，多余的参数是 %v", legacyAccountProtocol[1:])
-	}
-	if len(legacyAccountProtocol) == 1 {
-		// 旧写法：第二个参数是账号协议（忽略），真正的模型名落在第三个参数上。
-		model = legacyAccountProtocol[0]
-	}
-	protocol, err := s.ModelProtocol(accountID, model)
-	if err != nil {
-		return "", err
-	}
-	if protocol != "" {
-		return protocol, nil
-	}
-	provider, err := s.accountProvider(accountID)
-	if err != nil {
-		return "", err
-	}
-	fallback, err := s.providerDefaultProtocol(provider)
-	if err != nil {
-		return "", err
-	}
-	return ResolveProtocol(fallback, protocol), nil
-}
-
-// accountProvider 读账号的厂商名。账号不存在时返回空串、不报错：有效协议的契纡是
-// 「算不出来就是空串」，不因为一行不存在或读不到而中断转发。
-func (s *Store) accountProvider(accountID int64) (string, error) {
-	var provider string
-	err := s.db.QueryRow(`SELECT provider FROM accounts WHERE id = ?`, accountID).Scan(&provider)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return provider, nil
-}
-
-// SetModelProtocol 记录协议发现的结果，是这一列唯一的写入口。
-// 模型行还不存在时先落一行 synced 占位（探活本身就证明上游有这个模型），
-// 随后 SetModelStatus 再写状态；已存在的行只改协议列。
-func (s *Store) SetModelProtocol(accountID int64, model, protocol string) error {
-	_, err := s.db.Exec(`INSERT INTO account_models (account_id, model, status, http_status, error, checked_at, protocol)
-		VALUES (?, ?, 'synced', 0, '', 0, ?)
-		ON CONFLICT(account_id, model) DO UPDATE SET protocol = excluded.protocol`,
-		accountID, model, protocol)
-	return err
-}
-
-// ReplaceModels 用上游列表刷新账号的模型集合。已有的探活状态保留，消失的行删除，
-// 新出现的行记为 synced。返回新增的行数。
-func (s *Store) ReplaceModels(accountID int64, models []string) (int, error) {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if len(models) == 0 {
-		if _, err := tx.Exec(`DELETE FROM account_models WHERE account_id = ?`, accountID); err != nil {
-			return 0, err
-		}
-	} else {
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(models)), ",")
-		args := make([]any, 0, len(models)+1)
-		args = append(args, accountID)
-		for _, m := range models {
-			args = append(args, m)
-		}
-		q := `DELETE FROM account_models WHERE account_id = ? AND model NOT IN (` + placeholders + `)`
-		if _, err := tx.Exec(q, args...); err != nil {
-			return 0, err
-		}
-	}
-
-	added := 0
-	for _, m := range models {
-		// DO NOTHING：已存在的行一个字段都不动，探活状态、时间戳与发现到的协议原样保留，
-		// 一次同步不会把发现结果推倒重来。只有新出现的行拿默认值。
-		res, err := tx.Exec(`INSERT INTO account_models (account_id, model, status, http_status, error, checked_at)
-			VALUES (?, ?, 'synced', 0, '', 0)
-			ON CONFLICT(account_id, model) DO NOTHING`, accountID, m)
-		if err != nil {
-			return 0, err
-		}
-		if n, err := res.RowsAffected(); err == nil && n > 0 {
-			added++
-		}
-	}
-	return added, tx.Commit()
-}
-
-// SetModelStatus 记录一个模型的探活结果。只动状态、HTTP 状态、备注与时间，
-// 不动 protocol：协议发现的结果只由 SetModelProtocol 写。
-func (s *Store) SetModelStatus(accountID int64, model, status string, httpStatus int, msg string) error {
-	_, err := s.db.Exec(`INSERT INTO account_models (account_id, model, status, http_status, error, checked_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(account_id, model) DO UPDATE SET
-			status = excluded.status, http_status = excluded.http_status,
-			error = excluded.error, checked_at = excluded.checked_at`,
-		accountID, model, status, httpStatus, msg, time.Now().Unix())
-	return err
-}
-
-// AccountModels 返回一个账号的模型与状态，按模型名排序。
-func (s *Store) AccountModels(accountID int64) ([]AccountModel, error) {
-	rows, err := s.db.Query(`SELECT account_id, model, status, http_status, error, checked_at, protocol
-		FROM account_models WHERE account_id = ? ORDER BY model`, accountID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanAccountModels(rows)
-}
-
-// AllAccountModels 返回全部账号的模型状态。
-func (s *Store) AllAccountModels() ([]AccountModel, error) {
-	rows, err := s.db.Query(`SELECT account_id, model, status, http_status, error, checked_at, protocol
-		FROM account_models ORDER BY model`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanAccountModels(rows)
-}
-
-func scanAccountModels(rows *sql.Rows) ([]AccountModel, error) {
-	var out []AccountModel
-	for rows.Next() {
-		var m AccountModel
-		if err := rows.Scan(&m.AccountID, &m.Model, &m.Status, &m.HTTPStatus, &m.Error, &m.CheckedAt, &m.Protocol); err != nil {
-			return nil, err
-		}
-		out = append(out, m)
-	}
-	return out, rows.Err()
-}
-
-// SetModels 改写账号自身声明的模型列表，选号用它。
-func (s *Store) SetModels(accountID int64, models []string) error {
-	_, err := s.db.Exec(`UPDATE accounts SET models = ? WHERE id = ?`, encodeModels(models), accountID)
-	return err
 }
 
 func boolInt(b bool) int {

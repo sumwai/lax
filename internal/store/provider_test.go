@@ -270,8 +270,9 @@ func TestMigration0007UpgradesOldDatabase(t *testing.T) {
 		t.Fatalf("打开老库: %v", err)
 	}
 	// 0006 之后的形状：providers 还没有 default_protocol 列。
-	// accounts 与 requests 按 0010 的形状给出：真实的老库一直有这两张表，
-	// 后面的迁移（例如 0011 回填 in_tokens_uncached）会在它们上面动列。
+	// accounts、requests 与 account_models 按当时的样子给出：真实的老库一直有这三张表
+	// （account_models 由 0003 建立），后面的迁移（例如 0011 回填 in_tokens_uncached、
+	// 0015 把可达性搬进新表）会在它们上面动列。
 	ddl := []string{
 		`CREATE TABLE accounts (
 			id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, provider TEXT NOT NULL,
@@ -292,6 +293,11 @@ func TestMigration0007UpgradesOldDatabase(t *testing.T) {
 		`CREATE TABLE provider_routes (
 			provider TEXT NOT NULL, protocol TEXT NOT NULL, path TEXT NOT NULL,
 			models_path TEXT NOT NULL DEFAULT '', PRIMARY KEY (provider, protocol))`,
+		`CREATE TABLE account_models (
+			account_id INTEGER NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL,
+			http_status INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '',
+			checked_at INTEGER NOT NULL DEFAULT 0, protocol TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (account_id, model))`,
 	}
 	// 种子行照 0006 写回，保证升级前的库与真实老库同一个形状。0009 才种下的 gemini 厂商
 	// 那时候还不存在，这里不回放：模拟的是真实的 0006 库，不是「倒着算」的库。
@@ -827,7 +833,9 @@ func TestMigrationChainFrom0001ToLatest(t *testing.T) {
 		}
 	}
 
-	// account_models.protocol：0005 补的列在，新行默认空串，也就是继承账号协议。
+	// 可达性：0001 里手填的 m1 由 0015 补成 allowed，同步进来的 m2 也是 allowed。
+	// 0015 之前这里断言的是「账号的模型集合被整体改写成 m2」——accounts.models 那一列已经删掉，
+	// 同步只做加法（见 DESIGN 5.13）。
 	if _, err := st.ReplaceModels(1, []string{"m2"}); err != nil {
 		t.Fatalf("写入模型行: %v", err)
 	}
@@ -835,11 +843,16 @@ func TestMigrationChainFrom0001ToLatest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读模型行: %v", err)
 	}
-	if len(rows) != 1 || rows[0].Model != "m2" {
-		t.Fatalf("模型行 = %+v，期望只有 m2", rows)
+	if len(rows) != 2 || rows[0].Model != "m1" || rows[1].Model != "m2" {
+		t.Fatalf("模型行 = %+v，期望 m1（0015 从手填清单补的）与 m2", rows)
 	}
-	if rows[0].Protocol != "" {
-		t.Fatalf("新行的 protocol = %q，期望空串（继承账号协议）", rows[0].Protocol)
+	for _, r := range rows {
+		if r.Access != store.AccessAllowed {
+			t.Fatalf("模型 %s 的可达性 = %q，期望 %q", r.Model, r.Access, store.AccessAllowed)
+		}
+		if r.Protocol != "" {
+			t.Fatalf("新行的 protocol = %q，期望空串（继承厂商默认协议）", r.Protocol)
+		}
 	}
 
 	// 0002 删掉的 agents 表不该留下。
@@ -852,13 +865,15 @@ func TestMigrationChainFrom0001ToLatest(t *testing.T) {
 		t.Fatalf("升级后 agents 表还在，期望被 0002 删掉")
 	}
 
-	// 老数据原样：升级只加表加列，不动账号与请求记录。
+	// 老数据原样：升级只加表加列，不动账号本身与请求记录。
+	// 账号的模型集合是派生值（access='allowed' 的行），上面那一步同步进来 m2 之后是 m1 与 m2 两个。
 	acc, err := st.GetAccount("ds1")
 	if err != nil {
 		t.Fatalf("读老账号: %v", err)
 	}
 	if acc.Provider != "deepseek" || acc.Protocol != "openai-chat" ||
-		acc.BaseURL != "https://api.deepseek.com" || len(acc.Models) != 1 {
+		acc.BaseURL != "https://api.deepseek.com" ||
+		len(acc.Models) != 2 || acc.Models[0] != "m1" || acc.Models[1] != "m2" {
 		t.Fatalf("老账号被改动: %+v", acc)
 	}
 	recs, err := st.RecentRequests(5)
