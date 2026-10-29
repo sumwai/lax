@@ -1,0 +1,14 @@
+{
+  "max_tokens": 256,
+  "messages": [
+    {
+      "content": [{"text": "我先说一句", "type": "text"}],
+      "role": "assistant"
+    },
+    {
+      "content": [{"text": "继续", "type": "text"}],
+      "role": "user"
+    }
+  ],
+  "model": "m1"
+}

@@ -85,6 +85,20 @@ func EncodeAnthropicRequest(r *Request, model string) ([]byte, error) {
 	// （工具结果与普通 user 消息）并成一条：tool_result 块在前，普通内容按原顺序跟随
 	// （DESIGN 5.4）。
 	var pendingResults, pendingBlocks []ContentBlock
+	// emit 写出一条消息：块数为 0 的不写。anthropic 拒绝空的 content 数组，一条只剩无签名
+	// 思考块的 assistant 消息编出来就是空的（DESIGN 5.4）。丢弃之后相邻的同角色消息按块
+	// 顺序并成一条，assistant 也一样：丢一条空消息不该在报文里留下两条相邻的 assistant。
+	emit := func(msg AnthropicMessage) {
+		if len(msg.Content.Blocks) == 0 {
+			return
+		}
+		if n := len(wire.Messages); n > 0 && wire.Messages[n-1].Role == msg.Role {
+			last := &wire.Messages[n-1]
+			last.Content.Blocks = append(last.Content.Blocks, msg.Content.Blocks...)
+			return
+		}
+		wire.Messages = append(wire.Messages, msg)
+	}
 	flushUser := func() {
 		if len(pendingResults) == 0 && len(pendingBlocks) == 0 {
 			return
@@ -92,7 +106,7 @@ func EncodeAnthropicRequest(r *Request, model string) ([]byte, error) {
 		blocks := make([]ContentBlock, 0, len(pendingResults)+len(pendingBlocks))
 		blocks = append(blocks, pendingResults...)
 		blocks = append(blocks, pendingBlocks...)
-		wire.Messages = append(wire.Messages, AnthropicMessage{Role: "user", Content: Content{Blocks: blocks}})
+		emit(AnthropicMessage{Role: "user", Content: Content{Blocks: blocks}})
 		pendingResults, pendingBlocks = nil, nil
 	}
 	for _, m := range r.Messages {
@@ -113,9 +127,14 @@ func EncodeAnthropicRequest(r *Request, model string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		wire.Messages = append(wire.Messages, msg)
+		emit(msg)
 	}
 	flushUser()
+	// 消息全被丢弃时宁可自己报错：上游的 messages 至少要一条，写出空数组只会换回一个
+	// 指不到原因上的 400。
+	if len(wire.Messages) == 0 {
+		return nil, errors.New("请求里没有可发给 anthropic 的消息：每条消息的内容块都被丢弃了")
+	}
 
 	for _, t := range r.Tools {
 		// `input_schema` 是必填项，客户端函数缺它时补空对象；内置工具本来就没有 schema，

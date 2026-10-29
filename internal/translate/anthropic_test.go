@@ -324,6 +324,52 @@ func TestEncodeAnthropicRequestFoldsToolResults(t *testing.T) {
 	}
 }
 
+// TestEncodeAnthropicRequestDropsEmptyMessages 确认编码后一块内容都不剩的消息整条不写出去：
+// anthropic 拒绝空的 content 数组，一条只剩无签名思考块的 assistant 消息就是这么变空的。
+// 丢弃之后上下两条 user 消息并成一条，块顺序不变；全部消息都被丢弃时编码报错，
+// 不写出空的 messages（DESIGN 5.4）。
+func TestEncodeAnthropicRequestDropsEmptyMessages(t *testing.T) {
+	req := &Request{
+		Model: "claude-x",
+		Messages: []Message{
+			{Role: RoleUser, Blocks: []Block{{Kind: BlockText, Text: "6 乘 7 是多少"}}},
+			{Role: RoleAssistant, Blocks: []Block{
+				// 没有 signature 的思考块编不成 anthropic 的块，整条消息因此变空。
+				{Kind: BlockThinking, Thinking: &Thinking{Text: "先算 6×7=42。"}},
+			}},
+			{Role: RoleUser, Blocks: []Block{{Kind: BlockText, Text: "那 8 乘 9 呢"}}},
+		},
+	}
+
+	raw, err := EncodeAnthropicRequest(req, "")
+	if err != nil {
+		t.Fatalf("编码请求: %v", err)
+	}
+	if strings.Contains(string(raw), `"content":[]`) {
+		t.Fatalf("报文里不该出现空的 content 数组: %s", raw)
+	}
+	var wire AnthropicRequest
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("结果不是合法 JSON: %v", err)
+	}
+	if len(wire.Messages) != 1 {
+		t.Fatalf("消息数 = %d，期望 1（两条 user 并成一条，只剩思考的 assistant 整条丢弃）: %s", len(wire.Messages), raw)
+	}
+	merged := wire.Messages[0]
+	if merged.Role != "user" || len(merged.Content.Blocks) != 2 {
+		t.Fatalf("合并后的消息 = %+v，期望一条两个文本块的 user 消息", merged)
+	}
+	if merged.Content.Blocks[0].Text != "6 乘 7 是多少" || merged.Content.Blocks[1].Text != "那 8 乘 9 呢" {
+		t.Fatalf("块顺序 = %+v，期望按原顺序", merged.Content.Blocks)
+	}
+
+	// 全部消息都被丢弃时自己报错：上游的 messages 至少一条，写出空数组只会换回一个
+	// 指不到原因上的 400。
+	if _, err := EncodeAnthropicRequest(&Request{Model: "claude-x", Messages: req.Messages[1:2]}, ""); err == nil {
+		t.Fatal("所有消息都变空时应报错")
+	}
+}
+
 // TestEncodeAnthropicRequestKeepsSignedThinkingOnlyAssistant 确认一条只剩 signed 思考块的
 // assistant 消息编回 anthropic 时整条保住：anthropic 是唯一要求回填思考块的协议，
 // 带 signature 的块不丢，块前面的用户消息与后面的追问也不会被并到别处（DESIGN 5.4）。

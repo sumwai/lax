@@ -254,12 +254,14 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 
 结束原因在中间表示里只留四种：`end_turn`、`max_tokens`、`tool_use`、`stop_sequence`；编码时再翻回各协议自己的说法。
 
-上面那张表是从概念找坐标，反方向编出去还有五条不在这张表里的规则：
+上面那张表是从概念找坐标，反方向编出去还有六条不在这张表里的规则：
 
 - 工具结果进 anthropic：`RoleTool` 消息折叠成一条 `role=user` 消息里的 `tool_result` 块，同一个 assistant 消息之后的多条结果按原顺序并进同一条 user 消息。anthropic 没有 `role=tool`，chat 与 responses 解出来的工具结果原样写过去会被上游以 400 拒绝。
 - 连续的 user 侧内容并成一条：工具结果之后紧跟的追问（普通 user 消息）也并进同一条 user 消息，块顺序是 `tool_result` 在前、普通文本与图片按原顺序跟在后面。anthropic 不接受两条相邻的 user 消息，分成两条写过去同样会被 400 拒绝。
 - 工具序号进 chat：流式的 `tool_calls[].index` 由编码器自己从 0 连续编号，不沿用上游块号。上游 anthropic 有文本块时首个工具是 1、并行工具是 1 与 2；按稠密下标建数组的客户端会撞上空位。
 - 流式工具调用的收尾进 responses：编码器缓存每个工具 item 的名称与参数，收尾前补 `response.function_call_arguments.done` 与 `response.output_item.done`，并把完整的 `function_call` 回填进 `response.completed.response.output`。只发 added 与 delta 的流会让客户端拿不到收尾；`output` 列工具 item 与思考 item，文本 item 的正文已经按增量发出，不再攒一份（见第 7 节已知边界）。
+- 编码到 anthropic 时丢掉空内容消息：一块内容都没剩下的消息整条不写出去。丢弃之后相邻的同角色消息按块顺序并成一条，assistant 侧直接接在后面，user 侧仍是 `tool_result` 在前、普通内容跟随。anthropic 拒绝空的 `content` 数组，也拒绝相邻的同角色消息，写出去就是整条请求 400。代价是历史里只剩思考的一轮整条消失（例如一条只有 `reasoning_content`、没有签名的 assistant 消息），客户端下一轮看到的上下文里不再有那一轮的空位；所有消息都被丢弃时编码直接返回错误，不写出空的 `messages`。
+- 首条消息不补：丢弃之后第一条仍是 assistant 时原样保留，不预置一条客户端没发过的 user 消息。anthropic 的 Messages 文档只描述交替的轮次、连续轮次的合并与 prefill（末条是 assistant），没有「首条必须是 user」这一条；补一条伪造的 user 文本等于往上下文里塞客户端没说过的话，比让上游用它自己的理由拒绝更贵。
 - 工具定义跨协议：anthropic 的服务端内置工具（`tools[].type` 不是 `custom`，例如 `web_search_20250305`）在中间表示里保留 `type`，编到 chat 与 responses 时整条丢弃——这两条协议的工具定义只认 function，伪造一个出来会让语义错位；编回 anthropic 时 `type` 原样保留，缺 `input_schema` 的内置工具不补空对象。
 
 两条分界与各自的代价：

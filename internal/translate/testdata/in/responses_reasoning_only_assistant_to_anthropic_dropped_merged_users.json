@@ -1,0 +1,15 @@
+{
+  "from": "openai-responses",
+  "to": "anthropic",
+  "kind": "request",
+  "model": "m1",
+  "body": {
+    "model": "m1",
+    "max_output_tokens": 256,
+    "input": [
+      {"type": "message", "role": "user", "content": "6 乘 7 是多少"},
+      {"type": "reasoning", "summary": [{"type": "summary_text", "text": "先算 6×7=42。"}]},
+      {"type": "message", "role": "user", "content": "那 8 乘 9 呢"}
+    ]
+  }
+}

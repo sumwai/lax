@@ -1,0 +1,18 @@
+{
+  "max_tokens": 256,
+  "messages": [
+    {
+      "content": [{"text": "6 乘 7 是多少", "type": "text"}],
+      "role": "user"
+    },
+    {
+      "content": [{"signature": "sig-abc", "thinking": "先算 6×7=42。", "type": "thinking"}],
+      "role": "assistant"
+    },
+    {
+      "content": [{"text": "那 8 乘 9 呢", "type": "text"}],
+      "role": "user"
+    }
+  ],
+  "model": "m1"
+}

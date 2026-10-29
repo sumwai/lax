@@ -1,0 +1,16 @@
+{
+  "from": "openai-chat",
+  "to": "anthropic",
+  "kind": "request",
+  "model": "m1",
+  "body": {
+    "model": "m1",
+    "max_tokens": 256,
+    "messages": [
+      {"role": "user", "content": "介绍两句"},
+      {"role": "assistant", "content": "第一段"},
+      {"role": "assistant", "reasoning_content": "中间这段思考没有签名"},
+      {"role": "assistant", "content": "第二段"}
+    ]
+  }
+}
