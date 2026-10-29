@@ -774,11 +774,14 @@ func (s *Server) recordProbeAttempts(a store.Account, model string, attempts []p
 			HTTPStatus:     att.res.HTTPStatus,
 			OK:             i == verdict && att.res.HTTPStatus >= 200 && att.res.HTTPStatus < 300,
 			InTokens:       att.usage.in,
-			OutTokens:      att.usage.out,
-			CacheRead:      att.usage.cacheRead,
-			CacheWrite:     att.usage.cacheWrite,
-			LatencyMS:      att.res.Latency.Milliseconds(),
-			Error:          msg,
+			// 探活行也进 usage 汇总，所以同样按这次所用协议归一化输入 token：不归一化时
+			// 新列的默认值 0 会让探活输入的花费整块消失（见 store.UncachedInTokens）。
+			InTokensUncached: store.UncachedInTokens(protocol, att.usage.in, att.usage.cacheRead),
+			OutTokens:        att.usage.out,
+			CacheRead:        att.usage.cacheRead,
+			CacheWrite:       att.usage.cacheWrite,
+			LatencyMS:        att.res.Latency.Milliseconds(),
+			Error:            msg,
 		}
 		if err := s.store.InsertRequest(rec); err != nil {
 			s.logf("写探活请求记录失败: %v", err)

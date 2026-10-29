@@ -104,11 +104,11 @@ func cmdUsage(e *Env, args []string) error {
 	fmt.Fprint(e.Stdout, renderTable(
 		[]string{headerName, "请求", "输入 token", "输出 token", "缓存读 token", "缓存写 token", "估算花费"}, table))
 	if totalCost == 0 {
-		fmt.Fprintln(e.Stdout, "花费为 0：账号没定价，加账号时给 --price-in 与 --price-out")
+		fmt.Fprintln(e.Stdout, "花费为 0：账号没定价，加账号时给 --price-in 与 --price-out（缓存单价可选，未填时回退输入价）")
 	}
 	if totalCacheRead+totalCacheWrite > 0 {
-		// 缓存 token 只显示不折价（见 DESIGN 第 7 节），没说清就容易被当成已经算进花费。
-		fmt.Fprintln(e.Stdout, "缓存读写只显示、不计入估算花费：缓存单价与命中折扣各家不同，按原价折进去只会更错")
+		// 缓存 token 已经折进花费，不说清就会被当成只显示；口径与 DESIGN 5.5 的公式一致。
+		fmt.Fprintln(e.Stdout, "缓存读写已按账号的缓存单价计入估算花费，未填缓存单价时按输入价算")
 	}
 	return nil
 }

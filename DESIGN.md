@@ -105,7 +105,7 @@ $ switchboard log tail -n 5
 $ switchboard usage --since 7d --by account
 账号        请求   输入 token  输出 token  缓存读 token  缓存写 token  估算花费
 deepseek-1  214    412330      98421      1180000       240100        ¥1.87
-缓存读写只显示、不计入估算花费：缓存单价与命中折扣各家不同，按原价折进去只会更错
+缓存读写已按账号的缓存单价计入估算花费，未填缓存单价时按输入价算
 
 # 9 排障。手工打一条，打印选号过程与上游原始响应
 $ switchboard call "hi" --model deepseek-v4-pro --debug
@@ -142,9 +142,9 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | --- | --- | --- | --- |
 | `init` | `--force` | 建配置目录与数据目录，写默认配置；`--force` 覆盖 | 两个路径 |
 | `serve` | `--addr`、`--log-level` | 前台起网关，注册四条入站路由、`/healthz` 与两个只读的模型清单接口（`GET /v1/models`、`GET /v1/models/{id}`，见 5.2.1）；启动只统计账号与模型数，不发上游请求 | 启动摘要，之后按请求打日志 |
-| `account add` | `<名称> --provider --key [--protocol] [--base-url] [--models] [--priority]` | 加密存 key；缺 `--base-url` 或 `--protocol` 时从厂商表补：地址取厂商的 `base_url`（厂商的 `base_url` 为空时账号的地址也留空：它的路由与模型列表地址都是整条地址，转发不拼地址，见 5.8），协议取该厂商的有效默认协议（显式值落在已声明路由上就用它，否则按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 取第一条，见 5.8），两个参数都仍能覆盖。厂商行在但一条路由都没有时算不出默认协议：没给 `--protocol` 也没给 `--base-url` 就报错，提示先用 `provider set` 补上路由，或改用这两个参数；给了 `--base-url` 则按自建地址加账号、协议回退 openai-chat。厂商不在表里且没给 `--base-url` 时报错，列出已知厂商、编辑距离不超过 2 时给出最接近的名字，并说明 `--provider <自定义名> --base-url <地址>` 仍可自建；厂商表为空时只认 `--base-url`。`--protocol` 只收 anthropic、openai-chat、openai-responses 与 gemini，`--help` 把四个值都列出来，并注明四条协议入站与出站都可用：gemini 的入站路径是 `/v1beta/models/{model}:generateContent` 与 `:streamGenerateContent`，非流式与流式都有（见 5.9）；这个参数说的是出站协议。白名单只有 `store.IsWireProtocol` 一份，cli 与 store 不再各写一套。`--base-url` 与 `provider add` 同一份校验（`store.NormalizeBaseURL`，见 5.8），只有 scheme 没有主机名的写法是用法错误、退出码 2，落库的是规整后的形态 | 新账号名称 |
+| `account add` | `<名称> --provider --key [--protocol] [--base-url] [--models] [--priority] [--price-in] [--price-out] [--price-cache-read] [--price-cache-write]` | 加密存 key；价格参数（每百万 token 的浮点，0 是合法值，负数是用法错误、退出码 2）只写命令行上给过的那几项，没给的留空、花费记为 null（见 5.5）；缺 `--base-url` 或 `--protocol` 时从厂商表补：地址取厂商的 `base_url`（厂商的 `base_url` 为空时账号的地址也留空：它的路由与模型列表地址都是整条地址，转发不拼地址，见 5.8），协议取该厂商的有效默认协议（显式值落在已声明路由上就用它，否则按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 取第一条，见 5.8），两个参数都仍能覆盖。厂商行在但一条路由都没有时算不出默认协议：没给 `--protocol` 也没给 `--base-url` 就报错，提示先用 `provider set` 补上路由，或改用这两个参数；给了 `--base-url` 则按自建地址加账号、协议回退 openai-chat。厂商不在表里且没给 `--base-url` 时报错，列出已知厂商、编辑距离不超过 2 时给出最接近的名字，并说明 `--provider <自定义名> --base-url <地址>` 仍可自建；厂商表为空时只认 `--base-url`。`--protocol` 只收 anthropic、openai-chat、openai-responses 与 gemini，`--help` 把四个值都列出来，并注明四条协议入站与出站都可用：gemini 的入站路径是 `/v1beta/models/{model}:generateContent` 与 `:streamGenerateContent`，非流式与流式都有（见 5.9）；这个参数说的是出站协议。白名单只有 `store.IsWireProtocol` 一份，cli 与 store 不再各写一套。`--base-url` 与 `provider add` 同一份校验（`store.NormalizeBaseURL`，见 5.8），只有 scheme 没有主机名的写法是用法错误、退出码 2，落库的是规整后的形态 | 新账号名称 |
 | `account ls` | `--json` | 列账号、模型数、是否处在冷却；模型列分三种情况：`account_models` 有数据时显示「N 可用 / M 同步」（同步过但零可用就写作「0 可用 / M 同步」，说明这个账号眼下接不了任何模型），只有 `accounts.models` 里手填的名字时直接列出模型名，两者都没有时写「无模型（先 model sync）」——空模型列表表示该账号不提供任何模型、不参与选号（见 5.3），不写成「不限」这类看起来表示「什么模型都收」的文案；协议列显示账号默认协议，存在与它不同的已发现协议时写成「openai-chat + 另 1 种」；`--json` 每行多了 `models_usable`、`models_synced` 两个计数与 `protocols`（默认协议在前，其余是模型行上发现到的协议），模型列的三种情况由这两个计数与 `models` 分开：`models` 为空且 `models_synced` 为 0 是「无模型」，`models_synced` 大于 0 是同步过的「N 可用 / M 同步」，`models` 非空而 `models_synced` 为 0 是手填 | 表格 |
-| `account set` | `<名称> --key <key>` | 换掉已有账号的凭据，不删号重建：删号会丢掉 `account_models` 里的探活结果、协议发现与请求记录的账号归属。`--key` 的三种给法与 `account add` 一致（直接写值、`--key -` 从标准输入读、留空读 `SWITCHBOARD_KEY`），缺凭据是用法错误（退出码 2 并打出用法）。key 走同一条加密路径覆盖 `key_cipher`，明文不进日志、不进 `--json` 输出。旧凭据的结论一并作废：同一个事务里清掉 `cooldown_until`、`fail_streak`、`last_error` 并把账号重新启用（`enabled=1`），写入口是 `store.RotateKey`。不动 `account_models`、`accounts.models` 与协议发现结果，也不碰厂商表。账号不存在时报错并提示先 `switchboard account add` | 确认一行（新凭据的掩码、冷却与失败计数已清零、账号已启用）；`--json` 含 `name`、`key`（掩码）、`cooldown_cleared`、`fail_streak_cleared`、`enabled` |
+| `account set` | `<名称> [--key <key>] [--price-in N] [--price-out N] [--price-cache-read N] [--price-cache-write N]` | 换掉已有账号的凭据、改它的价格，都不删号重建：删号会丢掉 `account_models` 里的探活结果、协议发现与请求记录的账号归属。`--key` 的三种给法与 `account add` 一致（直接写值、`--key -` 从标准输入读、留空读 `SWITCHBOARD_KEY`），没给价格参数又解析不出凭据时是用法错误（退出码 2 并打出用法）。key 走同一条加密路径覆盖 `key_cipher`，明文不进日志、不进 `--json` 输出。旧凭据的结论一并作废：同一个事务里清掉 `cooldown_until`、`fail_streak`、`last_error` 并把账号重新启用（`enabled=1`），写入口是 `store.RotateKey`。不动 `account_models`、`accounts.models` 与协议发现结果，也不碰厂商表。账号不存在时报错并提示先 `switchboard account add`。价格参数与 `account add` 同一套（每百万 token 的浮点，负数是用法错误、退出码 2），只写命令行上给过的那几项，其余价格列原样保留；写入口是 `store.SetAccountPrices`，与换凭据分开——换凭据会顺手清冷却，改价格不能把账号状态一起抹掉。只给价格参数时不必给 `--key`（改价格与换凭据是两件事），`--key` 没给就不换凭据、不清冷却；给了就照旧走 `store.RotateKey` | 确认一行（改了价格时列出输入 / 输出 / 缓存读 / 缓存写四个价，没填缓存单价写作「回退输入价」；换了凭据时是原来的那一行）；`--json` 含 `name`、`key_rotated`、`price_in`、`price_out`、`price_cache_read`、`price_cache_write`，换凭据时另有 `key`（掩码）、`cooldown_cleared`、`fail_streak_cleared`、`enabled` |
 | `account rm` | `<名称>` | 删账号，同时删掉它的 `account_models` 行；关联的请求记录保留 | 确认一行 |
 | `account test` | `<名称>` | 分两步探活，先证明地址通、再证明凭据有效。第一步 `GET` 模型列表，地址与凭据头跟 `model sync` 同一套规则解析（厂商级覆盖 → 账号协议那条路由 → 同厂商按协议名排序的第一条非空 `models_path`，整条地址直接访问；凭据头跟取到地址的那条路由的协议，见 5.7），2xx 只说明地址通、上游连得上，同时报出上游模型数（与 `model sync` 同一套形状解析，解析不了只说明「上游返回的不是模型列表」，不判失败）；**列表 2xx 之后仍然**发一条 `max_tokens=1` 的请求证明凭据有效——列表接口是公开接口时任何 key 都能换回 200，前者不作数。列表返回 404 或 405（这家没有列表接口）、403（可能被网关拦）、取不到列表地址或连不上时同样走这条最小调用；模型取 `accounts.models` 第一项、为空时用默认模型名 `default` 并在备注里说明。两段都通过才判正常，状态与退出码按调用那段算；列表接口自己回 401/429/5xx/其它 4xx 时已经是凭据或上游的结论，不再花一次调用。两段的状态处理一致：2xx → 启用账号并清掉冷却、`last_error` 与 `fail_streak`；401 → 停用账号并把错误写进 `last_error`；429/5xx/超时 → 按连续失败次数打冷却；其它 4xx → 只报原话、不动状态。它只判凭据与连通性，模型是否可用由 `model probe` 决定 | 表格（账号 / 状态 / HTTP / 耗时 / 上游模型数 / 备注），状态与 HTTP 取调用那段，耗时取得出结论那一阶段的耗时，上游模型数取列表那段（列表接口没通时显示 `-`），备注写清两段各自的结果（列表接口可用、上游几个模型；模型调用可用还是失败）；`--json` 含 `account`、`stage`（`models` 或 `call`）、`status`、`ok`、`models`（数量，未知为 0）、`latency`、`message`，以及 `list` 对象（列表那一段的 `stage`、`status`、`ok`、`models`、`latency`、`message`） |
 | `account enable` | `<名称>` | 重新启用账号并清冷却 | 确认一行 |
@@ -160,7 +160,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | `provider header ls` | `[<厂商>]` `--json` | 列已声明的附加请求头：不给厂商就列全部厂商的，给了就只列这一家（厂商不在表里时报错、退出码 1，不把「写错厂商名」显示成「一条头都没有」）。文本四列：厂商、协议（厂商级显示 `-`）、头名、值（脱敏）。值一律走 `ProviderHeader.Masked`，只露前四位：值可能是密钥（会话 token、自定义鉴权头），完整值不打印，`--json` 也一样。厂商级与协议级各占一行，同一头名两边都有时两行都在，协议列就是区分；合并后的有效集合（协议级按同名覆盖厂商级，见 5.10）不在这里展开，转发时才算 | 表格；一条都没有时输出一行提示与一条示例命令；`--json` 是数组，每项 `provider`、`protocol`（空串是厂商级）、`name`、`value`（脱敏）、`value_masked`（恒 true，说明 `value` 不是明文） |
 | `model sync` | `[--provider 厂商]` `[--account 账号]` `[--endpoint <路径>]` | 对选中的账号 GET 上游模型列表：地址按厂商的 `models_path` 覆盖、账号协议那条路由的 `models_path`、同厂商按协议名排序的第一条非空 `models_path` 的顺序取，都没有时按 `base_url` 后缀猜；凭据头跟「实际取到这条路径的那条路由」的协议走，不是账号协议（见 5.7）。`--endpoint` 只影响这一次调用，值是相对账号的 `base_url` 的完整路径，也可以是整条地址（见 5.8；相对路径只规整，`v1/models` 与 `//v1//models/` 都可用；整条地址直接访问、不再拼 `base_url`），给了就压过厂商覆盖与路由，作用于被选中的每个账号；传空值或只有斜杠是用法错误，整条地址缺主机名、scheme 不是 http(s) 同样是用法错误（退出码 2，文案指出缺什么），不需要临时覆盖就整个去掉这个参数；解析 `{data:[{id}]}`、`{models:[{…}]}` 与顶层数组三种形状（见 5.7），按名字排序去重，空列表算该账号失败。结果写 `account_models`：新行状态 `synced`，已有行保留探活状态，上游已消失的行删除。只改 `account_models`，不动 `accounts.models`。某个账号失败时其余账号照常处理完 | 表格（账号 / 厂商 / 模型 / 新增 / 备注）与下一步 `model probe` 的提示；`--json` 是数组，每项 `account`、`provider`、`models`、`added`、`error`（只有失败才有） |
 | `model probe` | `[--provider 厂商]` `[--account 账号]` `[--sync]` `[--model 模型]` `[--limit N]` `[--concurrency N]` `[--max-age 时长]` `[--refresh]` | 逐账号对每个模型发一条 `max_tokens=1` 的请求判定可用性，结果写 `account_models`；每次上游调用同时写一行 `requests`（见 5.5）。`status` 为 `usable`、`forbidden`、`notfound` 之一且 `checked_at` 在 `--max-age`（默认 `24h`）以内的模型跳过，不发上游请求、不写库、不出现在输出里；`synced`、`auth`、`error` 与 `checked_at` 为 0 的照常探；`--refresh` 或 `--max-age 0` 忽略新鲜度全部重探。该账号库里出现 `usable` 时，把库里**全部** `usable` 写成该账号的 `accounts.models`（不只是本次探到的），选号从此按该列表。没有模型行或带 `--sync` 时先同步；`--model` 只探一个模型名，`--limit` 截断的是跳过之后剩下的待探模型，`--concurrency` 默认 4 且不超过待探模型数；待探模型被全部跳过时仍按库里 `usable` 回写 `accounts.models`，该账号算作已满足；任一账号出现 401 即停止后续账号并返回错误；所有账号都没探出可用模型时退出码 1 且不改任何 `accounts.models`，错误信息带本次探活数与跳过数 | 表格（账号 / 模型 / 状态 / HTTP / 耗时 / 备注）与该账号的「本次探活 N 个 / 跳过 M 个」和可用 / 无权 / 不存在 / 失败计数；`--json` 是数组，每项 `account`、`model`、`status`、`http_status`、`latency_ms`、`message`，只含本次被探的模型，计数只出现在人读输出里。人读输出在 stderr 用单行原地刷新（`\r`）打实时进度，形如 `ds1 探活中 37/94  deepseek-v4.1-flash`：账号名、已完成 / 待探总数、最近完成的那个模型（并发大于 1 时显示刚回来的那个），被跳过的模型不计入总数；账号探完补一个换行，随后照旧打印汇总行与表格。进度只在 stderr 是终端时开，非终端（管道、CI、测试）与 `--json` 一个字节都不打，标准输出始终只有结果 |
-| `usage` | `--since`、`--by account\|model\|day` | 汇总请求数、token（含缓存读写）与估算花费；`--by account`、`--by model`、`--by day` 三种分组都给出缓存读与缓存写的合计，文本表格另有一行合计，缓存 token 确实不为 0 时在末尾用一句话说明它们只显示、不参与估算花费（见第 7 节） | 表格；`--json` 是数组，每项 `key`、`requests`、`in_tokens`、`out_tokens`、`cache_read`、`cache_write`、`cost` |
+| `usage` | `--since`、`--by account\|model\|day` | 汇总请求数、token（含缓存读写）与估算花费；`--by account`、`--by model`、`--by day` 三种分组都给出缓存读与缓存写的合计，文本表格另有一行合计，成本已按 5.5 的公式计入缓存读写，合计之后在缓存 token 不为 0 时用一句话写明这个口径（未填缓存单价按输入价算） | 表格；`--json` 是数组，每项 `key`、`requests`、`in_tokens`、`out_tokens`、`cache_read`、`cache_write`、`cost` |
 | `log tail` | `-n`、`--follow` | 最近的请求记录；`--follow` 跟随 | 表格（时间、协议、模型、账号、状态、输入、输出、缓存读、缓存写、耗时、错误）；`--json` 是数组，每项 `ts`、`inbound`、`outbound`、`model`、`account`、`http_status`、`ok`、`in_tokens`、`out_tokens`、`cache_read`、`cache_write`、`latency_ms`、`error` |
 | `call` | `[提示词] --model [--protocol] [--stream] [--max-tokens N] [--system 提示词] [--debug] [--json]` | 绕过客户端直连本进程，打印选号过程；默认发 anthropic 入站，`--protocol` 可在 anthropic、chat、responses、gemini 之间切换。gemini 的模型名不在请求体里，由本命令按路径段转义后拼进入站路径：非流式 `/v1beta/models/{model}:generateContent`、`--stream` 时 `:streamGenerateContent`（见 5.9） | 响应，或 debug 轨迹；gemini 的流式按 SSE 逐帧解码后输出文本增量与工具调用，`--json` 时一个 `data` 帧一行 JSON 原文 |
 | `doctor` | 无 | 检查配置文件、数据目录、数据库、端口 | 逐项 ok / fail |
@@ -352,13 +352,22 @@ responses 的 `reasoning` item 只在响应方向编：非流式把正文写进 
 
 ### 5.5 请求记录
 
-每次尝试写一行，包括失败与换号前的尝试。字段：时间、入站协议、出站协议、请求模型名、实际模型名、账号 id、HTTP 状态、是否成功、输入 token、输出 token、缓存读、缓存写、耗时、错误摘要。
+每次尝试写一行，包括失败与换号前的尝试。字段：时间、入站协议、出站协议、请求模型名、实际模型名、账号 id、HTTP 状态、是否成功、输入 token、未命中缓存的输入 token（`in_tokens_uncached`）、输出 token、缓存读、缓存写、耗时、错误摘要。
 
-`inbound` 与 `outbound` 两列记的是这一行实际用到的协议对，转换时两列不同，直通时两列相同。除输入与输出 token，`cache_read` 与 `cache_write` 也会写入：anthropic 的缓存读与缓存写分别取自 `cache_read_input_tokens` 与 `cache_creation_input_tokens`；chat 与 responses 只带缓存读（`cached_tokens`），这两家的缓存写记为 0。直通与转换两条路径都会填这几个字段。缓存读与缓存写这两列在 `log tail` 与 `usage` 里都能看到：`log tail` 逐行显示（文本两列加 `--json` 的 `cache_read`、`cache_write`），`usage` 按 `--by` 的三种分组合计，文本与 `--json` 都带；它们只显示，不参与估算花费（见第 7 节）。
+`inbound` 与 `outbound` 两列记的是这一行实际用到的协议对，转换时两列不同，直通时两列相同。除输入与输出 token，`cache_read` 与 `cache_write` 也会写入：anthropic 的缓存读与缓存写分别取自 `cache_read_input_tokens` 与 `cache_creation_input_tokens`；chat 与 responses 只带缓存读（`cached_tokens`），这两家的缓存写记为 0。直通与转换两条路径都会填这几个字段。缓存读与缓存写这两列在 `log tail` 与 `usage` 里都能看到：`log tail` 逐行显示（文本两列加 `--json` 的 `cache_read`、`cache_write`），`usage` 按 `--by` 的三种分组合计，文本与 `--json` 都带。展示用的输入 token 是 `in_tokens`（上游原值，归一化只写进新列），花费按下一段的公式折。
 
 `model probe` 的 `max_tokens=1` 调用同样记行：每次上游调用写一行，探活也不例外。换协议重试的中间尝试也各记一行，它们的 `ok` 为 0，`error` 以「换协议前的尝试，未作结论」开头并带上那次的上游错误摘要，与判定行区分开；一次 403 触发三次调用就是三行，账实一致比行数好看重要。这类行的取值：`ts` 是这次调用的开始时间；`inbound` 与 `outbound` 都取这一行实际使用的协议（每一行各自是那次试的协议），探活就是「用这个协议直连上游」；`model_requested` 与 `model_used` 都取被探的模型名；`account_id` 取账号 id；`http_status` 与 `ok` 取上游响应，`ok` 表示 2xx，网络错误时 `http_status` 记 0；`in_tokens`、`out_tokens`、`cache_read`、`cache_write` 都由这次所用协议的 usage scanner 从响应体读出：anthropic 的 scanner 四项齐全（`cache_read_input_tokens` 与 `cache_creation_input_tokens`），chat 与 responses 只读得到缓存读（`cached_tokens`），`cache_write` 记 0；非 2xx 与网络错误记 0；`latency_ms` 是这次请求的耗时；`error` 是错误摘要，与探活结果一样过 `scrubSecret`，凭据不进库。这类行因此也进 `usage` 的汇总，探活的花费不会被漏掉一部分。
 
-估算花费需要价格表；价格表第一版放在账号上（`--price-in / --price-out`，单位每百万 token），缺省则花费记为 null，不猜价格。
+估算花费的口径（价格表第一版放在账号上，单位每百万 token，缺省则花费记为 null，不猜价格）：
+
+| 项 | 取值 |
+| --- | --- |
+| 未命中缓存的输入 | `in_tokens_uncached × --price-in` |
+| 缓存读 | `cache_read × --price-cache-read`，未填时回退到 `--price-in` |
+| 缓存写 | `cache_write × --price-cache-write`，未填时回退到 `--price-in` |
+| 输出 | `out_tokens × --price-out` |
+
+`in_tokens_uncached` 是入账时算好的一列，因为三种协议对「输入 token」的含不含缓存做法不一致：anthropic 的 `input_tokens` 已排除缓存读写，直接用它；chat 的 `prompt_tokens` 与 gemini 的 `promptTokenCount` 都包含命中缓存的部分，要减掉 `cache_read`（减到 0 为止）。记在 `requests.in_tokens` 里的仍是从上游读到的原值，展示不变；只有花费用归一化后的那一列。不归一化时两个方向都错：anthropic 的缓存读完全不算钱，chat 与 gemini 的缓存读按满价算。
 
 ### 5.6 凭据
 
@@ -638,6 +647,8 @@ CREATE TABLE accounts (
   models         TEXT    NOT NULL DEFAULT '[]',
   price_in       REAL,
   price_out      REAL,
+  price_cache_read  REAL,
+  price_cache_write REAL,
   priority       INTEGER NOT NULL DEFAULT 100,
   enabled        INTEGER NOT NULL DEFAULT 1,
   cooldown_until INTEGER,
@@ -657,6 +668,7 @@ CREATE TABLE requests (
   http_status     INTEGER NOT NULL,
   ok              INTEGER NOT NULL,
   in_tokens       INTEGER NOT NULL DEFAULT 0,
+  in_tokens_uncached INTEGER NOT NULL DEFAULT 0,
   out_tokens      INTEGER NOT NULL DEFAULT 0,
   cache_read      INTEGER NOT NULL DEFAULT 0,
   cache_write     INTEGER NOT NULL DEFAULT 0,
@@ -703,6 +715,8 @@ CREATE TABLE provider_headers (
 ```
 
 `account_models` 由迁移 `0003` 建立，`status` 取值就是 `synced`、`usable`、`forbidden`、`notfound`、`auth`、`error`（见 5.7）。`accounts.fail_streak` 由迁移 `0004` 加入，只用于冷却翻倍，写入口只有 `RecordFailure`（加一）、`ClearFailure`（清零）与 `RotateKey`（换凭据时清零，见 5.6）。`accounts.models` 仍是选号实际读的那份列表。删除账号时 `DeleteAccount` 在同一个事务里删掉它的 `account_models` 行：SQLite 的 rowid 会被复用，遗留子行会让新账号继承旧账号的探活状态。
+
+`accounts.price_cache_read`、`accounts.price_cache_write` 与 `requests.in_tokens_uncached` 由迁移 `0011` 加入。两列缓存单价可空，空表示没填：估算花费按输入价回退，老账号升上来两列都是 NULL，金额与只有输入输出价时一致。`in_tokens_uncached` 是入账时按出站协议归一化之后的输入 token（纯规则 `store.UncachedInTokens`，见 5.5），`in_tokens` 保持上游原值；历史行没有区分能力，迁移按当时的 `in_tokens` 回填，不写 0——写 0 会让历史花费凭空变成只算输出。花费的公式只有一份，在 `store.Usage` 的 SQL 里：`in_tokens_uncached × price_in + cache_read × COALESCE(price_cache_read, price_in, 0) + cache_write × COALESCE(price_cache_write, price_in, 0) + out_tokens × price_out`，四项之和再除以 1e6。
 
 `account_models.protocol` 由迁移 `0005` 加入，记录「这个模型该用哪种协议」，取值是 anthropic、openai-chat、openai-responses 与 gemini（见 5.9）。**空字符串表示继承账号的 `protocol`**：有效出站协议是「列非空就用列，否则用账号的 `protocol`」，纯规则在 `store.ResolveProtocol`，读库入口是 `store.EffectiveProtocol(accountID, accountProtocol, model)`，行不存在与列为空都当成继承，不报错。转发与展示只读这个有效协议，不在调用方拼规则；`cli` 要显示协议时也只调它。
 
@@ -755,8 +769,8 @@ M0 到 M13 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkel
 
 已知未做，按已知行为处理：
 
-- 估算花费依赖账号上的 `--price-in` 与 `--price-out`，没有价格时记为 0 并在 `usage` 末尾提示。
-- 缓存读写的 token 只显示、不参与估算花费：`log tail` 与 `usage` 都列出这两个数，估算仍只按 `--price-in` 与 `--price-out` 折输入与输出。缓存单价与命中折扣各家不同，没有对应的 `--price-cache-*` 参数时按原价算只会给出更错的数，所以宁可不折价也不给一个看起来精确的错数；`usage` 末尾在确实有缓存 token 时用一句话说明这条边界。
+- 估算花费依赖账号上手工填的 `--price-in`、`--price-out`、`--price-cache-read` 与 `--price-cache-write`（单位每百万 token），没有内建价格表；一个价都没填时记为 0 并在 `usage` 末尾提示，缓存单价未填时回退到输入价（见 5.5 的公式）。
+- `in_tokens_uncached` 只在入账那一刻算一次：之后改归一口径不会重算历史行（迁移按当时的 `in_tokens` 回填）。三种协议的输入 token 含义不同，anthropic 的 `input_tokens` 已排除缓存，chat 的 `prompt_tokens` 与 gemini 的 `promptTokenCount` 含缓存命中，不按出站协议归一化时 anthropic 的缓存读等于白用、chat 与 gemini 的缓存读按满价多算；归一化由 `store.UncachedInTokens` 在写 `requests` 时做掉（转发与探活两处入账都过它），上游自己报出自相矛盾的数（缓存比输入还多）时只能夹到 0，不记负数。
 - 模型名不做别名归一，请求里的 `model` 必须与账号 `--models` 里的名字完全一致。
 - 探活并发默认 4，`--concurrency` 可以改，只是默认值，不会根据上游限速自适应。
 - gemini 只取 `candidates[0]`，`candidateCount` 与多候选不搬；流式里不搬图片（`inlineData` / `fileData`）。

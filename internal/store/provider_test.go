@@ -270,7 +270,23 @@ func TestMigration0007UpgradesOldDatabase(t *testing.T) {
 		t.Fatalf("打开老库: %v", err)
 	}
 	// 0006 之后的形状：providers 还没有 default_protocol 列。
+	// accounts 与 requests 按 0010 的形状给出：真实的老库一直有这两张表，
+	// 后面的迁移（例如 0011 回填 in_tokens_uncached）会在它们上面动列。
 	ddl := []string{
+		`CREATE TABLE accounts (
+			id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, provider TEXT NOT NULL,
+			protocol TEXT NOT NULL, base_url TEXT NOT NULL, key_cipher BLOB NOT NULL,
+			models TEXT NOT NULL DEFAULT '[]', price_in REAL, price_out REAL,
+			priority INTEGER NOT NULL DEFAULT 100, enabled INTEGER NOT NULL DEFAULT 1,
+			cooldown_until INTEGER, last_error TEXT,
+			fail_streak INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL)`,
+		`CREATE TABLE requests (
+			id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, inbound TEXT NOT NULL,
+			outbound TEXT NOT NULL, model_requested TEXT NOT NULL, model_used TEXT NOT NULL,
+			account_id INTEGER, http_status INTEGER NOT NULL, ok INTEGER NOT NULL,
+			in_tokens INTEGER NOT NULL DEFAULT 0, out_tokens INTEGER NOT NULL DEFAULT 0,
+			cache_read INTEGER NOT NULL DEFAULT 0, cache_write INTEGER NOT NULL DEFAULT 0,
+			latency_ms INTEGER NOT NULL DEFAULT 0, error TEXT)`,
 		`CREATE TABLE providers (
 			name TEXT PRIMARY KEY, base_url TEXT NOT NULL, note TEXT NOT NULL DEFAULT '')`,
 		`CREATE TABLE provider_routes (

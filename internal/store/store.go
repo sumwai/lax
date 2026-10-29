@@ -16,6 +16,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"switchboard/internal/translate"
 )
 
 //go:embed migrations/*.sql
@@ -28,19 +30,23 @@ type Store struct {
 
 // Account 是一行账号。
 type Account struct {
-	ID            int64
-	Name          string
-	Provider      string
-	Protocol      string
-	BaseURL       string
-	KeyCipher     []byte
-	Models        []string
-	PriceIn       *float64
-	PriceOut      *float64
-	Priority      int
-	Enabled       bool
-	CooldownUntil int64
-	LastError     string
+	ID        int64
+	Name      string
+	Provider  string
+	Protocol  string
+	BaseURL   string
+	KeyCipher []byte
+	Models    []string
+	PriceIn   *float64
+	PriceOut  *float64
+	// PriceCacheRead 与 PriceCacheWrite 是缓存读写的单价（每百万 token），可空：
+	// 空表示没填，花费估算回退到输入价（见 Usage）。
+	PriceCacheRead  *float64
+	PriceCacheWrite *float64
+	Priority        int
+	Enabled         bool
+	CooldownUntil   int64
+	LastError       string
 	// FailStreak 是连续失败次数，跨请求累计，用于冷却翻倍。成功一次即清零。
 	FailStreak int
 	CreatedAt  int64
@@ -58,11 +64,14 @@ type RequestRecord struct {
 	HTTPStatus     int
 	OK             bool
 	InTokens       int64
-	OutTokens      int64
-	CacheRead      int64
-	CacheWrite     int64
-	LatencyMS      int64
-	Error          string
+	// InTokensUncached 是归一化之后的输入 token：没命中缓存的那部分，花费按它折输入价。
+	// 入账时由 UncachedInTokens 按出站协议算出，见那里与 DESIGN 5.5。
+	InTokensUncached int64
+	OutTokens        int64
+	CacheRead        int64
+	CacheWrite       int64
+	LatencyMS        int64
+	Error            string
 }
 
 // Open 打开数据库，按需建目录并执行迁移。
@@ -206,10 +215,11 @@ func (s *Store) CreateAccount(a *Account) error {
 		a.Priority = 100
 	}
 	res, err := s.db.Exec(`INSERT INTO accounts
-		(name, provider, protocol, base_url, key_cipher, models, price_in, price_out, priority, enabled, cooldown_until, last_error, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', ?)`,
+		(name, provider, protocol, base_url, key_cipher, models, price_in, price_out,
+		 price_cache_read, price_cache_write, priority, enabled, cooldown_until, last_error, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', ?)`,
 		a.Name, a.Provider, a.Protocol, a.BaseURL, a.KeyCipher, encodeModels(a.Models),
-		a.PriceIn, a.PriceOut, a.Priority, boolInt(a.Enabled), a.CreatedAt)
+		a.PriceIn, a.PriceOut, a.PriceCacheRead, a.PriceCacheWrite, a.Priority, boolInt(a.Enabled), a.CreatedAt)
 	if err != nil {
 		return err
 	}
@@ -220,7 +230,8 @@ func (s *Store) CreateAccount(a *Account) error {
 // ListAccounts 按 priority、id 升序返回全部账号。
 func (s *Store) ListAccounts() ([]Account, error) {
 	rows, err := s.db.Query(`SELECT id, name, provider, protocol, base_url, key_cipher, models,
-		price_in, price_out, priority, enabled, COALESCE(cooldown_until, 0), COALESCE(last_error, ''), fail_streak, created_at
+		price_in, price_out, price_cache_read, price_cache_write,
+		priority, enabled, COALESCE(cooldown_until, 0), COALESCE(last_error, ''), fail_streak, created_at
 		FROM accounts ORDER BY priority ASC, id ASC`)
 	if err != nil {
 		return nil, err
@@ -237,7 +248,8 @@ func scanAccounts(rows *sql.Rows) ([]Account, error) {
 		var models string
 		var enabled int
 		if err := rows.Scan(&a.ID, &a.Name, &a.Provider, &a.Protocol, &a.BaseURL, &a.KeyCipher,
-			&models, &a.PriceIn, &a.PriceOut, &a.Priority, &enabled, &a.CooldownUntil, &a.LastError, &a.FailStreak, &a.CreatedAt); err != nil {
+			&models, &a.PriceIn, &a.PriceOut, &a.PriceCacheRead, &a.PriceCacheWrite,
+			&a.Priority, &enabled, &a.CooldownUntil, &a.LastError, &a.FailStreak, &a.CreatedAt); err != nil {
 			return nil, err
 		}
 		a.Models = decodeModels(models)
@@ -253,9 +265,11 @@ func (s *Store) GetAccount(name string) (Account, error) {
 	var models string
 	var enabled int
 	err := s.db.QueryRow(`SELECT id, name, provider, protocol, base_url, key_cipher, models,
-		price_in, price_out, priority, enabled, COALESCE(cooldown_until, 0), COALESCE(last_error, ''), fail_streak, created_at
+		price_in, price_out, price_cache_read, price_cache_write,
+		priority, enabled, COALESCE(cooldown_until, 0), COALESCE(last_error, ''), fail_streak, created_at
 		FROM accounts WHERE name = ?`, name).Scan(&a.ID, &a.Name, &a.Provider, &a.Protocol, &a.BaseURL,
-		&a.KeyCipher, &models, &a.PriceIn, &a.PriceOut, &a.Priority, &enabled, &a.CooldownUntil, &a.LastError, &a.FailStreak, &a.CreatedAt)
+		&a.KeyCipher, &models, &a.PriceIn, &a.PriceOut, &a.PriceCacheRead, &a.PriceCacheWrite,
+		&a.Priority, &enabled, &a.CooldownUntil, &a.LastError, &a.FailStreak, &a.CreatedAt)
 	if err != nil {
 		return a, err
 	}
@@ -336,6 +350,29 @@ func (s *Store) RotateKey(id int64, cipher []byte) error {
 	})
 }
 
+// AccountPrices 是账号价格的增量改动：nil 表示这一项不动。
+// `account set` 用它只改传入的价格字段，不顺手把没给的那些清掉。
+type AccountPrices struct {
+	In         *float64
+	Out        *float64
+	CacheRead  *float64
+	CacheWrite *float64
+}
+
+// SetAccountPrices 只写这个结构里非 nil 的价格列，其余原样保留。
+// 单独开一个写入口而不复用换凭据的 RotateKey：换 key 会顺手清冷却与失败计数，
+// 改价格不能把账号状态一起抹掉（见 DESIGN 4 的 `account set`）。
+func (s *Store) SetAccountPrices(id int64, p AccountPrices) error {
+	// COALESCE 把「没给」（NULL 参数）变成「保留原值」：一条 UPDATE 就够，不拼动态 SQL。
+	_, err := s.db.Exec(`UPDATE accounts
+		SET price_in = COALESCE(?, price_in),
+		    price_out = COALESCE(?, price_out),
+		    price_cache_read = COALESCE(?, price_cache_read),
+		    price_cache_write = COALESCE(?, price_cache_write)
+		WHERE id = ?`, p.In, p.Out, p.CacheRead, p.CacheWrite, id)
+	return err
+}
+
 // recordFailureTx 是冷却的写入口（加一），只给事务内部用。
 func recordFailureTx(tx *sql.Tx, id int64, until int64, lastErr string) error {
 	_, err := tx.Exec(`UPDATE accounts
@@ -399,10 +436,10 @@ func (s *Store) InsertRequest(r *RequestRecord) error {
 func insertRequestTx(tx *sql.Tx, r *RequestRecord) error {
 	res, err := tx.Exec(`INSERT INTO requests
 		(ts, inbound, outbound, model_requested, model_used, account_id, http_status, ok,
-		 in_tokens, out_tokens, cache_read, cache_write, latency_ms, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 in_tokens, in_tokens_uncached, out_tokens, cache_read, cache_write, latency_ms, error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.TS, r.Inbound, r.Outbound, r.ModelRequested, r.ModelUsed, r.AccountID, r.HTTPStatus, boolInt(r.OK),
-		r.InTokens, r.OutTokens, r.CacheRead, r.CacheWrite, r.LatencyMS, r.Error)
+		r.InTokens, r.InTokensUncached, r.OutTokens, r.CacheRead, r.CacheWrite, r.LatencyMS, r.Error)
 	if err != nil {
 		return err
 	}
@@ -416,7 +453,7 @@ func (s *Store) RecentRequests(limit int) ([]RequestRecord, error) {
 		limit = 20
 	}
 	rows, err := s.db.Query(`SELECT id, ts, inbound, outbound, model_requested, model_used, COALESCE(account_id, 0),
-		http_status, ok, in_tokens, out_tokens, cache_read, cache_write, latency_ms, COALESCE(error, '')
+		http_status, ok, in_tokens, in_tokens_uncached, out_tokens, cache_read, cache_write, latency_ms, COALESCE(error, '')
 		FROM requests ORDER BY ts DESC, id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -428,7 +465,8 @@ func (s *Store) RecentRequests(limit int) ([]RequestRecord, error) {
 		var r RequestRecord
 		var ok int
 		if err := rows.Scan(&r.ID, &r.TS, &r.Inbound, &r.Outbound, &r.ModelRequested, &r.ModelUsed, &r.AccountID,
-			&r.HTTPStatus, &ok, &r.InTokens, &r.OutTokens, &r.CacheRead, &r.CacheWrite, &r.LatencyMS, &r.Error); err != nil {
+			&r.HTTPStatus, &ok, &r.InTokens, &r.InTokensUncached, &r.OutTokens, &r.CacheRead, &r.CacheWrite,
+			&r.LatencyMS, &r.Error); err != nil {
 			return nil, err
 		}
 		r.OK = ok == 1
@@ -437,9 +475,31 @@ func (s *Store) RecentRequests(limit int) ([]RequestRecord, error) {
 	return out, rows.Err()
 }
 
+// UncachedInTokens 把上游报的输入 token 归一成「没命中缓存的那部分」，入账时只算这一列的花费。
+// 三种出站协议对「输入 token 含不含缓存」的做法不同，不归一化时两个方向都错：
+//
+//   - anthropic 的 input_tokens 已经排除缓存读写，直接用；
+//   - chat 的 prompt_tokens 与 gemini 的 promptTokenCount 都包含命中缓存的部分（
+//     prompt_tokens_details.cached_tokens 与 cachedContentTokenCount），要减掉 cache_read。
+//
+// 减到 0 为止：上游若报出自相矛盾的数（缓存比输入还多），负的输入 token 会让花费变成负数，
+// 库里的列与实际账目都比一个夹到 0 的估算更难解释。in_tokens 本身不改，展示与 log tail 不变。
+// 以后加出站协议时要在这里确认它的输入计数含不含缓存：默认分支按「不含缓存」处理。
+func UncachedInTokens(outbound string, inTokens, cacheRead int64) int64 {
+	switch outbound {
+	case translate.ProtocolChat, translate.ProtocolResponses, translate.ProtocolGemini:
+		if rest := inTokens - cacheRead; rest > 0 {
+			return rest
+		}
+		return 0
+	default:
+		return inTokens
+	}
+}
+
 // UsageRow 是一行用量汇总。
-// CacheRead 与 CacheWrite 只是合计出来给人看与给脚本用：估算花费仍只按输入与输出折价，
-// 缓存读写的单价与命中折扣各家不同，没有价格参数时按原价折进去只会更错（见 DESIGN 第 7 节）。
+// Cost 按 UncachedInTokens 归一化之后的输入、缓存读、缓存写与输出折价（见 DESIGN 5.5）：
+// 缓存单价未填时回退到输入价，账号一个价都没填时是 0。
 type UsageRow struct {
 	Key        string
 	Requests   int64
@@ -468,7 +528,12 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 
 	q := fmt.Sprintf(`SELECT %s AS k, COUNT(*), COALESCE(SUM(r.in_tokens),0), COALESCE(SUM(r.out_tokens),0),
 		COALESCE(SUM(r.cache_read),0), COALESCE(SUM(r.cache_write),0),
-		COALESCE(SUM(r.in_tokens * COALESCE(a.price_in,0) / 1e6 + r.out_tokens * COALESCE(a.price_out,0) / 1e6),0)
+		COALESCE(SUM(
+			r.in_tokens_uncached * COALESCE(a.price_in,0)
+			+ r.cache_read * COALESCE(a.price_cache_read, a.price_in, 0)
+			+ r.cache_write * COALESCE(a.price_cache_write, a.price_in, 0)
+			+ r.out_tokens * COALESCE(a.price_out,0)
+		) / 1e6, 0)
 		FROM requests r %s WHERE r.ts >= ? GROUP BY k ORDER BY 2 DESC`, expr, join)
 
 	rows, err := s.db.Query(q, since)

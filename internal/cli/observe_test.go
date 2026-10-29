@@ -276,7 +276,7 @@ func TestUsageCacheHintOnlyWithCacheTokens(t *testing.T) {
 	}
 	id := accountID(t, "ds1")
 
-	const hint = "缓存读写只显示、不计入估算花费"
+	const hint = "缓存读写已按账号的缓存单价计入估算花费"
 	addRecord(t, store.RequestRecord{
 		TS: time.Now().Unix(), Inbound: "anthropic", Outbound: "anthropic",
 		ModelRequested: "m1", ModelUsed: "m1", AccountID: id,
@@ -309,38 +309,78 @@ func TestUsageCacheHintOnlyWithCacheTokens(t *testing.T) {
 	}
 }
 
-// TestUsageCostIgnoresCacheTokens 钉住估算花费的边界：
-// 只按输入与输出折价，缓存读写的 token 不参与，金额因此与没有缓存时一模一样。
-func TestUsageCostIgnoresCacheTokens(t *testing.T) {
+// TestUsageCostCountsCacheTokens 钉住估算花费的新口径：
+// 未命中缓存的输入按输入价、缓存读写按缓存单价、输出按输出价，四项都在金额里。
+// 与 TestUsageCacheFallbackToInputPrice 成对：那个用例看缓存单价缺失时的回退。
+func TestUsageCostCountsCacheTokens(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
-	addPricedAccount(t, "ds1", "2", "4")
+	if code, _, stderr := run(t, "account", "add", "ds1",
+		"--provider", "mine", "--base-url", "http://127.0.0.1:9", "--key", "sk-1",
+		"--protocol", "openai-chat", "--models", "m1",
+		"--price-in", "2", "--price-out", "4",
+		"--price-cache-read", "0.5", "--price-cache-write", "3"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
 	id := accountID(t, "ds1")
 
-	// 1M 输入按 2 元、1M 输出按 4 元：6 元。缓存读写各来一批，金额必须还是 6。
+	// 1M 未命中输入 × 2 + 2M 缓存读 × 0.5 + 1M 缓存写 × 3 + 1M 输出 × 4 = 2 + 1 + 3 + 4 = 10
 	addRecord(t, store.RequestRecord{
 		TS: time.Now().Unix(), Inbound: "anthropic", Outbound: "anthropic",
 		ModelRequested: "m1", ModelUsed: "m1", AccountID: id,
-		HTTPStatus: 200, OK: true, InTokens: 1_000_000, OutTokens: 1_000_000,
-		CacheRead: 2_000_000, CacheWrite: 700_000, LatencyMS: 1000,
+		HTTPStatus: 200, OK: true,
+		InTokens: 3_000_000, InTokensUncached: 1_000_000, OutTokens: 1_000_000,
+		CacheRead: 2_000_000, CacheWrite: 1_000_000, LatencyMS: 1000,
 	})
 
 	rows := mustUsageRows(t, "--by", "account", "--since", "1d")
-	if got := rows["ds1"]; got.Cost != 6 {
-		t.Fatalf("估算花费 = %v，期望 6（只按 1M 输入 2 元 + 1M 输出 4 元算，缓存 token 不折价）", got.Cost)
+	if got := rows["ds1"]; got.Cost != 10 {
+		t.Fatalf("估算花费 = %v，期望 10（输入 2 + 缓存读 1 + 缓存写 3 + 输出 4）", got.Cost)
 	}
-	if got := rows["ds1"]; got.CacheRead != 2_000_000 || got.CacheWrite != 700_000 {
-		t.Fatalf("缓存合计 = %+v，期望 2000000 / 700000", got)
+	if got := rows["ds1"]; got.CacheRead != 2_000_000 || got.CacheWrite != 1_000_000 {
+		t.Fatalf("缓存合计 = %+v，期望 2000000 / 1000000", got)
 	}
 
 	code, out, stderr := run(t, "usage", "--by", "account", "--since", "1d")
 	if code != 0 {
 		t.Fatalf("usage 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if !strings.Contains(out, "6.00") {
-		t.Fatalf("文本输出的估算花费应为 6.00:\n%s", out)
+	if !strings.Contains(out, "10.00") {
+		t.Fatalf("文本输出的估算花费应为 10.00:\n%s", out)
 	}
 	if strings.Contains(out, "花费为 0") {
 		t.Fatalf("定了价时不该出现「花费为 0」:\n%s", out)
+	}
+}
+
+// TestUsageCacheFallbackToInputPrice 钉住两个回退：缓存单价没填时按输入价折，
+// 只填输入输出价时的金额与旧公式一模一样（历史花费不变）。
+func TestUsageCacheFallbackToInputPrice(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+	addPricedAccount(t, "ds1", "2", "4")
+	id := accountID(t, "ds1")
+
+	// 1M 未命中输入按 2 元 + 1M 输出按 4 元 = 6 元，与旧公式一致。
+	addRecord(t, store.RequestRecord{
+		TS: time.Now().Unix(), Inbound: "anthropic", Outbound: "anthropic",
+		ModelRequested: "m1", ModelUsed: "m1", AccountID: id,
+		HTTPStatus: 200, OK: true, InTokens: 1_000_000, InTokensUncached: 1_000_000,
+		OutTokens: 1_000_000, LatencyMS: 1000,
+	})
+	rows := mustUsageRows(t, "--by", "account", "--since", "1d")
+	if got := rows["ds1"]; got.Cost != 6 {
+		t.Fatalf("估算花费 = %v，期望 6（1M 输入 2 元 + 1M 输出 4 元）", got.Cost)
+	}
+
+	// 再记 1M 缓存读 + 1M 缓存写：没填缓存单价，按输入价 2 元各算一遍，合计 6 + 2 + 2 = 10。
+	addRecord(t, store.RequestRecord{
+		TS: time.Now().Unix(), Inbound: "anthropic", Outbound: "anthropic",
+		ModelRequested: "m1", ModelUsed: "m1", AccountID: id,
+		HTTPStatus: 200, OK: true, CacheRead: 1_000_000, CacheWrite: 1_000_000, LatencyMS: 1000,
+	})
+	rows = mustUsageRows(t, "--by", "account", "--since", "1d")
+	if got := rows["ds1"]; got.Cost != 10 {
+		t.Fatalf("缓存单价缺失时的估算花费 = %v，期望 10（缓存读写按输入价回退）", got.Cost)
 	}
 }

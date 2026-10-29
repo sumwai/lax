@@ -124,7 +124,9 @@ func TestRequestRecordsAndUsage(t *testing.T) {
 	rec := store.RequestRecord{
 		TS: now, Inbound: "anthropic", Outbound: "openai-chat",
 		ModelRequested: "m1", ModelUsed: "m1", AccountID: acc.ID,
-		HTTPStatus: 200, OK: true, InTokens: 1_000_000, OutTokens: 1_000_000,
+		HTTPStatus: 200, OK: true,
+		// 这里直接给归一化之后的数：网关入账时按出站协议算它，本用例只关心汇总与折价。
+		InTokens: 1_000_000, InTokensUncached: 1_000_000, OutTokens: 1_000_000,
 		LatencyMS: 120,
 	}
 	if err := st.InsertRequest(&rec); err != nil {

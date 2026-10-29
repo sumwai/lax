@@ -901,7 +901,8 @@ func (s *Store) DeleteProvider(name string) error {
 // `provider rm` 用它列出还在用的账号。
 func (s *Store) ListAccountsByProvider(name string) ([]Account, error) {
 	rows, err := s.db.Query(`SELECT id, name, provider, protocol, base_url, key_cipher, models,
-		price_in, price_out, priority, enabled, COALESCE(cooldown_until, 0), COALESCE(last_error, ''), fail_streak, created_at
+		price_in, price_out, price_cache_read, price_cache_write,
+		priority, enabled, COALESCE(cooldown_until, 0), COALESCE(last_error, ''), fail_streak, created_at
 		FROM accounts WHERE provider = ? ORDER BY priority ASC, id ASC`, name)
 	if err != nil {
 		return nil, err

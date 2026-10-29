@@ -261,11 +261,15 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			HTTPStatus:     res.status,
 			OK:             res.err == nil && res.status >= 200 && res.status < 300,
 			InTokens:       res.inTok,
-			OutTokens:      res.outTok,
-			CacheRead:      res.cacheRead,
-			CacheWrite:     res.cacheWrite,
-			LatencyMS:      latency.Milliseconds(),
-			Error:          res.message,
+			// 入账时按出站协议归一化输入 token：anthropic 的 input_tokens 已排除缓存读写，
+			// chat 与 gemini 的上游把命中缓存的部分也算在输入里，花费只能按归一化后的这一列折
+			// （见 store.UncachedInTokens 与 DESIGN 5.5）。in_tokens 仍是上游原值，展示不变。
+			InTokensUncached: store.UncachedInTokens(outbound, res.inTok, res.cacheRead),
+			OutTokens:        res.outTok,
+			CacheRead:        res.cacheRead,
+			CacheWrite:       res.cacheWrite,
+			LatencyMS:        latency.Milliseconds(),
+			Error:            res.message,
 		}
 		// 一次尝试的账（requests 一行）与它的结论（冷却、清零、停用）在同一个事务里落库，
 		// 要么都写、要么都不写（见 store.RecordAttempt）。
