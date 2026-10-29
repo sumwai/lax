@@ -315,6 +315,12 @@ func cmdCall(e *Env, args []string) error {
 	}
 	inbound, ok := resolveInboundProtocol(*protocol)
 	if !ok {
+		// systemone 是第五条线协议，但它不是对话：一条决策请求由一个 state 加一组问题组成，
+		// 没有提示词可发（DESIGN 5.14 的 CLI 一行）。这是「这个命令接不了它」，不是用法写歪了，
+		// 所以走运行失败（退出码 1）并直接指向真正该用的命令。
+		if strings.TrimSpace(*protocol) == gateway.ProtocolSystemOne {
+			return fmt.Errorf("systemone 不是对话协议：一条决策请求由一个 state 加一组问题组成，没有提示词可发，call 发不了它；改用 switchboard decide --model <模型> --state <文本或 JSON> --noul <名>=<问句>（见 switchboard decide --help）")
+		}
 		return usagef("不支持的入站协议 %q，可用 anthropic、chat、responses、gemini", *protocol)
 	}
 	prompt := strings.Join(fs.Args(), " ")
@@ -344,6 +350,14 @@ func cmdCall(e *Env, args []string) error {
 		if usedModel == "" {
 			return usagef("没有可用模型：先 switchboard account add 加账号，再 switchboard model sync 拉上游模型列表、switchboard model probe 探活（模型列表为空的账号不参与选号）")
 		}
+	}
+
+	// 这个模型的候选账号全部以 systemone 出站时，这条对话请求在网关里只会换回一句
+	// 「协议不相通」的 400（DESIGN 5.14 的协议互通）：在发出去之前就说清，并给出该用的命令。
+	if only, err := systemOneOnlyModel(a.st, usedModel); err != nil {
+		return err
+	} else if only {
+		return fmt.Errorf("模型 %s 的有效出站协议是 systemone：这条协议一个 state 加一组问题、不出文本，没有提示词可以发给它，所以 call 发不了；改用 switchboard decide --model %s --state <文本或 JSON> --noul <名>=<问句>，或换一个走对话协议的模型（switchboard model ls 看清单）", usedModel, usedModel)
 	}
 
 	logf := func(string, ...any) {}

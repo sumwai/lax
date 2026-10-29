@@ -1295,7 +1295,7 @@ func TestProviderUnsetErrors(t *testing.T) {
 		args []string
 		want []string
 	}{
-		{"未知字段", []string{"cohere"}, []string{"cohere", "不认识", "anthropic、openai、responses、gemini、models-path、default-protocol、note"}},
+		{"未知字段", []string{"cohere"}, []string{"cohere", "不认识", "anthropic、openai、responses、gemini、systemone、models-path、default-protocol、note"}},
 		{"带 -- 前缀", []string{"--", "--openai"}, []string{"不要带 -- 前缀", "可用："}},
 		{"大小写不符", []string{"OpenAI"}, []string{"大小写不符", "openai"}},
 		{"base-url", []string{"base-url"}, []string{"不能 unset", "--base-url"}},

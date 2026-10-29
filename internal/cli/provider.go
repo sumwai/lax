@@ -22,21 +22,23 @@ var providerSubs = []groupItem{
 	{"header", "声明上游除凭据头之外还要的附加请求头：set / unset / ls"},
 }
 
-// 四个协议 flag 的取值有两种写法（见 DESIGN 5.8）：相对厂商 base_url 的完整路径，或整条地址
-// （含 `://`，直接用、不再拼 base_url）。相对路径由 store.NormalizePath 规整、不拒绝输入：
-// `v1/chat/completions`、`//v1//chat/completions`、`/v1/chat/completions/` 落成同一个地址；
-// 整条地址交给 store.NormalizeEndpoint 校验 scheme 与主机名，因此 `https://`、`https:///x`、
-// `ftp://host/x` 都是用法错误。cli 只判两件事：「规整之后为空」与「整条地址校验不过」，
-// 删除语义归 provider unset。gemini 的入站与出站都可用（DESIGN 5.9），路由路径里的
-// `{model}` 占位符原样落库，由网关在发请求之前换成模型名：cli 不展开、不校验、也不改写它。
+// 五个协议 flag（`--anthropic`、`--openai`、`--responses`、`--gemini`、`--systemone`）的取值
+// 有两种写法（见 DESIGN 5.8）：相对厂商 base_url 的完整路径，或整条地址（含 `://`，直接用、
+// 不再拼 base_url）。相对路径由 store.NormalizePath 规整、不拒绝输入：`v1/chat/completions`、
+// `//v1//chat/completions`、`/v1/chat/completions/` 落成同一个地址；整条地址交给
+// store.NormalizeEndpoint 校验 scheme 与主机名，因此 `https://`、`https:///x`、`ftp://host/x`
+// 都是用法错误。cli 只判两件事：「规整之后为空」与「整条地址校验不过」，删除语义归 provider unset。
+// gemini 的入站与出站都可用（DESIGN 5.9），路由路径里的 `{model}` 占位符原样落库，由网关在
+// 发请求之前换成模型名：cli 不展开、不校验、也不改写它。systemone 的入站与出站是同一个
+// `POST /v1/systemone`（DESIGN 5.14），没有占位符，与其它协议走同一套规整与校验。
 
 // 三份用法行，所有用法错误都把它打出来，不让用户看着一句「参数错误」去猜参数（见 AGENTS.md）。
 // `--base-url` 在 add 里是可选的：三条路由与 models_path 都是整条地址时它拼不进任何地址，
 // 写它只是为了过校验（见 DESIGN 5.8）。
 const (
-	providerAddUsage   = "用法：switchboard provider add <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]"
-	providerSetUsage   = "用法：switchboard provider set <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--models-path <路径>] [--default-protocol <协议>] [--note <备注>]"
-	providerUnsetUsage = "用法：switchboard provider unset <名称> <字段> [<字段>...]\n可用字段：anthropic、openai、responses、gemini、models-path、default-protocol、note"
+	providerAddUsage   = "用法：switchboard provider add <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]"
+	providerSetUsage   = "用法：switchboard provider set <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--models-path <路径>] [--default-protocol <协议>] [--note <备注>]"
+	providerUnsetUsage = "用法：switchboard provider unset <名称> <字段> [<字段>...]\n可用字段：anthropic、openai、responses、gemini、systemone、models-path、default-protocol、note"
 )
 
 // providerUnsetField 是一个可以被 `provider unset` 清掉的字段。字段名用 flag 名，
@@ -53,6 +55,7 @@ var providerUnsetFields = []providerUnsetField{
 	{"openai", "openai 路由", gateway.ProtocolChat},
 	{"responses", "openai-responses 路由", gateway.ProtocolResponses},
 	{"gemini", "gemini 路由", gateway.ProtocolGemini},
+	{"systemone", "systemone 路由", gateway.ProtocolSystemOne},
 	{"models-path", "模型列表覆盖", ""},
 	{"default-protocol", "显式默认协议", ""},
 	{"note", "备注", ""},
@@ -291,12 +294,13 @@ func cmdProviderLs(e *Env, args []string) error {
 	return nil
 }
 
-// providerPathFlags 是四个协议 flag 的当前值。add 用它们声明路由，set 用它们覆盖一条路由的路径。
+// providerPathFlags 是五个协议 flag 的当前值。add 用它们声明路由，set 用它们覆盖一条路由的路径。
 type providerPathFlags struct {
 	anthropic *string
 	openai    *string
 	responses *string
 	gemini    *string
+	systemone *string
 }
 
 func newProviderPathFlags(fs *flagSet) providerPathFlags {
@@ -307,6 +311,10 @@ func newProviderPathFlags(fs *flagSet) providerPathFlags {
 		gemini: fs.String("gemini", "", "gemini 协议的路由路径：相对 --base-url 的完整路径，例如 /v1beta/models/{model}:generateContent；也可以写整条地址（相对路径的斜杠写法由程序规整）。\n"+
 			"{model} 是占位符，原样落库，发请求时才换成模型名（按路径段转义），例：\n"+
 			"  switchboard provider add google-gemini --base-url https://generativelanguage.googleapis.com --gemini /v1beta/models/{model}:generateContent --default-protocol gemini"),
+		systemone: fs.String("systemone", "", "systemone 决策协议的路由路径：相对 --base-url 的完整路径，例如 /v1/systemone；也可以写整条地址（相对路径的斜杠写法由程序规整）。\n"+
+			"这条协议一个 state 加一组问题、不出文本，switchboard decide 用它，例：\n"+
+			"  switchboard provider add typesafe --base-url https://api.typesafe.ai --systemone /v1/systemone\n"+
+			"  只声明 systemone 这一条时再加 --default-protocol systemone（固定回退顺序只认 openai-chat → openai-responses → anthropic）"),
 	}
 }
 
@@ -318,13 +326,15 @@ type providerPathFlag struct {
 	given    bool
 }
 
-// pairs 按 anthropic、openai、responses、gemini 的固定顺序列出四个 flag，报错顺序因此稳定。
+// pairs 按 anthropic、openai、responses、gemini、systemone 的固定顺序列出五个 flag，
+// 报错顺序因此稳定。
 func (p providerPathFlags) pairs(fs *flagSet) []providerPathFlag {
 	return []providerPathFlag{
 		{"anthropic", gateway.ProtocolAnthropic, *p.anthropic, flagWasSet(fs, "anthropic")},
 		{"openai", gateway.ProtocolChat, *p.openai, flagWasSet(fs, "openai")},
 		{"responses", gateway.ProtocolResponses, *p.responses, flagWasSet(fs, "responses")},
 		{"gemini", gateway.ProtocolGemini, *p.gemini, flagWasSet(fs, "gemini")},
+		{"systemone", gateway.ProtocolSystemOne, *p.systemone, flagWasSet(fs, "systemone")},
 	}
 }
 
@@ -354,9 +364,9 @@ func checkModelsPathFlag(value string, setCmd bool, usageLine string) error {
 	return checkEndpoint(value, usageLine)
 }
 
-// protocolFromCLI 把 --default-protocol 的取值换成线协议。命令行写法是 anthropic、openai、responses、gemini，
-// 线协议全名（anthropic、openai-chat、openai-responses、gemini）也认：输入 openai 就是 chat，
-// gemini 两种写法同形。
+// protocolFromCLI 把 --default-protocol 的取值换成线协议。命令行写法是 anthropic、openai、responses、
+// gemini、systemone，线协议全名（anthropic、openai-chat、openai-responses、gemini、systemone）也认：
+// 输入 openai 就是 chat，gemini 与 systemone 两种写法同形。
 func protocolFromCLI(value string) (string, error) {
 	return protocolFromCLIName(value, "--default-protocol",
 		"switchboard provider add acme --base-url https://api.example.com --openai /v1/chat/completions --default-protocol openai")
@@ -376,8 +386,10 @@ func protocolFromCLIName(value, flagName, example string) (string, error) {
 		return gateway.ProtocolAnthropic, nil
 	case gateway.ProtocolGemini:
 		return gateway.ProtocolGemini, nil
+	case gateway.ProtocolSystemOne:
+		return gateway.ProtocolSystemOne, nil
 	}
-	return "", usagef("%s %q 不认识，可用 anthropic、openai、responses、gemini（也认线协议全名 openai-chat、openai-responses），例如 %s", flagName, value, example)
+	return "", usagef("%s %q 不认识，可用 anthropic、openai、responses、gemini、systemone（也认线协议全名 openai-chat、openai-responses），例如 %s", flagName, value, example)
 }
 
 // emptyValueError 是「给了参数但值是空」的统一文案，路径参数规整之后为空也算空。
@@ -428,10 +440,10 @@ func lookupUnsetField(raw string) (providerUnsetField, error) {
 
 // cmdProviderAdd 只新建一家厂商。重名时报错并指向 provider set，不顺手改已有的行。
 func cmdProviderAdd(e *Env, args []string) error {
-	fs := newFlagSet(e, "provider add", "新建一家厂商与它的协议路由（支持 anthropic、openai、responses、gemini 四种协议）")
+	fs := newFlagSet(e, "provider add", "新建一家厂商与它的协议路由（支持 anthropic、openai、responses、gemini、systemone 五种协议）")
 	baseURL := fs.String("base-url", "", "厂商的默认地址，如 https://api.deepseek.com（可省略：每条路由与 --models-path 都是整条地址时不需要它）")
 	paths := newProviderPathFlags(fs)
-	defProtocol := fs.String("default-protocol", "", "这家的默认协议：anthropic | openai | responses | gemini，必须落在这次声明的路由上；不给按 openai → responses → anthropic 取第一条")
+	defProtocol := fs.String("default-protocol", "", "这家的默认协议：anthropic | openai | responses | gemini | systemone，必须落在这次声明的路由上；不给按 openai → responses → anthropic 取第一条")
 	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖，相对 --base-url 的路径（如 /v1/models）或整条地址；不给按各路由的 models_path 取（相对路径的斜杠写法由程序规整）")
 	note := fs.String("note", "", "备注")
 	if err := fs.Parse(args); err != nil {
@@ -477,7 +489,7 @@ func cmdProviderAdd(e *Env, args []string) error {
 
 	// 路径取值原样交给 store：写法（前导斜杠、重复斜杠、末尾斜杠）由 NormalizePath 规整，
 	// cli 不提前拒绝（见 DESIGN 5.8）。上面只判过「规整之后为空」与「写成了整条地址」两种用法错误。
-	routes := make([]store.ProviderRoute, 0, 4)
+	routes := make([]store.ProviderRoute, 0, 5)
 	for _, f := range paths.pairs(fs) {
 		if !f.given {
 			continue
@@ -485,7 +497,7 @@ func cmdProviderAdd(e *Env, args []string) error {
 		routes = append(routes, store.ProviderRoute{Provider: name, Protocol: f.protocol, Path: f.value})
 	}
 	if len(routes) == 0 {
-		return usagef("缺少协议路由：--anthropic、--openai、--responses、--gemini 至少给一条，例如 switchboard provider add %s --base-url https://api.example.com --openai /v1/chat/completions；不再需要这家厂商就用 switchboard provider rm %s\n%s", name, name, providerAddUsage)
+		return usagef("缺少协议路由：--anthropic、--openai、--responses、--gemini、--systemone 至少给一条，例如 switchboard provider add %s --base-url https://api.example.com --openai /v1/chat/completions；不再需要这家厂商就用 switchboard provider rm %s\n%s", name, name, providerAddUsage)
 	}
 
 	def, err := protocolFromCLI(*defProtocol)
@@ -531,11 +543,11 @@ func cmdProviderAdd(e *Env, args []string) error {
 // cmdProviderSet 只设值：传了的字段改成新值，没传的字段一律保留。
 // 删除一条路由、清掉覆盖或备注走 `provider unset`（见 DESIGN 4）。
 func cmdProviderSet(e *Env, args []string) error {
-	fs := newFlagSet(e, "provider set", "改一家厂商的地址、路由、默认协议或备注（支持 anthropic、openai、responses、gemini 四种协议）")
+	fs := newFlagSet(e, "provider set", "改一家厂商的地址、路由、默认协议或备注（支持 anthropic、openai、responses、gemini、systemone 五种协议）")
 	baseURL := fs.String("base-url", "", "改厂商的默认地址（带主机名的完整地址；每条路由都是整条地址时不需要它）")
 	paths := newProviderPathFlags(fs)
 	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖，相对 --base-url 的路径（如 /v1/models）或整条地址（相对路径的斜杠写法由程序规整）")
-	defProtocol := fs.String("default-protocol", "", "这家的默认协议：anthropic | openai | responses | gemini，必须落在已声明的路由上")
+	defProtocol := fs.String("default-protocol", "", "这家的默认协议：anthropic | openai | responses | gemini | systemone，必须落在已声明的路由上")
 	note := fs.String("note", "", "改备注")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -599,7 +611,7 @@ func cmdProviderSet(e *Env, args []string) error {
 		changed = append(changed, f.flagName)
 	}
 	if len(changed) == 0 {
-		return usagef("没有要改的字段：至少给一个参数，比如 --base-url、--openai、--gemini、--models-path、--default-protocol 或 --note\n%s", providerSetUsage)
+		return usagef("没有要改的字段：至少给一个参数，比如 --base-url、--openai、--gemini、--systemone、--models-path、--default-protocol 或 --note\n%s", providerSetUsage)
 	}
 
 	a, err := openApp(e, true)
@@ -802,9 +814,9 @@ func cmdProviderRm(e *Env, args []string) error {
 	return nil
 }
 
-// isWireProtocol 判断一个取值是不是线协议。判定只有 store.IsWireProtocol 一份（四条线协议，
-// gemini 的入站与出站都可用，见 DESIGN 5.9）：账号的 --protocol 与厂商的默认协议共用这一个
-// 判断，两处各写一份名单迟早会对不上。
+// isWireProtocol 判断一个取值是不是线协议。判定只有 store.IsWireProtocol 一份（五条线协议，
+// gemini 的入站与出站都可用，见 DESIGN 5.9；systemone 的入站与出站是同一个 POST /v1/systemone，
+// 见 DESIGN 5.14）：账号的 --protocol 与厂商的默认协议共用这一个判断，两处各写一份名单迟早会对不上。
 func isWireProtocol(proto string) bool {
 	return store.IsWireProtocol(proto)
 }

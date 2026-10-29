@@ -19,6 +19,8 @@ type recorderCall struct {
 	apiKey  string
 	bearer  string
 	googKey string // gemini 的凭据头，与前两种分开记（见 DESIGN 5.9）
+	// body 是请求体原文：systemone 的 state 与 questions 原样转发（DESIGN 5.14），用例要能看见它。
+	body string
 }
 
 // recorderUpstream 是按方法加路径回固定响应的假上游：用例只声明「这条请求该回什么」，
@@ -42,6 +44,7 @@ func newRecorderUpstream(t *testing.T, routes map[string]fakeResponse) *recorder
 	t.Helper()
 	up := &recorderUpstream{}
 	up.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
 		up.mu.Lock()
 		up.calls = append(up.calls, recorderCall{
 			method:  r.Method,
@@ -50,6 +53,7 @@ func newRecorderUpstream(t *testing.T, routes map[string]fakeResponse) *recorder
 			apiKey:  r.Header.Get("x-api-key"),
 			bearer:  r.Header.Get("Authorization"),
 			googKey: r.Header.Get("x-goog-api-key"),
+			body:    string(body),
 		})
 		up.mu.Unlock()
 

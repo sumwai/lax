@@ -13,7 +13,7 @@ switchboard serve                                           # 起网关，127.0.
 switchboard log tail                                        # 看请求记录
 ```
 
-四条线协议能进，也能出。入站按路径分 anthropic、openai-chat、openai-responses 与 gemini，出站按厂商行上那家厂商的默认协议（探活发现某个模型该走别的协议时，结论记在 `account_models.protocol` 上优先用它），取值同为这四条；入站与出站相同则直通，不同则经中间表示转换，四条入站 × 四条出站共十六种组合，流式与非流式都可用，工具调用包含在内。中间表示、映射规则、选号规则、数据模型、里程碑见 [DESIGN.md](DESIGN.md)。
+四条对话线协议能进，也能出（第五条 `systemone` 是决策协议，只与自己互通、不参与转换，见下面「决策请求」）。入站按路径分 anthropic、openai-chat、openai-responses 与 gemini，出站按厂商行上那家厂商的默认协议（探活发现某个模型该走别的协议时，结论记在 `account_models.protocol` 上优先用它），取值同为这四条；入站与出站相同则直通，不同则经中间表示转换，四条入站 × 四条出站共十六种组合，流式与非流式都可用，工具调用包含在内。中间表示、映射规则、选号规则、数据模型、里程碑见 [DESIGN.md](DESIGN.md)。
 
 ## 命令
 
@@ -29,6 +29,7 @@ switchboard log tail                                        # 看请求记录
 | `usage` | 按账号、模型或日期汇总用量，含输入、输出与缓存读写 token |
 | `log tail` | 最近的请求记录 |
 | `call` | 手工打一条请求，打印选号过程；默认 anthropic 入站，`--protocol` 可切换四种入站，gemini 也支持 `--stream` |
+| `decide` | 发一条 systemone 决策请求（`--state` 加一组问题），打印每个问题的答案与概率；`--json` 给脚本用 |
 | `doctor` | 自检配置、目录、密钥、端口、数据库 |
 
 每个命令都支持 `--json`，结果走 stdout，错误走 stderr。退出码：0 成功、1 运行失败、2 用法错误。
@@ -53,9 +54,9 @@ curl -s http://127.0.0.1:4567/v1beta/models/deepseek-v4-pro:generateContent \
     -d '{"contents":[{"role":"user","parts":[{"text":"用一句话介绍你自己"}]}]}'
 ```
 
-出站协议由厂商决定，账号只存厂商名：地址与默认协议都是那家厂商行上的值（迁移 `0014` 之后账号不再有 `base_url`、`protocol` 两列），所以 `account add` 没有 `--base-url` 与 `--protocol` 两个参数——先 `provider add` 把厂商登记进去，再建账号。默认协议的取值是 `anthropic`、`openai-chat`、`openai-responses` 与 `gemini`（gemini 的原生路径是 `{base}/v1beta/models/{model}:generateContent`，流式换成 `:streamGenerateContent?alt=sse`，凭据头是 `x-goog-api-key`）：`provider add --default-protocol` 显式存的优先，没显式存则按 `openai-chat` → `openai-responses` → `anthropic` 取第一条路由。改一家厂商的地址或默认协议立刻影响所有用它的账号（这是单一来源应有的行为）。厂商与各协议的路径在数据库里，`switchboard provider ls` 能看到，`provider add` / `set` / `unset` 可以增删改，不必重编译。入站协议与出站协议相同时直通，请求体只改 `model` 字段，其余字段与值原样带到上游，响应按字节原样返回（gemini 的报文里没有 `model` 字段，它直通时请求体一个字节都不改）；不同时经中间表示转换，请求与响应都只搬映射表里定义的字段，表外字段丢弃。未知路径返回 404，请求体解析失败返回 400，错误消息带协议名前缀。
+出站协议由厂商决定，账号只存厂商名：地址与默认协议都是那家厂商行上的值（迁移 `0014` 之后账号不再有 `base_url`、`protocol` 两列），所以 `account add` 没有 `--base-url` 与 `--protocol` 两个参数——先 `provider add` 把厂商登记进去，再建账号。默认协议的取值是 `anthropic`、`openai-chat`、`openai-responses`、`gemini` 与 `systemone`（gemini 的原生路径是 `{base}/v1beta/models/{model}:generateContent`，流式换成 `:streamGenerateContent?alt=sse`，凭据头是 `x-goog-api-key`；systemone 是决策协议，入站与出站都是 `POST /v1/systemone`，只与自己互通，见下面「决策请求」）：`provider add --default-protocol` 显式存的优先，没显式存则按 `openai-chat` → `openai-responses` → `anthropic` 取第一条路由。改一家厂商的地址或默认协议立刻影响所有用它的账号（这是单一来源应有的行为）。厂商与各协议的路径在数据库里，`switchboard provider ls` 能看到，`provider add` / `set` / `unset` 可以增删改，不必重编译。入站协议与出站协议相同时直通，请求体只改 `model` 字段，其余字段与值原样带到上游，响应按字节原样返回（gemini 的报文里没有 `model` 字段，它直通时请求体一个字节都不改）；不同时经中间表示转换，请求与响应都只搬映射表里定义的字段，表外字段丢弃。未知路径返回 404，请求体解析失败返回 400，错误消息带协议名前缀。
 
-自己加一家厂商时，每个协议一条 flag（`--anthropic`、`--openai`、`--responses`、`--gemini`），值有两种写法：相对 `--base-url` 的完整路径，或者整条地址。整条地址给同一厂商不同协议分域名的情况用，写进去直接使用、不再拼 `--base-url`，例如 `--openai https://openai.example.com/v1/chat/completions --anthropic https://claude.example.com/v1/messages`；整条地址要带主机名，`https://` 这种只有 scheme、`https:///x` 缺主机名与 `ftp://host/x` 这类别的 scheme 都是用法错误（退出码 2）。`--base-url` 可以省略，条件是每个要声明的路由（以及给了的话 `--models-path`）都是整条地址：那时它拼不进任何地址，省掉它账号的地址也留空，转发与模型同步全走整条地址。bigmodel 就是这种形状——三套协议分属不同 host 与路径，模型列表在 chat 路径的同级：
+自己加一家厂商时，每个协议一条 flag（`--anthropic`、`--openai`、`--responses`、`--gemini`、`--systemone`），值有两种写法：相对 `--base-url` 的完整路径，或者整条地址。整条地址给同一厂商不同协议分域名的情况用，写进去直接使用、不再拼 `--base-url`，例如 `--openai https://openai.example.com/v1/chat/completions --anthropic https://claude.example.com/v1/messages`；整条地址要带主机名，`https://` 这种只有 scheme、`https:///x` 缺主机名与 `ftp://host/x` 这类别的 scheme 都是用法错误（退出码 2）。`--base-url` 可以省略，条件是每个要声明的路由（以及给了的话 `--models-path`）都是整条地址：那时它拼不进任何地址，省掉它账号的地址也留空，转发与模型同步全走整条地址。bigmodel 就是这种形状——三套协议分属不同 host 与路径，模型列表在 chat 路径的同级：
 
 ```bash
 switchboard provider add bigmodel \
@@ -148,6 +149,34 @@ switchboard serve
 模型列表的形状不用管：`{data:[…]}`、`{models:[…]}`、顶层数组三种都认，gemini 的 `{models:[{"name":"models/…"}]}` 走第二种，清单按 `supportedGenerationMethods` 过滤、名字去掉 `models/` 前缀；分页带 `pageSize=1000`，有 `nextPageToken` 就接着取，最多 10 页。
 
 探活会真实调用上游：`--limit 5` 限制每个账号这一次最多探几个，`--model deepseek-v4-pro` 只试一个。某个账号没探出可用模型时只写探活结果，它原有的模型列表保持不变；全部账号都没探出可用模型时退出码 1。终端里探活时 stderr 上有一行原地刷新的进度（账号、已完成 / 待探数、最近探完的模型），账号探完补一个换行再打汇总与表格；stderr 不是终端或加了 `--json` 时没有这一行，管道、CI 与日志里不会多出噪声。碰到 401 时命令停下并停用该账号：凭据被拒，后面的结论不作数。同步失败的账号同样不影响其余账号，只是最终退出码为 1。`account ls` 与 `model ls` 会带上每个账号的模型状态（可用 / 待探活 / 无权 / 不存在 / 凭据被拒 / 失败）。空模型列表的账号不参与选号，所以 `account ls` 的模型列不会写「不限」：只有手填的名字时直接列出模型名，同步过但没探出可用模型时写「0 可用 / N 同步」，完全没有模型信息时写「无模型（先 model sync）」；`model ls` 一条模型都没有时同样把下一步指到 `model sync` 与 `model probe`。
+
+## 决策请求：switchboard decide
+
+systemone 是第五条线协议，不是对话：一条请求由一个 `state` 加一组带名字的问题组成，回的是每个问题的答案与概率（是非题给概率，选择题与打分题给置信度），不产文本。这类模型的入站与出站都是 `POST /v1/systemone`，只与自己互通，也不参与跨协议转换，所以发对话的 `call` 对它一律拒绝（退出码 1，文案指向 `decide`）。厂商一侧多了一条 `--systemone` 路由：
+
+```bash
+switchboard provider add typesafe --base-url https://api.typesafe.ai \
+    --systemone /v1/systemone --default-protocol systemone
+switchboard account add ts --provider typesafe --key sk-xxx --models typesafe/jev   # 决策模型不在上游清单里，只能手工声明
+switchboard model probe --account ts
+```
+
+只声明 systemone 一条路由时要同时给 `--default-protocol systemone`：固定回退顺序只认 `openai-chat` → `openai-responses` → `anthropic`，不给的话这家厂商算不出默认协议。删这条路由是 `provider unset typesafe systemone`（删掉的正好是默认协议时会被拒绝，先把默认协议改成别的）。
+
+```bash
+switchboard decide --model typesafe/jev --state "客户说：这个月的账单被扣了两次" \
+    --noul "present=Is this text present?" \
+    --choice "mood=这是哪一类问题?" --choice "mood:billing=账单与付款,other" \
+    --score "anger=有多生气?" --score "anger:calm,mild,angry"
+模型 typesafe/jev（账号 ts，systemone，耗时 132ms）
+名称     类型    答案     概率  置信度
+present  noul    yes      0.99  -
+mood     choice  billing  -     0.87
+anger    score   mild     -     0.61
+用量 输入 11 / 输出 4
+```
+
+`--state` 收纯文本或 JSON：去掉首尾空白后首字符是 `{`、`[` 或 `"` 时按 JSON 解析，其余原样当一个字符串发出去。问题有两种给法，互斥：`--questions` 直接给整块 questions 对象（JSON，原样转发），或者用 `--noul 名=问句`、`--choice 名=问句 --choice 名:选项[,选项...]`、`--score 名=问句 --score 名:级别[,级别...]` 逐条拼（选项写 `key` 或 `key=说明`，选择题至少两个选项、打分题至少两级级别且按从低到高写，级别只写 key）。`--json` 原样输出上游的 `answers` 与 `usage`，另加 `model`、`account`、`latency_ms`。有效出站协议不是 systemone 的模型会被拒绝（退出码 1）并说明它以哪条协议出站；非 2xx 时文案取上游错误体的 `detail.message`。
 
 ## 客户端怎么接
 

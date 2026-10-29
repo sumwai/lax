@@ -51,6 +51,9 @@ func routeFlagsForProtocol(protocol string) []string {
 		return []string{"--responses", "/v1/responses"}
 	case "gemini":
 		return []string{"--gemini", "/v1beta/models/{model}:generateContent", "--default-protocol", "gemini"}
+	case "systemone":
+		// 决策协议没有固定顺序可回退（DESIGN 5.8 的回退只认聊天那三条），默认协议因此要显式给。
+		return []string{"--systemone", "/v1/systemone", "--default-protocol", "systemone"}
 	default:
 		return []string{"--openai", "/v1/chat/completions"}
 	}

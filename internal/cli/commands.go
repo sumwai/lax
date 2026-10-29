@@ -26,11 +26,12 @@ var commandTable = map[string]command{
 	"usage":    {name: "usage", summary: "按账号、模型或日期汇总用量", run: cmdUsage},
 	"log":      {name: "log", summary: "查看请求记录：tail", run: cmdLog},
 	"call":     {name: "call", summary: "手工打一条请求，打印选号过程", run: cmdCall},
+	"decide":   {name: "decide", summary: "发一条 systemone 决策请求，打印答案与概率", run: cmdDecide},
 	"doctor":   {name: "doctor", summary: "自检配置、目录与端口", run: cmdDoctor},
 	"version":  {name: "version", summary: "打印版本", run: cmdVersion},
 }
 
-var commandOrder = []string{"init", "serve", "account", "model", "provider", "usage", "log", "call", "doctor", "version"}
+var commandOrder = []string{"init", "serve", "account", "model", "provider", "usage", "log", "call", "decide", "doctor", "version"}
 
 func cmdInit(e *Env, args []string) error {
 	fs := newFlagSet(e, "init", "初始化配置目录与数据库")
