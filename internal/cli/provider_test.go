@@ -450,27 +450,15 @@ func TestProviderAddNormalizedPathsHitFullURL(t *testing.T) {
 		t.Fatalf("account add a-anth 退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	// account test 按账号协议打一条最小请求，看的是 --openai 那条路由拼出来的完整地址。
+	// account test 先 GET 模型列表：地址是厂商级覆盖 v1//models 拼出来的 <base_url>/v1/models。
+	// 列表接口通了就是结论，所以这里只有一次 GET，没有模型调用。
 	up.reset()
 	if code, _, stderr := run(t, "account", "test", "a-chat"); code != 0 {
 		t.Fatalf("account test a-chat 退出码 = %d，stderr = %s", code, stderr)
 	}
-	call := up.mustSingleCall(t)
-	if call.method != http.MethodPost {
-		t.Fatalf("上游方法 = %s，期望 POST", call.method)
-	}
-	if want := up.srv.URL + "/v1/chat/completions"; call.url != want {
-		t.Fatalf("chat 请求地址 = %q，期望 %q", call.url, want)
-	}
-
-	// --anthropic v1/messages 同样只规整不报错，拼出来是 /v1/messages。
-	up.reset()
-	if code, _, stderr := run(t, "account", "test", "a-anth"); code != 0 {
-		t.Fatalf("account test a-anth 退出码 = %d，stderr = %s", code, stderr)
-	}
-	call = up.mustSingleCall(t)
-	if want := up.srv.URL + "/v1/messages"; call.url != want {
-		t.Fatalf("anthropic 请求地址 = %q，期望 %q", call.url, want)
+	calls := up.all()
+	if want := up.srv.URL + "/v1/models"; len(calls) != 1 || calls[0].method != http.MethodGet || calls[0].url != want {
+		t.Fatalf("上游调用 = %+v，期望只有一次 GET %q", calls, want)
 	}
 
 	// --models-path v1//models 是厂商级覆盖，model sync 打到 <base_url>/v1/models。
@@ -478,12 +466,56 @@ func TestProviderAddNormalizedPathsHitFullURL(t *testing.T) {
 	if code, _, stderr := run(t, "model", "sync", "--account", "a-chat"); code != 0 {
 		t.Fatalf("model sync 退出码 = %d，stderr = %s", code, stderr)
 	}
-	call = up.mustSingleCall(t)
+	call := up.mustSingleCall(t)
 	if call.method != http.MethodGet {
 		t.Fatalf("模型列表的上游方法 = %s，期望 GET", call.method)
 	}
 	if want := up.srv.URL + "/v1/models"; call.url != want {
 		t.Fatalf("模型列表地址 = %q，期望 %q", call.url, want)
+	}
+}
+
+// TestAccountTestFallbackUsesProviderRoutes 钉住退回最小请求时打的是路由拼出来的完整地址：
+// 列表接口不通（这里是没有这个接口，上游回 404）时，openai-chat 账号打 --openai 那条、
+// anthropic 账号打 --anthropic 那条，两条路径都经过规整。
+func TestAccountTestFallbackUsesProviderRoutes(t *testing.T) {
+	sandbox(t)
+	up := newRecorderUpstream(t, map[string]fakeResponse{
+		"POST /v1/chat/completions": {status: http.StatusOK, body: chatCompletionOK},
+		"POST /v1/messages":         {status: http.StatusOK, body: anthropicMessageOK},
+	})
+	mustInit(t)
+
+	if code, _, stderr := run(t, "provider", "add", "mine",
+		"--base-url", up.srv.URL,
+		"--openai", "//v1//chat/completions/",
+		"--anthropic", "v1/messages"); code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	for _, c := range []struct{ name, protocol string }{
+		{"a-chat", "openai-chat"},
+		{"a-anth", "anthropic"},
+	} {
+		if code, _, stderr := run(t, "account", "add", c.name,
+			"--provider", "mine", "--protocol", c.protocol, "--key", "sk-test", "--models", "m1"); code != 0 {
+			t.Fatalf("account add %s 退出码 = %d，stderr = %s", c.name, code, stderr)
+		}
+		up.reset()
+		if code, _, stderr := run(t, "account", "test", c.name); code != 0 {
+			t.Fatalf("account test %s 退出码 = %d，stderr = %s", c.name, code, stderr)
+		}
+		// 列表接口在这个假上游上回 404（没有注册），所以结论来自模型调用。
+		posts := up.postCalls()
+		if len(posts) != 1 {
+			t.Fatalf("%s 的模型调用 = %+v，期望正好一次", c.name, posts)
+		}
+		want := up.srv.URL + "/v1/chat/completions"
+		if c.protocol == "anthropic" {
+			want = up.srv.URL + "/v1/messages"
+		}
+		if posts[0].url != want {
+			t.Fatalf("%s 的模型调用地址 = %q，期望 %q", c.name, posts[0].url, want)
+		}
 	}
 }
 
@@ -617,7 +649,13 @@ func TestProviderBaseURLVariantsHitSameAddress(t *testing.T) {
 		if code, _, stderr := run(t, "account", "test", provider+"-1"); code != 0 {
 			t.Fatalf("account test %s-1 退出码 = %d，stderr = %s", provider, code, stderr)
 		}
-		return up.mustSingleCall(t).url
+		// 这个假上游没有模型列表接口（GET 回 404），所以结论来自退回的模型调用：
+		// 要看的是那条 POST 拼出来的完整地址，列表接口那次 GET 不算在内。
+		posts := up.postCalls()
+		if len(posts) != 1 {
+			t.Fatalf("%s-1 的模型调用 = %+v，期望正好一次", provider, posts)
+		}
+		return posts[0].url
 	}
 
 	withSlash := addWith("slash", up.srv.URL+"/api/", "v1/chat/completions")

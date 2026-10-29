@@ -144,7 +144,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | `account ls` | `--json` | 列账号、模型数、是否处在冷却；`account_models` 有数据时模型列显示「N 可用 / M 同步」，协议列显示账号默认协议，存在与它不同的已发现协议时写成「openai-chat + 另 1 种」；`--json` 每行多了 `models_usable`、`models_synced` 两个计数与 `protocols`（默认协议在前，其余是模型行上发现到的协议） | 表格 |
 | `account set` | `<名称> --key <key>` | 换掉已有账号的凭据，不删号重建：删号会丢掉 `account_models` 里的探活结果、协议发现与请求记录的账号归属。`--key` 的三种给法与 `account add` 一致（直接写值、`--key -` 从标准输入读、留空读 `SWITCHBOARD_KEY`），缺凭据是用法错误（退出码 2 并打出用法）。key 走同一条加密路径覆盖 `key_cipher`，明文不进日志、不进 `--json` 输出。旧凭据的结论一并作废：同一个事务里清掉 `cooldown_until`、`fail_streak`、`last_error` 并把账号重新启用（`enabled=1`），写入口是 `store.RotateKey`。不动 `account_models`、`accounts.models` 与协议发现结果，也不碰厂商表。账号不存在时报错并提示先 `switchboard account add` | 确认一行（新凭据的掩码、冷却与失败计数已清零、账号已启用）；`--json` 含 `name`、`key`（掩码）、`cooldown_cleared`、`fail_streak_cleared`、`enabled` |
 | `account rm` | `<名称>` | 删账号，同时删掉它的 `account_models` 行；关联的请求记录保留 | 确认一行 |
-| `account test` | `<名称>` | 用最小请求探活，更新冷却状态；账号没有模型时用默认模型名 `default` 探活，并在输出里说明 | 状态码与耗时 |
+| `account test` | `<名称>` | 分两步探活。先 `GET` 模型列表，地址与凭据头跟 `model sync` 同一套规则解析（厂商级覆盖 → 账号协议那条路由 → 同厂商按协议名排序的第一条非空 `models_path`，整条地址直接访问；凭据头跟取到地址的那条路由的协议，见 5.7），2xx 即判定凭据与连通性正常，同时报出上游模型数（按 `{data:[{id}]}` 解析，解析不了只说明「上游返回的不是模型列表」，不判失败）；列表返回 404 或 405（这家没有列表接口）、或 403（可能被网关拦）时退回一条 `max_tokens=1` 的请求，模型取 `accounts.models` 第一项、为空时用默认模型名 `default` 并在备注里说明。两阶段的状态处理一致：任一阶段 2xx → 启用账号并清掉冷却、`last_error` 与 `fail_streak`；401 → 停用账号并把错误写进 `last_error`；429/5xx/超时 → 按连续失败次数打冷却；其它 4xx → 只报原话、不动状态。它只判凭据与连通性，模型是否可用由 `model probe` 决定 | 表格（账号 / 状态 / HTTP / 耗时 / 上游模型数 / 备注），耗时取得出结论那一阶段的耗时，列表接口没通时模型数显示 `-`，备注写清结论出自列表接口还是模型调用；`--json` 含 `account`、`stage`（`models` 或 `call`）、`status`、`ok`、`models`（数量，未知为 0）、`latency`、`message` |
 | `account enable` | `<名称>` | 重新启用账号并清冷却 | 确认一行 |
 | `account disable` | `<名称>` | 停用账号，不再参与选号 | 确认一行 |
 | `model ls` | `[--provider 厂商]` `[--account 账号]` `--json` | 按模型名列出可用账号与计价来源；`account_models` 有数据时每个账号带状态（可用 / 待探活 / 无权 / 不存在 / 凭据被拒 / 失败），没有任何模型行时回退到 `accounts.models` 并标「手填」；另有协议列，显示该模型在这个账号上的有效出站协议，取值只经 `store.EffectiveProtocol`，行不存在或协议列为空时由它回退到账号协议；`--json` 每个账号多了 `protocol` | 表格 |
@@ -328,7 +328,7 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 
 花费：先用账号协议试，成功时只花一次调用，只有失败才会多花一到两次。同一模型重复探活的结果稳定，代价最多是每次 `--refresh` 多一两次 `max_tokens=1` 的调用，跟 `--max-age` 省下的调用相比是小头。每次上游调用都在 `requests` 里各留一行（见 5.5），打出几次就记几行。
 
-`account test` 与具体模型无关，仍按账号的 `protocol` 打一次，不看模型上的协议发现结果：它检验的是凭据与账号整体可用性。模型列表为空的账号（刚建好、还没同步过）取不到 `accounts.models[0]`，探活回退到默认模型名 `default` 并在备注里说明这一句，既不 panic 也不要求先同步：凭据好不好用得先能试出来。
+`account test` 只判凭据与连通性，模型是否可用由 `model probe` 决定，所以它先 `GET` 模型列表：地址按 `model sync` 同一套规则解析（见 5.8），凭据头跟取到地址的那条路由的协议；2xx 就是「凭据能用、上游连得上」，顺带报出上游模型数，这一条不花 token，也不依赖某个模型名能不能用。列表接口不可用时（404、405、403，或这家声明了路由却一个 `models_path` 都没有）才退回一条 `max_tokens=1` 的请求：按账号的 `protocol` 打，不看模型上的协议发现结果，模型取 `accounts.models` 第一项；模型列表为空的账号（刚建好、还没同步过）取不到 `accounts.models[0]`，回退到默认模型名 `default` 并在备注里说明这一句，既不 panic 也不要求先同步：凭据好不好用得先能试出来。两阶段的状态处理一致（见 5.3），备注与 `--json` 的 `stage` 写清结论出自哪一步，因此「列表 404 之后模型 403」与「列表接口自己 403」不会读成同一个结论。
 
 参数与处理顺序：
 
