@@ -4,7 +4,7 @@
 
 本机上的模型总机。手上有几家模型的账号，客户端只连 `http://127.0.0.1:4567`，由 switchboard 挑账号、转协议、记用量。
 
-入站收四种线协议，按路径区分：`POST /v1/messages` 是 anthropic，`POST /v1/chat/completions` 是 openai-chat，`POST /v1/responses` 是 openai-responses，`POST /v1beta/models/{model}:generateContent` 与 `:streamGenerateContent` 是 gemini。出站协议同为这四种，归属在模型上：`account_models.protocol` 有值就用它，为空则继承账号的 `protocol`（见 5.7）。入站协议与有效出站协议相同则直通，不同则经中间表示转换，四条入站 × 四条出站共十六种组合，流式与非流式都可用（gemini 的原生形状见 5.9）。
+入站收五种线协议，按路径区分：`POST /v1/messages` 是 anthropic，`POST /v1/chat/completions` 是 openai-chat，`POST /v1/responses` 是 openai-responses，`POST /v1beta/models/{model}:generateContent` 与 `:streamGenerateContent` 是 gemini，`POST /v1/systemone` 是 systemone。前四种之间可以互相转换，出站协议归属在模型上（见 5.7）；systemone 不参与转换，只与它自己互通（见 5.14）。入站协议与有效出站协议相同则直通，不同则经中间表示转换，前四种入站 × 前四种出站共十六种组合，流式与非流式都可用（gemini 的原生形状见 5.9）。
 
 与同类产品的差别：
 
@@ -166,6 +166,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | `model alias ls` | `[<别名>]` `--json` | 不给别名就列全部（按别名升序），给了就只列这一条；别名不在表里时报错并列出已有的（退出码 1），不把写错一个字母显示成「一条别名都没有」。能不能解析问 `store.ResolveModelAlias`，cli 不自己走链：链断了（成环、超过 8 跳）时状态写「不可解析」，解析列写 store 的原文——它带着是哪几条串在一起，照着就能找到要改的那一条。别名链解析到真名才算可解析，「目标眼下没有账号提供」不影响这一列（那是请求到达时 404 的事，见 5.12）。一条别名都没有时输出一行提示与一条 `model alias set` 示例 | 表格（别名 / 目标 / 状态 / 解析）；`--json` 是数组，每项 `alias`、`target`、`resolved`（解析到的真实模型名，不可解析时为空串）、`ok` |
 | `usage` | `--since`、`--by account\|model\|day` | 汇总请求数、token（含思考与缓存读写）与估算花费；`--by account`、`--by model`、`--by day` 三种分组都给出思考、缓存读与缓存写的合计，文本表格另有一行合计，成本已按 5.5 的公式计入缓存读写与独立的思考 token（思考在输出之外时才另计，口径见 5.5），合计之后在缓存 token 不为 0 时用一句话写明这个口径（未填缓存单价按输入价算） | 表格；`--json` 是数组，每项 `key`、`requests`、`in_tokens`、`out_tokens`、`reasoning_tokens`、`cache_read`、`cache_write`、`cost` |
 | `log tail` | `-n`、`--follow` | 最近的请求记录；`--follow` 跟随。思考与输出分两列：思考是上游单独报的那一项（anthropic 没有独立字段，显示 0），0 显示 `0`。模型列把 `requests` 的两列都摆出来：客户端给的名字与解析别名后的真实模型名不同时写成 `别名 → 真名`（`fast → glm-4.6`），相同时只写一个名字，不引入恒定的重复；两个名字各自按 24 个显示宽度截断（与单名字时的上限相同），一次别名命中因此一眼能看出实际打了哪个模型（见 5.12） | 表格（时间、协议、模型、账号、状态、输入、输出、思考、缓存读、缓存写、耗时、错误）；`--json` 是数组，每项 `ts`、`inbound`、`outbound`、`model`、`model_used`、`account`、`http_status`、`ok`、`in_tokens`、`out_tokens`、`reasoning_tokens`、`cache_read`、`cache_write`、`latency_ms`、`error`；`model` 是客户端给的名字（可能是别名），`model_used` 是解析后的真实模型名，两者相同时两个字段都有值、不做省略 |
+| `decide` | `--model <模型> --state <文本或 JSON> [--questions <JSON>] [--noul 名=问句]... [--choice 名=问句 --choice 名:选项=说明]... [--score 名=问句 --score 名:级别]... [--json]` | 直连本进程发一条 systemone 请求，打印每个问题的答案与概率（见 5.14）。`--state` 收纯文本或 JSON（首字符是 `{` 、`[` 或 `"` 时按 JSON 解析，其余按字符串）。`--questions` 直接给整块 JSON，写了它就不再拼问题；否则用 `--noul`、`--choice`、`--score` 三种写法拼：`--noul` 给名字与问句，`--choice` 给名字、问句与选项（逗号分隔的 `key` 或 `key=说明`），`--score` 给名字、问句与至少两级级别（同上写法）。模型的有效出站协议不是 systemone 时，退出码 1 并说明它以哪条协议出站；入站协议固定 systemone。输出：每个问题一行（名字、类型、答案），`choice` 与 `score` 另给 `confidence`；`--json` 原样输出上游 `answers` 与 `usage`，另加 `model`、`account`、`latency_ms` |
 | `call` | `[提示词] --model [--protocol] [--stream] [--max-tokens N] [--system 提示词] [--debug] [--json]` | 绕过客户端直连本进程，打印选号过程；默认发 anthropic 入站，`--protocol` 可在 anthropic、chat、responses、gemini 之间切换。出站协议不取账号字段（账号已经不存协议，见 5.8）：按「该模型的 `account_models.protocol` → 厂商的有效默认协议」推导，入口是 `store.EffectiveProtocol(账号, 模型)`，cli 与转发层都不重算一份；模型还没探活过、协议列为空时就是厂商的默认协议。gemini 的模型名不在请求体里，由本命令按路径段转义后拼进入站路径：非流式 `/v1beta/models/{model}:generateContent`、`--stream` 时 `:streamGenerateContent`（见 5.9） | 响应，或 debug 轨迹；gemini 的流式按 SSE 逐帧解码后输出文本增量与工具调用，`--json` 时一个 `data` 帧一行 JSON 原文 |
 | `doctor` | 无 | 检查配置文件、数据目录、数据库、端口 | 逐项 ok / fail |
 | `version` | 无 | 版本号 | 一行 |
@@ -173,7 +174,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 退出码：`0` 成功；`1` 运行失败（含 `doctor` 有检查未通过、`call` 非 2xx）；`2` 用法错误。
 错误信息写 stderr，`--json` 时结果写 stdout，两者不混在一起。
 
-`serve` 同时暴露四条入站路径：`/v1/messages`（anthropic）、`/v1/chat/completions`（openai-chat）、`/v1/responses`（openai-responses）与 gemini 的 `/v1beta/models/{model}:generateContent` 与 `:streamGenerateContent`，路径决定入站协议（见 5.2），四条都只收 POST，其余方法 405 并带 `Allow: POST`；另有两条只读的模型清单接口 `GET /v1/models` 与 `GET /v1/models/{id}`，给客户端发现模型名用，它们不是入站协议入口，只收 GET（见 5.2.1）。`/healthz` 的响应里带 `inbound` 与 `outbound` 两份协议清单，都是这四条协议（见 5.2.1）。未知路径返回 404，这与清单接口的两条路径不冲突：它们各自注册了处理器，`/v1/models/` 之后一律当作模型名，不会落进「未知路径」；这条「之后全部算模型名」有一个例外，来自 `http.ServeMux` 的路径规整（见 5.2.1）。
+`serve` 暴露五条入站路径：`/v1/messages`（anthropic）、`/v1/chat/completions`（openai-chat）、`/v1/responses`（openai-responses）、gemini 的 `/v1beta/models/{model}:generateContent` 与 `:streamGenerateContent`，以及 `/v1/systemone`（systemone，非流式、模型名在请求体里，见 5.14），路径决定入站协议（见 5.2），五条都只收 POST，其余方法 405 并带 `Allow: POST`；另有两条只读的模型清单接口 `GET /v1/models` 与 `GET /v1/models/{id}`，给客户端发现模型名用，它们不是入站协议入口，只收 GET（见 5.2.1）。`/healthz` 的响应里带 `inbound` 与 `outbound` 两份协议清单，都是这五条协议（见 5.2.1）。未知路径返回 404，这与清单接口的两条路径不冲突：它们各自注册了处理器，`/v1/models/` 之后一律当作模型名，不会落进「未知路径」；这条「之后全部算模型名」有一个例外，来自 `http.ServeMux` 的路径规整（见 5.2.1）。
 
 ## 5 程序内部做什么
 
@@ -189,7 +190,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 
 ### 5.2 请求生命周期
 
-1. 收到入站请求，按路径定入站协议：`/v1/messages` 是 anthropic，`/v1/chat/completions` 是 openai-chat，`/v1/responses` 是 openai-responses，`/v1beta/models/{model}:generateContent` 与 `/v1beta/models/{model}:streamGenerateContent` 是 gemini（模型名从路径取、`url.PathUnescape` 还原，`:` 之后的后缀不算模型名的一部分，流式标志也由后缀定），其余路径返回 404。请求体解析失败返回 400，错误消息前缀协议名。定好协议后记下模型名与开始时间。
+1. 收到入站请求，按路径定入站协议：`/v1/messages` 是 anthropic，`/v1/chat/completions` 是 openai-chat，`/v1/responses` 是 openai-responses，`/v1beta/models/{model}:generateContent` 与 `/v1beta/models/{model}:streamGenerateContent` 是 gemini（模型名从路径取、`url.PathUnescape` 还原，`:` 之后的后缀不算模型名的一部分，流式标志也由后缀定），`/v1/systemone` 是 systemone（模型名在请求体里，见 5.14），其余路径返回 404。请求体解析失败返回 400，错误消息前缀协议名。定好协议后记下模型名与开始时间。
 2. 按模型名取候选账号：`enabled=1`、模型列表包含该模型（列表为空表示该账号不提供任何模型，不参与选号）、冷却已过。没有任何账号声明提供该模型时返回 404，错误消息说明「没有账号提供模型 X」并提示下一步：`switchboard model ls` 看现有清单、`switchboard model probe` 探活；错误类型按入站协议取：anthropic 入站是 `not_found_error`，两条 openai 入站是 `invalid_request_error`。有账号提供但全部在冷却或被停用时不算这种情况，仍按第 8 步返回 503。
 3. 按 `priority` 升序，同一会话（见 5.3）优先沿用上次的账号。
 4. 解密凭据，按该账号该模型的有效出站协议构造上游请求：入站协议与有效出站协议相同则直通，否则经中间表示转换（见 5.4）。上游路径、凭据头、请求体编码都跟有效出站协议走。上游请求头不从零开始也不照抄入站：先放 `Content-Type` 与流式时的 `Accept`，再用 `setAuth` 按出站协议设凭据头，再透传客户端白名单头（见 5.11），最后叠厂商附加头（5.10）。
@@ -208,6 +209,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | openai-chat | `{"error":{"message":"…","type":"…","param":null,"code":null}}` | OpenAI 的取值：`invalid_request_error`、`not_found_error`、`authentication_error`、`permission_error`、`server_error`、`rate_limit_exceeded` |
 | openai-responses | 与 openai-chat 同形，同样是 `message`、`type`、`param`、`code` 四个字段 | 同上 |
 | gemini | `{"error":{"code":<HTTP 状态码整数>,"message":"…","status":"<google 的状态名>"}}` | `status` 按状态码映射：400 `INVALID_ARGUMENT`、401 `UNAUTHENTICATED`、403 `PERMISSION_DENIED`、404 `NOT_FOUND`、405 `UNIMPLEMENTED`、429 `RESOURCE_EXHAUSTED`、500 `INTERNAL`、503 `UNAVAILABLE`，其余 `UNKNOWN` |
+| systemone | `{"detail": {"message":"…","type":"…"}}` | `type` 与 anthropic 那套同名（`invalid_request_error`、`not_found_error`、`authentication_error`、`permission_error`、`rate_limit_error`、`api_error`）；`detail` 用对象而不是纯字符串，好在留下类型的同时不改 TypeSafe SDK 读 `detail` 的习惯（见 5.14） |
 
 几条边界：
 
@@ -463,12 +465,12 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 
   | 上游 | 上下文 | 最大输出 | 支持的协议 | 其它（不解析） |
   | --- | --- | --- | --- | --- |
-  | commandcode | `context_length` | - | `supported_endpoints`：`/messages` → `anthropic`、`/chat/completions` → `openai-chat`、`/responses` → `openai-responses` | `owned_by`、`name`（名字已按 `id` → `name` → `model` 取过） |
+  | commandcode | `context_length` | - | `supported_endpoints`：`/messages` → `anthropic`、`/chat/completions` → `openai-chat`、`/responses` → `openai-responses`、`/systemone` → `systemone` | `owned_by`、`name`（名字已按 `id` → `name` → `model` 取过） |
   | openrouter | `context_length` | `top_provider.max_completion_tokens` | - | `supported_parameters`（能力位暂不解析，见 5.13） |
   | gemini | `inputTokenLimit` | `outputTokenLimit` | `supportedGenerationMethods`：只有 `generateContent` 折成 `gemini` 协议，`countTokens`、`embedContent` 是接口动作而不是协议 | `displayName` |
   | 其它 OpenAI 兼容 | - | - | - | 只有名字 |
 
-  三种形状（`{data:[…]}`、`{models:[…]}`、顶层数组）读的是同一批键，条目是字符串时只有名字、元数据留空。协议集合落库前按固定顺序 `anthropic` → `openai-chat` → `openai-responses` → `gemini` 排好、去重，空集合存空串（见 5.13）。未识别的端点名不计：猜一个相近的名字等于给探活安排一条这家未必声明过的路径。同名的条目只留第一次出现的那一条，元数据不跨页合并。
+  三种形状（`{data:[…]}`、`{models:[…]}`、顶层数组）读的是同一批键，条目是字符串时只有名字、元数据留空。协议集合落库前按固定顺序 `anthropic` → `openai-chat` → `openai-responses` → `gemini` → `systemone` 排好、去重，空集合存空串（见 5.13）。未识别的端点名不计：猜一个相近的名字等于给探活安排一条这家未必声明过的路径。同名的条目只留第一次出现的那一条，元数据不跨页合并。
 - 结果分两处写：清单里的名字按 `(厂商, 模型)` upsert 进目录 `provider_models`（`source='sync'`，只写上游给出的字段，见 5.13）。目录由 gateway 在拉清单这一层写——路径、凭据头与解析都在这里，再让调用方读一遍 JSON 就是第二份解析规则；写目录失败整次同步失败，不静默丢元数据。可达性由命令层写：该账号对这些名字标 `access='allowed'`，但只给**还没有行**的名字插，已有行一个字段都不动。
 - 同步不推翻探活结论：可达性是账号侧的结论，探活说了 `forbidden` / `missing` 就不再被一次清单翻回 `allowed`——上游清单会列出这个 key 用不了的模型（实测 bigmodel 的清单里有 `glm-4.6-air`），翻回去就是把一个已知不可用的名字重新放进候选池。写入因此只有 `INSERT … ON CONFLICT(account_id, model) DO NOTHING` 这一种形状，已有行的 `access`、`http_status`、`error`、`checked_at` 与 `protocol` 原样保留，只有新出现的名字拿默认值。
 - 上游清单里消失的名字不删行：一次少给了几个名字不等于这些模型不可用，可达性只由探活结论改动（见 5.13）。
@@ -786,6 +788,26 @@ gemini 的原生接口（Generative Language API 的 `generateContent`）与另�
 
 迁移 `0015`：`account_models` 的每一行按账号的 `provider` 搬进 `provider_models`（`source='probe'`，`protocol` 列落到 `protocols`，其余列留空、`updated_at` 为 0；同一厂商的多个账号各探到不同协议时取非空的那个，结果与行序无关），`status` 映射成 `access`（`usable`→`allowed`，`forbidden`→`forbidden`，`notfound`→`missing`，其余→`error`：`synced` 与 `auth` 在旧库里本来就不是选号依据）；`accounts.models` 里出现但 `account_models` 没有的名字补一行 `source='manual'` 与 `access='allowed'`，已有的行一个字段都不动；最后删掉 `accounts.models`。五步在同一个事务里，`json_valid` 挡住历史脏值——一条坏 JSON 不该让整次升级失败。
 
+### 5.14 systemone 决策协议
+
+TypeSafe 的 System One（Jev）不是对话：输入一个 `state` 加一组带名字的 `questions`，输出每个问题的答案与概率，不产文本。commandcode 的 Provider API 在 `/provider/v1/systemone` 上提供它，TypeSafe 本家是 `POST https://api.typesafe.ai/v1/systemone`。它算第五种线协议 `systemone`：入站 `POST /v1/systemone`，出站同一个路径，厂商路由的 flag 是 `--systemone`、默认协议取值是 `systemone`。
+
+| 项 | 规则 |
+| --- | --- |
+| 入站路径 | `POST /v1/systemone`，只收 POST，其余方法 405 带 `Allow: POST`；模型名在请求体 `model` 里，不在路径上 |
+| 协议互通 | 只与自己互通：入站是 systemone 且有效出站协议也是 systemone 才转发；有效出站协议是另外四种时 400，文案说明这个模型走的是哪条协议；反过来入站是那四条而入站模型的有效协议是 systemone 时同样 400。不做转换：对话消息与决策请求之间没有可定义的映射，5.4 的中间表示服务的是其余四条 |
+| 请求体 | 直通，只把 `model` 换成解析别名后的真名，其余键（`state`、`questions`、`assets`）原样转发；请求体上限 8 MiB，超过给 413 |
+| 最少校验 | `model` 非空且是字符串、`questions` 是非空对象；其余字段交给上游（32 MiB、64 层嵌套、有限数这些规则在上游，不在本机复制一份） |
+| 流式 | 不支持。请求体带 `"stream": true` 时 400，文案说明这条协议没有流式、把请求体改回非流式：静默当同步会让等 SSE 的客户端挂到超时 |
+| 响应 | 直通，不改 `model`（5.12 的响应不改名同样适用）；`usage.input_tokens` 与 `usage.output_tokens` 写进请求记录，没有缓存与思考字段，输入 token 按不含缓存处理（`store.UncachedInTokens` 的默认分支，见 5.5） |
+| 错误体 | `{"detail": {"message": "…", "type": "…"}}`：这条协议真实的客户端是 TypeSafe 的 SDK，它读 `detail`；`detail` 用对象而不是纯字符串，好在留下类型的同时不改 SDK 的读法。HTTP 状态码与其它入站一致（400、413、401、403、404、429、503） |
+| 探活 | systemone 模型的探活不是 `max_tokens=1` 的对话请求，而是一条最小决策请求：`state` 为 `ping`、一个问题 `{"ok":{"type":"noul","instructions":"Is this text present?"}}`；2xx 即 `allowed`，其余判定与 5.7 相同。一种模型的有效出站协议是 systemone 时，探活只能走这条路——对它发对话请求只会拿到 404 |
+| 同步 | `supported_endpoints` 里的 `/systemone` 折成 `systemone`（映射表见 5.7）；但 commandcode 的清单不列决策模型，`typesafe/jev` 一类的名字只能手工声明（`account add --models`） |
+| 别名与选号 | 与其余四条一致：别名解析在请求入口做一次（见 5.12），选号只读 `access='allowed'`（见 5.13） |
+| CLI | `provider add/set --systemone <路径或整条地址>`、`--default-protocol systemone`、`switchboard decide`（把 `state` 与问题组发出去并打印答案与概率，见第 4 节）；`call` 不接 systemone：它发的是对话，决策请求没有提示词 |
+
+第 7 节记已知未做：`assets`（图片）原样转发但不校验、压缩请求体（gzip 与 zstd）不支持（客户端自己解压后发）、`box` 答案原样返回不解释。
+
 ## 6 数据模型
 
 ```sql
@@ -1010,6 +1032,7 @@ internal/usage/         用量汇总与花费估算
 - 改写其它客户端的配置文件，不论带不带备份。
 - 跨机部署与集群。
 - 插件运行时（内置 JS 引擎、任意请求改写与执行第三方插件）：已知需要注入的厂商头用 5.10 的声明式附加头表达。
+- systemone 与对话协议之间的转换：决策请求没有消息序列，也产不出文本，5.14 只做同协议直通。
 
 ## 10 需要外部信息才能定的点
 
