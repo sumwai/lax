@@ -691,7 +691,7 @@ func probeStageLabel(stage string) string {
 var modelSubs = []groupItem{
 	{"ls", "列出网关可提供的模型、账号状态与目录里的元数据"},
 	{"sync", "从上游拉取模型列表，名字进模型目录并把这个账号标成可用"},
-	{"probe", "逐个模型发 max_tokens=1 的请求探活，把可达性写进账号"},
+	{"probe", "逐个模型探活（对话模型发一条 max_tokens=1 的请求，决策模型发一条最小决策请求），把可达性写进账号"},
 	{"alias", "维护模型别名：客户端写死的模型名指到真实模型名上（set / unset / ls）"},
 }
 
@@ -1056,7 +1056,7 @@ func cmdModelSync(e *Env, args []string) error {
 			})
 		}
 		fmt.Fprint(e.Stdout, renderTable([]string{"账号", "厂商", "模型", "新增", "备注"}, table))
-		fmt.Fprintln(e.Stdout, "下一步：switchboard model probe（每个模型发一条 max_tokens=1 的请求）")
+		fmt.Fprintln(e.Stdout, "下一步：switchboard model probe（对话模型发一条 max_tokens=1 的请求，决策模型发一条最小决策请求）")
 	}
 
 	if failed > 0 {
