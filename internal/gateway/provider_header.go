@@ -118,7 +118,6 @@ func (s *Server) applyProviderHeaders(httpReq *http.Request, a store.Account,
 			continue
 		}
 		httpReq.Header.Set(h.Name, value)
-		s.logf("附加头 %s 已发送", h.Name)
 	}
 	return nil
 }

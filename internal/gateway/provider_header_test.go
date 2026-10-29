@@ -124,10 +124,8 @@ func TestForwardInjectsProviderHeaders(t *testing.T) {
 	if got := calls[0].Header.Get("Authorization"); got != "Bearer sk-acme" {
 		t.Fatalf("Authorization = %q，没声明时仍按 setAuth 发 Bearer", got)
 	}
-	for _, line := range []string{"附加头 api-version 已发送", "附加头 x-routed-model 已发送"} {
-		if !strings.Contains(logs(), line) {
-			t.Fatalf("日志里没有 %q：\n%s", line, logs())
-		}
+	if strings.Contains(logs(), "附加头 api-version") || strings.Contains(logs(), "附加头 x-routed-model") {
+		t.Fatalf("正常发送不记日志，日志里不该出现头名：\n%s", logs())
 	}
 }
 
@@ -445,8 +443,8 @@ func TestProviderHeaderValueStaysOutOfRecords(t *testing.T) {
 					t.Fatalf("requests.error 里出现了附加头的值：%q", rec.Error)
 				}
 			}
-			if !strings.Contains(logs(), "附加头 x-opencode-session 已发送") {
-				t.Fatalf("日志里应只有头名与「已发送」：\n%s", logs())
+			if strings.Contains(logs(), "附加头 x-opencode-session") {
+				t.Fatalf("正常发送不记日志，日志里只允许出现未发送的头名与原因：\n%s", logs())
 			}
 		})
 	}
