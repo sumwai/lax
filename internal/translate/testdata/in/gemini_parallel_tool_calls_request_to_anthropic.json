@@ -1,0 +1,19 @@
+{
+  "from": "gemini",
+  "to": "anthropic",
+  "kind": "request",
+  "model": "claude-x",
+  "body": {
+    "contents": [
+      {"role": "user", "parts": [{"text": "北京和上海天气"}]},
+      {"role": "model", "parts": [
+        {"functionCall": {"name": "weather", "args": {"city": "北京"}}},
+        {"functionCall": {"name": "weather", "args": {"city": "上海"}}}
+      ]},
+      {"role": "user", "parts": [
+        {"functionResponse": {"name": "weather", "response": {"result": "晴"}}},
+        {"functionResponse": {"name": "weather", "response": {"result": "雨"}}}
+      ]}
+    ]
+  }
+}

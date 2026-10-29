@@ -13,7 +13,7 @@ switchboard serve                                           # 起网关，127.0.
 switchboard log tail                                        # 看请求记录
 ```
 
-三条线协议能进，四条能出。入站按路径分 anthropic、openai-chat、openai-responses，出站按账号的 `protocol` 字段，取值是这三条加 gemini（gemini 只作出站、只做非流式）；入站与出站相同则直通，不同则经中间表示转换，三条入站 × 四条出站共十二种组合，除 gemini 出站的流式之外都可用，工具调用包含在内。中间表示、映射规则、选号规则、数据模型、里程碑见 [DESIGN.md](DESIGN.md)。
+四条线协议能进，也能出。入站按路径分 anthropic、openai-chat、openai-responses 与 gemini，出站按账号的 `protocol` 字段，取值同为这四条；入站与出站相同则直通，不同则经中间表示转换，四条入站 × 四条出站共十六种组合，流式与非流式都可用，工具调用包含在内。中间表示、映射规则、选号规则、数据模型、里程碑见 [DESIGN.md](DESIGN.md)。
 
 ## 命令
 
@@ -35,15 +35,25 @@ switchboard log tail                                        # 看请求记录
 
 ## 入站协议
 
-路径决定入站协议，三条路径同时可用，一个网关可以同时接三种客户端（另有两条只读的模型清单接口 `GET /v1/models` 与 `GET /v1/models/{id}`，见下面「客户端怎么接」）：
+路径决定入站协议，四条路径同时可用，一个网关可以同时接四种客户端（另有两条只读的模型清单接口 `GET /v1/models` 与 `GET /v1/models/{id}`，见下面「客户端怎么接」）：
 
 | 入站路径 | 入站协议 | 常见客户端 |
 | --- | --- | --- |
 | `POST /v1/messages` | anthropic | Claude Code |
 | `POST /v1/chat/completions` | openai-chat | 普通 OpenAI SDK 客户端 |
 | `POST /v1/responses` | openai-responses | Codex |
+| `POST /v1beta/models/{model}:generateContent`<br>`POST /v1beta/models/{model}:streamGenerateContent` | gemini | 直接用 Google SDK 或原生 `generateContent` 的客户端 |
 
-出站协议由账号决定：`account add --protocol` 取值 `anthropic`、`openai-chat`、`openai-responses` 与 `gemini`（gemini 只作出站，原生路径是 `{base}/v1beta/models/{model}:generateContent`，凭据头是 `x-goog-api-key`；流式还没做，`stream=true` 的请求返回 400），留空则取该厂商的默认协议（`provider add --default-protocol` 显式存的优先，没显式存则按 `openai-chat` → `openai-responses` → `anthropic` 取第一条路由）。厂商与各协议的路径在数据库里，`switchboard provider ls` 能看到，`provider add` / `set` / `unset` 可以增删改，不必重编译。入站协议与出站协议相同时直通，请求体只改 `model` 字段，其余字段与值原样带到上游，响应按字节原样返回；不同时经中间表示转换，请求与响应都只搬映射表里定义的字段，表外字段丢弃。未知路径返回 404，请求体解析失败返回 400，错误消息带协议名前缀。
+gemini 的模型名在路径里（请求体里没有 `model` 字段）：`:` 之后的后缀不算名字的一部分，`{model}` 参与选号，名字里带 `/` 时按路径段转义成 `org%2Fgemini` 也能取到；流式由 `:streamGenerateContent` 后缀决定，不看请求体。两条路径都只收 POST：
+
+```bash
+# 非流式；流式把路径换成 :streamGenerateContent，响应是 SSE（data 帧，末尾一帧带 finishReason）
+curl -s http://127.0.0.1:4567/v1beta/models/deepseek-v4-pro:generateContent \
+    -H 'Content-Type: application/json' \
+    -d '{"contents":[{"role":"user","parts":[{"text":"用一句话介绍你自己"}]}]}'
+```
+
+出站协议由账号决定：`account add --protocol` 取值 `anthropic`、`openai-chat`、`openai-responses` 与 `gemini`（gemini 的原生路径是 `{base}/v1beta/models/{model}:generateContent`，流式换成 `:streamGenerateContent?alt=sse`，凭据头是 `x-goog-api-key`），留空则取该厂商的默认协议（`provider add --default-protocol` 显式存的优先，没显式存则按 `openai-chat` → `openai-responses` → `anthropic` 取第一条路由）。厂商与各协议的路径在数据库里，`switchboard provider ls` 能看到，`provider add` / `set` / `unset` 可以增删改，不必重编译。入站协议与出站协议相同时直通，请求体只改 `model` 字段，其余字段与值原样带到上游，响应按字节原样返回（gemini 的报文里没有 `model` 字段，它直通时请求体一个字节都不改）；不同时经中间表示转换，请求与响应都只搬映射表里定义的字段，表外字段丢弃。未知路径返回 404，请求体解析失败返回 400，错误消息带协议名前缀。
 
 自己加一家厂商时，每个协议一条 flag（`--anthropic`、`--openai`、`--responses`、`--gemini`），值有两种写法：相对 `--base-url` 的完整路径，或者整条地址。整条地址给同一厂商不同协议分域名的情况用，写进去直接使用、不再拼 `--base-url`，例如 `--openai https://openai.example.com/v1/chat/completions --anthropic https://claude.example.com/v1/messages`；整条地址要带主机名，`https://` 这种只有 scheme、`https:///x` 缺主机名与 `ftp://host/x` 这类别的 scheme 都是用法错误（退出码 2）。`--base-url` 必须是带主机名的完整地址，`https://` 这种只有 scheme 的写法会被拒；scheme 大小写不敏感，`HTTPS://api.example.com/` 能用，落库时归一成小写并去掉末尾斜杠。路径写法不用纠结：`v1/chat/completions`、`//v1//chat/completions`、`/v1/chat/completions/` 由程序规整成同一个地址，不报错；`--models-path` 与 `model sync --endpoint` 同理：`v1/models`、`//v1//models/` 都落到 `/v1/models`，也可以写整条地址、直接访问那个地址。只有规整之后为空的取值（`--openai ""`，或只有斜杠）算用法错误，删一条路由、清一项设置用 `provider unset`。`--default-protocol` 定下这家的默认协议，取值写 `anthropic`、`openai`、`responses`、`gemini`（也认线协议全名 `openai-chat`、`openai-responses`，`gemini` 两种写法同形），必须落在已声明的路由上：
 
@@ -157,4 +167,4 @@ make check        # go vet + go test + go build
 
 ## 已知边界
 
-gemini 只作出站且只做非流式：没有入站路径，流式请求在写出任何字节之前就被拒成 400（不冷却账号），模型列表同步还没做，gemini 账号的模型名暂时用 `--models` 手填或让同厂商其它协议的路由提供。gemini 的模型名在 URL 路径里，路由的 `path` 因此可以写 `{model}` 占位符（相对路径与整条地址都行，替换时按路径段转义）。转换时搬运文本、图片、思考内容、工具调用与工具结果五类块：思考内容只在响应方向搬运，请求方向不回填——chat 的 `reasoning_content` 与 responses 的 `reasoning` item 是上游自己产生的字段，回填给推理模型会被以 400 拒掉整条请求；响应方向仍照旧搬运。签名只有 anthropic 有落点，没有签名的思考块不写进 anthropic 的请求与响应（不伪造签名，伪造会被上游以 400 拒绝），所以 chat 与 responses 的思考内容转到 anthropic 时丢弃；流式转换下发给 anthropic 客户端的思考块没有签名，客户端若把这些块回填进下一轮请求，上游会报 400。工具结果之后紧跟的追问并进同一条 user 消息，因为 anthropic 不接受两条相邻的 user 消息。思考配置参数（anthropic 的 `thinking`、chat 的 `reasoning_effort`）、`redacted_thinking` 的不透明 `data` 与 responses 的 `encrypted_content` 跨协议不搬，reasoning token 不单独记账（算进输出 token）。音频与文件类内容丢弃；anthropic 的服务端内置工具（`web_search` 等）跨协议时整条丢弃，chat 与 responses 的工具定义只认 function，编回 anthropic 时才原样保留 `type`；`tools[].strict` 不搬运，`is_error` 只有 anthropic 有落点，`allowed_tools` 降级为 `auto`。流式转换下断在工具参数中间时，已下发的参数片段撤不回来，收尾的错误帧会写明「工具调用参数在上游中断，内容不完整」，这一次记失败，程序不伪造闭合的 JSON。跨协议只搬运图片地址，没有其它多模态变换。不改写任何客户端配置文件；冷却时长按单次失败计算；探活调用不计入用量汇总；估算花费需要给账号填 `--price-in` 与 `--price-out`。
+gemini 的入站与出站都支持非流式与流式；模型列表同步还没做（`GET /v1beta/models` 的响应形状与已知三种都不同，名字还带 `models/` 前缀），gemini 账号的模型名暂时用 `--models` 手填。gemini 的模型名在 URL 路径里，路由的 `path` 因此可以写 `{model}` 占位符（相对路径与整条地址都行，替换时按路径段转义）；入站 gemini 的错误体沿用统一形状，不带 google 的 `error.code` 与 `error.status`；非正常的 `finishReason`（`SAFETY` 一类）按正常结束转给客户端，原值只进网关日志；gemini 的内置工具（`googleSearch` 等）与思考内容（`thought` 标记、`thinkingConfig`）不搬。转换时搬运文本、图片、思考内容、工具调用与工具结果五类块：思考内容只在响应方向搬运，请求方向不回填——chat 的 `reasoning_content` 与 responses 的 `reasoning` item 是上游自己产生的字段，回填给推理模型会被以 400 拒掉整条请求；响应方向仍照旧搬运。签名只有 anthropic 有落点，没有签名的思考块不写进 anthropic 的请求与响应（不伪造签名，伪造会被上游以 400 拒绝），所以 chat 与 responses 的思考内容转到 anthropic 时丢弃；流式转换下发给 anthropic 客户端的思考块没有签名，客户端若把这些块回填进下一轮请求，上游会报 400。工具结果之后紧跟的追问并进同一条 user 消息，因为 anthropic 不接受两条相邻的 user 消息。思考配置参数（anthropic 的 `thinking`、chat 的 `reasoning_effort`）、`redacted_thinking` 的不透明 `data` 与 responses 的 `encrypted_content` 跨协议不搬，reasoning token 不单独记账（算进输出 token）。音频与文件类内容丢弃；anthropic 的服务端内置工具（`web_search` 等）跨协议时整条丢弃，chat 与 responses 的工具定义只认 function，编回 anthropic 时才原样保留 `type`；`tools[].strict` 不搬运，`is_error` 只有 anthropic 有落点，`allowed_tools` 降级为 `auto`。流式转换下断在工具参数中间时，已下发的参数片段撤不回来，收尾的错误帧会写明「工具调用参数在上游中断，内容不完整」，这一次记失败，程序不伪造闭合的 JSON。跨协议只搬运图片地址，没有其它多模态变换。不改写任何客户端配置文件；冷却时长按单次失败计算；探活调用不计入用量汇总；估算花费需要给账号填 `--price-in` 与 `--price-out`。

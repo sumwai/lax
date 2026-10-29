@@ -289,46 +289,64 @@ func TestRouteWithoutPlaceholderUnchanged(t *testing.T) {
 	}
 }
 
-// TestGeminiOutboundRejectsStream 钉住第一步的边界：gemini 出站只做非流式。
-// 流式请求在写响应之前就报错，不打上游、不把这个账号打入冷却（不是上游的错）。
-func TestGeminiOutboundRejectsStream(t *testing.T) {
-	f := newFixture(t)
-	up := newURIUpstream(t, geminiReply)
+// TestGeminiOutboundStreamEndpoint 钉住流式请求打到 gemini 的流式端点：路由与非流式写的是
+// 同一条 :generateContent，流式时换成 :streamGenerateContent 并补 alt=sse；路由本来就写
+// :streamGenerateContent 时只补 alt=sse，不再拼一层。
+func TestGeminiOutboundStreamEndpoint(t *testing.T) {
+	cases := []struct {
+		name    string
+		route   string
+		wantURI string
+		payload string
+	}{
+		{"非流式路由改成流式", geminiRoute, "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse", geminiStreamBody},
+		{"路由本来就写流式", "/v1beta/models/{model}:streamGenerateContent", "/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse", geminiStreamBody},
+		{"路由带查询串", geminiRoute + "?key=k", "/v1beta/models/gemini-2.5-flash:streamGenerateContent?key=k&alt=sse", geminiStreamBody},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t)
+			var uri string
+			up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				uri = r.URL.RequestURI()
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, c.payload)
+			}))
+			t.Cleanup(up.Close)
 
-	if err := f.st.CreateProvider(store.Provider{Name: "gtest", BaseURL: up.url},
-		[]store.ProviderRoute{{Protocol: translate.ProtocolGemini, Path: geminiRoute}}); err != nil {
-		t.Fatalf("加厂商: %v", err)
-	}
-	acc := f.addAs(t, "g1", "gtest", translate.ProtocolGemini, up.url, "sk-gemini-stream", []string{"gemini-2.5-flash"})
-	gs, _ := newGatewayWith(t, f, gateway.Options{})
-	srv := httptest.NewServer(gs.Handler())
-	t.Cleanup(srv.Close)
+			if err := f.st.CreateProvider(store.Provider{Name: "gtest", BaseURL: up.URL},
+				[]store.ProviderRoute{{Protocol: translate.ProtocolGemini, Path: c.route}}); err != nil {
+				t.Fatalf("加厂商: %v", err)
+			}
+			acc := f.addAs(t, "g1", "gtest", translate.ProtocolGemini, up.URL, "sk-gemini-stream",
+				[]string{"gemini-2.5-flash"})
+			gs, _ := newGatewayWith(t, f, gateway.Options{})
+			srv := httptest.NewServer(gs.Handler())
+			t.Cleanup(srv.Close)
 
-	status, body := postTo(t, srv, `{"model":"gemini-2.5-flash","stream":true,`+
-		`"messages":[{"role":"user","content":"hi"}]}`, translate.ProtocolChat)
-	if status != http.StatusBadRequest {
-		t.Fatalf("状态 = %d，期望 400，响应 %s", status, body)
-	}
-	if !strings.Contains(body, "流式") {
-		t.Fatalf("错误文案应说明流式还没实现: %s", body)
-	}
-	if up.hits != 0 {
-		t.Fatalf("流式请求不该打到上游，实际 %d 次", up.hits)
-	}
+			status, body := postTo(t, srv, `{"model":"gemini-2.5-flash","stream":true,`+
+				`"messages":[{"role":"user","content":"hi"}]}`, translate.ProtocolChat)
+			if status != http.StatusOK {
+				t.Fatalf("状态 = %d，响应 %s", status, body)
+			}
+			if uri != c.wantURI {
+				t.Fatalf("上游 URI = %q，期望 %q", uri, c.wantURI)
+			}
+			if !strings.Contains(body, "po") || !strings.Contains(body, "ng") {
+				t.Fatalf("chat 客户端没拿到正文片段:\n%s", body)
+			}
+			if !strings.Contains(body, "[DONE]") {
+				t.Fatalf("chat 客户端没拿到收尾帧:\n%s", body)
+			}
 
-	after, err := f.st.GetAccount(acc.Name)
-	if err != nil {
-		t.Fatalf("读账号: %v", err)
-	}
-	if after.CooldownUntil != 0 || !after.Enabled || after.FailStreak != 0 {
-		t.Fatalf("本机不支持这种组合不该惩罚账号: %+v", after)
-	}
-	recs, err := f.st.RecentRequests(5)
-	if err != nil {
-		t.Fatalf("读请求记录: %v", err)
-	}
-	if len(recs) != 0 {
-		t.Fatalf("没有上游调用就没有请求记录，实际 %+v", recs)
+			after, err := f.st.GetAccount(acc.Name)
+			if err != nil {
+				t.Fatalf("读账号: %v", err)
+			}
+			if after.CooldownUntil != 0 || !after.Enabled || after.FailStreak != 0 {
+				t.Fatalf("成功的流不该惩罚账号: %+v", after)
+			}
+		})
 	}
 }
 

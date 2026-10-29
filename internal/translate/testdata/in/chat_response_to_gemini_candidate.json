@@ -1,0 +1,28 @@
+{
+  "from": "gemini",
+  "to": "openai-chat",
+  "kind": "response",
+  "model": "gemini-2.5-flash",
+  "body": {
+    "id": "chatcmpl-9",
+    "object": "chat.completion",
+    "choices": [
+      {
+        "index": 0,
+        "message": {
+          "role": "assistant",
+          "content": "北京晴",
+          "tool_calls": [
+            {
+              "id": "call_1",
+              "type": "function",
+              "function": {"name": "weather", "arguments": "{\"city\": \"北京\"}"}
+            }
+          ]
+        },
+        "finish_reason": "tool_calls"
+      }
+    ],
+    "usage": {"prompt_tokens": 12, "completion_tokens": 8, "prompt_tokens_details": {"cached_tokens": 4}}
+  }
+}

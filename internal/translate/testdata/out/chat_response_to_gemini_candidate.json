@@ -1,0 +1,32 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "parts": [
+          {
+            "text": "北京晴"
+          },
+          {
+            "functionCall": {
+              "args": {
+                "city": "北京"
+              },
+              "name": "weather"
+            }
+          }
+        ],
+        "role": "model"
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "modelVersion": "gemini-2.5-flash",
+  "responseId": "chatcmpl-9",
+  "usageMetadata": {
+    "cachedContentTokenCount": 4,
+    "candidatesTokenCount": 8,
+    "promptTokenCount": 12,
+    "totalTokenCount": 20
+  }
+}

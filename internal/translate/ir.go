@@ -6,7 +6,7 @@ import (
 )
 
 // 线协议名称。入站按路径区分，出站按账号的 protocol 字段区分。
-// gemini 只作出站（非流式，见 DESIGN 5.9）：没有入站路径，也没有流式编解码。
+// gemini 两边都算一条线协议：入站路径是 /v1beta/models/{model}:generateContent（见 5.9）。
 const (
 	ProtocolAnthropic = "anthropic"
 	ProtocolChat      = "openai-chat"
@@ -155,11 +155,14 @@ type Usage struct {
 }
 
 // Response 是中间表示里的响应。
+// StopNote 装上游结束原因里四种取值装不下的那一档（gemini 的 SAFETY、RECITATION 等）：
+// 编给客户端时丢弃，由网关写进日志当备注（DESIGN 5.9）。其余三条协议目前不填。
 type Response struct {
 	ID         string
 	Model      string
 	Blocks     []Block
 	StopReason string
+	StopNote   string
 	Usage      Usage
 }
 
@@ -177,7 +180,8 @@ const (
 
 // Delta 是流式过程中的一个增量。上游解码器产出它，客户端编码器消费它。
 // DeltaThinking 用 Text 与 Signature 两个字段：正文与签名分别到达，可能各占一个增量；
-// 只有 anthropic 给得出签名，其余两家的思考增量只有正文。
+// 只有 anthropic 给得出签名，其余两家的思考增量只有正文。StopNote 与 Response 上的同名字段
+// 一个意思：装不下的结束原因，编给客户端时丢弃。
 type Delta struct {
 	Kind       DeltaKind
 	Text       string
@@ -187,6 +191,7 @@ type Delta struct {
 	ToolName   string
 	ArgsJSON   string
 	StopReason string
+	StopNote   string
 	Usage      *Usage
 }
 
@@ -225,7 +230,7 @@ func DecodeRequest(protocol string, raw []byte) (*Request, error) {
 	case ProtocolResponses:
 		return DecodeResponsesRequest(raw)
 	case ProtocolGemini:
-		// gemini 还没有入站路径（DESIGN 第 7 节已知未做），解码器留着给将来用。
+		// gemini 的报文里没有模型名与 stream 标志：两者由网关按路径注入（DESIGN 5.9）。
 		return DecodeGeminiRequest(raw)
 	default:
 		return nil, fmt.Errorf("不支持的入站协议 %q", protocol)
@@ -264,8 +269,8 @@ func DecodeResponse(protocol string, raw []byte, requestedModel string) (*Respon
 	}
 }
 
-// EncodeResponse 按协议编码返回给客户端的响应。gemini 没有入站路径（DESIGN 5.9），
-// 这里不认它：客户端的响应形状只有 anthropic、openai-chat、openai-responses 三种。
+// EncodeResponse 按协议编码返回给客户端的响应。四条入站协议都认，gemini 的响应体是
+// candidates 加 usageMetadata（DESIGN 5.9）。
 func EncodeResponse(protocol string, r *Response) ([]byte, error) {
 	switch protocol {
 	case ProtocolAnthropic:
@@ -274,12 +279,14 @@ func EncodeResponse(protocol string, r *Response) ([]byte, error) {
 		return EncodeChatResponse(r)
 	case ProtocolResponses:
 		return EncodeResponsesResponse(r)
+	case ProtocolGemini:
+		return EncodeGeminiResponse(r)
 	default:
 		return nil, fmt.Errorf("不支持的入站协议 %q", protocol)
 	}
 }
 
-// NewStreamDecoder 按上游协议造流式解码器。gemini 只做非流式出站，还没有解码器（DESIGN 5.9）。
+// NewStreamDecoder 按上游协议造流式解码器。
 func NewStreamDecoder(protocol string) (StreamDecoder, error) {
 	switch protocol {
 	case ProtocolAnthropic:
@@ -288,13 +295,14 @@ func NewStreamDecoder(protocol string) (StreamDecoder, error) {
 		return &chatStreamDecoder{}, nil
 	case ProtocolResponses:
 		return &responsesStreamDecoder{}, nil
+	case ProtocolGemini:
+		return &geminiStreamDecoder{}, nil
 	default:
 		return nil, fmt.Errorf("不支持的出站协议 %q", protocol)
 	}
 }
 
 // NewStreamEncoder 按入站协议造流式编码器。model 是客户端请求的模型名，会写回响应。
-// gemini 没有入站路径，因此也没有编码器（DESIGN 5.9）。
 func NewStreamEncoder(protocol, model string) (StreamEncoder, error) {
 	switch protocol {
 	case ProtocolAnthropic:
@@ -303,12 +311,16 @@ func NewStreamEncoder(protocol, model string) (StreamEncoder, error) {
 		return newChatStreamEncoder(model), nil
 	case ProtocolResponses:
 		return newResponsesStreamEncoder(model), nil
+	case ProtocolGemini:
+		return newGeminiStreamEncoder(model), nil
 	default:
 		return nil, fmt.Errorf("不支持的入站协议 %q", protocol)
 	}
 }
 
-// PathProtocol 把入站路径映射成协议。
+// PathProtocol 把入站路径映射成协议。三条固定路径直接对；gemini 的模型名在路径里，
+// 因此按前缀认：/v1beta/models/{model}:generateContent 与 :streamGenerateContent（DESIGN 5.9）。
+// 只认路径不认方法：两者都只接 POST，方法检查在网关那边。
 func PathProtocol(path string) (string, bool) {
 	switch path {
 	case "/v1/messages":
@@ -317,9 +329,11 @@ func PathProtocol(path string) (string, bool) {
 		return ProtocolChat, true
 	case "/v1/responses":
 		return ProtocolResponses, true
-	default:
-		return "", false
 	}
+	if _, _, ok := GeminiPathTarget(path); ok {
+		return ProtocolGemini, true
+	}
+	return "", false
 }
 
 // UsageScanner 从同协议直通的流式字节里读出用量，不改变转发内容。

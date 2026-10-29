@@ -1,0 +1,21 @@
+{
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "我不能回答",
+        "role": "assistant"
+      }
+    }
+  ],
+  "created": 0,
+  "id": "resp-g1",
+  "model": "gemini-2.5-flash",
+  "object": "chat.completion",
+  "usage": {
+    "completion_tokens": 3,
+    "prompt_tokens": 5,
+    "total_tokens": 8
+  }
+}

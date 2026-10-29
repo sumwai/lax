@@ -1,0 +1,31 @@
+{
+  "from": "gemini",
+  "to": "openai-chat",
+  "kind": "request",
+  "model": "up-chat",
+  "body": {
+    "systemInstruction": {"parts": [{"text": "只答一句"}]},
+    "contents": [
+      {
+        "role": "user",
+        "parts": [
+          {"text": "这是什么"},
+          {"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}}
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "functionDeclarations": [
+          {
+            "name": "weather",
+            "description": "查天气",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}
+          }
+        ]
+      }
+    ],
+    "toolConfig": {"functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": ["weather"]}},
+    "generationConfig": {"maxOutputTokens": 64, "topP": 0.9, "stopSequences": ["END"]}
+  }
+}

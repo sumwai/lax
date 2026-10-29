@@ -1,0 +1,51 @@
+{
+  "max_tokens": 4096,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "北京和上海天气",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "id": "gemini_call_1",
+          "input": {
+            "city": "北京"
+          },
+          "name": "weather",
+          "type": "tool_use"
+        },
+        {
+          "id": "gemini_call_2",
+          "input": {
+            "city": "上海"
+          },
+          "name": "weather",
+          "type": "tool_use"
+        }
+      ],
+      "role": "assistant"
+    },
+    {
+      "content": [
+        {
+          "content": "{\"result\": \"晴\"}",
+          "tool_use_id": "gemini_call_1",
+          "type": "tool_result"
+        },
+        {
+          "content": "{\"result\": \"雨\"}",
+          "tool_use_id": "gemini_call_2",
+          "type": "tool_result"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "claude-x"
+}

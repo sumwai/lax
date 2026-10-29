@@ -1,0 +1,95 @@
+[
+  {
+    "data": {
+      "candidates": [
+        {
+          "content": {
+            "parts": [],
+            "role": "model"
+          },
+          "index": 0
+        }
+      ],
+      "modelVersion": "gemini-2.5-flash"
+    }
+  },
+  {
+    "data": {
+      "candidates": [
+        {
+          "content": {
+            "parts": [
+              {
+                "text": "po"
+              }
+            ],
+            "role": "model"
+          },
+          "index": 0
+        }
+      ],
+      "modelVersion": "gemini-2.5-flash"
+    }
+  },
+  {
+    "data": {
+      "candidates": [
+        {
+          "content": {
+            "parts": [
+              {
+                "text": "ng"
+              }
+            ],
+            "role": "model"
+          },
+          "index": 0
+        }
+      ],
+      "modelVersion": "gemini-2.5-flash"
+    }
+  },
+  {
+    "data": {
+      "candidates": [
+        {
+          "content": {
+            "parts": [
+              {
+                "functionCall": {
+                  "args": {
+                    "city": "北京"
+                  },
+                  "name": "weather"
+                }
+              }
+            ],
+            "role": "model"
+          },
+          "index": 0
+        }
+      ],
+      "modelVersion": "gemini-2.5-flash"
+    }
+  },
+  {
+    "data": {
+      "candidates": [
+        {
+          "content": {
+            "parts": [],
+            "role": "model"
+          },
+          "finishReason": "STOP",
+          "index": 0
+        }
+      ],
+      "modelVersion": "gemini-2.5-flash",
+      "usageMetadata": {
+        "candidatesTokenCount": 2,
+        "promptTokenCount": 3,
+        "totalTokenCount": 5
+      }
+    }
+  }
+]
