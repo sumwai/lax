@@ -1,0 +1,14 @@
+{
+  "max_tokens": 256,
+  "messages": [
+    {
+      "content": "6 乘 7 是多少",
+      "role": "user"
+    },
+    {
+      "content": "那 8 乘 9 呢",
+      "role": "user"
+    }
+  ],
+  "model": "m1"
+}

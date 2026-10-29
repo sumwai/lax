@@ -324,6 +324,52 @@ func TestEncodeAnthropicRequestFoldsToolResults(t *testing.T) {
 	}
 }
 
+// TestEncodeAnthropicRequestKeepsSignedThinkingOnlyAssistant 确认一条只剩 signed 思考块的
+// assistant 消息编回 anthropic 时整条保住：anthropic 是唯一要求回填思考块的协议，
+// 带 signature 的块不丢，块前面的用户消息与后面的追问也不会被并到别处（DESIGN 5.4）。
+func TestEncodeAnthropicRequestKeepsSignedThinkingOnlyAssistant(t *testing.T) {
+	req := &Request{
+		Model: "claude-x",
+		Messages: []Message{
+			{Role: RoleUser, Blocks: []Block{{Kind: BlockText, Text: "6 乘 7 是多少"}}},
+			{Role: RoleAssistant, Blocks: []Block{
+				{Kind: BlockThinking, Thinking: &Thinking{Text: "用户问乘法，先算 6×7=42。", Signature: "sig-abc"}},
+			}},
+			{Role: RoleUser, Blocks: []Block{{Kind: BlockText, Text: "那 8 乘 9 呢"}}},
+		},
+	}
+
+	raw, err := EncodeAnthropicRequest(req, "")
+	if err != nil {
+		t.Fatalf("编码请求: %v", err)
+	}
+	var wire AnthropicRequest
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("结果不是合法 JSON: %v", err)
+	}
+	if len(wire.Messages) != 3 {
+		t.Fatalf("消息数 = %d，期望 3（user、只剩思考的 assistant、user）: %s", len(wire.Messages), raw)
+	}
+	for i, want := range []string{"user", "assistant", "user"} {
+		if wire.Messages[i].Role != want {
+			t.Fatalf("第 %d 条消息的角色 = %q，期望 %q: %s", i+1, wire.Messages[i].Role, want, raw)
+		}
+	}
+	mid := wire.Messages[1].Content.Blocks
+	if len(mid) != 1 {
+		t.Fatalf("assistant 的块数 = %d，期望 1（带签名的思考块）: %s", len(mid), raw)
+	}
+	if mid[0].Type != "thinking" || mid[0].Thinking != "用户问乘法，先算 6×7=42。" || mid[0].Signature != "sig-abc" {
+		t.Fatalf("思考块 = %+v，期望带 sig-abc 的 thinking 块", mid[0])
+	}
+	if len(wire.Messages[0].Content.Blocks) != 1 || wire.Messages[0].Content.Blocks[0].Text != "6 乘 7 是多少" {
+		t.Fatalf("第一条用户消息 = %+v", wire.Messages[0].Content.Blocks)
+	}
+	if len(wire.Messages[2].Content.Blocks) != 1 || wire.Messages[2].Content.Blocks[0].Text != "那 8 乘 9 呢" {
+		t.Fatalf("最后一条用户消息 = %+v（追问不能被并进思考那条）", wire.Messages[2].Content.Blocks)
+	}
+}
+
 // TestAnthropicToolTypeRoundTrip 确认服务端内置工具的 type 编回 anthropic 时保留，
 // 不会被补上一个伪造的 input_schema（DESIGN 5.4）。
 func TestAnthropicToolTypeRoundTrip(t *testing.T) {
