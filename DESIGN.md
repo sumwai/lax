@@ -712,6 +712,36 @@ gemini 的原生接口（Generative Language API 的 `generateContent`）与另�
 - `/v1/models` 与 `/v1/models/{id}`：清单里同时列出真实名字与别名。别名条目的 `id` 是别名，`owned_by` 取提供一个目标的厂商（多个时按现有规则取厂商名字典序第一个），`created` 仍是 0；两条都出现时客户端两个名字都能用。别名解析不到目标时不在清单里出现：清单反映「现在能接的名字」，解析不到的名字接不了。`/v1/models/{id}` 用别名查得到同一条目。
 - 命令行：`model alias set <别名> <目标>`（覆盖语义）、`model alias unset <别名>`、`model alias ls`（`--json` 输出别名与目标）。三条都在参数层做上面的校验，退出码与非空校验沿用现有约定。
 
+### 5.13 模型目录与账号可达性
+
+模型的事实（上下文长度、最大输出、支持哪些协议、能力位、厂商级价格）属于上游，与哪个账号去访问无关；账号只该回答「我能不能用这个模型」以及在个别模型上「我这里的能力/价格与目录不同」。把这两件事混在一张表里，会出现「同一个模型在三个账号下有三份重复元数据」，改一次要改三处。
+
+- `provider_models(provider, model)` 存模型事实：`source`（`sync` / `manual` / `probe`）、`context_window`、`max_output`、`protocols`（该模型支持的协议集合，逗号分隔）、`capabilities`（能力位，逗号分隔）、四个价格列（厂商级默认价）、`updated_at`。主键 `(provider, model)`。
+- `account_models(account_id, model)` 存账号侧的两件事：**可达性**（`access` 取 `allowed` / `forbidden` / `missing` / `error`，另有 `http_status`、`error`、`checked_at`）与**覆盖值**（`protocol`、`context_window`、`max_output`、四个价格列，NULL 表示继承目录）。主键 `(account_id, model)`。
+- `accounts.models` 那一列删除：它等价于「该账号 `access='allowed'` 的行集合」，是派生数据。
+
+取值优先级：
+
+| 维度 | 顺序 |
+| --- | --- |
+| 能否进候选池 | `account_models.access='allowed'` |
+| 有效协议 | `account_models.protocol` → `provider_models.protocols` 里按厂商默认顺序 → `providers.default_protocol` |
+| 上下文长度、最大输出 | `account_models` 覆盖值 → `provider_models` |
+| 价格 | `account_models` 覆盖值 → `provider_models` 厂商级默认 |
+
+写入分工：
+
+| 动作 | `provider_models` | `account_models` |
+| --- | --- | --- |
+| `model sync --account A` | 按 `(provider, model)` upsert，`source='sync'`，只更新上游给出的字段 | 清单里出现的标 `allowed`，不出现的保持不动 |
+| `model probe --account A` | 目录里没有的模型补一行 `source='probe'` | 写 `access`、`http_status`、`error`、`checked_at` 与发现到的 `protocol` |
+| `account add --models` | 目录里没有的补一行 `source='manual'` | 该账号 `access='allowed'` |
+
+- 目录是**同厂商所有账号的并集**：同一厂商不同账号能看到的模型可以不同（实测 bigmodel 的清单里有 `glm-4.6-air`，某个 key 无权访问），差异由 `account_models.access` 表达，不靠各自复制一份目录。
+- `/v1/models` 只列 `access='allowed'` 的行（另见 5.12 的别名）：客户端不该看到自己用不了的名字。
+- 元数据目前只存不用：上下文长度、能力位还没有消费者，等做「按能力过滤/超长提示」时再接，先不为了有消费者而临时定规则。
+- 迁移 `0015`：把现有 `account_models` 的每一行搬进 `provider_models`（`source='probe'`，只填在表里的字段），`status` 映射成 `access`（`usable`→`allowed`，`forbidden`→`forbidden`，`notfound`→`missing`，其余→`error`）；`accounts.models` 里出现但 `account_models` 没有的名字补一行 `source='manual'` 与 `access='allowed'`；最后删掉 `accounts.models`。
+
 ## 6 数据模型
 
 ```sql
@@ -720,7 +750,6 @@ CREATE TABLE accounts (
   name           TEXT    NOT NULL UNIQUE,
   provider       TEXT    NOT NULL,           -- 只存名字：地址、默认协议、路由都在 providers 上
   key_cipher     BLOB    NOT NULL,
-  models         TEXT    NOT NULL DEFAULT '[]',
   price_in       REAL,
   price_out      REAL,
   price_cache_read  REAL,
@@ -756,14 +785,36 @@ CREATE TABLE requests (
 
 CREATE INDEX requests_ts ON requests(ts DESC);
 
+CREATE TABLE provider_models (
+  provider        TEXT    NOT NULL,
+  model           TEXT    NOT NULL,
+  source          TEXT    NOT NULL,           -- sync / manual / probe
+  context_window  INTEGER,
+  max_output      INTEGER,
+  protocols       TEXT    NOT NULL DEFAULT '', -- 该模型支持的协议，逗号分隔
+  capabilities    TEXT    NOT NULL DEFAULT '',
+  price_in        REAL,
+  price_out       REAL,
+  price_cache_read  REAL,
+  price_cache_write REAL,
+  updated_at      INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (provider, model)
+);
+
 CREATE TABLE account_models (
-  account_id  INTEGER NOT NULL,
-  model       TEXT    NOT NULL,
-  status      TEXT    NOT NULL,
-  http_status INTEGER NOT NULL DEFAULT 0,
-  error       TEXT    NOT NULL DEFAULT '',
-  checked_at  INTEGER NOT NULL DEFAULT 0,
-  protocol    TEXT    NOT NULL DEFAULT '',
+  account_id      INTEGER NOT NULL,
+  model           TEXT    NOT NULL,
+  access          TEXT    NOT NULL,           -- allowed / forbidden / missing / error
+  http_status     INTEGER NOT NULL DEFAULT 0,
+  error           TEXT    NOT NULL DEFAULT '',
+  checked_at      INTEGER NOT NULL DEFAULT 0,
+  protocol        TEXT    NOT NULL DEFAULT '', -- 账号级的协议覆盖（探活发现）
+  context_window  INTEGER,                     -- NULL 表示继承目录
+  max_output      INTEGER,
+  price_in        REAL,
+  price_out       REAL,
+  price_cache_read  REAL,
+  price_cache_write REAL,
   PRIMARY KEY (account_id, model)
 );
 
