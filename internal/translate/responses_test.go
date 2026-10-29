@@ -624,28 +624,82 @@ func TestResponsesStreamEncode(t *testing.T) {
 	}
 
 	stopEvents := e.Emit(Delta{Kind: DeltaStop, StopReason: StopEndTurn, Usage: &Usage{In: 10, Out: 2}})
-	if len(stopEvents) != 1 || stopEvents[0].Event != "response.completed" {
-		t.Fatalf("收尾事件 = %+v", stopEvents)
+	if len(stopEvents) != 3 {
+		t.Fatalf("收尾应发 arguments.done、output_item.done 与 completed 三帧，实际 %d", len(stopEvents))
 	}
-	responsesEventType(t, stopEvents[0])
-	var stopData struct {
+	if stopEvents[0].Event != "response.function_call_arguments.done" ||
+		stopEvents[1].Event != "response.output_item.done" ||
+		stopEvents[2].Event != "response.completed" {
+		t.Fatalf("收尾事件顺序 = %s/%s/%s", stopEvents[0].Event, stopEvents[1].Event, stopEvents[2].Event)
+	}
+	for _, ev := range stopEvents {
+		responsesEventType(t, ev)
+	}
+	var doneData struct {
+		OutputIndex int    `json:"output_index"`
+		ItemID      string `json:"item_id"`
+		Name        string `json:"name"`
+		Arguments   string `json:"arguments"`
+	}
+	if err := json.Unmarshal(stopEvents[0].Data, &doneData); err != nil {
+		t.Fatalf("arguments.done 不是合法 JSON: %v", err)
+	}
+	if doneData.OutputIndex != 1 || doneData.Name != "get_weather" ||
+		doneData.Arguments != `{"city":"北京"}` || !json.Valid([]byte(doneData.Arguments)) {
+		t.Fatalf("arguments.done 字段 = %+v", doneData)
+	}
+	var itemDone struct {
+		OutputIndex int `json:"output_index"`
+		Item        struct {
+			Type      string `json:"type"`
+			CallID    string `json:"call_id"`
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+			Status    string `json:"status"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal(stopEvents[1].Data, &itemDone); err != nil {
+		t.Fatalf("output_item.done 不是合法 JSON: %v", err)
+	}
+	if itemDone.OutputIndex != 1 || itemDone.Item.Type != "function_call" ||
+		itemDone.Item.CallID != "call_1" || itemDone.Item.Name != "get_weather" ||
+		itemDone.Item.Arguments != `{"city":"北京"}` || itemDone.Item.Status != "completed" {
+		t.Fatalf("output_item.done 字段 = %+v", itemDone)
+	}
+
+	stopData := struct {
 		Response struct {
 			Status string `json:"status"`
-			Usage  struct {
+			Output []struct {
+				Type      string `json:"type"`
+				CallID    string `json:"call_id"`
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			} `json:"output"`
+			Usage struct {
 				InputTokens  int64 `json:"input_tokens"`
 				OutputTokens int64 `json:"output_tokens"`
 				TotalTokens  int64 `json:"total_tokens"`
 			} `json:"usage"`
 		} `json:"response"`
-	}
-	if err := json.Unmarshal(stopEvents[0].Data, &stopData); err != nil {
+	}{}
+	if err := json.Unmarshal(stopEvents[2].Data, &stopData); err != nil {
 		t.Fatalf("收尾事件不是合法 JSON: %v", err)
 	}
 	if stopData.Response.Status != "completed" ||
 		stopData.Response.Usage.InputTokens != 10 ||
 		stopData.Response.Usage.OutputTokens != 2 ||
 		stopData.Response.Usage.TotalTokens != 12 {
-		t.Fatalf("收尾事件字段 = %+v", stopData)
+		t.Fatalf("收尾事件字段 = %+v", stopData.Response)
+	}
+	// output 要回填完整的 function_call，不能一直是空数组。
+	if len(stopData.Response.Output) != 1 {
+		t.Fatalf("收尾事件的 output = %+v，期望一个 function_call", stopData.Response.Output)
+	}
+	call := stopData.Response.Output[0]
+	if call.Type != "function_call" || call.CallID != "call_1" || call.Name != "get_weather" ||
+		call.Arguments != `{"city":"北京"}` || !json.Valid([]byte(call.Arguments)) {
+		t.Fatalf("收尾事件 output[0] = %+v", call)
 	}
 
 	if after := e.Emit(Delta{Kind: DeltaText, Text: "多余"}); len(after) != 0 {
@@ -710,5 +764,190 @@ func TestResponsesUsageScannerNonStream(t *testing.T) {
 	in, out, cacheRead, cacheWrite := sc.Usage()
 	if in != 9 || out != 1 || cacheRead != 4 || cacheWrite != 0 {
 		t.Fatalf("用量 = %d/%d/%d/%d，期望 9/1/4/0", in, out, cacheRead, cacheWrite)
+	}
+}
+
+// TestResponsesStreamDecodeItemDoneOnly 覆盖上游只发 response.output_item.done 的形状：
+// 没有 added、也没有 function_call_arguments.delta 时，整条工具调用要在 done 里补齐。
+func TestResponsesStreamDecodeItemDoneOnly(t *testing.T) {
+	d := &responsesStreamDecoder{}
+	frames := []string{
+		`{"type":"response.output_text.delta","output_index":0,"content_index":0,"delta":"稍等"}`,
+		`{"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"北京\"}","status":"completed"}}`,
+		`{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[]}}`,
+	}
+	var deltas []Delta
+	for _, f := range frames {
+		got, err := d.Decode([]byte(f))
+		if err != nil {
+			t.Fatalf("Decode(%s): %v", f, err)
+		}
+		deltas = append(deltas, got...)
+	}
+
+	var starts, args []Delta
+	for _, dl := range deltas {
+		switch dl.Kind {
+		case DeltaToolStart:
+			starts = append(starts, dl)
+		case DeltaToolArgs:
+			args = append(args, dl)
+		}
+	}
+	if len(starts) != 1 || starts[0].ToolID != "call_1" || starts[0].ToolName != "get_weather" ||
+		starts[0].Index != 1 {
+		t.Fatalf("工具开始增量 = %+v", starts)
+	}
+	if len(args) != 1 || args[0].ArgsJSON != `{"city":"北京"}` || args[0].Index != 1 {
+		t.Fatalf("工具参数增量 = %+v", args)
+	}
+	if last := deltas[len(deltas)-1]; last.Kind != DeltaStop || last.StopReason != StopToolUse {
+		t.Fatalf("收尾增量 = %+v，期望 tool_use", last)
+	}
+}
+
+// TestResponsesStreamDecodeItemDoneAfterDeltas 确认 added 与 delta 都到过之后，done 不再重复发增量。
+func TestResponsesStreamDecodeItemDoneAfterDeltas(t *testing.T) {
+	d := &responsesStreamDecoder{}
+	frames := []string{
+		`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":""}}`,
+		`{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":"{\"city\":\"北"}`,
+		`{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"fc_1","delta":"京\"}"}`,
+		`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"北京\"}","status":"completed"}}`,
+	}
+	var deltas []Delta
+	for _, f := range frames {
+		got, err := d.Decode([]byte(f))
+		if err != nil {
+			t.Fatalf("Decode(%s): %v", f, err)
+		}
+		deltas = append(deltas, got...)
+	}
+	var starts int
+	var args strings.Builder
+	for _, dl := range deltas {
+		switch dl.Kind {
+		case DeltaToolStart:
+			starts++
+		case DeltaToolArgs:
+			args.WriteString(dl.ArgsJSON)
+		default:
+			t.Fatalf("意外增量: %+v", dl)
+		}
+	}
+	if starts != 1 {
+		t.Fatalf("工具开始增量数量 = %d，期望 1", starts)
+	}
+	if args.String() != `{"city":"北京"}` {
+		t.Fatalf("参数增量 = %q，期望只发一遍", args.String())
+	}
+}
+
+// TestEncodeResponsesRequestDropsBuiltinTools 确认 anthropic 的服务端内置工具不会变成 function。
+func TestEncodeResponsesRequestDropsBuiltinTools(t *testing.T) {
+	raw, err := EncodeResponsesRequest(&Request{
+		Model: "m1",
+		Tools: []Tool{
+			{Type: "web_search_20250305", Name: "web_search"},
+			{Name: "get_weather", Schema: json.RawMessage(`{"type":"object"}`)},
+			{Type: "custom", Name: "bash", Schema: json.RawMessage(`{"type":"object"}`)},
+		},
+	}, "up")
+	if err != nil {
+		t.Fatalf("EncodeResponsesRequest: %v", err)
+	}
+	var got struct {
+		Tools []struct {
+			Type string `json:"type"`
+			Name string `json:"name"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("编码结果不是合法 JSON: %v", err)
+	}
+	if len(got.Tools) != 2 || got.Tools[0].Name != "get_weather" || got.Tools[1].Name != "bash" {
+		t.Fatalf("tools = %+v，期望内置工具被丢弃", got.Tools)
+	}
+	for _, tool := range got.Tools {
+		if tool.Type != "function" {
+			t.Fatalf("tools 里的 type = %q，期望 function", tool.Type)
+		}
+	}
+}
+
+// TestResponsesStreamEncoderTruncatedToolArgs 确认断流时错误文案说明工具参数不完整。
+func TestResponsesStreamEncoderTruncatedToolArgs(t *testing.T) {
+	e := newResponsesStreamEncoder("gpt-5")
+	e.Emit(Delta{Kind: DeltaToolStart, Index: 1, ToolID: "call_1", ToolName: "get_weather"})
+	e.Emit(Delta{Kind: DeltaToolArgs, Index: 1, ArgsJSON: `{"city":"北`})
+
+	events := e.Emit(Delta{Kind: DeltaError, Text: "上游流式响应中断: 收尾帧之前连接就结束了"})
+	if len(events) != 2 || events[0].Event != "error" || events[1].Event != "response.failed" {
+		t.Fatalf("断流事件 = %+v", events)
+	}
+	var errData struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(events[0].Data, &errData); err != nil {
+		t.Fatalf("error 事件不是合法 JSON: %v", err)
+	}
+	if !strings.Contains(errData.Message, "工具调用参数在上游中断") {
+		t.Fatalf("error 文案 = %q，期望说明工具参数不完整", errData.Message)
+	}
+	var failed struct {
+		Response struct {
+			Status string `json:"status"`
+			Output []any  `json:"output"`
+			Error  struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(events[1].Data, &failed); err != nil {
+		t.Fatalf("response.failed 不是合法 JSON: %v", err)
+	}
+	if failed.Response.Status != "failed" || len(failed.Response.Output) != 0 {
+		t.Fatalf("response.failed = %+v，期望失败且不回填残缺的 output", failed.Response)
+	}
+	if !strings.Contains(failed.Response.Error.Message, "工具调用参数在上游中断") {
+		t.Fatalf("response.failed 的 message = %q", failed.Response.Error.Message)
+	}
+}
+
+// TestResponsesStreamDecodeItemDoneWithoutOutputIndex 覆盖上游不给 output_index 的形状：
+// added 与 done 都靠自增序号，done 不能把同一个 item 再发一遍。
+func TestResponsesStreamDecodeItemDoneWithoutOutputIndex(t *testing.T) {
+	d := &responsesStreamDecoder{}
+	frames := []string{
+		`{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"weather","arguments":""}}`,
+		`{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"city\":\"北京\"}"}`,
+		`{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"weather","arguments":"{\"city\":\"北京\"}","status":"completed"}}`,
+	}
+	var deltas []Delta
+	for _, f := range frames {
+		got, err := d.Decode([]byte(f))
+		if err != nil {
+			t.Fatalf("Decode(%s): %v", f, err)
+		}
+		deltas = append(deltas, got...)
+	}
+	var starts int
+	var args strings.Builder
+	for _, dl := range deltas {
+		switch dl.Kind {
+		case DeltaToolStart:
+			starts++
+			if dl.Index != 0 {
+				t.Fatalf("工具开始增量的序号 = %d，期望 0", dl.Index)
+			}
+		case DeltaToolArgs:
+			args.WriteString(dl.ArgsJSON)
+		}
+	}
+	if starts != 1 {
+		t.Fatalf("工具开始增量数量 = %d，期望 1（done 不该重复发）", starts)
+	}
+	if args.String() != `{"city":"北京"}` {
+		t.Fatalf("参数增量 = %q", args.String())
 	}
 }

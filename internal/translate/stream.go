@@ -27,6 +27,22 @@ func (e SSEEvent) Bytes() []byte {
 	return b.Bytes()
 }
 
+// 断流时工具调用的参数可能只到一半（DESIGN 5.4 已知边界）：错误文案要说明这一条，
+// 客户端才不会把残缺的 input 当成完整参数。
+const incompleteToolArgsNote = "工具调用参数在上游中断，内容不完整"
+
+// withIncompleteToolArgs 在断流的错误文案里补上「参数不完整」这层意思。
+// openTool 由各编码器自己给：它知道有没有工具块开了还没收。
+func withIncompleteToolArgs(message string, openTool bool) string {
+	if !openTool {
+		return message
+	}
+	if message == "" {
+		return incompleteToolArgsNote
+	}
+	return message + "；" + incompleteToolArgsNote
+}
+
 // ErrorEvent 构造一条 anthropic 形状的错误事件。
 func ErrorEvent(kind, message string) SSEEvent {
 	body, _ := json.Marshal(map[string]any{

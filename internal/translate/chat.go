@@ -118,6 +118,10 @@ func EncodeChatRequest(r *Request, model string) ([]byte, error) {
 	}
 
 	for _, t := range r.Tools {
+		if !isClientTool(t) {
+			// anthropic 的服务端内置工具在 chat 里没有对应形状，伪造一个 function 会语义错位。
+			continue
+		}
 		out.Tools = append(out.Tools, ChatTool{
 			Type: "function",
 			Function: ChatToolFunc{
@@ -371,11 +375,16 @@ type chatStreamEncoder struct {
 	usage     *Usage
 	usageSent bool
 	done      bool
+	// toolSlots 把上游的块号映射成 chat 的稠密序号：上游 anthropic 有文本块时
+	// 首个工具是 1，按稠密下标建数组的客户端会撞上空位（DESIGN 5.4）。
+	toolSlots map[int]int
+	// toolOpen 记「有工具块开了还没收」，断流时用来补说明。
+	toolOpen bool
 }
 
 // newChatStreamEncoder 构造编码器。model 是客户端请求的模型名，会写回每一帧。
 func newChatStreamEncoder(model string) *chatStreamEncoder {
-	return &chatStreamEncoder{model: model}
+	return &chatStreamEncoder{model: model, toolSlots: map[int]int{}}
 }
 
 // Start 发首帧：role=assistant、content 为空、finish_reason=null。
@@ -409,7 +418,8 @@ func (e *chatStreamEncoder) Emit(d Delta) []SSEEvent {
 		return []SSEEvent{e.choiceEvent(chatOutDelta{Content: &content}, nil)}
 
 	case DeltaToolStart:
-		index := d.Index
+		index := e.toolSlot(d.Index)
+		e.toolOpen = true
 		return []SSEEvent{e.choiceEvent(chatOutDelta{
 			ToolCalls: []ChatToolCall{{
 				Index: &index,
@@ -423,7 +433,8 @@ func (e *chatStreamEncoder) Emit(d Delta) []SSEEvent {
 		}, nil)}
 
 	case DeltaToolArgs:
-		index := d.Index
+		index := e.toolSlot(d.Index)
+		e.toolOpen = true
 		return []SSEEvent{e.choiceEvent(chatOutDelta{
 			ToolCalls: []ChatToolCall{{
 				Index: &index,
@@ -434,6 +445,7 @@ func (e *chatStreamEncoder) Emit(d Delta) []SSEEvent {
 		}, nil)}
 
 	case DeltaStop:
+		e.toolOpen = false
 		var out []SSEEvent
 		if d.StopReason != "" {
 			reason := chatStopFromIR(d.StopReason)
@@ -450,7 +462,7 @@ func (e *chatStreamEncoder) Emit(d Delta) []SSEEvent {
 		body, err := json.Marshal(map[string]any{
 			"error": map[string]string{
 				"type":    "upstream_error",
-				"message": d.Text,
+				"message": withIncompleteToolArgs(d.Text, e.toolOpen),
 			},
 		})
 		if err != nil {
@@ -474,6 +486,16 @@ func (e *chatStreamEncoder) Finish() []SSEEvent {
 		e.usageSent = true
 	}
 	return append(out, SSEEvent{Data: []byte("[DONE]")})
+}
+
+// toolSlot 给出某个上游块号对应的 chat 工具序号：从 0 开始按首次出现的顺序连续编号。
+func (e *chatStreamEncoder) toolSlot(upstream int) int {
+	if idx, ok := e.toolSlots[upstream]; ok {
+		return idx
+	}
+	idx := len(e.toolSlots)
+	e.toolSlots[upstream] = idx
+	return idx
 }
 
 func (e *chatStreamEncoder) choiceEvent(delta chatOutDelta, finish *string) SSEEvent {

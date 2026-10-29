@@ -1,0 +1,14 @@
+{
+  "from": "openai-responses",
+  "to": "openai-chat",
+  "kind": "stream",
+  "model": "gpt-5",
+  "frames": [
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "稍等"}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "weather", "arguments": ""}}]}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "{\"city\":"}}]}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "\"北京\"}"}}]}}]},
+    {"id": "c1", "object": "chat.completion.chunk", "model": "up", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 12, "completion_tokens": 8}},
+    "[DONE]"
+  ]
+}

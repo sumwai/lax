@@ -339,3 +339,46 @@ func TestConversionStreamUpstreamErrorFrameIsFailure(t *testing.T) {
 		t.Fatalf("请求记录的 error = %q，期望写上游原话", recs[0].Error)
 	}
 }
+
+// TestConversionStreamTruncatedToolArgsNote 覆盖上游停在工具参数中间的断流：客户端的
+// 错误帧要说明参数不完整（已转发的 partial_json 撤不回来），这一次仍记 ok=0。
+func TestConversionStreamTruncatedToolArgsNote(t *testing.T) {
+	written := strings.Join([]string{
+		`data: {"id":"c1","choices":[{"index":0,"delta":{"role":"assistant","content":"稍等"}}]}`,
+		``,
+		`data: {"id":"c1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"weather","arguments":"{\"city\":\"北"}}]}}]}`,
+		``,
+	}, "\n")
+
+	f := newFixture(t)
+	up := closedSSEUpstream(t, written)
+	f.add(t, "ds1", gateway.ProtocolChat, up.URL, "sk-tool-cut", []string{"m1"}, 100)
+	srv := f.server(t)
+
+	status, body := streamPost(t, srv, gateway.ProtocolAnthropic)
+	if status != http.StatusOK {
+		t.Fatalf("状态 = %d，期望 200（响应头已经发出）", status)
+	}
+	// 参数片段照原样转发，客户端看到的就是上游中断时的那一截。
+	if !strings.Contains(body, `"partial_json":"{\"city\":\"北"`) {
+		t.Fatalf("已转发的参数片段被改动了:\n%s", tail(body, 300))
+	}
+	if _, message := errorFrame(t, body); !strings.Contains(message, "工具调用参数在上游中断") {
+		t.Fatalf("错误帧的说明 = %q，期望说明工具参数不完整", message)
+	}
+	events := anthropicEvents(t, body)
+	if events[len(events)-1] != "message_stop" {
+		t.Fatalf("流仍应以 message_stop 收尾，事件序列 = %v", events)
+	}
+
+	recs, err := f.st.RecentRequests(5)
+	if err != nil {
+		t.Fatalf("读请求记录: %v", err)
+	}
+	if len(recs) != 1 || recs[0].OK {
+		t.Fatalf("请求记录 = %+v，期望一行且 ok=0", recs)
+	}
+	if !strings.Contains(recs[0].Error, "收尾帧") {
+		t.Fatalf("请求记录的 error = %q，期望写明收尾帧没到", recs[0].Error)
+	}
+}

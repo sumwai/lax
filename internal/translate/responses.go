@@ -140,10 +140,11 @@ type responsesStreamEvent struct {
 
 // responsesStreamItem 是流式事件里出现的 output item，只取用得到的字段。
 type responsesStreamItem struct {
-	ID     string `json:"id"`
-	Type   string `json:"type"`
-	CallID string `json:"call_id"`
-	Name   string `json:"name"`
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	CallID    string `json:"call_id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 // DecodeResponsesRequest 把 POST /v1/responses 的请求体解析成 IR。
@@ -505,6 +506,10 @@ func EncodeResponsesRequest(r *Request, model string) ([]byte, error) {
 	out.Input = input
 
 	for _, t := range r.Tools {
+		if !isClientTool(t) {
+			// anthropic 的服务端内置工具在 responses 里没有对应形状，只认 function。
+			continue
+		}
 		schema := t.Schema
 		if len(schema) == 0 {
 			schema = json.RawMessage(`{"type":"object","properties":{}}`)
@@ -840,6 +845,10 @@ type responsesStreamDecoder struct {
 	lastToolIndex int
 	hasTool       bool
 	finished      bool
+	// 按 output 序号记「已经发过哪个增量」：只发 output_item.done 的上游需要在
+	// 那里补 ToolStart / ToolArgs，已经发过的部分不能重复（DESIGN 5.4）。
+	toolStarted  map[int]bool
+	toolArgsSeen map[int]bool
 }
 
 // Decode 处理一帧 data。data 是 SSE 的 data 字段内容。
@@ -855,6 +864,12 @@ func (d *responsesStreamDecoder) Decode(data []byte) ([]Delta, error) {
 	}
 	if d.toolIndex == nil {
 		d.toolIndex = map[string]int{}
+	}
+	if d.toolStarted == nil {
+		d.toolStarted = map[int]bool{}
+	}
+	if d.toolArgsSeen == nil {
+		d.toolArgsSeen = map[int]bool{}
 	}
 
 	switch env.Type {
@@ -888,6 +903,7 @@ func (d *responsesStreamDecoder) Decode(data []byte) ([]Delta, error) {
 		}
 		d.lastToolIndex = idx
 		d.hasTool = true
+		d.toolStarted[idx] = true
 		id := env.Item.CallID
 		if id == "" {
 			id = env.Item.ID
@@ -899,6 +915,44 @@ func (d *responsesStreamDecoder) Decode(data []byte) ([]Delta, error) {
 			ToolName: env.Item.Name,
 		}}, nil
 
+	case "response.output_item.done":
+		// 只发 done、不发 added 与 arguments.delta 的上游：整条工具调用在这里补齐，
+		// 已经发过的部分按 output 序号跳过，避免重复。
+		if env.Item == nil || env.Item.Type != "function_call" {
+			return nil, nil
+		}
+		key := firstNonEmpty(env.Item.ID, env.Item.CallID)
+		idx, known := d.toolIndex[key]
+		if !known {
+			// 没见过这个 item：优先用上游给的 output_index，没给就新开一个序号。
+			if env.OutputIndex != nil {
+				idx = d.indexAt(env.OutputIndex, d.next)
+			} else {
+				idx = d.indexAt(nil, d.next)
+			}
+		}
+		if key != "" {
+			d.toolIndex[key] = idx
+		}
+		d.lastToolIndex = idx
+		d.hasTool = true
+
+		var out []Delta
+		if !d.toolStarted[idx] {
+			d.toolStarted[idx] = true
+			out = append(out, Delta{
+				Kind:     DeltaToolStart,
+				Index:    idx,
+				ToolID:   firstNonEmpty(env.Item.CallID, env.Item.ID),
+				ToolName: env.Item.Name,
+			})
+		}
+		if !d.toolArgsSeen[idx] && env.Item.Arguments != "" {
+			d.toolArgsSeen[idx] = true
+			out = append(out, Delta{Kind: DeltaToolArgs, Index: idx, ArgsJSON: env.Item.Arguments})
+		}
+		return out, nil
+
 	case "response.function_call_arguments.delta":
 		if env.Delta == "" {
 			return nil, nil
@@ -909,6 +963,8 @@ func (d *responsesStreamDecoder) Decode(data []byte) ([]Delta, error) {
 		} else if v, ok := d.toolIndex[env.ItemID]; ok {
 			idx = v
 		}
+		d.toolStarted[idx] = true
+		d.toolArgsSeen[idx] = true
 		return []Delta{{
 			Kind:     DeltaToolArgs,
 			Index:    idx,
@@ -1006,6 +1062,50 @@ type responsesStreamEncoder struct {
 	thinkingIndex int
 	textIndex     int
 	toolIndex     map[int]int
+	// toolBuffers 按 output 序号缓存工具 item 的名称、call_id 与已转发的参数：
+	// 收尾要补 function_call_arguments.done 与 output_item.done，并把 output 回填（DESIGN 5.4）。
+	toolBuffers map[int]*responsesToolBuffer
+	toolOrder   []int
+	// toolOpen 记「有工具块开了还没收」，断流时用来补说明。
+	toolOpen bool
+}
+
+// responsesToolBuffer 是一个正在流式下发的工具 item。
+type responsesToolBuffer struct {
+	itemID    string
+	callID    string
+	name      string
+	arguments strings.Builder
+}
+
+// item 拼出事件里的 item 对象。没有 call_id 的 item 不造 id：上游没给就不编。
+func (b *responsesToolBuffer) item(args string) map[string]any {
+	item := map[string]any{
+		"type":      "function_call",
+		"call_id":   b.callID,
+		"name":      b.name,
+		"arguments": args,
+	}
+	if b.itemID != "" {
+		item["id"] = b.itemID
+	}
+	return item
+}
+
+// doneItem 是带上 status=completed 的 item，用于 output_item.done 与收尾的 output 数组。
+func (b *responsesToolBuffer) doneItem(args string) map[string]any {
+	item := b.item(args)
+	item["status"] = "completed"
+	return item
+}
+
+// argumentsJSON 给出完整的参数：一路没有参数片段时按空对象，
+// 与三条协议的非流式编码器一致，不写空串。
+func (b *responsesToolBuffer) argumentsJSON() string {
+	if b.arguments.Len() == 0 {
+		return "{}"
+	}
+	return b.arguments.String()
 }
 
 // newResponsesStreamEncoder 构造编码器。model 是客户端请求的模型名，会写回事件。
@@ -1016,6 +1116,7 @@ func newResponsesStreamEncoder(model string) *responsesStreamEncoder {
 		thinkingIndex: -1,
 		textIndex:     -1,
 		toolIndex:     map[int]int{},
+		toolBuffers:   map[int]*responsesToolBuffer{},
 	}
 }
 
@@ -1073,43 +1174,39 @@ func (e *responsesStreamEncoder) Emit(d Delta) []SSEEvent {
 		}))
 
 	case DeltaToolStart:
-		idx := e.allocIndex()
-		e.toolIndex[d.Index] = idx
-		item := map[string]any{
-			"type":      "function_call",
-			"call_id":   d.ToolID,
-			"name":      d.ToolName,
-			"arguments": "",
-		}
+		idx, buf := e.toolBuffer(d.Index)
+		buf.callID = d.ToolID
+		buf.name = d.ToolName
 		if d.ToolID != "" {
-			item["id"] = "fc_" + strings.TrimPrefix(d.ToolID, "fc_")
+			buf.itemID = "fc_" + strings.TrimPrefix(d.ToolID, "fc_")
 		}
+		e.toolOpen = true
 		events = append(events, e.event("response.output_item.added", map[string]any{
 			"output_index": idx,
-			"item":         item,
+			"item":         buf.item(""),
 		}))
 
 	case DeltaToolArgs:
-		idx, ok := e.toolIndex[d.Index]
-		if !ok {
-			idx = e.allocIndex()
-			e.toolIndex[d.Index] = idx
-		}
+		idx, buf := e.toolBuffer(d.Index)
+		buf.arguments.WriteString(d.ArgsJSON)
+		e.toolOpen = true
 		events = append(events, e.event("response.function_call_arguments.delta", map[string]any{
 			"output_index": idx,
 			"delta":        d.ArgsJSON,
 		}))
 
 	case DeltaStop:
+		e.toolOpen = false
 		events = append(events, e.completed(d.StopReason, d.Usage)...)
 
 	case DeltaError:
 		// 先发一条 error 事件说明出了什么事，再发 response.failed 收尾：responses 的客户端
 		// 认终态事件，把一次失败报成 completed 会与请求记录里的 ok=0 自相矛盾。
+		text := withIncompleteToolArgs(d.Text, e.toolOpen)
 		events = append(events, e.event("error", map[string]any{
-			"message": d.Text,
+			"message": text,
 		}))
-		events = append(events, e.failed(d.Text)...)
+		events = append(events, e.failed(text)...)
 	}
 	return events
 }
@@ -1127,11 +1224,16 @@ func (e *responsesStreamEncoder) Finish() []SSEEvent {
 }
 
 // completed 发 response.completed，带上状态与用量。
+// 发之前把每个工具 item 的 arguments.done 与 output_item.done 补齐，并把完整的
+// function_call 回填进 output：只发 added 与 delta 的流会让客户端拿不到收尾。
 func (e *responsesStreamEncoder) completed(reason string, usage *Usage) []SSEEvent {
 	if e.sentStop {
 		return nil
 	}
 	e.sentStop = true
+	e.toolOpen = false
+
+	events := e.toolDoneEvents()
 
 	status := "completed"
 	resp := map[string]any{
@@ -1139,7 +1241,7 @@ func (e *responsesStreamEncoder) completed(reason string, usage *Usage) []SSEEve
 		"object": "response",
 		"status": status,
 		"model":  e.model,
-		"output": []any{},
+		"output": e.toolOutputItems(),
 		"usage":  responsesUsageOut{},
 	}
 	if reason == StopMaxTokens {
@@ -1153,7 +1255,60 @@ func (e *responsesStreamEncoder) completed(reason string, usage *Usage) []SSEEve
 			TotalTokens:  usage.In + usage.Out,
 		}
 	}
-	return []SSEEvent{e.event("response.completed", map[string]any{"response": resp})}
+	events = append(events, e.event("response.completed", map[string]any{"response": resp}))
+	return events
+}
+
+// toolDoneEvents 给每个工具 item 补 arguments.done 与 output_item.done，按 output 序号顺序发。
+func (e *responsesStreamEncoder) toolDoneEvents() []SSEEvent {
+	var events []SSEEvent
+	for _, idx := range e.toolOrder {
+		buf := e.toolBuffers[idx]
+		if buf == nil {
+			continue
+		}
+		args := buf.argumentsJSON()
+		events = append(events, e.event("response.function_call_arguments.done", map[string]any{
+			"output_index": idx,
+			"item_id":      buf.itemID,
+			"name":         buf.name,
+			"arguments":    args,
+		}))
+		events = append(events, e.event("response.output_item.done", map[string]any{
+			"output_index": idx,
+			"item":         buf.doneItem(args),
+		}))
+	}
+	return events
+}
+
+// toolOutputItems 拼出收尾事件里的 output 数组，只含工具 item：文本与思考 item 的正文
+// 已经按增量发过，这里不攒，输出数组因此只列 function_call（DESIGN 5.4 已知边界）。
+func (e *responsesStreamEncoder) toolOutputItems() []any {
+	out := []any{}
+	for _, idx := range e.toolOrder {
+		buf := e.toolBuffers[idx]
+		if buf == nil {
+			continue
+		}
+		out = append(out, buf.doneItem(buf.argumentsJSON()))
+	}
+	return out
+}
+
+// toolBuffer 取某个上游块号对应的工具缓冲；没有就新开一个（先来参数后到开始也算）。
+func (e *responsesStreamEncoder) toolBuffer(upstream int) (int, *responsesToolBuffer) {
+	if idx, ok := e.toolIndex[upstream]; ok {
+		if buf := e.toolBuffers[idx]; buf != nil {
+			return idx, buf
+		}
+	}
+	idx := e.allocIndex()
+	e.toolIndex[upstream] = idx
+	buf := &responsesToolBuffer{}
+	e.toolBuffers[idx] = buf
+	e.toolOrder = append(e.toolOrder, idx)
+	return idx, buf
 }
 
 // failed 发 response.failed：上游断流或上游自己报了错误时，客户端得到的终态是失败。

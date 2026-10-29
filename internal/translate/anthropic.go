@@ -36,11 +36,13 @@ func DecodeAnthropicRequest(raw []byte) (*Request, error) {
 	}
 
 	for _, t := range wire.Tools {
-		schema := t.InputSchema
-		if len(schema) == 0 {
-			schema = json.RawMessage(`{"type":"object","properties":{}}`)
+		tool := Tool{Type: t.Type, Name: t.Name, Description: t.Description, Schema: t.InputSchema}
+		// 只有客户端函数的 schema 缺失时才补空对象：内置工具本来就没有 input_schema，
+		// 补一个出来就是伪造上游事实。
+		if isClientTool(tool) && len(tool.Schema) == 0 {
+			tool.Schema = json.RawMessage(`{"type":"object","properties":{}}`)
 		}
-		req.Tools = append(req.Tools, Tool{Name: t.Name, Description: t.Description, Schema: schema})
+		req.Tools = append(req.Tools, tool)
 	}
 
 	if tc := wire.ToolChoice; tc != nil {
@@ -78,16 +80,42 @@ func EncodeAnthropicRequest(r *Request, model string) ([]byte, error) {
 		wire.System = b
 	}
 
+	// 工具结果必须并进 user 消息里的 tool_result 块：anthropic 没有 role=tool，
+	// 原样写过去会被上游以 400 拒绝。同一个 assistant 消息之后的多条结果并成一条
+	// user 消息，顺序不变（DESIGN 5.4）。
+	var pendingToolResults *AnthropicMessage
+	flushToolResults := func() {
+		if pendingToolResults == nil {
+			return
+		}
+		wire.Messages = append(wire.Messages, *pendingToolResults)
+		pendingToolResults = nil
+	}
 	for _, m := range r.Messages {
+		if m.Role == RoleTool {
+			blocks := toolResultBlocks(m)
+			if len(blocks) == 0 {
+				continue
+			}
+			if pendingToolResults == nil {
+				pendingToolResults = &AnthropicMessage{Role: "user", Content: Content{Blocks: blocks}}
+				continue
+			}
+			pendingToolResults.Content.Blocks = append(pendingToolResults.Content.Blocks, blocks...)
+			continue
+		}
+		flushToolResults()
 		msg, err := toAnthropicMessage(m)
 		if err != nil {
 			return nil, err
 		}
 		wire.Messages = append(wire.Messages, msg)
 	}
+	flushToolResults()
 
 	for _, t := range r.Tools {
 		wire.Tools = append(wire.Tools, AnthropicTool{
+			Type:        t.Type,
 			Name:        t.Name,
 			Description: t.Description,
 			InputSchema: t.Schema,
@@ -404,7 +432,7 @@ func (e *anthropicStreamEncoder) Emit(d Delta) []SSEEvent {
 		}
 		events = append(events, e.stopEvents()...)
 	case DeltaError:
-		events = append(events, ErrorEvent("api_error", d.Text))
+		events = append(events, ErrorEvent("api_error", withIncompleteToolArgs(d.Text, e.openKind == BlockToolUse)))
 	}
 	return events
 }
@@ -604,6 +632,26 @@ func toAnthropicMessage(m Message) (AnthropicMessage, error) {
 	}
 	out.Content = Content{Blocks: blocks}
 	return out, nil
+}
+
+// toolResultBlocks 把一条 RoleTool 消息里的工具结果编成 anthropic 的 tool_result 块，
+// 其余块丢弃：anthropic 的 user 消息里只有 tool_result 能承接工具结果。
+func toolResultBlocks(m Message) []ContentBlock {
+	var blocks []ContentBlock
+	for _, b := range m.Blocks {
+		if b.Kind != BlockToolResult || b.ToolResult == nil {
+			continue
+		}
+		content, err := json.Marshal(b.ToolResult.Text)
+		if err != nil {
+			continue
+		}
+		blocks = append(blocks, ContentBlock{
+			Type: "tool_result", ToolUseID: b.ToolResult.ToolUseID,
+			Content: content, IsError: b.ToolResult.IsError,
+		})
+	}
+	return blocks
 }
 
 // anthropicThinkingBlock 把思考块编成 anthropic 的 content block（DESIGN 5.4）。

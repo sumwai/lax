@@ -88,10 +88,19 @@ type Message struct {
 }
 
 // Tool 是一个工具定义。
+// Type 只有 anthropic 的服务端内置工具才有值（例如 "web_search_20250305"）；空串与
+// "custom" 都表示客户端自己执行的函数，另两条协议的工具定义只认这种。
 type Tool struct {
+	Type        string
 	Name        string
 	Description string
 	Schema      json.RawMessage
+}
+
+// isClientTool 判断工具定义是不是客户端自己执行的函数（DESIGN 5.4）：anthropic 的
+// 服务端内置工具在 chat 与 responses 里没有对应形状，整条丢弃而不是伪造 function。
+func isClientTool(t Tool) bool {
+	return t.Type == "" || t.Type == "custom"
 }
 
 // 工具选择模式。

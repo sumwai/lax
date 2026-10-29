@@ -991,3 +991,104 @@ func TestDecodeChatReasoningOnlyMessage(t *testing.T) {
 		t.Fatalf("报文 = %s", out)
 	}
 }
+
+// TestChatStreamEncoderDenseToolIndex 确认工具序号按出现顺序从 0 连续编号：
+// 上游 anthropic 有文本块时首个工具是 1，并行工具是 1、2，照搬块号会让按稠密下标
+// 建数组的客户端撞空位（DESIGN 5.4）。
+func TestChatStreamEncoderDenseToolIndex(t *testing.T) {
+	e := newChatStreamEncoder("m1")
+	e.Start()
+
+	// 上游块号：文本 0、工具 1、工具 2。
+	first := e.Emit(Delta{Kind: DeltaToolStart, Index: 1, ToolID: "toolu_1", ToolName: "weather"})
+	got := e.indexesOf(t, first)
+	if len(got) != 1 || got[0] != 0 {
+		t.Fatalf("首个工具的下标 = %v，期望 0", got)
+	}
+
+	second := e.Emit(Delta{Kind: DeltaToolStart, Index: 2, ToolID: "toolu_2", ToolName: "clock"})
+	got = e.indexesOf(t, second)
+	if len(got) != 1 || got[0] != 1 {
+		t.Fatalf("第二个工具的下标 = %v，期望 1", got)
+	}
+
+	// 同一个上游块号的后续参数片段仍落在同一个序号上。
+	args := e.Emit(Delta{Kind: DeltaToolArgs, Index: 2, ArgsJSON: `{"zone":"UTC"}`})
+	got = e.indexesOf(t, args)
+	if len(got) != 1 || got[0] != 1 {
+		t.Fatalf("参数片段的下标 = %v，期望 1", got)
+	}
+}
+
+// indexesOf 取事件里 tool_calls[].index。
+func (e *chatStreamEncoder) indexesOf(t *testing.T, events []SSEEvent) []int {
+	t.Helper()
+	var idxs []int
+	for _, ev := range events {
+		for _, c := range testChatChunkOf(t, ev).Choices {
+			for _, call := range c.Delta.ToolCalls {
+				if call.Index == nil {
+					t.Fatalf("tool_calls 缺少 index")
+				}
+				idxs = append(idxs, *call.Index)
+			}
+		}
+	}
+	return idxs
+}
+
+// TestEncodeChatRequestDropsBuiltinTools 确认 anthropic 服务端内置工具不会变成 function。
+func TestEncodeChatRequestDropsBuiltinTools(t *testing.T) {
+	raw, err := EncodeChatRequest(&Request{
+		Model:    "m1",
+		Messages: []Message{{Role: RoleUser, Blocks: []Block{{Kind: BlockText, Text: "hi"}}}},
+		Tools: []Tool{
+			{Type: "web_search_20250305", Name: "web_search"},
+			{Name: "get_weather", Schema: json.RawMessage(`{"type":"object"}`)},
+		},
+	}, "")
+	if err != nil {
+		t.Fatalf("EncodeChatRequest: %v", err)
+	}
+	body := testChatBodyOf(t, raw)
+	if len(body.Tools) != 1 || body.Tools[0].Function.Name != "get_weather" {
+		t.Fatalf("tools = %+v，期望只剩客户端函数", body.Tools)
+	}
+	if body.Tools[0].Type != "function" {
+		t.Fatalf("tools[0].type = %q", body.Tools[0].Type)
+	}
+}
+
+// TestChatStreamEncoderTruncatedToolArgs 确认断流时错误帧说明工具参数不完整。
+func TestChatStreamEncoderTruncatedToolArgs(t *testing.T) {
+	e := newChatStreamEncoder("m1")
+	e.Start()
+	e.Emit(Delta{Kind: DeltaToolStart, Index: 1, ToolID: "toolu_1", ToolName: "weather"})
+	e.Emit(Delta{Kind: DeltaToolArgs, Index: 1, ArgsJSON: `{"city":"北`})
+
+	events := e.Emit(Delta{Kind: DeltaError, Text: "上游流式响应中断: 收尾帧之前连接就结束了"})
+	if len(events) != 1 {
+		t.Fatalf("错误帧数 = %d", len(events))
+	}
+	var frame struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(events[0].Data, &frame); err != nil {
+		t.Fatalf("错误帧不是合法 JSON: %v", err)
+	}
+	if !strings.Contains(frame.Error.Message, "工具调用参数在上游中断") {
+		t.Fatalf("错误帧文案 = %q，期望说明工具参数不完整", frame.Error.Message)
+	}
+
+	// 收尾之后再来的错误不带这条说明：那时工具块已经收了。
+	other := newChatStreamEncoder("m1")
+	other.Start()
+	other.Emit(Delta{Kind: DeltaToolStart, Index: 0, ToolID: "t1", ToolName: "f"})
+	other.Emit(Delta{Kind: DeltaStop, StopReason: StopToolUse})
+	events = other.Emit(Delta{Kind: DeltaError, Text: "上游报错"})
+	if strings.Contains(string(events[0].Data), "工具调用参数在上游中断") {
+		t.Fatalf("工具块已收尾，不该带参数不完整的说明: %s", events[0].Data)
+	}
+}

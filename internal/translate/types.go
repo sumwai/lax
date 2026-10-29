@@ -59,11 +59,13 @@ type ImageSource struct {
 	URL       string `json:"url,omitempty"`
 }
 
-// AnthropicTool 是入站工具定义。
+// AnthropicTool 是入站工具定义。Type 是 anthropic 服务端内置工具的种类
+// （例如 "web_search_20250305"），客户端自己执行的函数没有这个字段。
 type AnthropicTool struct {
+	Type        string          `json:"type,omitempty"`
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
-	InputSchema json.RawMessage `json:"input_schema"`
+	InputSchema json.RawMessage `json:"input_schema,omitempty"`
 }
 
 // AnthropicToolChoice 是入站工具选择。

@@ -1,0 +1,27 @@
+{
+  "max_tokens": 256,
+  "messages": [
+    {
+      "content": "今天有什么新闻",
+      "role": "user"
+    }
+  ],
+  "model": "up-chat",
+  "tools": [
+    {
+      "function": {
+        "description": "查天气",
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ]
+}

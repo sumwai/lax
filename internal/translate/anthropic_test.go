@@ -268,3 +268,120 @@ func TestPathProtocol(t *testing.T) {
 		t.Fatal("未知路径应返回 false")
 	}
 }
+
+// TestEncodeAnthropicRequestFoldsToolResults 确认 RoleTool 消息编成 user 加 tool_result 块：
+// anthropic 没有 role=tool，原样写过去会被上游以 400 拒绝（DESIGN 5.4）。
+func TestEncodeAnthropicRequestFoldsToolResults(t *testing.T) {
+	req := &Request{
+		Model: "claude-x",
+		Messages: []Message{
+			{Role: RoleUser, Blocks: []Block{{Kind: BlockText, Text: "查两个城市"}}},
+			{Role: RoleAssistant, Blocks: []Block{
+				{Kind: BlockToolUse, ToolUse: &ToolUse{ID: "toolu_1", Name: "weather", Input: json.RawMessage(`{"city":"北京"}`)}},
+				{Kind: BlockToolUse, ToolUse: &ToolUse{ID: "toolu_2", Name: "weather", Input: json.RawMessage(`{"city":"上海"}`)}},
+			}},
+			{Role: RoleTool, Blocks: []Block{
+				{Kind: BlockToolResult, ToolResult: &ToolResult{ToolUseID: "toolu_1", Text: "晴"}},
+			}},
+			{Role: RoleTool, Blocks: []Block{
+				{Kind: BlockToolResult, ToolResult: &ToolResult{ToolUseID: "toolu_2", Text: "雨", IsError: true}},
+			}},
+		},
+	}
+
+	raw, err := EncodeAnthropicRequest(req, "")
+	if err != nil {
+		t.Fatalf("编码请求: %v", err)
+	}
+	if strings.Contains(string(raw), `"role":"tool"`) {
+		t.Fatalf("报文里不该出现 role=tool: %s", raw)
+	}
+
+	var wire AnthropicRequest
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("结果不是合法 JSON: %v", err)
+	}
+	if len(wire.Messages) != 3 {
+		t.Fatalf("消息数 = %d，期望 3（user、assistant、合并后的 user）", len(wire.Messages))
+	}
+	results := wire.Messages[2]
+	if results.Role != "user" {
+		t.Fatalf("工具结果消息的角色 = %q，期望 user", results.Role)
+	}
+	if len(results.Content.Blocks) != 2 {
+		t.Fatalf("工具结果块数 = %d，期望两条并在同一条 user 消息里", len(results.Content.Blocks))
+	}
+	first, second := results.Content.Blocks[0], results.Content.Blocks[1]
+	if first.Type != "tool_result" || first.ToolUseID != "toolu_1" || string(first.Content) != `"晴"` {
+		t.Fatalf("第一个 tool_result = %+v", first)
+	}
+	if second.Type != "tool_result" || second.ToolUseID != "toolu_2" || string(second.Content) != `"雨"` {
+		t.Fatalf("第二个 tool_result = %+v", second)
+	}
+	// is_error 只有 anthropic 有落点，从 anthropic 解出来再编回去要保住。
+	if !second.IsError {
+		t.Fatalf("is_error 丢了: %+v", second)
+	}
+}
+
+// TestAnthropicToolTypeRoundTrip 确认服务端内置工具的 type 编回 anthropic 时保留，
+// 不会被补上一个伪造的 input_schema（DESIGN 5.4）。
+func TestAnthropicToolTypeRoundTrip(t *testing.T) {
+	decoded, err := DecodeAnthropicRequest([]byte(`{"model":"claude-x","max_tokens":16,"messages":[{"role":"user","content":"hi"}],
+		"tools":[{"type":"web_search_20250305","name":"web_search"},
+		         {"name":"get_weather","input_schema":{"type":"object"}}]}`))
+	if err != nil {
+		t.Fatalf("解码请求: %v", err)
+	}
+	if len(decoded.Tools) != 2 {
+		t.Fatalf("tools = %+v", decoded.Tools)
+	}
+	if decoded.Tools[0].Type != "web_search_20250305" {
+		t.Fatalf("内置工具的 type = %q，期望保留", decoded.Tools[0].Type)
+	}
+	if len(decoded.Tools[0].Schema) != 0 {
+		t.Fatalf("内置工具不该补 input_schema，实际 %s", decoded.Tools[0].Schema)
+	}
+
+	raw, err := EncodeAnthropicRequest(decoded, "")
+	if err != nil {
+		t.Fatalf("编码请求: %v", err)
+	}
+	var wire AnthropicRequest
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatalf("结果不是合法 JSON: %v", err)
+	}
+	if len(wire.Tools) != 2 || wire.Tools[0].Type != "web_search_20250305" {
+		t.Fatalf("编回 anthropic 的 tools = %+v", wire.Tools)
+	}
+	if strings.Contains(string(raw), `"input_schema":null`) {
+		t.Fatalf("内置工具不该写出 input_schema: %s", raw)
+	}
+	if string(wire.Tools[1].InputSchema) != `{"type":"object"}` {
+		t.Fatalf("客户端工具的 input_schema = %s", wire.Tools[1].InputSchema)
+	}
+}
+
+// TestAnthropicStreamEncoderTruncatedToolArgs 确认断流时错误事件说明工具参数不完整。
+func TestAnthropicStreamEncoderTruncatedToolArgs(t *testing.T) {
+	enc := newAnthropicStreamEncoder("claude-x")
+	enc.Start()
+	enc.Emit(Delta{Kind: DeltaToolStart, Index: 1, ToolID: "toolu_1", ToolName: "weather"})
+	enc.Emit(Delta{Kind: DeltaToolArgs, Index: 1, ArgsJSON: `{"city":"北`})
+
+	events := enc.Emit(Delta{Kind: DeltaError, Text: "上游流式响应中断: 收尾帧之前连接就结束了"})
+	if len(events) != 1 || events[0].Event != "error" {
+		t.Fatalf("错误事件 = %+v", events)
+	}
+	var frame struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(events[0].Data, &frame); err != nil {
+		t.Fatalf("错误事件不是合法 JSON: %v", err)
+	}
+	if !strings.Contains(frame.Error.Message, "工具调用参数在上游中断") {
+		t.Fatalf("错误事件文案 = %q，期望说明工具参数不完整", frame.Error.Message)
+	}
+}
