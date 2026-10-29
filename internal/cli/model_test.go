@@ -375,6 +375,60 @@ func TestAccountSyncProbeFlow(t *testing.T) {
 	}
 }
 
+// TestModelProbeNoProgressOutsideTerminal 钉住实时进度的开关：测试里 stderr 是
+// bytes.Buffer，不是字符设备，进度行必须一个字节都不出；人读的汇总行与表格形状、
+// --json 的 stdout 都不受影响。
+func TestModelProbeNoProgressOutsideTerminal(t *testing.T) {
+	sandbox(t)
+	up := newProbeUpstream(t, []string{"m1", "m2"}, nil)
+
+	if code, _, stderr := run(t, "init"); code != 0 {
+		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := run(t, "account", "add", "ds1", "--provider", "custom",
+		"--base-url", up.srv.URL, "--key", "sk-test"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	// 人读路径：进度不开，汇总行与表格照旧。
+	code, out, stderr := run(t, "model", "probe", "--account", "ds1", "--concurrency", "2")
+	if code != 0 {
+		t.Fatalf("model probe 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if strings.Contains(stderr, "\r") || strings.Contains(stderr, "探活中") {
+		t.Fatalf("非终端不该打实时进度，stderr = %q", stderr)
+	}
+	for _, want := range []string{"账号", "模型", "本次探活 2 个", "跳过 0 个", "选号列表共 2 个"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("model probe 文本输出缺少 %q: %s", want, out)
+		}
+	}
+
+	// --json 路径：stdout 只有 JSON，stderr 同样没有进度。
+	code, out, stderr = run(t, "model", "probe", "--account", "ds1", "--refresh", "--json")
+	if code != 0 {
+		t.Fatalf("model probe --json 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if strings.Contains(stderr, "\r") || strings.Contains(stderr, "探活中") {
+		t.Fatalf("--json 不该打实时进度，stderr = %q", stderr)
+	}
+	if probes := mustProbeRows(t, out); len(probes) != 2 {
+		t.Fatalf("model probe --json 应给出 2 个模型，实际 %d 个: %s", len(probes), out)
+	}
+
+	// 待探模型全被跳过（结论仍在新鲜期内）时不画进度行，也不报错。
+	code, out, stderr = run(t, "model", "probe", "--account", "ds1", "--json")
+	if code != 0 {
+		t.Fatalf("全部跳过时退出码 = %d，stderr = %s", code, stderr)
+	}
+	if strings.Contains(stderr, "\r") || strings.Contains(stderr, "探活中") {
+		t.Fatalf("全部跳过的账号不该有进度行，stderr = %q", stderr)
+	}
+	if got := strings.TrimSpace(out); got != "[]" {
+		t.Fatalf("全部跳过时 --json = %q，期望空数组", got)
+	}
+}
+
 // TestAccountProbeAllForbiddenKeepsModels 确认零可用模型时退出码 1 且不动 accounts.models。
 func TestAccountProbeAllForbiddenKeepsModels(t *testing.T) {
 	sandbox(t)
