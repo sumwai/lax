@@ -5,13 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
-// 本文件负责 gemini（Generative Language API 的 generateContent）与中间表示之间的编解码。
-// 第一步只做非流式出站（DESIGN 5.9）：模型名在 URL 路径里，不在请求体里，因此编码器不写
-// model 字段；入站路径与流式都还没实现，解码器只留一个能跑通最小请求的实现给将来用。
-// 映射规则见 DESIGN 5.9，表里没有的字段一律丢弃。
+// 本文件负责 gemini（Generative Language API 的 generateContent）与中间表示之间的编解码，
+// 入站与出站、非流式与流式都在这里。模型名在 URL 路径里，不在请求体里，所以编解码器都不写
+// model 字段：入站时模型名与流式标志由路径注入，出站时模型名由网关填进路由的 {model} 占位符
+// （DESIGN 5.9）。映射规则见 DESIGN 5.9，表里没有的字段一律丢弃。
 
 // gemini 的 toolConfig 模式。gemini 只有这三种，没有「必须调用某个具体函数」这一档，
 // 指定函数时用 ANY 加白名单（DESIGN 5.9）。
@@ -20,6 +21,42 @@ const (
 	geminiModeAny  = "ANY"
 	geminiModeNone = "NONE"
 )
+
+// gemini 入站路径的形状（DESIGN 5.2、5.9）：模型名在路径里，非流式与流式由路径后缀区分，
+// 后缀本身不算模型名的一部分。
+const (
+	// GeminiInboundPathPrefix 是 gemini 入站路径的前缀，网关按它注册路由。
+	GeminiInboundPathPrefix = "/v1beta/models/"
+	geminiGenerateAction    = ":generateContent"
+	geminiStreamAction      = ":streamGenerateContent"
+)
+
+// GeminiPathTarget 从 gemini 的入站路径里取出模型名与是否流式。
+// 模型名是前缀与动作后缀之间的那一段，按 url.PathUnescape 还原（`org%2Fgemini` 落成
+// `org/gemini`，不会被拆成两段路径）；后缀不是这两个动作、或模型名为空时返回 ok=false。
+// 转义串本身不合法时按原文返回：这样的名字匹配不上任何账号，404 比 400 更贴近事实。
+func GeminiPathTarget(path string) (model string, stream, ok bool) {
+	rest, found := strings.CutPrefix(path, GeminiInboundPathPrefix)
+	if !found {
+		return "", false, false
+	}
+	switch {
+	case strings.HasSuffix(rest, geminiStreamAction):
+		rest = strings.TrimSuffix(rest, geminiStreamAction)
+		stream = true
+	case strings.HasSuffix(rest, geminiGenerateAction):
+		rest = strings.TrimSuffix(rest, geminiGenerateAction)
+	default:
+		return "", false, false
+	}
+	if unescaped, err := url.PathUnescape(rest); err == nil {
+		rest = unescaped
+	}
+	if strings.TrimSpace(rest) == "" {
+		return "", false, false
+	}
+	return rest, stream, true
+}
 
 // GeminiRequest 是 POST {base}/v1beta/models/{model}:generateContent 的请求体。
 // 模型名不在请求体里：它在路径上，由网关按路由的 {model} 占位符填进去（DESIGN 5.9）。
@@ -139,12 +176,8 @@ func EncodeGeminiRequest(r *Request, model string) ([]byte, error) {
 	if r == nil {
 		return nil, errors.New("请求为空")
 	}
-	// 流式不在第一步的范围里：gemini 的流式走 streamGenerateContent 与 ?alt=sse，
-	// 请求体形状一样但响应形状另一套，写出一个非流式请求换回一整段 JSON，
-	// 客户端拿到的就不是它要的流（DESIGN 5.9）。
-	if r.Stream {
-		return nil, errors.New("gemini 出站暂不支持流式请求：第一步只做非流式（见 DESIGN 5.9）")
-	}
+	// 流式与非流式的请求体同一形状：gemini 的流式由路径后缀（:streamGenerateContent）与
+	// alt=sse 表示，报文里没有 stream 字段，所以 r.Stream 不在这里落笔（DESIGN 5.9）。
 	_ = model
 
 	out := GeminiRequest{}
@@ -217,9 +250,8 @@ func EncodeGeminiRequest(r *Request, model string) ([]byte, error) {
 	return json.Marshal(out)
 }
 
-// DecodeGeminiRequest 把 generateContent 的请求体解析成 IR。入站 gemini 还没有路径
-// （DESIGN 第 7 节已知未做），这里是留给将来用的最小实现：报文里没有模型名——它在 URL 路径上，
-// 入站实现时由路径注入，因此 Model 留空，由调用方填。
+// DecodeGeminiRequest 把 generateContent 的请求体解析成 IR。报文里没有模型名（它在 URL
+// 路径上）也没有 stream 字段（流式由路径后缀表示），两者都由网关按路径注入，这里留空。
 func DecodeGeminiRequest(raw []byte) (*Request, error) {
 	var wire GeminiRequest
 	if err := json.Unmarshal(raw, &wire); err != nil {
@@ -231,8 +263,13 @@ func DecodeGeminiRequest(raw []byte) (*Request, error) {
 		out.System = geminiTextBlocks(wire.SystemInstruction.Parts)
 	}
 
+	// 合成 id 按整段对话连续编号，函数名 → 待对回的 id 记一份：gemini 的 functionResponse 只有
+	// 函数名，编给 anthropic 与 chat 时那一头的 tool_result / tool 消息必须引用同一轮 tool_use 的
+	// id，否则上游会以「对不上任何调用」拒掉整条请求（DESIGN 5.9）。
+	toolIndex := 0
+	callIDs := map[string][]string{}
 	for i, c := range wire.Contents {
-		msg, err := geminiMessage(c)
+		msg, err := geminiMessage(c, &toolIndex, &callIDs)
 		if err != nil {
 			return nil, fmt.Errorf("第 %d 条内容: %w", i+1, err)
 		}
@@ -316,13 +353,401 @@ func DecodeGeminiResponse(raw []byte, requestedModel string) (*Response, error) 
 		}
 	}
 
-	out.StopReason = geminiStopToIR(cand.FinishReason, out.Blocks)
+	out.StopReason = geminiStopToIR(cand.FinishReason, hasToolUse(out.Blocks))
+	out.StopNote = geminiStopNote(cand.FinishReason)
 	out.Usage = geminiUsageToIR(wire.UsageMetadata)
 	return out, nil
 }
 
-// geminiUsageScanner 从响应体里读 gemini 的用量，用于同协议直通与探活记账。
-// 第一步没有入站 gemini 路径，它实际只服务探活的非流式响应体。
+// EncodeGeminiResponse 把 IR 编成 generateContent 的响应体，用于「客户端说 gemini」这一条入站。
+// 只搬映射表里有的几类块：思考内容与工具结果在 gemini 的响应里没有落点，丢弃
+// （工具结果只出现在请求的 functionResponse 里）。
+func EncodeGeminiResponse(r *Response) ([]byte, error) {
+	if r == nil {
+		return nil, errors.New("响应为空")
+	}
+	wire := GeminiResponse{
+		ResponseID:   r.ID,
+		ModelVersion: r.Model,
+		Candidates: []GeminiCandidate{{
+			Content:      GeminiContent{Role: "model", Parts: geminiResponseParts(r.Blocks)},
+			FinishReason: geminiFinishFromIR(r.StopReason),
+		}},
+		UsageMetadata: geminiUsageFromIR(r.Usage),
+	}
+	return json.Marshal(wire)
+}
+
+// geminiResponseParts 把中间表示的内容块翻成 gemini 响应的 parts。
+func geminiResponseParts(blocks []Block) []GeminiPart {
+	parts := make([]GeminiPart, 0, len(blocks))
+	for _, b := range blocks {
+		switch b.Kind {
+		case BlockText:
+			if b.Text == "" {
+				continue
+			}
+			parts = append(parts, GeminiPart{Text: b.Text})
+
+		case BlockToolUse:
+			if b.ToolUse == nil {
+				continue
+			}
+			parts = append(parts, GeminiPart{FunctionCall: &GeminiFunctionCall{
+				Name: b.ToolUse.Name,
+				Args: geminiObjectOrNil(b.ToolUse.Input),
+			}})
+
+		case BlockImage:
+			if b.Image == nil {
+				continue
+			}
+			if part, ok := geminiImagePart(b.Image.URL); ok {
+				parts = append(parts, part)
+			}
+		}
+	}
+	return parts
+}
+
+// geminiUsageFromIR 把中间表示的用量翻成 usageMetadata。totalTokenCount 是两项相加：
+// gemini 没有缓存写入字段，CacheWrite 无处可放，丢弃。
+func geminiUsageFromIR(u Usage) *GeminiUsageMetadata {
+	return &GeminiUsageMetadata{
+		PromptTokenCount:        u.In,
+		CandidatesTokenCount:    u.Out,
+		TotalTokenCount:         u.In + u.Out,
+		CachedContentTokenCount: u.CacheRead,
+	}
+}
+
+// geminiStreamDecoder 把 gemini 的流式帧（只有 `data: {...}`，没有事件名）翻成增量。
+// 一帧是一个 GenerateContentResponse：文本与 functionCall 按 parts 逐帧给出，finishReason
+// 与 usageMetadata 在末尾。gemini 的 functionCall 不是增量的（参数一次给全），所以每个
+// functionCall 在同一帧里产出 tool_start 与一整段 tool_args（DESIGN 5.9）。
+type geminiStreamDecoder struct {
+	// toolIndex 是合成调用 id 的序号，与 DecodeGeminiResponse 同一个写法。
+	toolIndex  int
+	sawTool    bool
+	stopReason string
+	stopped    bool
+	closed     bool
+	usage      *Usage
+}
+
+func (d *geminiStreamDecoder) Decode(data []byte) ([]Delta, error) {
+	data = bytes.TrimSpace(data)
+	if len(data) == 0 {
+		return nil, nil
+	}
+
+	var frame struct {
+		Candidates     []GeminiCandidate     `json:"candidates"`
+		PromptFeedback *GeminiPromptFeedback `json:"promptFeedback"`
+		UsageMetadata  *GeminiUsageMetadata  `json:"usageMetadata"`
+		Error          *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(data, &frame); err != nil {
+		return nil, fmt.Errorf("上游流式帧不是合法 JSON: %w", err)
+	}
+	if frame.Error != nil {
+		msg := frame.Error.Message
+		if msg == "" {
+			msg = "上游返回错误"
+		}
+		return []Delta{{Kind: DeltaError, Text: msg}}, nil
+	}
+
+	if frame.UsageMetadata != nil {
+		u := geminiUsageToIR(frame.UsageMetadata)
+		d.usage = &u
+	}
+
+	if len(frame.Candidates) == 0 {
+		// 提示词自己被拦：上游给出了结论，当成错误增量，与 DecodeGeminiResponse 同一条规则。
+		if frame.PromptFeedback != nil && frame.PromptFeedback.BlockReason != "" {
+			return []Delta{{Kind: DeltaError, Text: fmt.Sprintf(
+				"上游拒绍了这次请求（promptFeedback.blockReason=%s），没有候选",
+				frame.PromptFeedback.BlockReason)}}, nil
+		}
+		return nil, nil
+	}
+
+	cand := frame.Candidates[0]
+	var out []Delta
+	for _, part := range cand.Content.Parts {
+		switch {
+		case part.FunctionCall != nil:
+			d.toolIndex++
+			d.sawTool = true
+			index := d.toolIndex
+			out = append(out, Delta{
+				Kind:     DeltaToolStart,
+				Index:    index,
+				ToolID:   geminiToolUseID(index),
+				ToolName: part.FunctionCall.Name,
+			})
+			// 参数一次给全：非对象的参数照样省略成空对象，与请求方向同一个处理。
+			out = append(out, Delta{
+				Kind:     DeltaToolArgs,
+				Index:    index,
+				ArgsJSON: string(geminiArgumentsJSON(part.FunctionCall.Args)),
+			})
+		case part.Text != "":
+			out = append(out, Delta{Kind: DeltaText, Text: part.Text})
+		}
+		// inlineData / fileData 与 thought 标记不搬：流式增量只有文本、思考、工具三样，
+		// 而思考内容在 gemini 这一档没有落点（DESIGN 5.9）。
+	}
+
+	if cand.FinishReason != "" && !d.stopped {
+		d.stopped = true
+		d.stopReason = geminiStopToIR(cand.FinishReason, d.sawTool)
+		out = append(out, Delta{
+			Kind:       DeltaStop,
+			StopReason: d.stopReason,
+			StopNote:   geminiStopNote(cand.FinishReason),
+			Usage:      d.takeUsage(),
+		})
+	}
+	return out, nil
+}
+
+// Close 在上游结束时补齐收尾。finishReason 先到、usageMetadata 后到时补一个只带 Usage 的
+// DeltaStop，与 chat 解码器同一个写法。
+func (d *geminiStreamDecoder) Close() []Delta {
+	if d.closed {
+		return nil
+	}
+	d.closed = true
+	if !d.stopped {
+		d.stopped = true
+		reason := d.stopReason
+		if reason == "" {
+			reason = StopEndTurn
+		}
+		return []Delta{{Kind: DeltaStop, StopReason: reason, Usage: d.takeUsage()}}
+	}
+	if u := d.takeUsage(); u != nil {
+		return []Delta{{Kind: DeltaStop, Usage: u}}
+	}
+	return nil
+}
+
+// takeUsage 取走待附加的用量，避免重复上报。
+func (d *geminiStreamDecoder) takeUsage() *Usage {
+	u := d.usage
+	d.usage = nil
+	return u
+}
+
+// geminiStreamEncoder 把增量编成下发给 gemini 客户端的 SSE 帧。gemini 的流式没有事件名，
+// 一帧是一个 GenerateContentResponse；收尾没有单独的结束事件，最后一帧的 finishReason 就是。
+//
+// 工具调用要攒：gemini 的 functionCall 一次给整个参数对象，而增量体系里的 tool_args 是片段。
+// 攒到收尾（DeltaStop 或 Finish）才一次发出；断在中间的参数整块丢弃（见 toolEvents）。
+//
+// 带 finishReason 的收尾帧留到 Finish 才发：用量可能在 stop 增量之后才到（chat 上游把用量单发
+// 一帧），早发一帧结束帧就带不上它，客户端会看到两次结束或者丢掉用量。
+type geminiStreamEncoder struct {
+	model   string
+	started bool
+	// toolOrder 是上游工具块号的出现顺序，决定同一帧里 parts 的顺序。
+	toolOrder  []int
+	toolNames  map[int]string
+	toolArgs   map[int]*strings.Builder
+	toolOpen   bool
+	stopReason string
+	usage      *Usage
+	finished   bool
+}
+
+func newGeminiStreamEncoder(model string) *geminiStreamEncoder {
+	return &geminiStreamEncoder{
+		model:     model,
+		toolNames: map[int]string{},
+		toolArgs:  map[int]*strings.Builder{},
+	}
+}
+
+// Start 发首帧：gemini 没有「消息开始」事件，先给一个带角色、不带内容的候选，
+// 客户端因此立刻拿到一帧，而不是等到上游第一个 token。
+func (e *geminiStreamEncoder) Start() []SSEEvent {
+	if e.started {
+		return nil
+	}
+	e.started = true
+	return []SSEEvent{e.frame(&GeminiResponse{
+		ModelVersion: e.model,
+		Candidates: []GeminiCandidate{{
+			Content: GeminiContent{Role: "model", Parts: []GeminiPart{}},
+		}},
+	})}
+}
+
+func (e *geminiStreamEncoder) Emit(d Delta) []SSEEvent {
+	switch d.Kind {
+	case DeltaThinking:
+		// 思考内容在 gemini 的报文里没有落点（DESIGN 5.9），签名更无处可放。
+		return nil
+
+	case DeltaText:
+		if d.Text == "" {
+			return nil
+		}
+		return []SSEEvent{e.partsEvent([]GeminiPart{{Text: d.Text}})}
+
+	case DeltaToolStart:
+		e.noteTool(d.Index, d.ToolName)
+		e.toolOpen = true
+		return nil
+
+	case DeltaToolArgs:
+		// 没收到 start 就来了参数时补一条，避免丢内容。
+		if _, ok := e.toolNames[d.Index]; !ok {
+			e.noteTool(d.Index, d.ToolName)
+		}
+		e.toolOpen = true
+		if b, ok := e.toolArgs[d.Index]; ok {
+			b.WriteString(d.ArgsJSON)
+		} else {
+			buf := &strings.Builder{}
+			buf.WriteString(d.ArgsJSON)
+			e.toolArgs[d.Index] = buf
+		}
+		return nil
+
+	case DeltaStop:
+		e.toolOpen = false
+		if d.Usage != nil {
+			e.usage = d.Usage
+		}
+		if d.StopReason != "" {
+			e.stopReason = d.StopReason
+		}
+		// 只把攒下的工具发出去，结束帧留给 Finish（见类型注释）。
+		return e.toolEvents()
+
+	case DeltaError:
+		return []SSEEvent{e.errorEvent(withIncompleteToolArgs(d.Text, e.toolOpen))}
+	}
+	return nil
+}
+
+// Finish 收尾：发攒下的工具帧与带 finishReason 的那一帧；已经发过就不再发第二次。
+func (e *geminiStreamEncoder) Finish() []SSEEvent {
+	if !e.started || e.finished {
+		return nil
+	}
+	events := e.toolEvents()
+	return append(events, e.finishEvent())
+}
+
+// noteTool 记下一个工具块的名字。
+func (e *geminiStreamEncoder) noteTool(index int, name string) {
+	if _, ok := e.toolNames[index]; !ok {
+		e.toolOrder = append(e.toolOrder, index)
+		e.toolNames[index] = name
+		return
+	}
+	if name != "" {
+		e.toolNames[index] = name
+	}
+}
+
+// toolEvents 把攒下来的工具调用编成一帧。
+//
+// 参数分三种：空表示这个函数本来就没有参数，照发不带 args 的 functionCall；合法 JSON 对象原样
+// 写进 args；既非空又不是对象的（上游断在参数中间）整块丢弃——gemini 的 args 是 protobuf
+// Struct，写不了半截 JSON，发一个不带参数的 functionCall 只会让客户端拿空参数调一次函数，
+// 比丢这一次调用更糟。断流的错误帧已经说明了参数不完整（DESIGN 5.9）。
+func (e *geminiStreamEncoder) toolEvents() []SSEEvent {
+	if len(e.toolOrder) == 0 {
+		return nil
+	}
+	parts := make([]GeminiPart, 0, len(e.toolOrder))
+	for _, index := range e.toolOrder {
+		name := e.toolNames[index]
+		if name == "" {
+			continue
+		}
+		var raw json.RawMessage
+		if b, ok := e.toolArgs[index]; ok {
+			raw = json.RawMessage(b.String())
+		}
+		args := geminiObjectOrNil(raw)
+		if args == nil && len(bytes.TrimSpace(raw)) > 0 {
+			continue
+		}
+		parts = append(parts, GeminiPart{FunctionCall: &GeminiFunctionCall{Name: name, Args: args}})
+	}
+	e.toolOrder = nil
+	e.toolNames = map[int]string{}
+	e.toolArgs = map[int]*strings.Builder{}
+	if len(parts) == 0 {
+		return nil
+	}
+	return []SSEEvent{e.partsEvent(parts)}
+}
+
+// finishEvent 是最后一帧：finishReason 与 usageMetadata 一起发，客户端据此结束流。
+func (e *geminiStreamEncoder) finishEvent() SSEEvent {
+	e.finished = true
+	reason := e.stopReason
+	if reason == "" {
+		reason = StopEndTurn
+	}
+	wire := GeminiResponse{
+		ModelVersion: e.model,
+		Candidates: []GeminiCandidate{{
+			Content:      GeminiContent{Role: "model", Parts: []GeminiPart{}},
+			FinishReason: geminiFinishFromIR(reason),
+		}},
+	}
+	if e.usage != nil {
+		wire.UsageMetadata = geminiUsageFromIR(*e.usage)
+	}
+	return e.frame(&wire)
+}
+
+func (e *geminiStreamEncoder) partsEvent(parts []GeminiPart) SSEEvent {
+	return e.frame(&GeminiResponse{
+		ModelVersion: e.model,
+		Candidates: []GeminiCandidate{{
+			Content: GeminiContent{Role: "model", Parts: parts},
+		}},
+	})
+}
+
+// errorEvent 是下发给客户端的错误帧：gemini 的错误体是 {"error":{"code","message","status"}}，
+// 流里的错误也照这个形状写，客户端不用为流式另写一套解析。
+func (e *geminiStreamEncoder) errorEvent(message string) SSEEvent {
+	body, err := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"code":    500,
+			"message": message,
+			"status":  "INTERNAL",
+		},
+	})
+	if err != nil {
+		body = []byte(`{"error":{"code":500,"message":"内部错误"}}`)
+	}
+	return SSEEvent{Data: body}
+}
+
+// frame 把一帧序列化成 SSE：gemini 的流没有事件名，只有 data 行。
+func (e *geminiStreamEncoder) frame(v any) SSEEvent {
+	b, err := json.Marshal(v)
+	if err != nil {
+		b = []byte(`{}`)
+	}
+	return SSEEvent{Data: b}
+}
+
+// geminiUsageScanner 从响应体里读 gemini 的用量，用于同协议直通、流式直通与探活记账。
+// 非流式的响应体是整条 JSON，流式的每帧也是 JSON，两者都只有 usageMetadata 有用。
 type geminiUsageScanner struct {
 	in, out, cacheRead int64
 }
@@ -567,8 +992,9 @@ func geminiToolChoiceFromWire(cfg *GeminiFunctionCallingConfig) *ToolChoice {
 	}
 }
 
-// geminiMessage 把一条 gemini 内容折成 IR 消息。
-func geminiMessage(c GeminiContent) (Message, error) {
+// geminiMessage 把一条 gemini 内容折成 IR 消息。toolIndex 是整段对话里的调用序号，callIDs 记
+// 函数名到合成 id 的待对回队列，两者都跨消息传递，工具结果才能对上前面那次调用（DESIGN 5.9）。
+func geminiMessage(c GeminiContent, toolIndex *int, callIDs *map[string][]string) (Message, error) {
 	role := RoleUser
 	switch strings.ToLower(strings.TrimSpace(c.Role)) {
 	case "", "user":
@@ -579,22 +1005,40 @@ func geminiMessage(c GeminiContent) (Message, error) {
 		return Message{}, fmt.Errorf("内容角色 %q 不受支持，gemini 只有 user 与 model", c.Role)
 	}
 
+	// 一轮新的工具调用开始，上一轮没被对回的 id 就过期了：gemini 的对话严格 user/model 交替，
+	// 结果必须写在紧随其后的 user 消息里，留着上一轮的队列只会把结果对到更早的调用上。
+	if role == RoleAssistant && geminiHasFunctionCall(c.Parts) {
+		*callIDs = map[string][]string{}
+	}
+
 	msg := Message{Role: role}
-	toolIndex := 0
 	for _, part := range c.Parts {
 		switch {
 		case part.FunctionCall != nil:
-			toolIndex++
+			*toolIndex++
+			id := geminiToolUseID(*toolIndex)
+			if part.FunctionCall.Name != "" {
+				(*callIDs)[part.FunctionCall.Name] = append((*callIDs)[part.FunctionCall.Name], id)
+			}
 			msg.Blocks = append(msg.Blocks, Block{Kind: BlockToolUse, ToolUse: &ToolUse{
-				ID:    geminiToolUseID(toolIndex),
+				ID:    id,
 				Name:  part.FunctionCall.Name,
 				Input: geminiArgumentsJSON(part.FunctionCall.Args),
 			}})
 		case part.FunctionResponse != nil:
+			// gemini 按函数名对回调用，没有调用 id：同名调用排成队列按出现顺序取，与 gemini 要求
+			// 「结果与调用同序」一致。查不到（历史被截断、跨请求续聊）时退回函数名——那种请求
+			// 上游可能拒收，但丢掉整条结果更糟。
+			id := ""
+			if queue := (*callIDs)[part.FunctionResponse.Name]; len(queue) > 0 {
+				id = queue[0]
+				(*callIDs)[part.FunctionResponse.Name] = queue[1:]
+			}
+			if id == "" {
+				id = part.FunctionResponse.Name
+			}
 			msg.Blocks = append(msg.Blocks, Block{Kind: BlockToolResult, ToolResult: &ToolResult{
-				// gemini 按函数名对回调用，没有调用 id：入站时把函数名写进 ToolUseID，
-				// 编到别的协议时由那边的编码器决定怎么用（见 DESIGN 5.9）。
-				ToolUseID: part.FunctionResponse.Name,
+				ToolUseID: id,
 				Text:      geminiResponseText(part.FunctionResponse.Response),
 			}})
 		case part.InlineData != nil:
@@ -610,6 +1054,16 @@ func geminiMessage(c GeminiContent) (Message, error) {
 		}
 	}
 	return msg, nil
+}
+
+// geminiHasFunctionCall 判断这一组 part 里有没有工具调用。
+func geminiHasFunctionCall(parts []GeminiPart) bool {
+	for _, part := range parts {
+		if part.FunctionCall != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // geminiTextBlocks 取一段内容里的文本块，用于 systemInstruction。
@@ -640,19 +1094,42 @@ func geminiResponseText(raw json.RawMessage) string {
 // geminiStopToIR 把 finishReason 折成中间表示的四种结束原因。gemini 没有「因为工具调用而停」
 // 这一档（有 functionCall 时 finishReason 仍是 STOP），所以出现工具调用时按 tool_use 给出去：
 // 客户端要靠它走工具调用分支，写 end_turn 会让 anthropic 与 chat 的客户端当普通回复结束。
-// 其余取值（SAFETY、RECITATION、BLOCKLIST 等）在中间表示里没有对应项，按 end_turn 处理。
-func geminiStopToIR(reason string, blocks []Block) string {
+// 其余取值（SAFETY、RECITATION、BLOCKLIST 等）在中间表示里没有对应项，按 end_turn 处理
+// （DESIGN 5.9 的取舍）。withToolUse 由调用方先扫一遍 parts 得到。
+func geminiStopToIR(reason string, withToolUse bool) string {
 	switch strings.ToUpper(strings.TrimSpace(reason)) {
 	case "MAX_TOKENS":
 		return StopMaxTokens
 	case "", "STOP", "OTHER":
-		if hasToolUse(blocks) {
+		if withToolUse {
 			return StopToolUse
 		}
 		return StopEndTurn
 	default:
 		return StopEndTurn
 	}
+}
+
+// geminiStopNote 给出 finishReason 里「中间表示装不下」的那一档，供网关写进日志备注。
+// STOP、MAX_TOKENS 与空值都是已映射的正常取值，不产生备注；其余（SAFETY、RECITATION、
+// BLOCKLIST、MALFORMED_FUNCTION_CALL 等）原样返回，让用户知道这次回答为什么被截断（DESIGN 5.9）。
+func geminiStopNote(reason string) string {
+	switch strings.ToUpper(strings.TrimSpace(reason)) {
+	case "", "STOP", "MAX_TOKENS", "OTHER":
+		return ""
+	default:
+		return strings.ToUpper(strings.TrimSpace(reason))
+	}
+}
+
+// geminiFinishFromIR 把中间表示的结束原因翻回 gemini 的 finishReason。gemini 只有 STOP 与
+// MAX_TOKENS 两个正常值，`tool_use` 与 `stop_sequence` 都写成 STOP：前者在 gemini 里本来就是
+// STOP 加 functionCall，后者没有对应取值，编一个假的会被客户端当成上游事实。
+func geminiFinishFromIR(reason string) string {
+	if reason == StopMaxTokens {
+		return "MAX_TOKENS"
+	}
+	return "STOP"
 }
 
 // hasToolUse 判断响应里有没有工具调用块。

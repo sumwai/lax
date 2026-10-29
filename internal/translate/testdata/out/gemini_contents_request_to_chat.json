@@ -25,7 +25,7 @@
     {
       "content": "{\"result\": \"晴\"}",
       "role": "tool",
-      "tool_call_id": "weather"
+      "tool_call_id": "gemini_call_1"
     }
   ],
   "model": "up-chat",

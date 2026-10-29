@@ -22,7 +22,7 @@ import (
 )
 
 // 协议常量。入站按路径区分，出站按该模型的有效协议（account_models.protocol 优先，
-// 否则账号的 protocol）。gemini 只作出站且只做非流式（DESIGN 5.9）。
+// 否则账号的 protocol）。gemini 入站与出站都支持（DESIGN 5.9）。
 const (
 	ProtocolAnthropic = translate.ProtocolAnthropic
 	ProtocolChat      = translate.ProtocolChat
@@ -83,15 +83,18 @@ func New(o Options) (*Server, error) {
 	return s, nil
 }
 
-// Handler 返回 http 处理器。三条入站路径按路径定协议（见 5.2），另有两个只读的模型清单
-// 接口给客户端发现模型名用（见 5.2.1）；`/v1/models/{id}` 用前缀注册，其后全部算模型名，
-// 含 `/` 的模型名也照取。其余路径由 mux 返回 404。
+// Handler 返回 http 处理器。三条固定入站路径与 gemini 的模型名前缀按路径定协议（见 5.2），
+// 另有两个只读的模型清单接口给客户端发现模型名用（见 5.2.1）；`/v1/models/{id}` 用前缀注册，
+// 其后全部算模型名，含 `/` 的模型名也照取。其余路径由 mux 返回 404。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
 	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses"} {
 		mux.HandleFunc(path, s.handleInbound)
 	}
+	// gemini 的模型名在路径里（/v1beta/models/{model}:generateContent），按前缀注册，
+	// 模型名与流式标志由 translate.GeminiPathTarget 解析（DESIGN 5.9）。
+	mux.HandleFunc(translate.GeminiInboundPathPrefix, s.handleInbound)
 	mux.HandleFunc(modelsPath, s.handleModelList)
 	mux.HandleFunc(modelsPathPrefix, s.handleModelByID)
 	return mux
@@ -142,7 +145,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"accounts": len(accounts),
 		"enabled":  enabled,
 		"models":   len(models),
-		"inbound":  []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses},
+		"inbound":  []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini},
 		"outbound": []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini},
 		"passthru": "同协议直通，跨协议经中间表示转换",
 	})
@@ -166,6 +169,19 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found_error", "未知路径 "+r.URL.Path)
 		return
 	}
+	// gemini 的报文里没有模型名（它在路径上），流式也由路径后缀表示而非请求体里的 stream
+	// 字段：两个值都按路径注入（DESIGN 5.9）。用 EscapedPath 取值，模型名里的 %2F 因此仍是
+	// 一个路径段，PathUnescape 能还原成 org/gemini。
+	var pathModel string
+	var pathStream bool
+	if inbound == ProtocolGemini {
+		model, stream, ok := translate.GeminiPathTarget(r.URL.EscapedPath())
+		if !ok {
+			writeError(w, http.StatusNotFound, "not_found_error", "未知路径 "+r.URL.Path)
+			return
+		}
+		pathModel, pathStream = model, stream
+	}
 	if r.Method != http.MethodPost {
 		// 405 带上 `Allow: POST`，与两个只读清单接口的 `Allow: GET` 对称：
 		// 客户端据此能判断是方法用错了，而不是路径不存在（见 DESIGN 5.2.1）。
@@ -185,6 +201,10 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", inbound+": "+err.Error())
 		return
+	}
+	if inbound == ProtocolGemini {
+		req.Model = pathModel
+		req.Stream = pathStream
 	}
 	if strings.TrimSpace(req.Model) == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "缺少 model 字段")
@@ -227,14 +247,6 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			s.logf("读账号 %s 模型 %s 的有效协议失败，改按账号协议 %s: %v",
 				cand.Name, req.Model, cand.Protocol, err)
 			outbound = cand.Protocol
-		}
-
-		if req.Stream && outbound == ProtocolGemini {
-			// gemini 出站的第一步只做非流式（DESIGN 5.9）。在写出任何字节、也不打上游之前报错，
-			// 并且不把这个账号打入冷却：这是本机还没实现这种组合，不是上游的错。
-			writeError(w, http.StatusBadRequest, "invalid_request_error",
-				"gemini 出站暂不支持流式请求（第一步只做非流式）：客户端关掉 stream，或改用另一条协议的账号")
-			return
 		}
 
 		attemptStart := s.now()
@@ -382,16 +394,25 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, in
 	req *translate.Request, key string) (*http.Request, error) {
 
 	// 路由的 path 里可以有 {model} 占位符（gemini 的模型名在路径里，见 DESIGN 5.9）：
-	// 先拼好地址再替换，替换后才是真正要访问的 URL。
+	// 先拼好地址再替换，替换后才是真正要访问的 URL。gemini 的流式另走
+	// :streamGenerateContent 与 alt=sse（见 geminiStreamEndpoint）。
 	endpoint := modelEndpoint(s.endpoint(a, outbound), req.Model)
+	if outbound == ProtocolGemini && req.Stream {
+		endpoint = geminiStreamEndpoint(endpoint)
+	}
 
 	var body []byte
 	var err error
-	if inbound == outbound {
+	switch {
+	case inbound != outbound:
+		body, err = translate.EncodeRequest(outbound, req, req.Model)
+	case outbound == ProtocolGemini:
+		// gemini 的报文里没有 model 字段（模型名在路径上），所以直通时请求体一个字节都不改：
+		// 往里面塞一个 model 只会让上游以「未知字段」拒掉整条请求（DESIGN 5.9）。
+		body = raw
+	default:
 		// 同协议直通：只替换 model，其余字节原样保留。
 		body, err = patchModel(raw, req.Model)
-	} else {
-		body, err = translate.EncodeRequest(outbound, req, req.Model)
 	}
 	if err != nil {
 		return nil, err
@@ -460,6 +481,11 @@ func (s *Server) jsonSuccess(w http.ResponseWriter, resp *http.Response,
 	if err != nil {
 		return attempt{status: http.StatusBadGateway, message: err.Error(), err: err}
 	}
+	if parsed.StopNote != "" {
+		// 上游的结束原因在中间表示里没有对应取值（gemini 的 SAFETY 一类），统一按正常结束编给
+		// 客户端，原值只进日志当备注（DESIGN 5.9）。
+		s.logf("上游 %s 的结束原因 %s 在中间表示里没有对应取值，按 %s 编给客户端", outbound, parsed.StopNote, parsed.StopReason)
+	}
 	payload, err := translate.EncodeResponse(inbound, parsed)
 	if err != nil {
 		return attempt{status: http.StatusInternalServerError, message: err.Error(), err: err}
@@ -520,6 +546,9 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 		for _, d := range deltas {
 			if d.Usage != nil {
 				usage = *d.Usage
+			}
+			if d.StopNote != "" {
+				s.logf("上游 %s 的结束原因 %s 在中间表示里没有对应取值，按 %s 编给客户端", outbound, d.StopNote, d.StopReason)
 			}
 			if d.Kind == translate.DeltaError {
 				upstreamErr = d.Text
@@ -677,14 +706,32 @@ const truncatedMessage = "上游流式响应中断: 收尾帧之前连接就结�
 
 // streamFrameEnded 判断这一帧是不是该协议的收尾帧：anthropic 的 message_stop、
 // openai-chat 的 [DONE]、openai-responses 的 response.completed / response.incomplete /
-// response.failed。事件名与帧里的 type 字段都认：解析 JSON 取 type，不按字节子串找，
-// `{"type": "message_stop"}` 这种带空格或换行缩进的合法帧因此也算收尾；
-// SSE 的 event: 行直接给了名字（上游只写事件名、data 是别的形状）时同样算。
+// response.failed、gemini 的 candidates[].finishReason。事件名与帧里的 type 字段都认：解析
+// JSON 取字段，不按字节子串找，`{"type": "message_stop"}` 这种带空格或换行缩进的合法帧因此
+// 也算收尾；SSE 的 event: 行直接给了名字（上游只写事件名、data 是别的形状）时同样算。
 func streamFrameEnded(protocol, event string, data []byte) bool {
 	trimmed := bytes.TrimSpace(data)
 	// chat 的 [DONE] 既没有事件名也不是 JSON，单独认。
 	if protocol == ProtocolChat && string(trimmed) == "[DONE]" {
 		return true
+	}
+	if protocol == ProtocolGemini {
+		// gemini 没有单独的收尾帧：某个候选带上 finishReason 就是上游把这一轮说完了。
+		// 只有 promptFeedback.blockReason 的帧不算收尾（那是上游拒了提示词，不能当成完成）。
+		var env struct {
+			Candidates []struct {
+				FinishReason string `json:"finishReason"`
+			} `json:"candidates"`
+		}
+		if len(trimmed) == 0 || trimmed[0] != '{' || json.Unmarshal(trimmed, &env) != nil {
+			return false
+		}
+		for _, c := range env.Candidates {
+			if c.FinishReason != "" {
+				return true
+			}
+		}
+		return false
 	}
 
 	name := strings.TrimSpace(event)
@@ -713,7 +760,9 @@ func streamFrameEnded(protocol, event string, data []byte) bool {
 //
 //   - anthropic：event: error，再补 message_delta（带已知 usage）与 message_stop；
 //   - openai-chat：一帧 data: {"error":…}，再补 data: [DONE]；
-//   - openai-responses：event: error，再补 response.failed。
+//   - openai-responses：event: error，再补 response.failed；
+//   - gemini：一帧 data: {"error":…}，再补一帧带 finishReason 与 usageMetadata 的候选（gemini
+//     没有单独的结束事件，收尾就是这一帧）。
 //
 // 用量是 scanner 已经从已转发帧里读出来的那些，读不到就是 0：补的是一个诚实的结尾，不是重放。
 func passthroughTail(protocol, message string, in, out int64) []translate.SSEEvent {
@@ -753,6 +802,23 @@ func passthroughTail(protocol, message string, in, out int64) []translate.SSEEve
 					"object": "response",
 					"status": "failed",
 					"error":  map[string]string{"code": "server_error", "message": message},
+				},
+			})},
+		}
+	case ProtocolGemini:
+		// 收尾帧就是带 finishReason 的那一帧；usageMetadata 用 scanner 已经从已转发帧里
+		// 读到的值，读不到就是 0。
+		return []translate.SSEEvent{
+			{Data: marshal(map[string]any{"error": map[string]any{
+				"code": 500, "message": message, "status": "INTERNAL",
+			}})},
+			{Data: marshal(translate.GeminiResponse{
+				Candidates: []translate.GeminiCandidate{{
+					Content:      translate.GeminiContent{Role: "model", Parts: []translate.GeminiPart{}},
+					FinishReason: "STOP",
+				}},
+				UsageMetadata: &translate.GeminiUsageMetadata{
+					PromptTokenCount: in, CandidatesTokenCount: out, TotalTokenCount: in + out,
 				},
 			})},
 		}
@@ -849,6 +915,13 @@ func joinEndpoint(base, path string) string {
 // 模型名在路径里是 gemini 的原生写法，因此路由的 path 支持 {model} 占位符（DESIGN 5.9）。
 const geminiGeneratePath = "/v1beta/models/{model}:generateContent"
 
+// gemini 的两种动作后缀。路由的 path 按非流式写法（:generateContent）给，流式时由
+// geminiStreamEndpoint 换掉这一段。
+const (
+	geminiGenerateAction = ":generateContent"
+	geminiStreamAction   = ":streamGenerateContent"
+)
+
 // modelPlaceholder 是路由 path 里代表本次请求模型名的占位符。
 const modelPlaceholder = "{model}"
 
@@ -860,6 +933,27 @@ func modelEndpoint(endpoint, model string) string {
 		return endpoint
 	}
 	return strings.ReplaceAll(endpoint, modelPlaceholder, url.PathEscape(model))
+}
+
+// geminiStreamEndpoint 把非流式的 gemini 地址改成流式形状：末尾的 :generateContent 换成
+// :streamGenerateContent，并加一个 alt=sse（不加的话上游返回的是一段 JSON 数组，不是 SSE）。
+// 路由如果本来就写的 :streamGenerateContent，只补 alt=sse；没有这个后缀（自定义路由）时
+// 路径不动，只加 alt=sse。字符串拼接而不经 url.Parse：路径里的 `:` 与模型名的转义形式
+// （org%2Fgemini）原样保留。
+func geminiStreamEndpoint(endpoint string) string {
+	if !strings.Contains(endpoint, geminiStreamAction) {
+		if idx := strings.LastIndex(endpoint, geminiGenerateAction); idx >= 0 {
+			endpoint = endpoint[:idx] + geminiStreamAction + endpoint[idx+len(geminiGenerateAction):]
+		}
+	}
+	if strings.Contains(endpoint, "alt=sse") {
+		return endpoint
+	}
+	sep := "?"
+	if strings.Contains(endpoint, "?") {
+		sep = "&"
+	}
+	return endpoint + sep + "alt=sse"
 }
 
 // setAuth 按协议给上游请求配好凭据头：gemini 用 x-goog-api-key，anthropic 用 x-api-key

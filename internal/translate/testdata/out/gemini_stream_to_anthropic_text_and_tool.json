@@ -1,0 +1,111 @@
+[
+  {
+    "data": {
+      "message": {
+        "content": [],
+        "id": "msg_switchboard",
+        "model": "gemini-2.5-flash",
+        "role": "assistant",
+        "stop_sequence": null,
+        "type": "message",
+        "usage": {
+          "input_tokens": 0,
+          "output_tokens": 0
+        }
+      },
+      "type": "message_start"
+    },
+    "event": "message_start"
+  },
+  {
+    "data": {
+      "content_block": {
+        "text": "",
+        "type": "text"
+      },
+      "index": 0,
+      "type": "content_block_start"
+    },
+    "event": "content_block_start"
+  },
+  {
+    "data": {
+      "delta": {
+        "text": "po",
+        "type": "text_delta"
+      },
+      "index": 0,
+      "type": "content_block_delta"
+    },
+    "event": "content_block_delta"
+  },
+  {
+    "data": {
+      "delta": {
+        "text": "ng",
+        "type": "text_delta"
+      },
+      "index": 0,
+      "type": "content_block_delta"
+    },
+    "event": "content_block_delta"
+  },
+  {
+    "data": {
+      "index": 0,
+      "type": "content_block_stop"
+    },
+    "event": "content_block_stop"
+  },
+  {
+    "data": {
+      "content_block": {
+        "id": "gemini_call_1",
+        "input": {},
+        "name": "weather",
+        "type": "tool_use"
+      },
+      "index": 1,
+      "type": "content_block_start"
+    },
+    "event": "content_block_start"
+  },
+  {
+    "data": {
+      "delta": {
+        "partial_json": "{\"city\": \"北京\"}",
+        "type": "input_json_delta"
+      },
+      "index": 1,
+      "type": "content_block_delta"
+    },
+    "event": "content_block_delta"
+  },
+  {
+    "data": {
+      "index": 1,
+      "type": "content_block_stop"
+    },
+    "event": "content_block_stop"
+  },
+  {
+    "data": {
+      "delta": {
+        "stop_reason": "tool_use",
+        "stop_sequence": null
+      },
+      "type": "message_delta",
+      "usage": {
+        "input_tokens": 12,
+        "output_tokens": 8
+      }
+    },
+    "event": "message_delta"
+  },
+  {
+    "data": {
+      "type": "message_stop"
+    },
+    "event": "message_stop"
+  }
+]
