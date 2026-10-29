@@ -277,19 +277,19 @@ func TestREADMEModelFlowExamples(t *testing.T) {
 		t.Fatalf("--endpoint 示例的上游调用 = %+v，期望一次 GET /v1/models", calls)
 	}
 
-	// README：--limit 5 限制探活数；三个模型都探通，选号列表随之写进账号。
+	// README：--limit 5 限制探活数；三个模型都探通，可达性转成 allowed、选号从此按它走。
 	code, out, stderr = run(t, "model", "probe", "--account", "ds", "--limit", "5")
 	if code != 0 {
 		t.Fatalf("README 示例 model probe --limit 5 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"ds：本次探活 3 个，跳过 0 个，可用 3", "选号列表共 3 个"} {
+	for _, want := range []string{"ds：本次探活 3 个，跳过 0 个，可用 3", "可达 3 个"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("model probe 输出缺 %q:\n%s", want, out)
 		}
 	}
 	code, out, _ = run(t, "account", "ls")
-	if !strings.Contains(out, "3 可用 / 3 同步") {
-		t.Fatalf("探活后 account ls 的模型列 = %s，期望 3 可用 / 3 同步", out)
+	if !strings.Contains(out, "3 可用 / 3 已登记") {
+		t.Fatalf("探活后 account ls 的模型列 = %s，期望 3 可用 / 3 已登记", out)
 	}
 }
 

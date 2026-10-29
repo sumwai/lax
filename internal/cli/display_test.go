@@ -1,9 +1,11 @@
 package cli_test
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 
+	"switchboard/internal/store"
 	"switchboard/internal/store/storetest"
 )
 
@@ -153,8 +155,8 @@ func addBareAccount(t *testing.T, name, key string) {
 	}
 }
 
-// TestAccountLsModelsColumnNeverSaysUnlimited 盯住模型列在空模型列表时的文案：
-// 空列表表示该账号不提供任何模型、不参与选号（见 lessons/2026-10-29-empty-model-list.md），
+// TestAccountLsModelsColumnNeverSaysUnlimited 盯住模型列在没有模型行时的文案：
+// 没有一行表示该账号不提供任何模型、不参与选号（见 lessons/2026-10-29-empty-model-list.md），
 // 所以文案不能写成看起来表示「什么模型都收」的样子；--json 用同一份事实表达同一个意思。
 func TestAccountLsModelsColumnNeverSaysUnlimited(t *testing.T) {
 	sandbox(t)
@@ -174,14 +176,15 @@ func TestAccountLsModelsColumnNeverSaysUnlimited(t *testing.T) {
 	if !strings.Contains(out, "无模型（先 model sync）") {
 		t.Fatalf("没有任何模型信息时应写明下一步: %s", out)
 	}
-	// 手填了名字的账号照旧直接列出模型名，文案不变。
+	// 手填了名字的账号与同步过的账号一样走计数：--models 写的是目录行与一条 allowed，
+	// 分子分母都从 account_models 来。
 	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(line, "filled") && !strings.Contains(line, "m1 等 2 个") {
-			t.Fatalf("手填了模型的账号应列出模型名: %q", line)
+		if strings.HasPrefix(line, "filled") && !strings.Contains(line, "2 可用 / 2 已登记") {
+			t.Fatalf("手填了模型的账号应写「2 可用 / 2 已登记」: %q", line)
 		}
 	}
 
-	// --json 与文本说的是同一件事：没有任何模型信息 = models 为空且 models_synced 为 0。
+	// --json 与文本说的是同一件事：没有任何模型行 = models 为空且 models_synced 为 0。
 	code, out, stderr = run(t, "account", "ls", "--json")
 	if code != 0 {
 		t.Fatalf("account ls --json 退出码 = %d，stderr = %s", code, stderr)
@@ -193,29 +196,45 @@ func TestAccountLsModelsColumnNeverSaysUnlimited(t *testing.T) {
 		byName[r.Name] = r
 	}
 	if b := byName["bare"]; len(b.Models) != 0 || b.ModelsSynced != 0 || b.ModelsUsable != 0 {
-		t.Fatalf("没有任何模型信息的账号 = %+v，期望 models 为空、两个计数都是 0", b)
+		t.Fatalf("没有任何模型行的账号 = %+v，期望 models 为空、两个计数都是 0", b)
 	}
-	if f := byName["filled"]; len(f.Models) != 2 || f.ModelsSynced != 0 || f.ModelsUsable != 0 {
-		t.Fatalf("手填模型名的账号 = %+v，期望 models 有两个名字、两个计数都是 0", f)
+	if f := byName["filled"]; len(f.Models) != 2 || f.ModelsSynced != 2 || f.ModelsUsable != 2 {
+		t.Fatalf("手填模型名的账号 = %+v，期望 models 有两个名字、两个计数都是 2", f)
 	}
 }
 
-// TestAccountLsSyncedZeroUsable 覆盖「同步过但零可用」：模型列走「0 可用 / N 同步」，
-// 不落到「无模型」，--json 的 models_synced 大于 0 能把这种情况与没同步过分开。
-func TestAccountLsSyncedZeroUsable(t *testing.T) {
+// TestAccountLsCountsModelsByAccess 覆盖模型列的两个计数都来自 account_models：
+// 分子数 access='allowed'，分母数全部行。零可用但不为零行时仍走计数分支，
+// 「0 可用 / N 已登记」把「同步过但一个都不通」与「一行都没有」分开。
+func TestAccountLsCountsModelsByAccess(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
-	addBareAccount(t, "ds1", "sk-1")
+	addBareAccount(t, "mixed", "sk-1")
+	addBareAccount(t, "none", "sk-2")
 
 	db := storetest.Open(t)
-	acc, err := db.GetAccount("ds1")
+	// mixed：一个能用、一个无权、一个不存在。
+	mixed, err := db.GetAccount("mixed")
 	if err != nil {
-		t.Fatalf("读账号 ds1: %v", err)
+		t.Fatalf("读账号 mixed: %v", err)
 	}
-	// model sync 写进来的是 synced：列表拉到了，但一个都还没探过。
-	for _, m := range []string{"m1", "m2"} {
-		if err := db.SetModelStatus(acc.ID, m, "synced", 0, ""); err != nil {
-			t.Fatalf("写 %s 状态: %v", m, err)
+	for model, access := range map[string]string{
+		"m1": store.AccessAllowed,
+		"m2": store.AccessForbidden,
+		"m3": store.AccessMissing,
+	} {
+		if err := db.SetAccountModelAccess(mixed.ID, model, access, 0, "", 1700000000); err != nil {
+			t.Fatalf("写 %s 的可达性: %v", model, err)
+		}
+	}
+	// none：同步过两行，但两行都不是 allowed。
+	none, err := db.GetAccount("none")
+	if err != nil {
+		t.Fatalf("读账号 none: %v", err)
+	}
+	for _, model := range []string{"m1", "m2"} {
+		if err := db.SetAccountModelAccess(none.ID, model, store.AccessForbidden, http.StatusForbidden, "", 1700000000); err != nil {
+			t.Fatalf("写 %s 的可达性: %v", model, err)
 		}
 	}
 
@@ -223,20 +242,111 @@ func TestAccountLsSyncedZeroUsable(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("account ls 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if strings.Contains(out, "不限") || strings.Contains(out, "无模型") {
-		t.Fatalf("同步过的账号应写「0 可用 / 2 同步」: %s", out)
+	if !strings.Contains(out, "1 可用 / 3 已登记") {
+		t.Fatalf("mixed 的模型列应写「1 可用 / 3 已登记」: %s", out)
 	}
-	if !strings.Contains(out, "0 可用 / 2 同步") {
-		t.Fatalf("同步过但零可用时应写「0 可用 / 2 同步」: %s", out)
+	if !strings.Contains(out, "0 可用 / 2 已登记") {
+		t.Fatalf("none 的模型列应写「0 可用 / 2 已登记」: %s", out)
+	}
+	if strings.Contains(out, "无模型") {
+		t.Fatalf("有可达性行的账号不该落到「无模型」: %s", out)
 	}
 
 	code, out, stderr = run(t, "account", "ls", "--json")
 	if code != 0 {
 		t.Fatalf("account ls --json 退出码 = %d，stderr = %s", code, stderr)
 	}
-	row := mustAccountRow(t, out)
-	if len(row.Models) != 0 || row.ModelsSynced != 2 || row.ModelsUsable != 0 {
-		t.Fatalf("同步过但零可用的账号 = %+v，期望 models 为空、models_synced 2、models_usable 0", row)
+	var rows []accountRow
+	mustJSON(t, out, &rows)
+	byName := make(map[string]accountRow, len(rows))
+	for _, r := range rows {
+		byName[r.Name] = r
+	}
+	if m := byName["mixed"]; m.ModelsUsable != 1 || m.ModelsSynced != 3 || len(m.Models) != 1 || m.Models[0] != "m1" {
+		t.Fatalf("mixed = %+v，期望可用 1、总共 3、models 只有 m1", m)
+	}
+	if n := byName["none"]; n.ModelsUsable != 0 || n.ModelsSynced != 2 || len(n.Models) != 0 {
+		t.Fatalf("none = %+v，期望可用 0、总共 2、models 为空", n)
+	}
+}
+
+// TestModelLsShowsCatalogMetadata 覆盖 model ls 的目录元数据列：上下文长度、最大输出与
+// 支持的协议集合都取自 provider_models（长度按「账号覆盖 → 目录」，见 DESIGN 5.13），
+// 目录里没填的项在文本里写 -、在 --json 里是 null 或空数组。
+func TestModelLsShowsCatalogMetadata(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+	// m1 有完整元数据，m2 只有名字：两种取值都要显示得出来。
+	if code, _, stderr := addAccount(t, "ds1", "custom", "http://127.0.0.1:9", "", "--key", "sk-test", "--models", "m1,m2"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	contextWindow, maxOutput := int64(200000), int64(8192)
+	db := storetest.Open(t)
+	if err := db.UpsertProviderModels("custom", []store.ProviderModel{{
+		Model:         "m1",
+		Source:        store.SourceManual,
+		ContextWindow: &contextWindow,
+		MaxOutput:     &maxOutput,
+		Protocols:     []string{"openai-chat", "anthropic"},
+	}}); err != nil {
+		t.Fatalf("写 m1 的目录行: %v", err)
+	}
+
+	code, out, stderr := run(t, "model", "ls", "--json")
+	if code != 0 {
+		t.Fatalf("model ls --json 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var rows []struct {
+		Model         string   `json:"model"`
+		ContextWindow *int64   `json:"context_window"`
+		MaxOutput     *int64   `json:"max_output"`
+		Protocols     []string `json:"protocols"`
+	}
+	mustJSON(t, out, &rows)
+	byModel := make(map[string]int, len(rows))
+	for i, r := range rows {
+		byModel[r.Model] = i
+	}
+	i, ok := byModel["m1"]
+	if !ok {
+		t.Fatalf("model ls 缺 m1: %s", out)
+	}
+	got := rows[i]
+	if got.ContextWindow == nil || *got.ContextWindow != contextWindow {
+		t.Fatalf("m1 的 context_window = %v，期望 %d", got.ContextWindow, contextWindow)
+	}
+	if got.MaxOutput == nil || *got.MaxOutput != maxOutput {
+		t.Fatalf("m1 的 max_output = %v，期望 %d", got.MaxOutput, maxOutput)
+	}
+	if len(got.Protocols) != 2 || got.Protocols[0] != "openai-chat" || got.Protocols[1] != "anthropic" {
+		t.Fatalf("m1 的 protocols = %v，期望目录里的协议集合", got.Protocols)
+	}
+	j, ok := byModel["m2"]
+	if !ok {
+		t.Fatalf("model ls 缺 m2: %s", out)
+	}
+	two := rows[j]
+	if two.ContextWindow != nil || two.MaxOutput != nil {
+		t.Fatalf("m2 的元数据 = %v / %v，期望都是 null（目录没填）", two.ContextWindow, two.MaxOutput)
+	}
+	if two.Protocols == nil || len(two.Protocols) != 0 {
+		t.Fatalf("m2 的 protocols = %v，期望空数组而不是 null", two.Protocols)
+	}
+
+	code, out, stderr = run(t, "model", "ls")
+	if code != 0 {
+		t.Fatalf("model ls 退出码 = %d，stderr = %s", code, stderr)
+	}
+	for _, want := range []string{"上下文长度", "最大输出", "支持协议", "200000", "8192", "openai-chat,anthropic"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("model ls 文本输出缺 %q: %s", want, out)
+		}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "m2") && !strings.Contains(line, " - ") {
+			t.Fatalf("目录里没填的元数据应写 -: %q", line)
+		}
 	}
 }
 

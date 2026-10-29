@@ -28,7 +28,7 @@ func mustSyncRows(t *testing.T, out string) []syncRow {
 	return rows
 }
 
-// mustModelRowStatuses 读 model ls --json，返回「模型 → 该账号上的状态」。
+// mustModelRowStatuses 读 model ls --json，返回「模型 → 该账号上的可达性」。
 func mustModelRowStatuses(t *testing.T) map[string]string {
 	t.Helper()
 	code, out, stderr := run(t, "model", "ls", "--json")
@@ -46,8 +46,8 @@ func mustModelRowStatuses(t *testing.T) map[string]string {
 }
 
 // TestModelSyncResponseShapesWriteModels 三种形状各跑一次完整的 model sync：
-// 退出码 0、拉到并新增的模型数对得上、每个模型在 account_models 里是 synced、
-// accounts.models 仍为空（同步只改 account_models，不改选号列表）。
+// 退出码 0、拉到并新增的模型数对得上、每个名字都进模型目录且这个账号的行是 allowed
+// （同步写「目录 + 该账号可达性」，见 DESIGN 5.13）。
 func TestModelSyncResponseShapesWriteModels(t *testing.T) {
 	cases := []struct {
 		name string
@@ -94,7 +94,7 @@ func TestModelSyncResponseShapesWriteModels(t *testing.T) {
 				t.Fatalf("model sync = %+v，期望拉到并新增 %d 个模型、没有错误", rows[0], len(c.want))
 			}
 
-			// 写库：每个模型一行 synced，顺序按名字排。
+			// 写库：每个名字一行 allowed（还没探过），顺序按名字排。
 			calls := up.all()
 			if len(calls) != 1 || calls[0].method != http.MethodGet || calls[0].path != "/v1/models" {
 				t.Fatalf("上游调用 = %+v，期望只打一次 GET /v1/models", calls)
@@ -104,23 +104,29 @@ func TestModelSyncResponseShapesWriteModels(t *testing.T) {
 				t.Fatalf("model ls 有 %d 个模型，期望 %d 个: %v", len(statuses), len(c.want), statuses)
 			}
 			for _, model := range c.want {
-				if statuses[model] != "synced" {
-					t.Fatalf("模型 %s 的状态 = %q，期望 synced（新同步的行）", model, statuses[model])
+				if statuses[model] != "allowed" {
+					t.Fatalf("模型 %s 的可达性 = %q，期望 allowed（同步把这批名字标成可用）", model, statuses[model])
 				}
 			}
 
-			// 同步本身不改选号列表：accounts.models 仍为空，计数看得出来同步了几个。
+			// 同步已经把这个账号的可达性写成 allowed：计数与模型名都跟着变，
+			// 「待探活」由 model ls 的 checked_at 表达，不由这里另记一份清单。
 			code, out, stderr = run(t, "account", "ls", "--json")
 			if code != 0 {
 				t.Fatalf("account ls 退出码 = %d，stderr = %s", code, stderr)
 			}
 			acc := mustAccountRow(t, out)
-			if len(acc.Models) != 0 {
-				t.Fatalf("account ls models = %v，期望为空（同步不改 accounts.models）", acc.Models)
+			if len(acc.Models) != len(c.want) {
+				t.Fatalf("account ls models = %v，期望同步进来的 %d 个名字", acc.Models, len(c.want))
 			}
-			if acc.ModelsSynced != len(c.want) || acc.ModelsUsable != 0 {
-				t.Fatalf("account ls 模型计数 = 同步 %d / 可用 %d，期望 %d / 0",
-					acc.ModelsSynced, acc.ModelsUsable, len(c.want))
+			for i, want := range c.want {
+				if acc.Models[i] != want {
+					t.Fatalf("account ls models = %v，期望按名字排序的 %v", acc.Models, c.want)
+				}
+			}
+			if acc.ModelsSynced != len(c.want) || acc.ModelsUsable != len(c.want) {
+				t.Fatalf("account ls 模型计数 = 已登记 %d / 可用 %d，期望 %d / %d",
+					acc.ModelsSynced, acc.ModelsUsable, len(c.want), len(c.want))
 			}
 		})
 	}
@@ -214,7 +220,7 @@ func TestModelSyncUnknownShapeListsThreeShapes(t *testing.T) {
 // TestModelSyncShapeDetectionKeepsModelsPathPriority 钉住形状识别不改地址优先级：
 // 厂商级 models_path 是一条完整地址（返回 ollama 形状）时，同步只打那台、不打账号 base_url；
 // 再加 `--endpoint` 时 `--endpoint` 压过厂商覆盖，打到账号 base_url 上的那条路径（返回 data 形状），
-// 上一次同步进来的模型被替换掉。
+// 上一轮的名字留在库里、这一轮的名字也进库。
 func TestModelSyncShapeDetectionKeepsModelsPathPriority(t *testing.T) {
 	sandbox(t)
 	base := newRecorderUpstream(t, map[string]fakeResponse{
@@ -254,8 +260,8 @@ func TestModelSyncShapeDetectionKeepsModelsPathPriority(t *testing.T) {
 	if calls := lists.all(); calls[0].bearer != "Bearer sk-test" || calls[0].apiKey != "" {
 		t.Fatalf("凭据头 = Bearer %q / x-api-key %q，期望按厂商默认协议发 Bearer", calls[0].bearer, calls[0].apiKey)
 	}
-	if statuses := mustModelRowStatuses(t); len(statuses) != 1 || statuses["llama3:latest"] != "synced" {
-		t.Fatalf("model ls = %v，期望只有 llama3:latest 且为 synced", statuses)
+	if statuses := mustModelRowStatuses(t); len(statuses) != 1 || statuses["llama3:latest"] != "allowed" {
+		t.Fatalf("model ls = %v，期望只有 llama3:latest 且为 allowed", statuses)
 	}
 
 	// 第二轮：--endpoint 压过厂商覆盖，打到账号 base_url 上的 /custom/models（data 形状）。
@@ -275,7 +281,10 @@ func TestModelSyncShapeDetectionKeepsModelsPathPriority(t *testing.T) {
 	if calls := lists.all(); len(calls) != 0 {
 		t.Fatalf("厂商覆盖那台收到 %+v，--endpoint 生效时不该再打它", calls)
 	}
-	if statuses := mustModelRowStatuses(t); len(statuses) != 1 || statuses["m-endpoint"] != "synced" {
-		t.Fatalf("model ls = %v，期望只剩 m-endpoint（上游消失的模型行被删掉）", statuses)
+	// 上一轮拉到的 llama3:latest 留着：同步只做加法，可达性只由探活结论改动
+	// （见 DESIGN 5.13），一次少给了几个名字不等于这些模型不可用。
+	statuses := mustModelRowStatuses(t)
+	if len(statuses) != 2 || statuses["m-endpoint"] != "allowed" || statuses["llama3:latest"] != "allowed" {
+		t.Fatalf("model ls = %v，期望 m-endpoint 与上一轮的 llama3:latest 都在、都是 allowed", statuses)
 	}
 }

@@ -79,9 +79,9 @@ func postGateway(t *testing.T, srv *httptest.Server, path, body string) (int, st
 	return resp.StatusCode, string(raw)
 }
 
-// TestModelsCatalogFollowsModelProbe 确认清单与选号同源：清单读 accounts.models，
-// 而这份列表由 model probe 回写。model sync 只刷新 account_models，清单该是空的；
-// 探出一条可用之后清单只有这一条，没探通的模型既不进清单也接不到请求。
+// TestModelsCatalogFollowsModelProbe 确认清单与选号同源：两者都读 account_models 里
+// access='allowed' 的行。model sync 把清单里的名字都标成 allowed，因此同步之后整份清单都在；
+// 探活把 403 的那个改成 forbidden 之后清单只剩探通的那条，没探通的模型也接不到请求。
 func TestModelsCatalogFollowsModelProbe(t *testing.T) {
 	sandbox(t)
 	up := newProbeUpstream(t, []string{"m1", "m2"}, map[string]int{"m2": http.StatusForbidden})
@@ -92,9 +92,13 @@ func TestModelsCatalogFollowsModelProbe(t *testing.T) {
 	}
 	srv := gatewayServer(t)
 
-	// 同步只写 account_models，accounts.models 还是空的：清单不该因为同步而变长。
-	if raw, got := mustCatalog(t, srv); len(got) != 0 {
-		t.Fatalf("同步之后清单 = %s，期望空数组（选号读 accounts.models，不是 account_models）", raw)
+	// 同步写的是「目录 + 这个账号可达性」：两个名字都是 allowed，清单因此列出这两条。
+	synced := []catalogEntry{
+		{ID: "m1", Object: "model", Created: 0, OwnedBy: "ds1-co"},
+		{ID: "m2", Object: "model", Created: 0, OwnedBy: "ds1-co"},
+	}
+	if raw, got := mustCatalog(t, srv); !reflect.DeepEqual(got, synced) {
+		t.Fatalf("同步之后清单 = %s，期望 %+v", raw, synced)
 	}
 
 	if code, out, stderr := run(t, "model", "probe", "--account", "ds1", "--json"); code != 0 {

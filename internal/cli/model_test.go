@@ -254,7 +254,7 @@ func TestModelSyncEndpointNormalized(t *testing.T) {
 	}
 }
 
-// TestAccountSyncProbeFlow 覆盖 sync → probe → accounts.models → model ls 整条链路。
+// TestAccountSyncProbeFlow 覆盖 sync → probe → 可达性 → model ls 整条链路。
 func TestAccountSyncProbeFlow(t *testing.T) {
 	sandbox(t)
 	// m1 可用，m2 上游返回 403。
@@ -319,7 +319,7 @@ func TestAccountSyncProbeFlow(t *testing.T) {
 		}
 	}
 
-	// 可用模型写进 accounts.models，选号按它走。
+	// 探活结论就是可达性：选号按 access='allowed' 走，m1 能用、m2 无权。
 	code, out, stderr = run(t, "account", "ls", "--json")
 	if code != 0 {
 		t.Fatalf("account ls 退出码 = %d，stderr = %s", code, stderr)
@@ -329,14 +329,14 @@ func TestAccountSyncProbeFlow(t *testing.T) {
 		t.Fatalf("account ls models = %v，期望只有 m1", acc.Models)
 	}
 	if acc.ModelsUsable != 1 || acc.ModelsSynced != 2 {
-		t.Fatalf("account ls 模型计数 = 可用 %d / 同步 %d，期望 1 / 2", acc.ModelsUsable, acc.ModelsSynced)
+		t.Fatalf("account ls 模型计数 = 可用 %d / 已登记 %d，期望 1 / 2", acc.ModelsUsable, acc.ModelsSynced)
 	}
 
 	code, out, stderr = run(t, "account", "ls")
 	if code != 0 {
 		t.Fatalf("account ls 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if !strings.Contains(out, "1 可用 / 2 同步") {
+	if !strings.Contains(out, "1 可用 / 2 已登记") {
 		t.Fatalf("account ls 文本输出缺少模型计数: %s", out)
 	}
 
@@ -349,7 +349,7 @@ func TestAccountSyncProbeFlow(t *testing.T) {
 	if len(models) != 2 {
 		t.Fatalf("model ls 应有 2 个模型，实际 %d 个: %s", len(models), out)
 	}
-	for model, want := range map[string]string{"m1": "usable", "m2": "forbidden"} {
+	for model, want := range map[string]string{"m1": "allowed", "m2": "forbidden"} {
 		row, ok := models[model]
 		if !ok {
 			t.Fatalf("model ls 缺模型 %s: %s", model, out)
@@ -365,7 +365,7 @@ func TestAccountSyncProbeFlow(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("model probe 文本输出退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"账号", "模型", "本次探活 2 个", "跳过 0 个", "可用 1", "无权 1", "选号列表共 1 个"} {
+	for _, want := range []string{"账号", "模型", "本次探活 2 个", "跳过 0 个", "可用 1", "无权 1", "可达 1 个"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("model probe 文本输出缺少 %q: %s", want, out)
 		}
@@ -394,7 +394,7 @@ func TestModelProbeNoProgressOutsideTerminal(t *testing.T) {
 	if strings.Contains(stderr, "\r") || strings.Contains(stderr, "探活中") {
 		t.Fatalf("非终端不该打实时进度，stderr = %q", stderr)
 	}
-	for _, want := range []string{"账号", "模型", "本次探活 2 个", "跳过 0 个", "选号列表共 2 个"} {
+	for _, want := range []string{"账号", "模型", "本次探活 2 个", "跳过 0 个", "可达 2 个"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("model probe 文本输出缺少 %q: %s", want, out)
 		}
@@ -425,13 +425,11 @@ func TestModelProbeNoProgressOutsideTerminal(t *testing.T) {
 	}
 }
 
-// TestAccountProbeAllForbiddenKeepsModels 确认零可用模型时退出码 1 且不动 accounts.models。
-func TestAccountProbeAllForbiddenKeepsModels(t *testing.T) {
+// TestAccountProbeAllForbiddenRecordsAccess 确认零可用时退出码 1，且结论照样落库：
+// 探不动的名字从 allowed 变成 forbidden，行不删、也不再进候选（见 DESIGN 5.13）。
+func TestAccountProbeAllForbiddenRecordsAccess(t *testing.T) {
 	sandbox(t)
-	up := newProbeUpstream(t, []string{"m1", "m2"}, map[string]int{
-		"m1": http.StatusForbidden,
-		"m2": http.StatusForbidden,
-	})
+	up := newProbeUpstream(t, nil, map[string]int{"keep-me": http.StatusForbidden})
 
 	if code, _, stderr := run(t, "init"); code != 0 {
 		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
@@ -444,12 +442,20 @@ func TestAccountProbeAllForbiddenKeepsModels(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("全部 403 时 model probe 退出码 = %d，期望 1；stdout = %s，stderr = %s", code, out, stderr)
 	}
-	if !strings.Contains(stderr, "探出可用模型") {
-		t.Fatalf("stderr 应说明没有可用模型: %s", stderr)
+	for _, want := range []string{"探出可用模型", "可达性已记录", "forbidden / missing"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr 应说明结论落在可达性上、%q 不进候选: %s", want, stderr)
+		}
 	}
 	probes := mustProbeRows(t, out)
-	if len(probes) != 2 || probes["m1"].Status != "forbidden" || probes["m2"].Status != "forbidden" {
-		t.Fatalf("探活结果 = %+v，期望两个模型都是 forbidden", probes)
+	if len(probes) != 1 || probes["keep-me"].Status != "forbidden" {
+		t.Fatalf("探活结果 = %+v，期望 keep-me 是 forbidden", probes)
+	}
+
+	// 行还在，可达性改成 forbidden 并记了时间：下一次不用重探就能跳过。
+	st := storetest.Open(t)
+	if row := st.ModelRow(t, "ds1", "keep-me"); row.Access != store.AccessForbidden || row.CheckedAt == 0 {
+		t.Fatalf("可达性没落库：%+v，期望 forbidden 且记了探活时间", row)
 	}
 
 	code, out, stderr = run(t, "account", "ls", "--json")
@@ -457,24 +463,25 @@ func TestAccountProbeAllForbiddenKeepsModels(t *testing.T) {
 		t.Fatalf("account ls 退出码 = %d，stderr = %s", code, stderr)
 	}
 	acc := mustAccountRow(t, out)
-	if len(acc.Models) != 1 || acc.Models[0] != "keep-me" {
-		t.Fatalf("零可用模型时 accounts.models 被改动：%v", acc.Models)
+	if acc.ModelsUsable != 0 || acc.ModelsSynced != 1 || len(acc.Models) != 0 {
+		t.Fatalf("零可用的账号 = %+v，期望 models 为空、可用 0、已登记 1", acc)
 	}
 	if !acc.Enabled || acc.Status != "正常" {
 		t.Fatalf("403 不该停用账号：enabled = %v，status = %s", acc.Enabled, acc.Status)
 	}
 }
 
-// TestAccountProbeAuthFailureDisablesAccount 确认凭据被拒时账号停用、不写可用列表。
+// TestAccountProbeAuthFailureDisablesAccount 确认凭据被拒时账号停用、后续账号不再处理，
+// 已经探完的那几个模型的可达性照样留库（auth 落成 error，下一轮重探）。
 func TestAccountProbeAuthFailureDisablesAccount(t *testing.T) {
 	sandbox(t)
-	// m1 能通，m2 回 401：只要出现凭据被拒，整批结论都不作数。
+	// m1 能通，m2 回 401：凭据不行了，整次探活就停在这里。
 	up := newProbeUpstream(t, []string{"m1", "m2"}, map[string]int{"m2": http.StatusUnauthorized})
 
 	if code, _, stderr := run(t, "init"); code != 0 {
 		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if code, _, stderr := addAccount(t, "ds1", "custom", up.srv.URL, "", "--key", "sk-test", "--models", "keep-me"); code != 0 {
+	if code, _, stderr := addAccount(t, "ds1", "custom", up.srv.URL, "", "--key", "sk-test"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -489,6 +496,15 @@ func TestAccountProbeAuthFailureDisablesAccount(t *testing.T) {
 		t.Fatalf("m2 探活结果 = %+v，期望 auth", probes["m2"])
 	}
 
+	// 探完的那两条各自落库：m1 能用，m2 是没定论的 error（凭据问题不是模型层面的结论）。
+	st := storetest.Open(t)
+	if row := st.ModelRow(t, "ds1", "m1"); row.Access != store.AccessAllowed {
+		t.Fatalf("m1 的可达性 = %+v，期望 allowed", row)
+	}
+	if row := st.ModelRow(t, "ds1", "m2"); row.Access != store.AccessError {
+		t.Fatalf("m2 的可达性 = %+v，期望 error（下一轮重探）", row)
+	}
+
 	code, out, stderr = run(t, "account", "ls", "--json")
 	if code != 0 {
 		t.Fatalf("account ls 退出码 = %d，stderr = %s", code, stderr)
@@ -497,8 +513,8 @@ func TestAccountProbeAuthFailureDisablesAccount(t *testing.T) {
 	if acc.Enabled {
 		t.Fatal("401 之后账号应被停用")
 	}
-	if len(acc.Models) != 1 || acc.Models[0] != "keep-me" {
-		t.Fatalf("凭据被拒时 accounts.models 被改动：%v", acc.Models)
+	if len(acc.Models) != 1 || acc.Models[0] != "m1" {
+		t.Fatalf("可用模型 = %v，期望只剩探通的 m1", acc.Models)
 	}
 }
 
@@ -704,8 +720,8 @@ func TestModelProbeSkipDoesNotTouchCheckedAt(t *testing.T) {
 }
 
 // TestModelProbeReprobesUsableWithZeroCheckedAt 确认「有定论但没记时间」不算新鲜。
-// checked_at 为 0 的行可能来自手工导入或旧库升级，没有时间就无法判断结论是不是
-// 一天前的，必须照常重探。
+// checked_at 为 0 的行可能来自手工导入、account add --models 或旧库升级，没有时间就无法
+// 判断结论是不是一天前的，必须照常重探。
 func TestModelProbeReprobesUsableWithZeroCheckedAt(t *testing.T) {
 	sandbox(t)
 	up := newProbeUpstream(t, []string{"m1", "m2"}, nil)
@@ -715,11 +731,11 @@ func TestModelProbeReprobesUsableWithZeroCheckedAt(t *testing.T) {
 		t.Fatalf("首次探活退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	// 只把 m1 的时间戳归零，status 仍是 usable；m2 保持新鲜做对照。
+	// 只把 m1 的时间戳归零，可达性仍是 allowed；m2 保持新鲜做对照。
 	st := storetest.Open(t)
 	st.BackdateModel(t, "ds1", "m1", 0)
-	if row := st.ModelRow(t, "ds1", "m1"); row.Status != store.ModelUsable || row.CheckedAt != 0 {
-		t.Fatalf("前置条件不对：%+v", row)
+	if row := st.ModelRow(t, "ds1", "m1"); row.Access != store.AccessAllowed || row.CheckedAt != 0 {
+		t.Fatalf("前置条件不对（期望 allowed 且没记时间）：%+v", row)
 	}
 
 	code, out, stderr := run(t, "model", "probe", "--account", "ds1", "--json")
@@ -789,7 +805,7 @@ func TestModelProbeSummaryMixedProbeAndSkip(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("退出码 = %d，stdout = %s，stderr = %s", code, out, stderr)
 	}
-	want := "ds1：本次探活 1 个，跳过 1 个，可用 1，无权 0，不存在 0，失败 0；选号列表共 2 个"
+	want := "ds1：本次探活 1 个，跳过 1 个，可用 1，无权 0，不存在 0，失败 0；可达 2 个"
 	if !strings.Contains(out, want) {
 		t.Fatalf("汇总行缺 %q: %s", want, out)
 	}
@@ -835,8 +851,9 @@ func TestModelProbeModelFlagRespectsFreshness(t *testing.T) {
 	}
 }
 
-// TestModelProbeDoesNotSkipUnsettledStatuses 确认待探活、凭据被拒、失败三种没有定论的状态照常探。
-func TestModelProbeDoesNotSkipUnsettledStatuses(t *testing.T) {
+// TestModelProbeDoesNotSkipUnsettledAccess 确认只有「有定论且记了时间」才跳过：
+// access 为 error 的行、以及 allowed 但 checked_at 为 0 的行都要照常探（见 DESIGN 5.7）。
+func TestModelProbeDoesNotSkipUnsettledAccess(t *testing.T) {
 	sandbox(t)
 	up := newProbeUpstream(t, nil, nil)
 	addProbeAccount(t, up, "ds1")
@@ -846,18 +863,19 @@ func TestModelProbeDoesNotSkipUnsettledStatuses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读账号: %v", err)
 	}
-	// checked_at 都是刚写进去的，唯一让它们重探的理由是状态没有定论。
-	for model, status := range map[string]string{
-		"m-synced": store.ModelSynced,
-		"m-auth":   store.ModelAuthFailed,
-		"m-error":  store.ModelError,
+	now := time.Now().Unix()
+	// 三条里只有 m-settled 同时满足两个条件，它应当被跳过；另两条各缺一个条件。
+	for model, row := range map[string]struct {
+		access    string
+		httpCode  int
+		checkedAt int64
+	}{
+		"m-settled":  {store.AccessAllowed, http.StatusOK, now},
+		"m-error":    {store.AccessError, http.StatusInternalServerError, now},
+		"m-no-stamp": {store.AccessAllowed, http.StatusOK, 0},
 	} {
-		httpStatus := 0
-		if status != store.ModelSynced {
-			httpStatus = http.StatusInternalServerError
-		}
-		if err := st.SetModelStatus(acc.ID, model, status, httpStatus, "上一轮的结论"); err != nil {
-			t.Fatalf("写 %s 状态: %v", model, err)
+		if err := st.SetAccountModelAccess(acc.ID, model, row.access, row.httpCode, "上一轮的结论", row.checkedAt); err != nil {
+			t.Fatalf("写 %s 的可达性: %v", model, err)
 		}
 	}
 
@@ -865,22 +883,27 @@ func TestModelProbeDoesNotSkipUnsettledStatuses(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("探活退出码 = %d，stdout = %s，stderr = %s", code, out, stderr)
 	}
-	if rows := mustProbeRows(t, out); len(rows) != 3 {
-		t.Fatalf("synced / auth / error 都不该跳过，实际探了 %d 个: %s", len(rows), out)
+	rows := mustProbeRows(t, out)
+	if len(rows) != 2 {
+		t.Fatalf("error 与 allowed 但没记时间的两行都该重探，实际探了 %d 个: %s", len(rows), out)
 	}
-	if got := len(up.requestBodies()); got != 3 {
-		t.Fatalf("假上游收到 %d 条请求，期望 3 条", got)
+	if _, ok := rows["m-settled"]; ok {
+		t.Fatalf("有定论且新鲜的 m-settled 不该被重探: %s", out)
+	}
+	if got := len(up.requestBodies()); got != 2 {
+		t.Fatalf("假上游收到 %d 条请求，期望 2 条", got)
 	}
 }
 
-// TestModelProbeAllSkippedWritesUsableModels 确认全部跳过时仍按库里 usable 回写并退出 0。
-func TestModelProbeAllSkippedWritesUsableModels(t *testing.T) {
+// TestModelProbeAllSkippedKeepsAccess 确认全被跳过那一轮一条上游请求都不发、也不动可达性：
+// 结论仍在 --max-age 窗口内，库里那份 access 就是选号依据，不必再回写一份清单。
+func TestModelProbeAllSkippedKeepsAccess(t *testing.T) {
 	sandbox(t)
-	up := newProbeUpstream(t, []string{"m1", "m2"}, map[string]int{"m2": http.StatusForbidden})
+	up := newProbeUpstream(t, []string{"m1", "m2"}, nil)
 	addProbeAccount(t, up, "ds1")
 
-	if code, _, stderr := run(t, "model", "probe", "--account", "ds1", "--json"); code != 0 {
-		t.Fatalf("首次探活退出码 = %d，stderr = %s", code, stderr)
+	if code, _, stderr := run(t, "model", "sync", "--account", "ds1"); code != 0 {
+		t.Fatalf("model sync 退出码 = %d，stderr = %s", code, stderr)
 	}
 
 	st := storetest.Open(t)
@@ -888,9 +911,13 @@ func TestModelProbeAllSkippedWritesUsableModels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读账号: %v", err)
 	}
-	// 把选号列表改坏，模拟「上一轮留下的旧值」，下一轮全部跳过时应当被库里 usable 纠正。
-	if err := st.SetModels(acc.ID, []string{"stale-model"}); err != nil {
-		t.Fatalf("改选号列表: %v", err)
+	// 两条结论都定好了、都落在 24h 窗口内：这一轮应当全部跳过。
+	pinned := time.Now().Add(-time.Hour).Unix()
+	want := map[string]string{"m1": store.AccessAllowed, "m2": store.AccessForbidden}
+	for model, access := range want {
+		if err := st.SetAccountModelAccess(acc.ID, model, access, http.StatusOK, "", pinned); err != nil {
+			t.Fatalf("写 %s 的可达性: %v", model, err)
+		}
 	}
 
 	code, out, stderr := run(t, "model", "probe", "--account", "ds1", "--json")
@@ -900,12 +927,24 @@ func TestModelProbeAllSkippedWritesUsableModels(t *testing.T) {
 	if strings.Contains(stderr, "没有账号探出可用模型") {
 		t.Fatalf("全部跳过不该落到没有可用模型的错误分支: %s", stderr)
 	}
+	if got := strings.TrimSpace(out); got != "[]" {
+		t.Fatalf("全部跳过时 --json 应是空数组，实际 %s", got)
+	}
+	if got := len(up.requestBodies()); got != 0 {
+		t.Fatalf("跳过的一轮不该发探活请求，实际 %d 条", got)
+	}
+	for model, access := range want {
+		row := st.ModelRow(t, "ds1", model)
+		if row.Access != access || row.CheckedAt != pinned {
+			t.Fatalf("%s 被跳过了，库里却变了：%+v，期望 access %q、checked_at %d", model, row, access, pinned)
+		}
+	}
 	after, err := st.GetAccount("ds1")
 	if err != nil {
 		t.Fatalf("读账号: %v", err)
 	}
 	if len(after.Models) != 1 || after.Models[0] != "m1" {
-		t.Fatalf("全部跳过时 accounts.models 应按库里 usable 回写，实际 %v", after.Models)
+		t.Fatalf("选号集合应只有 allowed 的 m1，实际 %v", after.Models)
 	}
 }
 
@@ -951,8 +990,8 @@ func TestModelProbeMixedAccountsExitCode(t *testing.T) {
 
 	t.Run("一号全跳过且库里零可用另一号有可用", func(t *testing.T) {
 		sandbox(t)
-		// 一号的模型固定回 403：有定论、新鲜，但库里零可用。
-		noneUp := newProbeUpstream(t, []string{"m-a"}, map[string]int{"m-a": http.StatusForbidden})
+		// 一号手填的那个名字固定回 403：有定论、新鲜，但库里零可用。
+		noneUp := newProbeUpstream(t, nil, map[string]int{"keep-me": http.StatusForbidden})
 		liveUp := newProbeUpstream(t, []string{"m-b"}, nil)
 		addProbeAccount(t, noneUp, "a-none", "--models", "keep-me")
 		addProbeAccount(t, liveUp, "b-live")
@@ -972,9 +1011,10 @@ func TestModelProbeMixedAccountsExitCode(t *testing.T) {
 		if strings.Contains(stderr, "没有账号探出可用模型") {
 			t.Fatalf("至少一个账号有可用，不该落到零可用的错误分支: %s", stderr)
 		}
-		// 一号零可用但不报错，输出里说清「模型列表保持原样」；二号是真探的。
+		// 一号零可用但不报错，输出里说清可达性已经记录、forbidden / missing 不进候选；
+		// 二号是真探的。
 		for _, want := range []string{
-			"a-none：本次探活 0 个，跳过 1 个，库里无一可用，模型列表保持原样",
+			"a-none：本次探活 0 个，跳过 1 个，库里没有可用模型；可达性已记录，access 为 forbidden / missing 的模型不会进候选",
 			"b-live：本次探活 1 个，跳过 0 个，可用 1",
 		} {
 			if !strings.Contains(out, want) {
@@ -982,20 +1022,23 @@ func TestModelProbeMixedAccountsExitCode(t *testing.T) {
 			}
 		}
 
-		// 一号零可用，连它的手填列表也得保留，避免一次全跳过就把账号清空。
+		// 一号那条手填的名字留库、可达性停在 forbidden：行不删，但不再进候选。
 		none, err := st.GetAccount("a-none")
 		if err != nil {
 			t.Fatalf("读账号: %v", err)
 		}
-		if len(none.Models) != 1 || none.Models[0] != "keep-me" {
-			t.Fatalf("零可用账号的 accounts.models 被改动：%v", none.Models)
+		if len(none.Models) != 0 {
+			t.Fatalf("零可用账号的选号集合应为空，实际 %v", none.Models)
+		}
+		if row := st.ModelRow(t, "a-none", "keep-me"); row.Access != store.AccessForbidden {
+			t.Fatalf("keep-me 的可达性 = %+v，期望 forbidden", row)
 		}
 		live, err := st.GetAccount("b-live")
 		if err != nil {
 			t.Fatalf("读账号: %v", err)
 		}
 		if len(live.Models) != 1 || live.Models[0] != "m-b" {
-			t.Fatalf("可用账号的 accounts.models 应是 m-b，实际 %v", live.Models)
+			t.Fatalf("可用账号的选号集合应是 m-b，实际 %v", live.Models)
 		}
 	})
 }
@@ -1441,5 +1484,74 @@ func TestModelSyncEndpointOnlyHitsSelectedProvider(t *testing.T) {
 		if c.path != "/v1/models" {
 			t.Fatalf("不带 --endpoint 时应回到 /v1/models，实际 %+v", calls)
 		}
+	}
+}
+
+// TestAccountAddModelsWritesCatalog 确认 `account add --models` 的名字按新结构落库：
+// 目录里补一行（来源 manual，不带长度与价格），账号侧记一条 allowed，
+// 因此这个账号立刻进候选集合，`--json` 的 models 就是这份 allowed 名字集合。
+func TestAccountAddModelsWritesCatalog(t *testing.T) {
+	sandbox(t)
+	if code, _, stderr := run(t, "init"); code != 0 {
+		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := addAccount(t, "ds1", "custom", "http://127.0.0.1:9", "", "--key", "sk-test", "--models", "m1,m2"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	code, out, stderr := addAccount(t, "ds2", "custom", "http://127.0.0.1:9", "", "--key", "sk-test", "--models", "m3", "--json")
+	if code != 0 {
+		t.Fatalf("account add --json 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var added struct {
+		Models []string `json:"models"`
+	}
+	mustJSON(t, out, &added)
+	if len(added.Models) != 1 || added.Models[0] != "m3" {
+		t.Fatalf("account add --json 的 models = %v，期望就是手填的 m3", added.Models)
+	}
+
+	st := storetest.Open(t)
+	catalog, err := st.ProviderModels("custom")
+	if err != nil {
+		t.Fatalf("读目录: %v", err)
+	}
+	byName := make(map[string]store.ProviderModel, len(catalog))
+	for _, pm := range catalog {
+		byName[pm.Model] = pm
+	}
+	for _, want := range []string{"m1", "m2", "m3"} {
+		pm, ok := byName[want]
+		if !ok {
+			t.Fatalf("目录里没有 %s：%+v", want, catalog)
+		}
+		if pm.Source != store.SourceManual {
+			t.Fatalf("%s 的目录来源 = %q，期望 manual", want, pm.Source)
+		}
+		if pm.ContextWindow != nil || pm.MaxOutput != nil {
+			t.Fatalf("%s 的长度类元数据 = %v / %v，手填不提供这些，应当留空",
+				want, pm.ContextWindow, pm.MaxOutput)
+		}
+	}
+
+	acc, err := st.GetAccount("ds1")
+	if err != nil {
+		t.Fatalf("读账号: %v", err)
+	}
+	rows, err := st.AccountModels(acc.ID)
+	if err != nil {
+		t.Fatalf("读模型行: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("ds1 的模型行 = %+v，期望 m1、m2 两行", rows)
+	}
+	for _, row := range rows {
+		if row.Access != store.AccessAllowed {
+			t.Fatalf("%s 的可达性 = %q，期望 allowed", row.Model, row.Access)
+		}
+	}
+	if allowed, err := st.AllowedModels(acc.ID); err != nil {
+		t.Fatalf("读选号集合: %v", err)
+	} else if len(allowed) != 2 || allowed[0] != "m1" || allowed[1] != "m2" {
+		t.Fatalf("选号集合 = %v，期望 [m1 m2]", allowed)
 	}
 }
