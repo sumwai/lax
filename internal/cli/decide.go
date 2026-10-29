@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"sort"
@@ -431,12 +432,70 @@ type decideResponse struct {
 	Usage   json.RawMessage `json:"usage"`
 }
 
-// decideAnswer 是上游给一个问题的答案：noul 给 probability，choice 与 score 给 confidence
-// （DESIGN 第 4 节的 decide 一行）。两个字段都按可选处理，上游给了哪个就显示哪个。
+// decideAnswer 是上游给一个问题的答案。四种问题类型各自把结论平铺在顶层，不共用一个
+// `answer` 字段：noul 给 `noul`（是非的概率），choice 给 `choice` 与 `probabilities`，
+// score 给 `score`、`legend` 与 `probabilities`，box 给 `box`（DESIGN 5.14）。
+// 数值一律按可选处理：上游没给的列写 -，不补一个 0 冒充结论。
 type decideAnswer struct {
-	Answer      json.RawMessage `json:"answer"`
-	Probability *float64        `json:"probability"`
-	Confidence  *float64        `json:"confidence"`
+	Type          string             `json:"type"`
+	Noul          *float64           `json:"noul"`
+	Choice        string             `json:"choice"`
+	Score         *float64           `json:"score"`
+	Confidence    *float64           `json:"confidence"`
+	Probabilities map[string]float64 `json:"probabilities"`
+	Legend        map[string]string  `json:"legend"`
+}
+
+// decideAnswerCells 把一个答案拆成表格的三列：答案、概率、置信度。
+//
+// 三列的含义按问题类型定，而不是按字段位置猜：
+//   - noul 只给一个是非概率，没有「答案」可写，概率列就是它；
+//   - choice 的答案是选项名，概率取选中那一项的 probabilities[选项]；
+//   - score 的答案是分数本身，legend 里有对应级别时附在后面，概率取最接近那一级的。
+//   - 其余类型（box、以后新增的）没有列可拆，整个答案对象按 JSON 原文放进答案列。
+func decideAnswerCells(raw json.RawMessage, ans decideAnswer) (string, *float64, *float64) {
+	switch ans.Type {
+	case "noul":
+		return "-", ans.Noul, nil
+	case "choice":
+		if ans.Choice == "" {
+			return rawCell(raw), nil, ans.Confidence
+		}
+		return ans.Choice, probabilityOf(ans.Probabilities, ans.Choice), ans.Confidence
+	case "score":
+		if ans.Score == nil {
+			return rawCell(raw), nil, ans.Confidence
+		}
+		level := strconv.Itoa(int(math.Round(*ans.Score)))
+		text := strconv.FormatFloat(*ans.Score, 'f', -1, 64)
+		if label := strings.TrimSpace(ans.Legend[level]); label != "" {
+			text += "（" + label + "）"
+		}
+		return text, probabilityOf(ans.Probabilities, level), ans.Confidence
+	}
+	return rawCell(raw), nil, ans.Confidence
+}
+
+// probabilityOf 取某一项的的概率：概率表里没有这一项时返回 nil（写 -），
+// 不用 0 代替：0 在概率里是一个真实结论，与「上游没给」不是一回事。
+func probabilityOf(probabilities map[string]float64, key string) *float64 {
+	if probabilities == nil {
+		return nil
+	}
+	value, ok := probabilities[key]
+	if !ok {
+		return nil
+	}
+	return &value
+}
+
+// rawCell 把整份答案按 JSON 原文写成一列，用于没有专用列的类型。
+func rawCell(raw json.RawMessage) string {
+	text := string(bytes.TrimSpace(raw))
+	if text == "" {
+		return "-"
+	}
+	return text
 }
 
 // cmdDecide 是 systemone 决策请求的入口：把 state 与问题组发给本进程，打印每个问题的答案与概率。
@@ -576,7 +635,7 @@ func cmdDecide(e *Env, args []string) error {
 		})
 	}
 
-	var answers map[string]decideAnswer
+	var answers map[string]json.RawMessage
 	if len(env.Answers) > 0 {
 		if err := json.Unmarshal(env.Answers, &answers); err != nil {
 			return fmt.Errorf("响应里的 answers 不是对象：%v；用 switchboard log tail 看这一次的记录，或 switchboard account test %s 核对上游", err, target.account)
@@ -588,7 +647,7 @@ func cmdDecide(e *Env, args []string) error {
 
 	rows := make([][]string, 0, len(metas))
 	for _, meta := range metas {
-		answer, ok := answers[meta.name]
+		raw, ok := answers[meta.name]
 		kind := meta.kind
 		if kind == "" {
 			kind = "-"
@@ -598,9 +657,15 @@ func cmdDecide(e *Env, args []string) error {
 			rows = append(rows, []string{meta.name, kind, "（上游没有给答案）", "-", "-"})
 			continue
 		}
+		var parsed decideAnswer
+		_ = json.Unmarshal(raw, &parsed)
+		if kind == "-" && parsed.Type != "" {
+			kind = parsed.Type
+		}
+		text, probability, confidence := decideAnswerCells(raw, parsed)
 		rows = append(rows, []string{
-			meta.name, kind, decideAnswerCell(answer.Answer),
-			decideMetricCell(answer.Probability), decideMetricCell(answer.Confidence),
+			meta.name, kind, text,
+			decideMetricCell(probability), decideMetricCell(confidence),
 		})
 	}
 	fmt.Fprint(e.Stdout, renderTable([]string{"名称", "类型", "答案", "概率", "置信度"}, rows))

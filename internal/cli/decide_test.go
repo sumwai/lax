@@ -10,12 +10,13 @@ import (
 // `provider add/set --systemone`、`provider unset systemone`、`--default-protocol systemone`、
 // `switchboard decide` 的三种拼法与错误，以及 `call` 撞上 systemone 模型时的拒绝。
 
-// systemOneDecideOK 是假决策上游的正常响应：三个问题的答案加一行用量。
-// noul 给 probability，choice 与 score 给 confidence（见 DESIGN 第 4 节的 decide 一行）。
+// systemOneDecideOK 是假决策上游的正常响应：三个问题的答案加一行用量。答案按真实形状写：
+// 结论平铺在顶层（noul / choice / score），不共用一个 answer 字段（DESIGN 5.14）。
 const systemOneDecideOK = `{"answers":{` +
-	`"present":{"answer":"yes","probability":0.99},` +
-	`"mood":{"answer":"billing","confidence":0.87},` +
-	`"anger":{"answer":"mild","confidence":0.61}},` +
+	`"present":{"type":"noul","noul":0.99},` +
+	`"mood":{"type":"choice","choice":"billing","confidence":0.87,"probabilities":{"billing":0.9,"other":0.1}},` +
+	`"anger":{"type":"score","score":1.4,"confidence":0.61,"legend":{"0":"calm","1":"mild","2":"angry"},` +
+	`"probabilities":{"0":0.05,"1":0.34,"2":0.61}}},` +
 	`"usage":{"input_tokens":11,"output_tokens":4}}`
 
 // decideUpstream 是只说 systemone 的假上游：POST /v1/systemone 回一条固定响应，别的路径回 404。
@@ -216,9 +217,9 @@ func TestDecideNoulQuestions(t *testing.T) {
 		t.Fatalf("decide 的首行应写模型、账号与耗时: %s", out)
 	}
 	for _, want := range [][]string{
-		{"present", "noul", "yes", "0.99", "-"},
-		{"mood", "choice", "billing", "-", "0.87"},
-		{"anger", "score", "mild", "-", "0.61"},
+		{"present", "noul", "-", "0.99", "-"},
+		{"mood", "choice", "billing", "0.9", "0.87"},
+		{"anger", "score", "1.4（mild）", "0.34", "0.61"},
 	} {
 		if got := tableRow(t, out, want[0]); !equalFields(got, want) {
 			t.Fatalf("表格行 %v，期望 %v（整份输出：%s）", got, want, out)
@@ -280,7 +281,7 @@ func TestDecideQuestionsJSON(t *testing.T) {
 	if strings.Index(out, "mood") > strings.Index(out, "present") {
 		t.Fatalf("--questions 的输出应按名字升序: %s", out)
 	}
-	if got := tableRow(t, out, "mood"); !equalFields(got, []string{"mood", "choice", "billing", "-", "0.87"}) {
+	if got := tableRow(t, out, "mood"); !equalFields(got, []string{"mood", "choice", "billing", "0.9", "0.87"}) {
 		t.Fatalf("mood 行 = %v", got)
 	}
 
@@ -329,10 +330,10 @@ func TestDecideJSONOutput(t *testing.T) {
 	if payload.LatencyMS == nil || *payload.LatencyMS < 0 {
 		t.Fatalf("--json 应带非负的 latency_ms: %s", out)
 	}
-	if got := payload.Answers["present"]["answer"]; got != "yes" {
-		t.Fatalf("answers.present.answer = %v，期望 yes", got)
+	if got := payload.Answers["present"]["noul"]; got != 0.99 {
+		t.Fatalf("answers.present.noul = %v，期望 0.99", got)
 	}
-	if got := payload.Answers["mood"]; got["answer"] != "billing" {
+	if got := payload.Answers["mood"]["choice"]; got != "billing" {
 		t.Fatalf("answers 应原样带出每一个问题: %+v", payload.Answers)
 	}
 	if _, ok := payload.Usage["input_tokens"]; !ok {
