@@ -54,11 +54,13 @@ func cmdUsage(e *Env, args []string) error {
 		out := make([]map[string]any, 0, len(rows))
 		for _, r := range rows {
 			out = append(out, map[string]any{
-				"key":        r.Key,
-				"requests":   r.Requests,
-				"in_tokens":  r.InTokens,
-				"out_tokens": r.OutTokens,
-				"cost":       r.Cost,
+				"key":         r.Key,
+				"requests":    r.Requests,
+				"in_tokens":   r.InTokens,
+				"out_tokens":  r.OutTokens,
+				"cache_read":  r.CacheRead,
+				"cache_write": r.CacheWrite,
+				"cost":        r.Cost,
 			})
 		}
 		return e.printJSON(out)
@@ -71,7 +73,7 @@ func cmdUsage(e *Env, args []string) error {
 
 	headerName := map[string]string{"account": "账号", "model": "模型", "day": "日期"}[*by]
 	table := make([][]string, 0, len(rows))
-	var totalReq, totalIn, totalOut int64
+	var totalReq, totalIn, totalOut, totalCacheRead, totalCacheWrite int64
 	var totalCost float64
 	for _, r := range rows {
 		table = append(table, []string{
@@ -79,11 +81,15 @@ func cmdUsage(e *Env, args []string) error {
 			fmt.Sprintf("%d", r.Requests),
 			fmt.Sprintf("%d", r.InTokens),
 			fmt.Sprintf("%d", r.OutTokens),
+			fmt.Sprintf("%d", r.CacheRead),
+			fmt.Sprintf("%d", r.CacheWrite),
 			usage.Yuan(r.Cost),
 		})
 		totalReq += r.Requests
 		totalIn += r.InTokens
 		totalOut += r.OutTokens
+		totalCacheRead += r.CacheRead
+		totalCacheWrite += r.CacheWrite
 		totalCost += r.Cost
 	}
 	table = append(table, []string{
@@ -91,11 +97,18 @@ func cmdUsage(e *Env, args []string) error {
 		fmt.Sprintf("%d", totalReq),
 		fmt.Sprintf("%d", totalIn),
 		fmt.Sprintf("%d", totalOut),
+		fmt.Sprintf("%d", totalCacheRead),
+		fmt.Sprintf("%d", totalCacheWrite),
 		usage.Yuan(totalCost),
 	})
-	fmt.Fprint(e.Stdout, renderTable([]string{headerName, "请求", "输入 token", "输出 token", "估算花费"}, table))
+	fmt.Fprint(e.Stdout, renderTable(
+		[]string{headerName, "请求", "输入 token", "输出 token", "缓存读 token", "缓存写 token", "估算花费"}, table))
 	if totalCost == 0 {
 		fmt.Fprintln(e.Stdout, "花费为 0：账号没定价，加账号时给 --price-in 与 --price-out")
+	}
+	if totalCacheRead+totalCacheWrite > 0 {
+		// 缓存 token 只显示不折价（见 DESIGN 第 7 节），没说清就容易被当成已经算进花费。
+		fmt.Fprintln(e.Stdout, "缓存读写只显示、不计入估算花费：缓存单价与命中折扣各家不同，按原价折进去只会更错")
 	}
 	return nil
 }
@@ -228,6 +241,8 @@ func printRecords(e *Env, records []store.RequestRecord, names map[int64]string)
 				"ok":          r.OK,
 				"in_tokens":   r.InTokens,
 				"out_tokens":  r.OutTokens,
+				"cache_read":  r.CacheRead,
+				"cache_write": r.CacheWrite,
 				"latency_ms":  r.LatencyMS,
 				"error":       r.Error,
 			})
@@ -258,12 +273,14 @@ func printRecords(e *Env, records []store.RequestRecord, names map[int64]string)
 			status,
 			fmt.Sprintf("%d", r.InTokens),
 			fmt.Sprintf("%d", r.OutTokens),
+			fmt.Sprintf("%d", r.CacheRead),
+			fmt.Sprintf("%d", r.CacheWrite),
 			fmt.Sprintf("%dms", r.LatencyMS),
 			truncate(r.Error, 30),
 		})
 	}
 	fmt.Fprint(e.Stdout, renderTable(
-		[]string{"时间", "协议", "模型", "账号", "状态", "输入", "输出", "耗时", "错误"}, rows))
+		[]string{"时间", "协议", "模型", "账号", "状态", "输入", "输出", "缓存读", "缓存写", "耗时", "错误"}, rows))
 	return nil
 }
 

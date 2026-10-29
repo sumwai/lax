@@ -438,12 +438,16 @@ func (s *Store) RecentRequests(limit int) ([]RequestRecord, error) {
 }
 
 // UsageRow 是一行用量汇总。
+// CacheRead 与 CacheWrite 只是合计出来给人看与给脚本用：估算花费仍只按输入与输出折价，
+// 缓存读写的单价与命中折扣各家不同，没有价格参数时按原价折进去只会更错（见 DESIGN 第 7 节）。
 type UsageRow struct {
-	Key       string
-	Requests  int64
-	InTokens  int64
-	OutTokens int64
-	Cost      float64
+	Key        string
+	Requests   int64
+	InTokens   int64
+	OutTokens  int64
+	CacheRead  int64
+	CacheWrite int64
+	Cost       float64
 }
 
 // Usage 按 dimension 汇总 since 之后的请求。dimension 取 account、model 或 day。
@@ -463,6 +467,7 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 	const join = "LEFT JOIN accounts a ON a.id = r.account_id"
 
 	q := fmt.Sprintf(`SELECT %s AS k, COUNT(*), COALESCE(SUM(r.in_tokens),0), COALESCE(SUM(r.out_tokens),0),
+		COALESCE(SUM(r.cache_read),0), COALESCE(SUM(r.cache_write),0),
 		COALESCE(SUM(r.in_tokens * COALESCE(a.price_in,0) / 1e6 + r.out_tokens * COALESCE(a.price_out,0) / 1e6),0)
 		FROM requests r %s WHERE r.ts >= ? GROUP BY k ORDER BY 2 DESC`, expr, join)
 
@@ -475,7 +480,7 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 	var out []UsageRow
 	for rows.Next() {
 		var u UsageRow
-		if err := rows.Scan(&u.Key, &u.Requests, &u.InTokens, &u.OutTokens, &u.Cost); err != nil {
+		if err := rows.Scan(&u.Key, &u.Requests, &u.InTokens, &u.OutTokens, &u.CacheRead, &u.CacheWrite, &u.Cost); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
