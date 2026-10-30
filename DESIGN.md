@@ -1015,7 +1015,7 @@ M0 到 M13 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkel
 ## 8 代码结构
 
 ```
-cmd/lax/        main，只做 os.Exit(cli.Run(...))
+cmd/lax/                main，只做 os.Exit(cli.Run(...))
 internal/cli/           子命令分发、参数解析、输出格式
 internal/config/        路径解析与配置读写
 internal/store/         SQLite 连接、迁移、账号与请求记录的读写

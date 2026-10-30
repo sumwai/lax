@@ -210,7 +210,7 @@ anger    score   mild     -     0.61
 
 ```
 ANTHROPIC_BASE_URL=http://127.0.0.1:4567
-ANTHROPIC_AUTH_TOKEN=lax-local    # 本机网关不校验，填个非空值即可
+ANTHROPIC_AUTH_TOKEN=lax-local            # 本机网关不校验，填个非空值即可
 ANTHROPIC_MODEL=deepseek-v4-pro           # 必须是探活出来的可用模型名
 ```
 
