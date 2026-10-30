@@ -1,6 +1,6 @@
 ---
 name: guard
-description: switchboard 只读审查：凭据泄漏、并发、错误映射、流式中断处理
+description: lax 只读审查：凭据泄漏、并发、错误映射、流式中断处理
 tools: read, grep, find, ls
 ---
 

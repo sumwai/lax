@@ -1,8 +1,8 @@
-# switchboard 设计
+# lax 设计
 
 ## 1 这是什么
 
-本机上的模型总机。手上有几家模型的账号，客户端只连 `http://127.0.0.1:4567`，由 switchboard 挑账号、转协议、记用量。
+本机上的模型总机。手上有几家模型的账号，客户端只连 `http://127.0.0.1:4567`，由 lax 挑账号、转协议、记用量。
 
 入站收五种线协议，按路径区分：`POST /v1/messages` 是 anthropic，`POST /v1/chat/completions` 是 openai-chat，`POST /v1/responses` 是 openai-responses，`POST /v1beta/models/{model}:generateContent` 与 `:streamGenerateContent` 是 gemini，`POST /v1/systemone` 是 systemone。前四种之间可以互相转换，出站协议归属在模型上（见 5.7）；systemone 不参与转换，只与它自己互通（见 5.14）。入站协议与有效出站协议相同则直通，不同则经中间表示转换，前四种入站 × 前四种出站共十六种组合，流式与非流式都可用（gemini 的原生形状见 5.9）。
 
@@ -40,13 +40,13 @@
 
 ```bash
 # 1 初始化。建配置目录与数据库，重复执行不会覆盖已有配置
-$ switchboard init
-配置 /home/someone/.config/switchboard/config.json
-数据库 /home/someone/.local/share/switchboard/switchboard.db
+$ lax init
+配置 /home/someone/.config/lax/config.json
+数据库 /home/someone/.local/share/lax/lax.db
 
 # 2 加账号。key 加密后入库，不进配置文件。地址与默认协议都来自厂商行，账号只记厂商名
 #   （deepseek 显式存了 openai-chat，所以这个账号的出站协议就是它，见 5.8）
-$ switchboard account add deepseek-1 \
+$ lax account add deepseek-1 \
     --provider deepseek \
     --key sk-xxxxxxxx
 已添加 deepseek-1（deepseek，openai-chat，凭据 sk-x…）
@@ -56,21 +56,21 @@ $ switchboard account add deepseek-1 \
 #     至少给一条；路径写法由程序规整（前导斜杠、重复斜杠、末尾斜杠都不必纠结）。
 #     默认协议必须落在已声明的路由上。改一家已有的厂商用 provider set，
 #     删一条路由或清一项设置用 provider unset
-$ switchboard provider add acme --base-url https://api.example.com \
+$ lax provider add acme --base-url https://api.example.com \
     --openai /v1/chat/completions --anthropic /v1/messages
 已添加厂商 acme（https://api.example.com），2 条路由，默认协议 openai-chat
-$ switchboard provider unset acme anthropic
+$ lax provider unset acme anthropic
 acme 已清掉 anthropic 路由
 现有 1 条路由，默认协议 openai-chat
 
 # 3 拉上游模型列表
-$ switchboard model sync --account deepseek-1
+$ lax model sync --account deepseek-1
 账号        厂商      模型  新增  备注
 deepseek-1  deepseek  47    47
-下一步：switchboard model probe（每个模型发一条 max_tokens=1 的请求）
+下一步：lax model probe（每个模型发一条 max_tokens=1 的请求）
 
 # 4 逐个探活，能用的才进选号。已经探过且结论还新鲜（默认 24h 内）的模型会跳过，不花钱
-$ switchboard model probe --account deepseek-1
+$ lax model probe --account deepseek-1
 账号        模型              状态  HTTP  耗时   备注
 deepseek-1  deepseek-v4-pro   可用  200   412ms
 deepseek-1  deepseek-v4-fast  可用  200   388ms
@@ -80,36 +80,36 @@ deepseek-1：本次探活 47 个，跳过 0 个，可用 2，无权 45，不存�
 已把 2 个可用模型写进 deepseek-1，选号按这个列表走
 
 # 5 看一眼
-$ switchboard account ls
+$ lax account ls
 名称       厂商      协议         模型               优先级   状态
 deepseek-1  deepseek  openai-chat  2 可用 / 47 同步  100      正常
 
 # 6 起网关。前台运行，Ctrl-C 退出
-$ switchboard serve
+$ lax serve
 监听 127.0.0.1:4567
 入站 /v1/messages（anthropic）
 上游 1 个账号，2 个模型
 
 # 7 在客户端里把地址指过来，例如 Claude Code：
 #   ANTHROPIC_BASE_URL=http://127.0.0.1:4567
-#   ANTHROPIC_AUTH_TOKEN=switchboard-local（值随意，本机不校验）
+#   ANTHROPIC_AUTH_TOKEN=lax-local（值随意，本机不校验）
 #   ANTHROPIC_MODEL=deepseek-v4-pro
 
 # 8 观察。缓存读与缓存写是两列独立的数：命中通常更便宜、写入更贵，分开看才能对上账单
-$ switchboard log tail -n 5
+$ lax log tail -n 5
 时间           协议                   模型              账号        状态   输入  输出  思考  缓存读  缓存写  耗时   错误
 01-02 14:02:11 anthropic→anthropic    deepseek-v4-pro  deepseek-1  200    1831  402   0     15200   3210    1800ms
 01-02 14:01:52 anthropic→openai-chat  deepseek-v4-pro  deepseek-1  429 ✗  0     0     0     0       0       200ms  冷却 60s
 # 思考是独立的一列：上游把它报在输出之外时这里才有数，anthropic 自己把它算进输出 token，
 # 所以第一行是 0。是否单独计价不按这一列显示的数字猜，判定见 5.5。
 
-$ switchboard usage --since 7d --by account
+$ lax usage --since 7d --by account
 账号        请求  输入 token  输出 token  思考 token  缓存读 token  缓存写 token  估算花费
 deepseek-1  214   412330      98421      124800      1180000       240100        ¥1.87
 缓存读写已按账号的缓存单价计入估算花费，未填缓存单价时按输入价算
 
 # 9 排障。手工打一条，打印选号过程与上游原始响应
-$ switchboard call "hi" --model deepseek-v4-pro --debug
+$ lax call "hi" --model deepseek-v4-pro --debug
 选中 deepseek-1（priority 100，无冷却）
 → POST https://api.deepseek.com/v1/chat/completions
 ← 200 text/event-stream
@@ -137,22 +137,22 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 
 `account` 一组的子命令：`add`、`ls`、`set`、`rm`、`test`、`enable`、`disable`（`update` 作为 `set` 的同义词接受，帮助里只列 `set`）。`model` 一组的子命令：`ls`、`sync`、`probe`，后两个都支持 `--provider` 与 `--account` 筛选账号；`alias` 一组（`set`、`unset`、`ls`）维护模型别名，把客户端写死的模型名指到真实模型名上（见 5.12）；`price` 一组（`set`、`unset`、`ls`）维护模型单价，写的是目录里的厂商级标价与某个账号的覆盖价（见 5.13）。`provider` 一组的子命令：`ls`、`add`、`set`、`unset`、`rm`，维护厂商默认地址、模型列表覆盖与它的路由（见 5.8）；`header set`、`header unset`、`header ls` 维护上游除凭据头之外还要的附加请求头（见 5.10）；`add` 只新建，改一家已有厂商用 `set`，删一条路由或清掉一项设置用 `unset`（删除不做成「传空串」：空值一律是用法错误）。`--models` 只是手填的初始值，模型列表的常规来源是 `model sync` 拉取加 `model probe` 探活（见 5.7）。
 
-`account`、`model`、`provider`、`log` 四组支持 `-h`、`--help` 与 `help`：把该组的用途与子命令清单（每个子命令一行中文说明）打到 stdout，退出码 0，不读数据库。子命令自己的 `--help` 仍打印该子命令的参数清单。未知子命令退出码 2，提示里给出 `switchboard <组> --help`。`provider header` 这一组同样支持 `--help`，但它打印的是三条用法、一个示例与四种取值写法（见 5.10）：光列子命令说不清值怎么展开。`model alias` 这一组也一样：它的 `--help` 打印三条用法、一个示例与两段说明（别名只影响请求方向、客户端请求别名时 `log tail` 的模型列写成 `别名 → 真名`），光列子命令说不清别名改的是什么、不改的是什么。`model price` 同样按这个形状打印（三条用法、一个示例 `switchboard model price set glm-4.6 --in 0.6 --out 2.2`、两段说明：价格属于模型不属于账号；账号级只在套餐不同时覆盖，不影响其它账号）。
+`account`、`model`、`provider`、`log` 四组支持 `-h`、`--help` 与 `help`：把该组的用途与子命令清单（每个子命令一行中文说明）打到 stdout，退出码 0，不读数据库。子命令自己的 `--help` 仍打印该子命令的参数清单。未知子命令退出码 2，提示里给出 `lax <组> --help`。`provider header` 这一组同样支持 `--help`，但它打印的是三条用法、一个示例与四种取值写法（见 5.10）：光列子命令说不清值怎么展开。`model alias` 这一组也一样：它的 `--help` 打印三条用法、一个示例与两段说明（别名只影响请求方向、客户端请求别名时 `log tail` 的模型列写成 `别名 → 真名`），光列子命令说不清别名改的是什么、不改的是什么。`model price` 同样按这个形状打印（三条用法、一个示例 `lax model price set glm-4.6 --in 0.6 --out 2.2`、两段说明：价格属于模型不属于账号；账号级只在套餐不同时覆盖，不影响其它账号）。
 
 | 命令 | 参数 | 行为 | 输出 |
 | --- | --- | --- | --- |
 | `init` | `--force` | 建配置目录与数据目录，写默认配置；`--force` 覆盖 | 两个路径 |
 | `serve` | `--addr`、`--log-level` | 前台起网关，注册四条入站路由、`/healthz` 与两个只读的模型清单接口（`GET /v1/models`、`GET /v1/models/{id}`，见 5.2.1）；启动只统计账号与模型数，不发上游请求 | 启动摘要，之后按请求打日志 |
-| `account add` | `<名称> --provider --key [--models] [--priority]` | 加密存 key。价格不在账号上：模型单价属于供应商×模型，账号只在套餐不同时覆盖（`model price set`，见 5.13）。`--price-in`、`--price-out`、`--price-cache-read`、`--price-cache-write` 误敲仍是用法错误（退出码 2），文案说明价格已经只存在模型目录上并给出 `switchboard model price set` 的命令形状。地址与默认协议不落在账号上：转发时按账号的 `provider` 取厂商行的 `base_url` 与有效默认协议（见 5.8），因此不再有 `--base-url` 与 `--protocol` 两个参数；厂商不在表里时报错，列出已知厂商、编辑距离不超过 2 时给出最接近的名字，并提示先 `switchboard provider add <名称> --base-url <地址> --openai /v1/chat/completions` 再建账号。这两个参数删掉之后，误敲仍然是用法错误（退出码 2）：文案说清地址与默认协议已经只存在厂商行上，并给出 `provider add` 的命令（`--base-url`）或 `provider set --default-protocol`（`--protocol`）。`--models` 手工声明该账号可用的模型（写入按 5.13 的新结构：模型进 `provider_models`，账号侧记一条可用结论），留空则等 `model sync` 与 `model probe`。厂商行在、但一条路由都没声明不算错：此时算不出默认协议，账号照建，转发时按厂商默认协议推导，推导为空由转发层报错（见 5.8）；`--json` 里 `protocol` 与 `base_url` 报的是写完再读一次的派生值（厂商的默认协议与 `base_url`，算不出来时是空串），另有 `name`、`provider`、`models`（这个账号 `access='allowed'` 的名字集合，写完再读一次）、`key`（掩码）。 | 确认一行（名称、厂商、默认协议、脱敏凭据），协议算不出来时写 `-` |
+| `account add` | `<名称> --provider --key [--models] [--priority]` | 加密存 key。价格不在账号上：模型单价属于供应商×模型，账号只在套餐不同时覆盖（`model price set`，见 5.13）。`--price-in`、`--price-out`、`--price-cache-read`、`--price-cache-write` 误敲仍是用法错误（退出码 2），文案说明价格已经只存在模型目录上并给出 `lax model price set` 的命令形状。地址与默认协议不落在账号上：转发时按账号的 `provider` 取厂商行的 `base_url` 与有效默认协议（见 5.8），因此不再有 `--base-url` 与 `--protocol` 两个参数；厂商不在表里时报错，列出已知厂商、编辑距离不超过 2 时给出最接近的名字，并提示先 `lax provider add <名称> --base-url <地址> --openai /v1/chat/completions` 再建账号。这两个参数删掉之后，误敲仍然是用法错误（退出码 2）：文案说清地址与默认协议已经只存在厂商行上，并给出 `provider add` 的命令（`--base-url`）或 `provider set --default-protocol`（`--protocol`）。`--models` 手工声明该账号可用的模型（写入按 5.13 的新结构：模型进 `provider_models`，账号侧记一条可用结论），留空则等 `model sync` 与 `model probe`。厂商行在、但一条路由都没声明不算错：此时算不出默认协议，账号照建，转发时按厂商默认协议推导，推导为空由转发层报错（见 5.8）；`--json` 里 `protocol` 与 `base_url` 报的是写完再读一次的派生值（厂商的默认协议与 `base_url`，算不出来时是空串），另有 `name`、`provider`、`models`（这个账号 `access='allowed'` 的名字集合，写完再读一次）、`key`（掩码）。 | 确认一行（名称、厂商、默认协议、脱敏凭据），协议算不出来时写 `-` |
 | `account ls` | `--json` | 列账号、模型数、是否处在冷却；模型列按可达性统计，两种情况：`account_models` 有行时显示「N 可用 / M 已登记」（分子数 `access='allowed'` 的行，分母数这个账号在 `account_models` 里的全部行；分母写「已登记」而不是「已同步」，因为同步、手填与探活都会留行，其中同步与手填的行还没探过。零可用同样走这条分支，「0 可用 / M 已登记」说明这个账号眼下接不了任何模型），一行都没有时写「无模型（先 model sync）」——没有行表示该账号不提供任何模型、不参与候选，不写成「不限」这类看起来表示「什么模型都收」的文案；地址列与协议列都取厂商行：地址是该厂商的 `base_url`（厂商 `base_url` 为空时写 `-`，与 `provider ls` 同一种写法，见 5.8），协议是该厂商的有效默认协议（`store.Account.Protocol` 这个派生值，算不出来时写 `-`）；存在与默认协议不同的已发现协议时写成「openai-chat + 另 1 种」；`--json` 每行的 `base_url`、`protocol` 与两列同源（厂商行不在时都是空串），另多 `models_usable`、`models_synced` 两个计数与 `protocols`（默认协议在前，其余是模型行上发现到的协议；默认协议为空串时不把空串放进列表），两个计数与文本同源：`models_usable` 是 `access='allowed'` 的行数，`models_synced` 是 `account_models` 的全部行数，`models_synced` 为 0 就是文本的「无模型」，`models` 是这份 allowed 名字集合（与 `models_usable` 同源，不含 forbidden / missing / error 的行） | 表格 |
-| `account set` | `<名称> [--key <key>]` | 换掉已有账号的凭据，不删号重建：删号会丢掉 `account_models` 里的探活结果、协议发现与请求记录的账号归属。`--key` 的三种给法与 `account add` 一致（直接写值、`--key -` 从标准输入读、留空读 `SWITCHBOARD_KEY`），解析不出凭据时是用法错误（退出码 2 并打出用法）——价格参数已经不在这条命令上，换凭据是它唯一的作用。key 走同一条加密路径覆盖 `key_cipher`，明文不进日志、不进 `--json` 输出。旧凭据的结论一并作废：同一个事务里清掉 `cooldown_until`、`fail_streak`、`last_error` 并把账号重新启用（`enabled=1`），写入口是 `store.RotateKey`。不动 `account_models` 与协议发现结果，也不碰厂商表与模型目录——账号的地址与默认协议是厂商行的派生值（见 5.8），换凭据不该影响它们，价格也不在账号上（见 5.13，改价用 `model price set`）。账号不存在时报错并提示先 `switchboard account add`。只接受 `--key` 一个参数；`--price-in` 一类误敲是用法错误（退出码 2）并指向 `model price set`。`--key` 给了就走 `store.RotateKey`（同事务清冷却、`fail_streak`、`last_error` 并重新启用），换凭据是这条子命令唯一的作用，凭据在动库之前就要能解析出来 | 确认一行（账号名、厂商、脱敏凭据、是否清了冷却）；`--json` 含 `name`、`key_rotated`、`key`（掩码）、`cooldown_cleared`、`fail_streak_cleared`、`enabled` |
+| `account set` | `<名称> [--key <key>]` | 换掉已有账号的凭据，不删号重建：删号会丢掉 `account_models` 里的探活结果、协议发现与请求记录的账号归属。`--key` 的三种给法与 `account add` 一致（直接写值、`--key -` 从标准输入读、留空读 `LAX_KEY`），解析不出凭据时是用法错误（退出码 2 并打出用法）——价格参数已经不在这条命令上，换凭据是它唯一的作用。key 走同一条加密路径覆盖 `key_cipher`，明文不进日志、不进 `--json` 输出。旧凭据的结论一并作废：同一个事务里清掉 `cooldown_until`、`fail_streak`、`last_error` 并把账号重新启用（`enabled=1`），写入口是 `store.RotateKey`。不动 `account_models` 与协议发现结果，也不碰厂商表与模型目录——账号的地址与默认协议是厂商行的派生值（见 5.8），换凭据不该影响它们，价格也不在账号上（见 5.13，改价用 `model price set`）。账号不存在时报错并提示先 `lax account add`。只接受 `--key` 一个参数；`--price-in` 一类误敲是用法错误（退出码 2）并指向 `model price set`。`--key` 给了就走 `store.RotateKey`（同事务清冷却、`fail_streak`、`last_error` 并重新启用），换凭据是这条子命令唯一的作用，凭据在动库之前就要能解析出来 | 确认一行（账号名、厂商、脱敏凭据、是否清了冷却）；`--json` 含 `name`、`key_rotated`、`key`（掩码）、`cooldown_cleared`、`fail_streak_cleared`、`enabled` |
 | `account rm` | `<名称>` | 删账号，同时删掉它的 `account_models` 行；关联的请求记录保留 | 确认一行 |
 | `account test` | `<名称>` | 分两步探活，先证明地址通、再证明凭据有效。第一步 `GET` 模型列表，地址与凭据头跟 `model sync` 同一套规则解析（厂商级覆盖 → 该账号的默认协议那条路由 → 同厂商按协议名排序的第一条非空 `models_path`，整条地址直接访问；凭据头跟取到地址的那条路由的协议，见 5.7），2xx 只说明地址通、上游连得上，同时报出上游模型数（与 `model sync` 同一套形状解析，解析不了只说明「上游返回的不是模型列表」，不判失败）；**列表 2xx 之后仍然**发一条 `max_tokens=1` 的请求证明凭据有效——列表接口是公开接口时任何 key 都能换回 200，前者不作数。列表返回 404 或 405（这家没有列表接口）、403（可能被网关拦）、取不到列表地址或连不上时同样走这条最小调用；模型名按这个顺序取：账号 `accounts.models` 的第一个非空名字 → 列表那一步拿到的第一个模型名（与 `model sync` 同一份解析、按名字排序去重后的第一项）→ 默认模型名 `default`，备注写清用的是哪一个与来源（账号清单 / 上游清单 / 兜底默认名）。两段都通过才判正常，状态与退出码按调用那段算；列表接口自己回 401/429/5xx/其它 4xx 时已经是凭据或上游的结论，不再花一次调用。两段的状态处理一致：2xx → 启用账号并清掉冷却、`last_error` 与 `fail_streak`；401 → 停用账号并把错误写进 `last_error`；429/5xx 与连接层失败（连不上、超时，一条 HTTP 响应都没拿到）→ 按连续失败次数与三档打冷却（见 5.3）；其它 4xx → 只报原话、不动状态。它只判凭据与连通性，模型是否可用由 `model probe` 决定 | 表格（账号 / 状态 / HTTP / 耗时 / 上游模型数 / 备注），状态与 HTTP 取调用那段，耗时取得出结论那一阶段的耗时，上游模型数取列表那段（列表接口没通时显示 `-`），备注写清两段各自的结果（列表接口可用、上游几个模型；模型调用可用还是失败）；`--json` 含 `account`、`stage`（`models` 或 `call`）、`status`、`ok`、`models`（数量，未知为 0）、`latency`、`message`，以及 `list` 对象（列表那一段的 `stage`、`status`、`ok`、`models`、`latency`、`message`） |
 | `account enable` | `<名称>` | 重新启用账号并清冷却 | 确认一行 |
 | `account disable` | `<名称>` | 停用账号，不再参与选号 | 确认一行 |
 | `model ls` | `[--provider 厂商]` `[--account 账号]` `--json` | 按模型名列出提供它的账号、目录里的元数据与计价来源，一行一个模型名；账号列写成「账号(状态)」，状态取 `account_models.access`：`allowed` 且 `checked_at` 不为 0 是「可用」，`allowed` 但没探过是「待探活」，`forbidden` 是「无权」，`missing` 是「不存在」，`error` 是「失败」（凭据被拒在库里落成 `error`，模型层面无从区分）；协议列是该模型在这个账号上的有效出站协议，取值只经 `store.EffectiveModels`（账号覆盖 → 目录里的协议集合 → 厂商的有效默认协议，见 5.13），cli 不重算合并规则；另有三列目录元数据：上下文长度、最大输出（`store.EffectiveModels` 的合并结果，账号覆盖 → 目录）与支持的协议集合（只在 `provider_models.protocols` 里，账号侧没有协议集合的覆盖值），目录里没填的写 `-`；价格列是合并之后的模型单价（账号覆盖 → 厂商级标价，见 5.13），两项都是空时写「未定价」。一行模型行都没有时输出一行提示，下一步是 `model sync` 与 `model probe`，也可以用 `account add --models` 手填；`--json` 每项含 `model`、`accounts`（每项 `name`、`status`（`access` 原文）、`protocol`）、`context_window`、`max_output`、`protocols`（空集合是空数组，不是 null）、`price_in`、`price_out` | 表格（模型 / 账号 / 协议 / 上下文长度 / 最大输出 / 支持协议 / 输入价 / 输出价） |
 | `provider ls` | `--json` | 列厂商、`base_url`、默认协议、模型列表、各协议的路由与备注；`base_url` 为空的厂商（它的路由与模型列表地址都是整条地址，见 5.8）地址列显示 `-`，`--json` 的 `base_url` 是空串；默认协议是该厂商的有效默认协议（显式值落在已声明路由上就用它，否则按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 取第一条，见 5.8），一条路由都没有时显示 `-`，不算错误；模型列表列：厂商级 `models_path` 非空就显示它，否则显示各路由自己的 `models_path`（多条路由共用一个路径时只显示一次），都没有时显示 `-`；路由列与 `--json` 的 `protocols` 原样带出 gemini 路由，`path` 里的 `{model}` 占位符照库里存的写，命令行不展开它（见 5.9）；`--json` 每项含 `name`、`base_url`、`default_protocol`、`models_path`、`protocols`（每项 `protocol`、`path`、`models_path`）、`note`，没有路由时 `default_protocol` 为空串、`protocols` 为空数组 | 表格 |
-| `provider add` | `<名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径或整条地址>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]` | 只新建：名称已在厂商表里时报错（「厂商 X 已存在，改用 switchboard provider set X 修改」），绝不顺手改已有的行。`--base-url` 可以省略，条件是这次声明的每一条路由与 `--models-path`（给了的话）都是整条地址：那时它拼不进任何地址，写一个只为过校验的地址只是无效配置（见 5.8）；有一条相对路径时缺它仍是用法错误，文案说清「这条路由是相对路径，需要 --base-url，或把它写成整条地址」，判定只有 `store` 一份（`requireBaseURLCoverage`），cli 把 `store.ErrBaseURLRequired` 包成用法错误。给了就校验并规整，走 `store.NormalizeBaseURL`（见 5.8），cli 不另写一份 scheme/主机名预检：必须是带主机名的完整地址，`https://` 这种只有 scheme 的写法是用法错误（退出码 2，文案说明缺主机名并给正确例子）；scheme 大小写不敏感（`HTTPS://host/` 能用），落库时归一成小写、路径里重复斜杠合并、末尾斜杠去掉。至少要给一条协议路由，一条都不给是用法错误（不再需要这家厂商就用 `provider rm`）。四个协议 flag 各声明 `(厂商, 协议)` 的一条路由，值可以是相对 `base_url` 的完整路径，也可以是整条地址（含 `://`，见 5.8）：相对路径只规整不拒绝，`v1/chat/completions`、`//v1//chat/completions`、`/v1/chat/completions/` 都落成同一个地址，不报错，只有规整之后为空才算缺值；整条地址校验 scheme 与主机名（`https://`、`https:///x`、`ftp://host/x` 都是用法错误，退出码 2，文案指出缺的是主机名还是 scheme 不对），路径部分照旧规整、查询串与 `#` 之后原样保留，使用时不再拼 `--base-url`。同一个 `base_url` 上不同协议落在不同域名时，协议 flag 直接写整条地址：`switchboard provider add myco --base-url https://api.example.com --openai https://openai.example.com/v1/chat/completions --anthropic https://claude.example.com/v1/messages`。`--gemini` 与另外三个同一套写法，声明的是 `(厂商, gemini)` 那条路由：gemini 的入站与出站都可用，非流式与流式都有（见 5.9），路径里可以写 `{model}` 占位符，cli 只规整斜杠，花括号与冒号原样落库，占位符在发请求之前才由网关换成模型名。`--help` 里四个协议 flag 都列出来，`--gemini` 的示例是真实形状：`switchboard provider add google-gemini --base-url https://generativelanguage.googleapis.com --gemini /v1beta/models/{model}:generateContent --default-protocol gemini`。没给每条路由的模型列表路径时按规则自动填：`openai`（openai-chat）路由把尾部 `/chat/completions` 换成 `/models`（`/v1/chat/completions` → `/v1/models`、`/chat/completions` → `/models`），其余协议留空表示回退到同厂商其它协议的非空值（见 5.8）。`--models-path` 是厂商级覆盖，收同样两种写法（相对路径或整条地址），整条地址同样要带主机名。`--default-protocol` 是这家的默认协议，取值是命令行写法 `anthropic`、`openai`、`responses`、`gemini`（也认线协议全名 `openai-chat`、`openai-responses`，`openai` 就是 chat，`gemini` 两种写法同形），必须落在这次声明的路由上，否则整笔拒绝、退出码 1、一条路由都不落库；缺省时按固定顺序 `openai` → `responses` → `anthropic` 取第一条已声明的路由。取值参数传给空串（或只有斜杠这类规整之后为空的写法）是用法错误，删除与清空见 `provider unset` | 确认一行（地址、默认协议、几条路由） |
+| `provider add` | `<名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径或整条地址>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]` | 只新建：名称已在厂商表里时报错（「厂商 X 已存在，改用 lax provider set X 修改」），绝不顺手改已有的行。`--base-url` 可以省略，条件是这次声明的每一条路由与 `--models-path`（给了的话）都是整条地址：那时它拼不进任何地址，写一个只为过校验的地址只是无效配置（见 5.8）；有一条相对路径时缺它仍是用法错误，文案说清「这条路由是相对路径，需要 --base-url，或把它写成整条地址」，判定只有 `store` 一份（`requireBaseURLCoverage`），cli 把 `store.ErrBaseURLRequired` 包成用法错误。给了就校验并规整，走 `store.NormalizeBaseURL`（见 5.8），cli 不另写一份 scheme/主机名预检：必须是带主机名的完整地址，`https://` 这种只有 scheme 的写法是用法错误（退出码 2，文案说明缺主机名并给正确例子）；scheme 大小写不敏感（`HTTPS://host/` 能用），落库时归一成小写、路径里重复斜杠合并、末尾斜杠去掉。至少要给一条协议路由，一条都不给是用法错误（不再需要这家厂商就用 `provider rm`）。四个协议 flag 各声明 `(厂商, 协议)` 的一条路由，值可以是相对 `base_url` 的完整路径，也可以是整条地址（含 `://`，见 5.8）：相对路径只规整不拒绝，`v1/chat/completions`、`//v1//chat/completions`、`/v1/chat/completions/` 都落成同一个地址，不报错，只有规整之后为空才算缺值；整条地址校验 scheme 与主机名（`https://`、`https:///x`、`ftp://host/x` 都是用法错误，退出码 2，文案指出缺的是主机名还是 scheme 不对），路径部分照旧规整、查询串与 `#` 之后原样保留，使用时不再拼 `--base-url`。同一个 `base_url` 上不同协议落在不同域名时，协议 flag 直接写整条地址：`lax provider add myco --base-url https://api.example.com --openai https://openai.example.com/v1/chat/completions --anthropic https://claude.example.com/v1/messages`。`--gemini` 与另外三个同一套写法，声明的是 `(厂商, gemini)` 那条路由：gemini 的入站与出站都可用，非流式与流式都有（见 5.9），路径里可以写 `{model}` 占位符，cli 只规整斜杠，花括号与冒号原样落库，占位符在发请求之前才由网关换成模型名。`--help` 里四个协议 flag 都列出来，`--gemini` 的示例是真实形状：`lax provider add google-gemini --base-url https://generativelanguage.googleapis.com --gemini /v1beta/models/{model}:generateContent --default-protocol gemini`。没给每条路由的模型列表路径时按规则自动填：`openai`（openai-chat）路由把尾部 `/chat/completions` 换成 `/models`（`/v1/chat/completions` → `/v1/models`、`/chat/completions` → `/models`），其余协议留空表示回退到同厂商其它协议的非空值（见 5.8）。`--models-path` 是厂商级覆盖，收同样两种写法（相对路径或整条地址），整条地址同样要带主机名。`--default-protocol` 是这家的默认协议，取值是命令行写法 `anthropic`、`openai`、`responses`、`gemini`（也认线协议全名 `openai-chat`、`openai-responses`，`openai` 就是 chat，`gemini` 两种写法同形），必须落在这次声明的路由上，否则整笔拒绝、退出码 1、一条路由都不落库；缺省时按固定顺序 `openai` → `responses` → `anthropic` 取第一条已声明的路由。取值参数传给空串（或只有斜杠这类规整之后为空的写法）是用法错误，删除与清空见 `provider unset` | 确认一行（地址、默认协议、几条路由） |
 | `provider set` | `<名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径或整条地址>] [--models-path <路径>] [--default-protocol <协议>] [--note <备注>]` | 只设值，不承担删除：只改传入的字段，其余一律保留。协议 flag 覆盖或新增那条路由的路径（写法与 `provider add` 同一套：相对路径只规整，整条地址校验后直接使用；gemini 路由的 `{model}` 占位符同样原样保留），`--default-protocol` 与 `--models-path` 换新值（`--models-path` 同样收两种写法），`--note` 换备注。任何取值参数传空串（例如 `--openai ""`、`--note ""`）都是用法错误、文案指向 `provider unset`，路径参数只有斜杠这类规整之后为空的写法同样算空值，不做「空串即删除」的约定：误敲一个空引号不该把已有路由或备注抹掉。改完之后默认协议必须仍指向一条存在的路由，否则整笔拒绝并提示先加路由或改默认协议。把一条路由从整条地址改成相对路径、同时没给 `--base-url`、库里也没有地址时同样整笔拒绝（文案与 `provider add` 同一份，指向「给 --base-url 或写成整条地址」；要一起改就在同一次调用里带上 `--base-url`），退出码 2。没给模型列表路径的路由按 `openai` 推导规则重算，手工填过的值保持不动。厂商不存在时报错并提示用 `provider add` 新建；一个参数都不给是用法错误 | 确认一行（改了几项、现有几条路由、默认协议） |
 | `provider unset` | `<名称> <字段> [<字段>...]` | 删除必须显式声明：`anthropic`、`openai`、`responses`、`gemini` 删掉那条协议路由，`models-path` 清掉厂商级覆盖、回到按路由取，`default-protocol` 清掉显式值、回到 `openai` → `responses` → `anthropic` 固定顺序取第一条路由，`note` 清空备注。字段是位置参数，一次可以给多个，重复的只处理一次。要删的项本来就不存在时不报错（幂等），输出一行说明「X 本来就没有 …」。`base-url` 与厂商名不能 unset：前者清掉之后相对路径的路由就拼不出完整地址（改地址用 `provider set --base-url`，本来就不需要地址的厂商应该从一开始就省略这个参数），后者是主键、清不掉，两者都报错说明原因；未知字段、带 `--` 前缀、大小写不符报错并列出可用字段。删到一条路由都不剩时整笔拒绝并指向 `provider rm <名称>`；删掉的路由正好是默认协议时同样整笔拒绝，文案由 store 给，列出仍然声明的协议并给出 `provider set <名称> --default-protocol <协议>` 与 `provider unset <名称> default-protocol` 两条出路（cli 不另算一份回退规则），同一次调用里带上 `default-protocol` 即放行。`--json` 输出与 `provider ls` 的单项同形 | 逐项确认（清掉了什么 / 本来就没有）+ 现有几条路由与默认协议 |
 | `provider rm` | `<名称> [--force]` | 删除厂商行与它的全部路由行；仍有账号指向该厂商时列出这些账号并拒绝。加 `--force` 才删，走 `store.DeleteProviderForce`：同一个事务里把这些账号停用（`enabled=0` 并写明 `last_error`，见 5.8），因为它们的地址与路由随厂商一起没了，留在选号池里必然 502；账号行、凭据与模型清单都不删，重建厂商或改账号的厂商之后 `account enable` 就能接着用 | 确认一行（删了几条路由），`--force` 时另有一行列出被停用的账号；`--json` 含 `removed`、`routes`、`accounts`（指向它的账号名） |
@@ -161,7 +161,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | `provider header ls` | `[<厂商>]` `--json` | 列已声明的附加请求头：不给厂商就列全部厂商的，给了就只列这一家（厂商不在表里时报错、退出码 1，不把「写错厂商名」显示成「一条头都没有」）。文本四列：厂商、协议（厂商级显示 `-`）、头名、值（脱敏）。值一律走 `ProviderHeader.Masked`，只露前四位：值可能是密钥（会话 token、自定义鉴权头），完整值不打印，`--json` 也一样。厂商级与协议级各占一行，同一头名两边都有时两行都在，协议列就是区分；合并后的有效集合（协议级按同名覆盖厂商级，见 5.10）不在这里展开，转发时才算 | 表格；一条都没有时输出一行提示与一条示例命令；`--json` 是数组，每项 `provider`、`protocol`（空串是厂商级）、`name`、`value`（脱敏）、`value_masked`（恒 true，说明 `value` 不是明文） |
 | `model sync` | `[--provider 厂商]` `[--account 账号]` `[--endpoint <路径>]` | 对选中的账号 GET 上游模型列表：地址按厂商的 `models_path` 覆盖、该账号的默认协议那条路由的 `models_path`、同厂商按协议名排序的第一条非空 `models_path` 的顺序取，都没有时按 `base_url` 后缀猜；凭据头跟「实际取到这条路径的那条路由」的协议走，不是账号的默认协议（见 5.7）。`--endpoint` 只影响这一次调用，值是相对账号的 `base_url` 的完整路径，也可以是整条地址（见 5.8；相对路径只规整，`v1/models` 与 `//v1//models/` 都可用；整条地址直接访问、不再拼 `base_url`），给了就压过厂商覆盖与路由，作用于被选中的每个账号；传空值或只有斜杠是用法错误，整条地址缺主机名、scheme 不是 http(s) 同样是用法错误（退出码 2，文案指出缺什么），不需要临时覆盖就整个去掉这个参数；解析 `{data:[{id}]}`、`{models:[{…}]}` 与顶层数组三种形状（见 5.7），按名字排序去重，空列表算该账号失败。结果写「目录 + 该账号可达性」（见 5.13）：名字进 `provider_models`（同步只说明这个名字存在，不写长度、价格与能力位），该账号在 `account_models` 里的这些名字标 `access='allowed'`；已有的行只改可达性，`http_status`、`error`、`checked_at` 与协议发现一律保留，这一轮清单里没出现的行也不删——可达性只由探活结论改动。抓取走 `gateway.SyncModelsWithEndpoint`，写库走 `store.ReplaceModels`，cli 不自己拼 SQL。某个账号失败时其余账号照常处理完 | 表格（账号 / 厂商 / 模型 / 新增 / 备注）与下一步 `model probe` 的提示；`--json` 是数组，每项 `account`、`provider`、`models`、`added`、`error`（只有失败才有） |
 | `model probe` | `[--provider 厂商]` `[--account 账号]` `[--sync]` `[--model 模型]` `[--limit N]` `[--concurrency N]` `[--max-age 时长]` `[--refresh]` | 逐账号对每个模型发一条 `max_tokens=1` 的请求判定可用性，结果写 `account_models.access`（`allowed` / `forbidden` / `missing` / `error`，协议发现另写 `protocol`），每次上游调用同时写一行 `requests`（见 5.5）。选号本来就只读 `access='allowed'`（见 5.13），探活因此不再回写另一份模型清单：探完一条，这个账号能不能用这个模型当场就有答案。跳过规则不变：`allowed`、`forbidden`、`missing` 且 `checked_at` 在 `--max-age`（默认 `24h`）以内的模型跳过，不发上游请求、不写库、不出现在输出里；`error`（含凭据被拒）与 `checked_at` 为 0 的照常探；`--refresh` 或 `--max-age 0` 忽略新鲜度全部重探。没有模型行或带 `--sync` 时先同步；`--model` 只探一个模型名，`--limit` 截断的是跳过之后剩下的待探模型，`--concurrency` 默认 4 且不超过待探模型数；待探模型被全部跳过时一条上游请求都不发，库里已有的 `allowed` 行照旧算数，这个账号因此算作已满足；任一账号出现 401 即停止后续账号并返回错误（已经探完的行留在库里，凭据被拒的那条落成 `error`，下一轮重探）；所有账号库里都零 `allowed` 时退出码 1，错误信息带本次探活数与跳过数，并说明可达性已记录、`access` 为 `forbidden` / `missing` 的模型不会进候选 | 表格（账号 / 模型 / 状态 / HTTP / 耗时 / 备注）与该账号的「本次探活 N 个 / 跳过 M 个」、可用 / 无权 / 不存在 / 失败计数与「可达 N 个」（这个账号库里 `access='allowed'` 的行数）；零可用的账号改说一句「库里没有可用模型；可达性已记录，`access` 为 forbidden / missing 的模型不会进候选」，不再说「模型列表保持原样」——探活的结论现在直接就是选号依据；`--json` 是数组，每项 `account`、`model`、`status`、`http_status`、`latency_ms`、`message`，只含本次被探的模型，计数只出现在人读输出里。人读输出在 stderr 用单行原地刷新（`\r`）打实时进度，形如 `ds1 探活中 37/94  deepseek-v4.1-flash`：账号名、已完成 / 待探总数、最近完成的那个模型（并发大于 1 时显示刚回来的那个），被跳过的模型不计入总数；账号探完补一个换行，随后照旧打印汇总行与表格。进度只在 stderr 是终端时开，非终端（管道、CI、测试）与 `--json` 一个字节都不打，标准输出始终只有结果 |
-| `model alias set` | `<别名> <目标>` | 覆盖语义：同一个别名再写一次就是改目标（`created_at` 不动），不存在就新建，不报错也不留旧行。参数个数不对、别名或目标为空（含只有空白）是用法错误（退出码 2，打出用法行）；名字里的控制字符、别名等于目标、别名与真实模型名同名，判定都在 `store.SetModelAlias` 这一处（见 5.12）。遮蔽真名是运行失败（退出码 1），文案由 store 给（写清命中的是哪个账号或哪家厂商的目录、下一步换个别名还是改哪一处），cli 原样带出、不另写一份规则。写完再解析一次：成环与超过 8 跳当场报出来，文案说明这一行已经进库并给出查看与撤掉两条命令，不等到请求时才炸。目标可以暂时没有任何账号提供：先把别名写好，之后加账号即生效 | 确认一行（`已设置别名 <别名> → <目标>`）与下一步 `switchboard model alias ls`；`--json` 含 `alias`、`target`、`resolved`（解析到的真实模型名）、`ok` |
+| `model alias set` | `<别名> <目标>` | 覆盖语义：同一个别名再写一次就是改目标（`created_at` 不动），不存在就新建，不报错也不留旧行。参数个数不对、别名或目标为空（含只有空白）是用法错误（退出码 2，打出用法行）；名字里的控制字符、别名等于目标、别名与真实模型名同名，判定都在 `store.SetModelAlias` 这一处（见 5.12）。遮蔽真名是运行失败（退出码 1），文案由 store 给（写清命中的是哪个账号或哪家厂商的目录、下一步换个别名还是改哪一处），cli 原样带出、不另写一份规则。写完再解析一次：成环与超过 8 跳当场报出来，文案说明这一行已经进库并给出查看与撤掉两条命令，不等到请求时才炸。目标可以暂时没有任何账号提供：先把别名写好，之后加账号即生效 | 确认一行（`已设置别名 <别名> → <目标>`）与下一步 `lax model alias ls`；`--json` 含 `alias`、`target`、`resolved`（解析到的真实模型名）、`ok` |
 | `model alias unset` | `<别名>` | 删不到时报错并列出当前有哪些别名（多半是别名写错了），退出码 1：没删掉而静默当成功，会让人以为客户端那个名字已经能解析。一条别名都没有时把下一步写成设置一条的命令。参数个数不对与空值是用法错误（退出码 2） | 确认一行（删掉的是哪个别名、还剩几条）；`--json` 含 `alias`、`removed`、`remaining` |
 | `model alias ls` | `[<别名>]` `--json` | 不给别名就列全部（按别名升序），给了就只列这一条；别名不在表里时报错并列出已有的（退出码 1），不把写错一个字母显示成「一条别名都没有」。能不能解析问 `store.ResolveModelAlias`，cli 不自己走链：链断了（成环、超过 8 跳）时状态写「不可解析」，解析列写 store 的原文——它带着是哪几条串在一起，照着就能找到要改的那一条。别名链解析到真名才算可解析，「目标眼下没有账号提供」不影响这一列（那是请求到达时 404 的事，见 5.12）。一条别名都没有时输出一行提示与一条 `model alias set` 示例 | 表格（别名 / 目标 / 状态 / 解析）；`--json` 是数组，每项 `alias`、`target`、`resolved`（解析到的真实模型名，不可解析时为空串）、`ok` |
 | `model price set` | `<模型> [--provider 供应商] [--account 账号] [--in N] [--out N] [--cache-read N] [--cache-write N]` | 写模型单价（每百万 token 的浮点，0 是合法值，负数是用法错误、退出码 2），价格归属见 5.13。两个作用域互斥：给 `--account` 写该账号在这个模型上的覆盖价（账号必须有这个模型的可达性行，否则报错并提示先 `model sync` 或 `model probe`），否则写厂商级标价（`--provider` 给定时用它，不给时按模型名唯一确定供应商，多于一家的时报错并列出候选）。只写命令行上给过的那几项，没给的留空（表示继承），不做「一次写四个」。模型不在目录里时报错并提示先同步或探活。同名模型出现在多家供应商的目录里、又没给 `--provider` 时是用法错误（退出码 2），文案列出候选供应商并给出带 `--provider` 的命令形状。 | 确认一行（作用域、模型、写入的几项价）与下一步 `model ls`；`--json` 含 `model`、`provider`、`account`（账号级才有值）、`price_in`、`price_out`、`price_cache_read`、`price_cache_write`（未写的为 null） |
@@ -170,7 +170,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | `usage` | `--since`、`--by account\|model\|day` | 汇总请求数、token（含思考与缓存读写）与估算花费；`--by account`、`--by model`、`--by day` 三种分组都给出思考、缓存读与缓存写的合计，文本表格另有一行合计，成本已按 5.5 的公式计入缓存读写与独立的思考 token（思考在输出之外时才另计，口径见 5.5），合计之后在缓存 token 不为 0 时用一句话写明这个口径（未填缓存单价按输入价算） | 表格；`--json` 是数组，每项 `key`、`requests`、`in_tokens`、`out_tokens`、`reasoning_tokens`、`cache_read`、`cache_write`、`cost` |
 | `log tail` | `-n`、`--follow` | 最近的请求记录；`--follow` 跟随。思考与输出分两列：思考是上游单独报的那一项（anthropic 没有独立字段，显示 0），0 显示 `0`。模型列把 `requests` 的两列都摆出来：客户端给的名字与解析别名后的真实模型名不同时写成 `别名 → 真名`（`fast → glm-4.6`），相同时只写一个名字，不引入恒定的重复；两个名字各自按 24 个显示宽度截断（与单名字时的上限相同），一次别名命中因此一眼能看出实际打了哪个模型（见 5.12） | 表格（时间、协议、模型、账号、状态、输入、输出、思考、缓存读、缓存写、耗时、错误）；`--json` 是数组，每项 `ts`、`inbound`、`outbound`、`model`、`model_used`、`account`、`http_status`、`ok`、`in_tokens`、`out_tokens`、`reasoning_tokens`、`cache_read`、`cache_write`、`latency_ms`、`error`；`model` 是客户端给的名字（可能是别名），`model_used` 是解析后的真实模型名，两者相同时两个字段都有值、不做省略 |
 | `decide` | `--model <模型> --state <文本或 JSON> [--questions <JSON>] [--noul 名=问句]... [--choice 名=问句 --choice 名:选项[,选项...]]... [--score 名=问句 --score 名:级别[,级别...]]... [--json]` | 直连本进程发一条 systemone 请求，打印每个问题的答案与概率（见 5.14）。`--state` 收纯文本或 JSON（去掉首尾空白后首字符是 `{` 、`[` 或 `"` 时按 JSON 解析，其余原样当一个字符串发出去）。`--questions` 直接给整块 JSON（必须是带至少一个问题的对象，原样转发）；写了它就不能再用 `--noul`/`--choice`/`--score`，两种来源同时给是用法错误。逐条拼的写法：`--noul 名=问句` 问一个是非题；`--choice 名=问句` 声明一个选择题、`--choice 名:选项[,选项...]` 给它追加选项（至少两个）；`--score 名=问句` 声明一个打分题、`--score 名:级别[,级别...]` 给它追加级别（至少两级，按从低到高写）；选项写 `key` 或 `key=说明`，说明落在 choice 的 `criteria` 对象里（没写说明的选项值是 `null`），score 的级别只写 `key`（它的 `criteria` 是有序字符串数组，没有说明的落点，写 `=` 是用法错误）；判据只能追加给已经声明过、且类型相同的问题。一个问题都没拼出来、`--choice` 少于两个选项、`--score` 少于两级、`--questions` 不是对象或空对象、`--state` 首字符像 JSON 却解析不了，都是用法错误（退出码 2）。模型的有效出站协议不是 systemone 时退出码 1 并说明它以哪条协议出站；入站协议固定 systemone。输出：每个问题一行（名字、类型、答案），`choice` 与 `score` 另给 `confidence`（`noul` 给概率），最后一行是用量；`--json` 原样输出上游 `answers` 与 `usage`，另加 `model`、`account`、`latency_ms`。非 2xx 时文案取响应体的 `detail.message`，退出码 1 |
-| `call` | `[提示词] --model [--protocol] [--stream] [--max-tokens N] [--system 提示词] [--debug] [--json]` | 绕过客户端直连本进程，打印选号过程；默认发 anthropic 入站，`--protocol` 可在 anthropic、chat、responses、gemini 之间切换；`--protocol systemone` 与「有效出站协议是 systemone 的模型」都被拒绝（退出码 1）：决策请求没有提示词，改用 `switchboard decide`（见 5.14）。出站协议不取账号字段（账号已经不存协议，见 5.8）：按「该模型的 `account_models.protocol` → 厂商的有效默认协议」推导，入口是 `store.EffectiveProtocol(账号, 模型)`，cli 与转发层都不重算一份；模型还没探活过、协议列为空时就是厂商的默认协议。gemini 的模型名不在请求体里，由本命令按路径段转义后拼进入站路径：非流式 `/v1beta/models/{model}:generateContent`、`--stream` 时 `:streamGenerateContent`（见 5.9） | 响应，或 debug 轨迹；gemini 的流式按 SSE 逐帧解码后输出文本增量与工具调用，`--json` 时一个 `data` 帧一行 JSON 原文 |
+| `call` | `[提示词] --model [--protocol] [--stream] [--max-tokens N] [--system 提示词] [--debug] [--json]` | 绕过客户端直连本进程，打印选号过程；默认发 anthropic 入站，`--protocol` 可在 anthropic、chat、responses、gemini 之间切换；`--protocol systemone` 与「有效出站协议是 systemone 的模型」都被拒绝（退出码 1）：决策请求没有提示词，改用 `lax decide`（见 5.14）。出站协议不取账号字段（账号已经不存协议，见 5.8）：按「该模型的 `account_models.protocol` → 厂商的有效默认协议」推导，入口是 `store.EffectiveProtocol(账号, 模型)`，cli 与转发层都不重算一份；模型还没探活过、协议列为空时就是厂商的默认协议。gemini 的模型名不在请求体里，由本命令按路径段转义后拼进入站路径：非流式 `/v1beta/models/{model}:generateContent`、`--stream` 时 `:streamGenerateContent`（见 5.9） | 响应，或 debug 轨迹；gemini 的流式按 SSE 逐帧解码后输出文本增量与工具调用，`--json` 时一个 `data` 帧一行 JSON 原文 |
 | `doctor` | 无 | 检查配置文件、数据目录、数据库、端口 | 逐项 ok / fail |
 | `version` | 无 | 版本号 | 一行 |
 
@@ -185,16 +185,16 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 
 | 路径 | 内容 |
 | --- | --- |
-| `$XDG_CONFIG_HOME/switchboard/config.json` | 监听地址、数据库路径，权限 0600 |
-| `$XDG_DATA_HOME/switchboard/switchboard.db` | 账号、请求记录 |
-| `$XDG_DATA_HOME/switchboard/secret.key` | 加密账号凭据的对称密钥，权限 0600 |
+| `$XDG_CONFIG_HOME/lax/config.json` | 监听地址、数据库路径，权限 0600 |
+| `$XDG_DATA_HOME/lax/lax.db` | 账号、请求记录 |
+| `$XDG_DATA_HOME/lax/secret.key` | 加密账号凭据的对称密钥，权限 0600 |
 
 配置只有两项，其余状态都在数据库里。改状态一律走子命令，不手改库。
 
 ### 5.2 请求生命周期
 
 1. 收到入站请求，按路径定入站协议：`/v1/messages` 是 anthropic，`/v1/chat/completions` 是 openai-chat，`/v1/responses` 是 openai-responses，`/v1beta/models/{model}:generateContent` 与 `/v1beta/models/{model}:streamGenerateContent` 是 gemini（模型名从路径取、`url.PathUnescape` 还原，`:` 之后的后缀不算模型名的一部分，流式标志也由后缀定），`/v1/systemone` 是 systemone（模型名在请求体里，见 5.14），其余路径返回 404。请求体解析失败返回 400，错误消息前缀协议名。定好协议后记下模型名与开始时间。
-2. 按模型名取候选账号：`enabled=1`、模型列表包含该模型（列表为空表示该账号不提供任何模型，不参与选号）、冷却已过。没有任何账号声明提供该模型时返回 404，错误消息说明「没有账号提供模型 X」并提示下一步：`switchboard model ls` 看现有清单、`switchboard model probe` 探活；错误类型按入站协议取：anthropic 入站是 `not_found_error`，两条 openai 入站是 `invalid_request_error`。有账号提供但全部在冷却或被停用时不算这种情况，仍按第 8 步返回 503。
+2. 按模型名取候选账号：`enabled=1`、模型列表包含该模型（列表为空表示该账号不提供任何模型，不参与选号）、冷却已过。没有任何账号声明提供该模型时返回 404，错误消息说明「没有账号提供模型 X」并提示下一步：`lax model ls` 看现有清单、`lax model probe` 探活；错误类型按入站协议取：anthropic 入站是 `not_found_error`，两条 openai 入站是 `invalid_request_error`。有账号提供但全部在冷却或被停用时不算这种情况，仍按第 8 步返回 503。
 3. 按 `priority` 升序，同一会话（见 5.3）优先沿用上次的账号。
 4. 解密凭据，按该账号该模型的有效出站协议构造上游请求：入站协议与有效出站协议相同则直通，否则经中间表示转换（见 5.4）。上游路径、凭据头、请求体编码都跟有效出站协议走。上游请求头不从零开始也不照抄入站：先放 `Content-Type` 与流式时的 `Accept`，再用 `setAuth` 按出站协议设凭据头，再透传客户端白名单头（见 5.11），最后叠厂商附加头（5.10）。
 5. 发上游请求，读响应头。上游返回 429、5xx，或一条 HTTP 响应都没拿到（连接建立失败、请求发不出去、响应体没读完），且尚未向客户端写出任何字节时，把该账号打入冷却（档位见 5.3）并换下一个候选。
@@ -226,10 +226,10 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 客户端需要知道有哪些模型名能用，不该让它去翻 `provider ls`／`model ls` 的命令行输出。两个只读接口就是给客户端发现模型名用的：
 
 - `GET /v1/models` → 200，`{"object":"list","data":[{"id":"deepseek-v4-pro","object":"model","created":0,"owned_by":"deepseek"}]}`。
-- `GET /v1/models/{id}` → 命中返回 `data` 里的那一个对象（`id`、`object`、`created`、`owned_by` 四个字段，形状与列表里相同）；未命中 404，`error.type` 是 `not_found_error`，消息是「清单里没有模型 `<id>`（停用账号不计，冷却中的账号仍然计入）；用 `switchboard model ls` 看现有清单，或先运行 `model probe`」。`{id}` 是模型名原文：前缀之后的全部字符都算模型名，含 `/` 的名字（`org/model`）因此也取得到；只有前缀、没有名字时同样 404，文案说明缺的是模型名而不是模型不存在。`{id}` 是别名时返回别名那一条（`id` 仍是别名，`owned_by` 取提供解析后真名的厂商），解不到目标时同样 404，文案在那句话后面接着说「这是一个别名，目标是 Y，但没有启用账号提供它」（见 5.12）。
+- `GET /v1/models/{id}` → 命中返回 `data` 里的那一个对象（`id`、`object`、`created`、`owned_by` 四个字段，形状与列表里相同）；未命中 404，`error.type` 是 `not_found_error`，消息是「清单里没有模型 `<id>`（停用账号不计，冷却中的账号仍然计入）；用 `lax model ls` 看现有清单，或先运行 `model probe`」。`{id}` 是模型名原文：前缀之后的全部字符都算模型名，含 `/` 的名字（`org/model`）因此也取得到；只有前缀、没有名字时同样 404，文案说明缺的是模型名而不是模型不存在。`{id}` 是别名时返回别名那一条（`id` 仍是别名，`owned_by` 取提供解析后真名的厂商），解不到目标时同样 404，文案在那句话后面接着说「这是一个别名，目标是 Y，但没有启用账号提供它」（见 5.12）。
 - 「前缀之后全部算模型名」有一个例外，来自 `http.ServeMux` 而不是这两个接口：mux 先把路径过一遍 `cleanPath` 再匹配，`/v1/models//x`、`/v1/models/a/./b` 与带 `..` 的写法（`/v1/models/x/../y`）匹配不到 `/v1/models/` 这个前缀，而是 307 到规整后的路径（mux 用 307 而不是 301，方法与非 GET 的请求体因此不会被改写），客户端跟过去查到的是规整后的名字。含 `//`、`.`、`..` 的模型名在真实上游里不存在，不为此绕开 mux 另写一套路由。
 - 两个接口都只收 GET，其余方法（含 HEAD）405 并带 `Allow: GET`；四条入站路径反过来只收 POST，405 带 `Allow: POST`。405 说的是「这个地址不支持这个方法」，404 说的是「这个模型名不在清单里」，客户端据此能分开是方法用错了还是清单里真的没有。
-- 读库失败（打不开、查询报错）返回 500，`error.type` 是 `api_error`，文案提示先跑 `switchboard doctor` 查数据库：清单答不出来要跟「清单是空的」分开，后者是 200 加空数组。
+- 读库失败（打不开、查询报错）返回 500，`error.type` 是 `api_error`，文案提示先跑 `lax doctor` 查数据库：清单答不出来要跟「清单是空的」分开，后者是 200 加空数组。
 - `accounts.models` 里的空白名字（空串或只有空格）不算模型，不进清单：它匹配不上任何请求里的 `model`，列出来只会让客户端以为有这么个名字。
 
 清单的来源与选号是同一份数据：`enabled=1` 账号的 `accounts.models`（见 5.3），不是 `account_models`——后者是同步与探活的原料，选号不读它（见 5.7）。四条规则：
@@ -257,7 +257,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 - 协议不进选号。候选量与排序只看 `accounts.models`、`enabled`、冷却与 `priority`，协议决定的是「怎么打」而不是「能不能接」：同一账号的两个模型可以各走各的协议，不必为了协议不同拆成两个账号、重复同步与重复探活。有效出站协议按 `account_models.protocol` 优先、账号 `protocol` 兜底算出（见 5.7），换号时按候选账号各自的有效协议重新算。
 - 协议只影响路径、凭据头与请求体编码。冷却、失败转移、会话粘性、401 停用与 403 原话返回都在这层之上，不因协议不同而变。
 - 冷却分三档，按失败的来源定，不看状态码本身：429 起始 60 秒；上游明确的 5xx 起始 10 秒；**连接层失败**（DNS 解析失败、连接被拒、TLS 握手失败、读超时、`unexpected EOF` 一类没有拿到任何 HTTP 响应的失败）起始 2 秒。三档都按连续失败翻倍、上限 30 分钟，连续失败次数记在 `fail_streak` 列、跨请求累计。连接层失败单独一档，因为这类失败通常来自本机网络或中转抖动而不是上游在拒服务：按 5xx 那档算，单账号网关在断网恢复后仍会被锁住十几秒到几分钟，实测一个不稳的中转连续六次 EOF 就能把首个冷却推到分钟级。`requests.http_status` 对这类失败仍记 502（表示「网关没能拿到上游响应」），冷却档位由内部的失败来源决定，不改状态码的含义。定档只有两份代码：`account.KindFromStatus(status)` 给拿到状态的失败定档（429 → `KindRateLimit`，其余 → `KindServer`），没拿到状态的失败由网关显式给 `KindTransport`；`account.Cooldown(kind, streak)` 按档位与连续失败次数算时长，三档的翻倍与上限都只有这一处。已经向客户端写出字节之后的断流（流式 `wrote` 为真）不进冷却、也不换号，因此也不算连接层失败：这一次的结局已经写在客户端那边，重试只会把半截响应再打一遍。任意一次成功、`account test` 成功或 `account enable` 都会把冷却、`last_error` 与 `fail_streak` 一起清零。
-- 会话粘性：请求头带 `x-switchboard-session` 或 `metadata.user_id` 时，同一个值在一小时内粘同一个账号；否则按 `priority` 轮转。
+- 会话粘性：请求头带 `x-lax-session` 或 `metadata.user_id` 时，同一个值在一小时内粘同一个账号；否则按 `priority` 轮转。
 - 401 说明凭据本身不行：把账号标为 `enabled=0` 并把错误返回客户端，避免同一条错误把整个候选池刷成不可用。`account test` 成功或 `account enable` 可恢复，两者都会清冷却。
 - 403 多为套餐或模型权限不对，凭据还能用：不停用账号，也不再换号，直接把上游原话返回。commandcode 对不在套餐内的模型就是返回 403。
 
@@ -510,7 +510,7 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 
 花费：先用厂商默认协议试，成功时只花一次调用，只有失败才会多花一到两次。同一模型重复探活的结果稳定，代价最多是每次 `--refresh` 多一两次 `max_tokens=1` 的调用，跟 `--max-age` 省下的调用相比是小头。每次上游调用都在 `requests` 里各留一行（见 5.5），打出几次就记几行。
 
-`account test` 只判凭据与连通性，模型是否可用由 `model probe` 决定，所以它分两段验：先 `GET` 模型列表证明地址通，再发一条 `max_tokens=1` 的请求证明凭据有效。第一段：地址按 `model sync` 同一套规则解析（见 5.8），凭据头跟取到地址的那条路由的协议；2xx 说明地址通、上游连得上，顺带报出上游模型数，这一条不花 token，也不依赖某个模型名能不能用。列表那一段到此为止——列表接口可能是公开接口，commandcode 的 `GET /provider/v1/models` 对任何 key（甚至没有 key）都回 200 与整份清单，`POST /provider/v1/chat/completions` 才回 `401 Invalid 'Authorization' header or token`：光凭 2xx 判不出凭据好不好，所以 2xx 之后**仍然**发第二段。列表接口不可用时（404、405、403，或这家声明了路由却一个 `models_path` 都没有，或连不上）也走这条最小调用，只是备注里写清第一段为什么没成。第二段：按账号所属厂商的有效默认协议打（账号行不再存协议，见 5.8），不看模型上的协议发现结果；算不出协议时（厂商没有路由、默认协议为空）这一步直接报错，文案给出下一步命令 `switchboard provider set <厂商> --openai /v1/chat/completions`，不落到 chat 分支去打一个猜出来的地址。模型名按三档取：该账号 `access='allowed'` 的第一行（按名字升序，也就是 `store.AllowedModels` 的第一项）→ 第一段列表那一步拿到的第一个模型名（按名字排序去重后的第一项）→ 默认模型名 `default`。前两档都是上游真实存在的名字，第三档只是没有名字可用时的兜底：刚建好、还没探过模型的账号走第二档——列表已经报出了一个模型名，再拿固定名字去打只会把「模型名不对」误报成账号失败（只提供 `gemini-3.8-flash` 的中转对 `default` 回 503「无法从令牌路由为模型 default 选择渠道」）；列表接口不可用或清单为空时才回退到 `default`，既不 panic 也不要求先同步：凭据好不好用得先能试出来。备注写清这次用的是哪一个、来自哪一档（账号清单 / 上游清单 / 兜底默认名），否则「模型调用返回 404」看不出是名字不对还是模型真的不能用。两段都通过才判正常，状态与退出码按第二段算；例外是第一段自己就给出了结论（401 是凭据问题，429/5xx 与连接层失败要按 5.3 的三档打冷却，其它 4xx 只报原话），这时不再花一次调用。两段的状态处理一致（见 5.3），备注与 `--json` 写清两段各自的结果（`--json` 的 `list` 对象是第一段自己的结论，`stage` 是判定成败的那一步），因此「列表 404 之后模型 403」与「列表接口自己 403」不会读成同一个结论。
+`account test` 只判凭据与连通性，模型是否可用由 `model probe` 决定，所以它分两段验：先 `GET` 模型列表证明地址通，再发一条 `max_tokens=1` 的请求证明凭据有效。第一段：地址按 `model sync` 同一套规则解析（见 5.8），凭据头跟取到地址的那条路由的协议；2xx 说明地址通、上游连得上，顺带报出上游模型数，这一条不花 token，也不依赖某个模型名能不能用。列表那一段到此为止——列表接口可能是公开接口，commandcode 的 `GET /provider/v1/models` 对任何 key（甚至没有 key）都回 200 与整份清单，`POST /provider/v1/chat/completions` 才回 `401 Invalid 'Authorization' header or token`：光凭 2xx 判不出凭据好不好，所以 2xx 之后**仍然**发第二段。列表接口不可用时（404、405、403，或这家声明了路由却一个 `models_path` 都没有，或连不上）也走这条最小调用，只是备注里写清第一段为什么没成。第二段：按账号所属厂商的有效默认协议打（账号行不再存协议，见 5.8），不看模型上的协议发现结果；算不出协议时（厂商没有路由、默认协议为空）这一步直接报错，文案给出下一步命令 `lax provider set <厂商> --openai /v1/chat/completions`，不落到 chat 分支去打一个猜出来的地址。模型名按三档取：该账号 `access='allowed'` 的第一行（按名字升序，也就是 `store.AllowedModels` 的第一项）→ 第一段列表那一步拿到的第一个模型名（按名字排序去重后的第一项）→ 默认模型名 `default`。前两档都是上游真实存在的名字，第三档只是没有名字可用时的兜底：刚建好、还没探过模型的账号走第二档——列表已经报出了一个模型名，再拿固定名字去打只会把「模型名不对」误报成账号失败（只提供 `gemini-3.8-flash` 的中转对 `default` 回 503「无法从令牌路由为模型 default 选择渠道」）；列表接口不可用或清单为空时才回退到 `default`，既不 panic 也不要求先同步：凭据好不好用得先能试出来。备注写清这次用的是哪一个、来自哪一档（账号清单 / 上游清单 / 兜底默认名），否则「模型调用返回 404」看不出是名字不对还是模型真的不能用。两段都通过才判正常，状态与退出码按第二段算；例外是第一段自己就给出了结论（401 是凭据问题，429/5xx 与连接层失败要按 5.3 的三档打冷却，其它 4xx 只报原话），这时不再花一次调用。两段的状态处理一致（见 5.3），备注与 `--json` 写清两段各自的结果（`--json` 的 `list` 对象是第一段自己的结论，`stage` 是判定成败的那一步），因此「列表 404 之后模型 403」与「列表接口自己 403」不会读成同一个结论。
 
 参数与处理顺序：
 
@@ -552,8 +552,8 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 - 两列删掉之后，账号的地址与默认协议是**只读派生值**，规则只有一份：`store.Account` 的 `BaseURL` 取 `providers.base_url`，`Protocol` 取这家厂商的有效默认协议（`ResolveDefaultProtocol(default_protocol, routes)` 的结果，显式值落不到已声明的路由上就按固定顺序回退）；厂商行不存在时两者都是空串，厂商行在但一条路由都没声明时 `Protocol` 是空串。`ListAccounts`、`GetAccount`、`ListAccountsByProvider` 三个读入口共用 `queryAccounts` 一份实现，写入侧（`CreateAccount`）不看这两个字段，也不回写。
 - 删厂商两个入口：`store.DeleteProvider` 只删厂商行与它的路由，账号状态原样保留（`provider rm` 不带 `--force` 时调用方已经先拒绝）；`store.DeleteProviderForce` 是 `provider rm --force` 的入口，在上面那一步之外把指向它的账号逐个停用，与 `SetEnabled` 走同一条写路径 `setEnabledTx`。
 - 厂商行存在但没有该协议的路由时，退回原来的后缀猜测：末尾是 `/v1` 就补 `/chat/completions`、`/messages` 或 `/responses`，否则补 `/v1` 再接同样的后缀；模型列表同理补 `/models` 或 `/v1/models`。自建地址因此仍然可用——模型上的发现结果压过厂商默认协议、而这家没声明那条路由时走的就是这一条。猜后缀要用 `base_url`，厂商用的是整条地址路由（`base_url` 为空）时无后缀可猜，此时报错并提示用 `provider set <厂商> --<协议> <路径>` 声明这条路由。
-- 账号的 `provider` 在表里查不到（历史库里的孤儿行）是另一种情况：地址与默认协议都只从厂商行取，孤儿行两样都是空串，拼不出任何可用地址。转发以 503 结束（错误体按入站协议给形状，见 5.2），文案提示先 `switchboard provider add <厂商> --base-url <地址> --openai /v1/chat/completions` 重建厂商、或用 `switchboard account set <账号> --provider <厂商>` 把账号指到已有厂商；`model sync` 与 `account test` 同样在取地址这一步就报这条错。`provider rm --force` 之后的账号不落到这里：存储层已经在同一个事务里把它们停用（见上一条），选号不会选中。
-- 算不出有效出站协议时（一条路由都没声明，或默认协议落不到已声明的路由上——例如只声明了 gemini 一条路由却没给 `--default-protocol`，而模型上也没有发现结果），转发同样是 503 而不是编码器报「不支持的出站协议 ""」：错误体按入站协议给形状，文案给出下一步命令，例如 `switchboard provider set <厂商> --openai /v1/chat/completions` 声明一条路由，或 `switchboard model probe --account <账号>` 探出这个模型的协议。这一类失败不动账号的冷却与 `fail_streak`：它是一次配置缺口，不是这家上游打不通。
+- 账号的 `provider` 在表里查不到（历史库里的孤儿行）是另一种情况：地址与默认协议都只从厂商行取，孤儿行两样都是空串，拼不出任何可用地址。转发以 503 结束（错误体按入站协议给形状，见 5.2），文案提示先 `lax provider add <厂商> --base-url <地址> --openai /v1/chat/completions` 重建厂商、或用 `lax account set <账号> --provider <厂商>` 把账号指到已有厂商；`model sync` 与 `account test` 同样在取地址这一步就报这条错。`provider rm --force` 之后的账号不落到这里：存储层已经在同一个事务里把它们停用（见上一条），选号不会选中。
+- 算不出有效出站协议时（一条路由都没声明，或默认协议落不到已声明的路由上——例如只声明了 gemini 一条路由却没给 `--default-protocol`，而模型上也没有发现结果），转发同样是 503 而不是编码器报「不支持的出站协议 ""」：错误体按入站协议给形状，文案给出下一步命令，例如 `lax provider set <厂商> --openai /v1/chat/completions` 声明一条路由，或 `lax model probe --account <账号>` 探出这个模型的协议。这一类失败不动账号的冷却与 `fail_streak`：它是一次配置缺口，不是这家上游打不通。
 - 探活的候选协议跟着路由收紧：只用该厂商在 `provider_routes` 里声明过的协议（含 gemini），不去打这家没有声明的路径；没有厂商行的账号仍三条入站协议全试。顺序（已发现的协议、目录里声明的协议、厂商默认协议在前，其余按协议名排序）见 5.7。读库失败时报错，不放宽成全部协议全试——放宽等于去打这家没声明的路径，把一次读库故障变成对错误地址的上游调用。
 - 默认协议：显式值优先，但必须落在这家已声明的路由上；否则按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 取第一条已声明的路由，一条路由都没有时为空。有效出站协议在账号没有逐模型覆盖时就用它（见 5.7），`provider ls` 也显示它，两处同一个规则。规则是纯函数 `store.ResolveDefaultProtocol`，读库入口是 `store.EffectiveProviderProtocol`：厂商不存在返回 `ErrProviderNotFound`，厂商在但一条路由都没有时返回空串与 `ErrProviderNoRoutes`，提示文案由调用方写，`cli` 不再自己算这条回退。**不能靠协议名字典序兜底**：deepseek 与 commandcode 都同时声明了 `openai-chat` 与 `anthropic` 两条路由，字典序把 `anthropic` 排在前面，默认协议就会从升级前的 `openai-chat` 变成 `anthropic`，这两个厂商的账号在升级前后默认协议不一致。升级前的默认值因此由迁移 `0007` 逐家显式种进 `default_protocol`：`anthropic` 自己是 `anthropic`，其余 7 家是 `openai-chat`。
 - 默认协议的写入侧与读取侧分工：`provider add` 的 `--default-protocol` 必须落在这次声明的路由上，`provider set` 改完之后必须仍然指向一条存在的路由，`provider unset <协议>` 删掉的正好是默认协议时也整笔拒绝（提示先改默认协议再删），两处都是同一个事务，指不到就一条都不落库。读取侧对历史脏数据（旧版本删路由时没清默认协议）按固定顺序回退到仍然存在的路由，不静默交给后缀猜测。
@@ -698,12 +698,12 @@ gemini 的原生接口（Generative Language API 的 `generateContent`）与另�
 | --- | --- | --- |
 | 字面量 | 原样 | `api-version: 2024-10-21` 这类固定值 |
 | `{env:NAME}` | 进程环境变量的值；变量没设置、或设置了但是空串时这条头不发，日志写明是哪个变量 | 会话 token、自定义鉴权头这类不该落库的东西 |
-| `{session}` | 本次请求的会话键（见 5.3：`x-switchboard-session` 或 `metadata.user_id`），与选号粘性取同一个值；都没有时每次请求现生成一个 UUID | opencode 的 `x-opencode-session`：同一对话一个稳定值 |
+| `{session}` | 本次请求的会话键（见 5.3：`x-lax-session` 或 `metadata.user_id`），与选号粘性取同一个值；都没有时每次请求现生成一个 UUID | opencode 的 `x-opencode-session`：同一对话一个稳定值 |
 | `{model}` | 本次请求的模型名（裸名，不转义）；模型列表请求没有模型名，这条头在那里不发 | 少数按模型路由的网关 |
 
 - 注入范围是所有发往上游的请求：转发、`model sync` 的模型列表请求、`account test` 的两段（列表与最小调用）、`model probe` 的单模型请求。顺序固定为「先 `setAuth` 设默认凭据头，再叠声明」。`/v1/models` 这类入站只读接口不带附加头。
 - 展开后为空串时不发这个头，也不发一个空值头；展开后含回车、换行或 NUL 时同样不发（环境变量的值可能带折行，原样拼进请求头等于拼出第二条头）。
-- 读声明失败（读库失败）时转发报错，不静默跳过：少一条附加头上游就回 400，静默跳过等于把一次配置故障变成一句看不懂的协议错误。文案提示先跑 `switchboard doctor`。
+- 读声明失败（读库失败）时转发报错，不静默跳过：少一条附加头上游就回 400，静默跳过等于把一次配置故障变成一句看不懂的协议错误。文案提示先跑 `lax doctor`。
 - 只影响上游请求，不影响入站响应与 `/v1/models` 这类只读接口；也不进 `requests` 记录（头里可能是密钥，落库等于把它们写进请求记录）。日志只在不发送时记一行（头名与没发的原因），正常发送不记：每条转发都打一行会让日志被正常路径淹掉，而那正是排查时最不需要的东西。任何情况下都不打印值。
 - 与协议凭据头冲突时按「声明优先」：显式写的头覆盖 `setAuth` 给的默认值（比如某些网关要 `Authorization: Bearer` 换成自定义 scheme）。冲突在写入时不管，只由转发时的「先设默认、再套声明」顺序决定，避免两层都做判断。
 - 命名：`provider header set <名称> <头名> <值> [--protocol <协议>]`、`provider header unset <名称> <头名> [--protocol <协议>]`、`provider header ls [<名称>]`（`--json` 输出；`set` 是覆盖语义，不存在时新建）。
@@ -724,7 +724,7 @@ gemini 的原生接口（Generative Language API 的 `generateContent`）与另�
 
 - 同一头名有多个值时按出现顺序全部带上（`anthropic-beta` 重复出现表示同时开多个 beta）；客户端没给或给的是空值时一个都不设，`anthropic-version` 因此保持 `setAuth` 写的默认值。
 - 入站协议与有效出站协议不同时一个都不透传：`anthropic-beta` 给 chat 上游只会换回 400，这些头只在同一协议内有意义。
-- 永远不透传：凭据类（`Authorization`、`x-api-key`、`x-goog-api-key`）与 `Cookie`；逐跳头（`Host`、`Connection`、`Content-Length`、`Transfer-Encoding`、`Expect`、`Upgrade`）；本网关自己的 `x-switchboard-session`（它只用于会话粘性，见 5.3）。白名单本身已经把这张名单挡在外面，名单仍单列一份当第二道闸：以后往白名单里加名字时，误加同名头不会漏出去。
+- 永远不透传：凭据类（`Authorization`、`x-api-key`、`x-goog-api-key`）与 `Cookie`；逐跳头（`Host`、`Connection`、`Content-Length`、`Transfer-Encoding`、`Expect`、`Upgrade`）；本网关自己的 `x-lax-session`（它只用于会话粘性，见 5.3）。白名单本身已经把这张名单挡在外面，名单仍单列一份当第二道闸：以后往白名单里加名字时，误加同名头不会漏出去。
 - 只作用于转发路径（`buildRequest`）：`model sync`、`account test` 与 `model probe` 是网关自己发起的，没有客户端请求可依，行为不变。
 - 优先级从低到高：`setAuth` 的默认值 → 透传的客户端头 → 厂商附加头声明（5.10）。声明是站点配置，要能压住客户端带来的值。同名时只由顺序决定：客户端这层先删同名头再按顺序追加，`anthropic-version` 给了就替换掉默认值而不是与它并存；附加头那层用覆盖写入，连客户端带来的多个值一起压掉。
 - 单个头值超过 8KB 时丢弃整个头并记一行日志（头名与长度，不记值）：异常客户端把一个头写爆不应该变成上游的 431。
@@ -738,10 +738,10 @@ gemini 的原生接口（Generative Language API 的 `generateContent`）与另�
 - 匹配：精确匹配，区分大小写，不做通配、不做前缀归一。别名可以指向另一个别名，解析沿链走，最长 8 跳：8 跳是「别名 → … → 真实名字」的边数，走满 8 跳落到真实名字算解析成功，第 9 跳落到仍是别名的名字上报错。成环与超长是两种错误，都带上是哪几条串在一起；解析逻辑只有一份，调用方只问一次，不自己走链。解析结果就是「真实模型名」。
 - 写入校验：别名与目标都去首尾空白后不能为空、不能含控制字符（它们会原样进请求体与路径，也能进日志与表格），落库的就是去空白之后的值；别名不能等于目标（含去空白之后相等）；别名不能与任何真实模型名同名，否则会遮蔽真名，客户端请求那个名字时行为会随账号增减而变。真名按两处判，都是区分大小写的精确匹配：`provider_models` 里存在同名模型——目录是真名的事实来源（见 5.13），目录里有、眼下没有账号能用的名字也算，账号一恢复可用别名的行为就会突然改变，文案因此写出是哪几家厂商的目录（最多三个）；以及某个账号 `account_models.access='allowed'` 的同名行，也就是眼下真的能用。两处都命中时合成一句话报出（厂商与账号各列最多三个），不报两次；判定与落库在同一个事务里，中间插不进一条新账号或一条新目录行。目标可以暂时没有任何账号提供，之后加账号即可生效。
 - 请求处理：拿到入站模型名（gemini 的是从路径取的那个）后先解析别名一次，此后的选号、有效协议、路由占位符、请求体里的 `model`、路径里的模型名全部用解析后的真实名字；响应方向不解析。`requests` 两列正好分工：`model_requested` 记客户端给的名字（别名），`model_used` 记解析后的真实名字；`log tail` 两列不同时能看出一次别名命中。
-- 解析失败：链成环或超过 8 跳时这个名字解不出真实名字，换哪个账号都发不出去，按入站协议报 400（`writeInboundError`，`error.type` 是 `invalid_request_error`），消息带 store 给的原文（整条链）并给出下一步 `switchboard model alias ls`；这类请求不写 `requests`。它不是 404：404 说的是「清单里没有这个模型」，400 说的是这个名字本身解不开。
-- 404 文案：别名解析出的目标没有账号提供时，消息写明「别名 X 指向 Y，但没有账号提供 Y；用 `switchboard model ls` 看现有清单」，不要只说「没有账号提供 X」，否则用户会去清单里找一个永远不存在的名字。错误类型与非别名场景一样按入站协议取（anthropic 是 `not_found_error`，两条 openai 是 `invalid_request_error`）。
+- 解析失败：链成环或超过 8 跳时这个名字解不出真实名字，换哪个账号都发不出去，按入站协议报 400（`writeInboundError`，`error.type` 是 `invalid_request_error`），消息带 store 给的原文（整条链）并给出下一步 `lax model alias ls`；这类请求不写 `requests`。它不是 404：404 说的是「清单里没有这个模型」，400 说的是这个名字本身解不开。
+- 404 文案：别名解析出的目标没有账号提供时，消息写明「别名 X 指向 Y，但没有账号提供 Y；用 `lax model ls` 看现有清单」，不要只说「没有账号提供 X」，否则用户会去清单里找一个永远不存在的名字。错误类型与非别名场景一样按入站协议取（anthropic 是 `not_found_error`，两条 openai 是 `invalid_request_error`）。
 - 响应里的模型名不改：别名只影响请求方向。直通路径现在把上游响应按字节转发（有用例逐字节断言，流式尤其），为一个字段重编码整帧的代价与风险都高于收益；响应里的 `model` 因此是上游的真实名字。跨协议转换时同理，转换后的响应里也写真实名字。
-- `/v1/models` 与 `/v1/models/{id}`：清单里同时列出真实名字与别名（具体规则见 5.2.1）。别名条目的 `id` 是别名，`owned_by` 取提供一个目标的厂商（多个时按现有规则取厂商名字典序第一个），`created` 仍是 0；两条都出现时客户端两个名字都能用。别名解析不到目标时不在清单里出现：清单反映「现在能接的名字」，解析不到的名字接不了。`/v1/models/{id}` 用别名查得到同一条目；查不到时按现有的 404 处理，文案在那句话后面接着说「这是一个别名，目标是 Y」，链坏了的别名则带 store 的原文与 `switchboard model alias ls`。
+- `/v1/models` 与 `/v1/models/{id}`：清单里同时列出真实名字与别名（具体规则见 5.2.1）。别名条目的 `id` 是别名，`owned_by` 取提供一个目标的厂商（多个时按现有规则取厂商名字典序第一个），`created` 仍是 0；两条都出现时客户端两个名字都能用。别名解析不到目标时不在清单里出现：清单反映「现在能接的名字」，解析不到的名字接不了。`/v1/models/{id}` 用别名查得到同一条目；查不到时按现有的 404 处理，文案在那句话后面接着说「这是一个别名，目标是 Y」，链坏了的别名则带 store 的原文与 `lax model alias ls`。
 - 命令行：`model alias set <别名> <目标>`（覆盖语义）、`model alias unset <别名>`、`model alias ls`（`--json` 输出别名与目标）。三条都在参数层做上面的校验，退出码与非空校验沿用现有约定。
 
 ### 5.13 模型目录与账号可达性
@@ -816,7 +816,7 @@ TypeSafe 的 System One（Jev）不是对话：输入一个 `state` 加一组带
 | 探活 | systemone 模型的探活不是 `max_tokens=1` 的对话请求，而是一条最小决策请求：`state` 为 `ping`、一个问题 `{"ok":{"type":"noul","instructions":"Is this text present?"}}`；2xx 即 `allowed`，其余判定与 5.7 相同。一种模型的有效出站协议是 systemone 时，探活只能走这条路——对它发对话请求只会拿到 404 |
 | 同步 | `supported_endpoints` 里的 `/systemone` 折成 `systemone`（映射表见 5.7）；但 commandcode 的清单不列决策模型，`typesafe/jev` 一类的名字只能手工声明（`account add --models`） |
 | 别名与选号 | 与其余四条一致：别名解析在请求入口做一次（见 5.12），选号只读 `access='allowed'`（见 5.13） |
-| CLI | `provider add/set --systemone <路径或整条地址>`、`--default-protocol systemone`、`switchboard decide`（把 `state` 与问题组发出去并打印答案与概率，见第 4 节）；`call` 不接 systemone：它发的是对话，决策请求没有提示词 |
+| CLI | `provider add/set --systemone <路径或整条地址>`、`--default-protocol systemone`、`lax decide`（把 `state` 与问题组发出去并打印答案与概率，见第 4 节）；`call` 不接 systemone：它发的是对话，决策请求没有提示词 |
 
 第 7 节记已知未做：`assets`（图片）原样转发但不校验、压缩请求体（gzip 与 zstd）不支持（客户端自己解压后发）、`box` 答案原样返回不解释。
 
@@ -1015,7 +1015,7 @@ M0 到 M13 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkel
 ## 8 代码结构
 
 ```
-cmd/switchboard/        main，只做 os.Exit(cli.Run(...))
+cmd/lax/        main，只做 os.Exit(cli.Run(...))
 internal/cli/           子命令分发、参数解析、输出格式
 internal/config/        路径解析与配置读写
 internal/store/         SQLite 连接、迁移、账号与请求记录的读写

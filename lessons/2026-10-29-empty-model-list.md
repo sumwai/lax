@@ -7,7 +7,7 @@ Fixed: `30421bf`.
 
 ## Symptom
 
-`switchboard serve` routed a request for `deepseek/deepseek-v4.1-flash` (a Command Code model
+`lax serve` routed a request for `deepseek/deepseek-v4.1-flash` (a Command Code model
 name) to an account on the official DeepSeek endpoint, which answered:
 
 ```

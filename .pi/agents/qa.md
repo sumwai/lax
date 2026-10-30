@@ -1,6 +1,6 @@
 ---
 name: qa
-description: switchboard 测试：假上游服务、对拍用例、流式与工具调用回归、失败转移场景
+description: lax 测试：假上游服务、对拍用例、流式与工具调用回归、失败转移场景
 tools: read, write, edit, bash, grep, find, ls
 ---
 

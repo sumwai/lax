@@ -5,7 +5,7 @@ Fixed: `2ed8c7c`.
 
 ## Symptom
 
-`switchboard account test` judged an account by `GET /v1/models` first, on the reasoning that a
+`lax account test` judged an account by `GET /v1/models` first, on the reasoning that a
 model list costs no tokens and exercises credentials. Against commandcode, the list endpoint is
 public: it answers 200 with 94 models for any key, including a key that the completions endpoint
 rejects with `401 Invalid 'Authorization' header or token`. The command therefore printed `正常`

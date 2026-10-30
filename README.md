@@ -1,16 +1,16 @@
-# switchboard
+# lax
 
 本机上的模型总机。账号在命令行里管，所有客户端只连一个地址。
 
 ```bash
-switchboard init                                            # 建配置、数据库与密钥
-switchboard provider ls                                     # 看已知厂商与各协议的路径
-switchboard account add ds --provider deepseek --key sk-xxx  # 或用 --key - 从标准输入读
-switchboard account set ds --key sk-yyy                     # 换 key：不删号，冷却与失败计数清零
-switchboard model sync --account ds                         # 拉上游模型列表
-switchboard model probe --account ds                        # 逐个探活，能用的才进选号
-switchboard serve                                           # 起网关，127.0.0.1:4567
-switchboard log tail                                        # 看请求记录
+lax init                                            # 建配置、数据库与密钥
+lax provider ls                                     # 看已知厂商与各协议的路径
+lax account add ds --provider deepseek --key sk-xxx  # 或用 --key - 从标准输入读
+lax account set ds --key sk-yyy                     # 换 key：不删号，冷却与失败计数清零
+lax model sync --account ds                         # 拉上游模型列表
+lax model probe --account ds                        # 逐个探活，能用的才进选号
+lax serve                                           # 起网关，127.0.0.1:4567
+lax log tail                                        # 看请求记录
 ```
 
 四条对话线协议能进，也能出（第五条 `systemone` 是决策协议，只与自己互通、不参与转换，见下面「决策请求」）。入站按路径分 anthropic、openai-chat、openai-responses 与 gemini，出站按厂商行上那家厂商的默认协议（探活发现某个模型该走别的协议时，结论记在 `account_models.protocol` 上优先用它），取值同为这四条；入站与出站相同则直通，不同则经中间表示转换，四条入站 × 四条出站共十六种组合，流式与非流式都可用，工具调用包含在内。中间表示、映射规则、选号规则、数据模型、里程碑见 [DESIGN.md](DESIGN.md)。
@@ -56,12 +56,12 @@ curl -s http://127.0.0.1:4567/v1beta/models/deepseek-v4-pro:generateContent \
     -d '{"contents":[{"role":"user","parts":[{"text":"用一句话介绍你自己"}]}]}'
 ```
 
-出站协议由厂商决定，账号只存厂商名：地址与默认协议都是那家厂商行上的值（迁移 `0014` 之后账号不再有 `base_url`、`protocol` 两列），所以 `account add` 没有 `--base-url` 与 `--protocol` 两个参数——先 `provider add` 把厂商登记进去，再建账号。默认协议的取值是 `anthropic`、`openai-chat`、`openai-responses`、`gemini` 与 `systemone`（gemini 的原生路径是 `{base}/v1beta/models/{model}:generateContent`，流式换成 `:streamGenerateContent?alt=sse`，凭据头是 `x-goog-api-key`；systemone 是决策协议，入站与出站都是 `POST /v1/systemone`，只与自己互通，见下面「决策请求」）：`provider add --default-protocol` 显式存的优先，没显式存则按 `openai-chat` → `openai-responses` → `anthropic` 取第一条路由。改一家厂商的地址或默认协议立刻影响所有用它的账号（这是单一来源应有的行为）。厂商与各协议的路径在数据库里，`switchboard provider ls` 能看到，`provider add` / `set` / `unset` 可以增删改，不必重编译。入站协议与出站协议相同时直通，请求体只改 `model` 字段，其余字段与值原样带到上游，响应按字节原样返回（gemini 的报文里没有 `model` 字段，它直通时请求体一个字节都不改）；不同时经中间表示转换，请求与响应都只搬映射表里定义的字段，表外字段丢弃。未知路径返回 404，请求体解析失败返回 400，错误消息带协议名前缀。
+出站协议由厂商决定，账号只存厂商名：地址与默认协议都是那家厂商行上的值（迁移 `0014` 之后账号不再有 `base_url`、`protocol` 两列），所以 `account add` 没有 `--base-url` 与 `--protocol` 两个参数——先 `provider add` 把厂商登记进去，再建账号。默认协议的取值是 `anthropic`、`openai-chat`、`openai-responses`、`gemini` 与 `systemone`（gemini 的原生路径是 `{base}/v1beta/models/{model}:generateContent`，流式换成 `:streamGenerateContent?alt=sse`，凭据头是 `x-goog-api-key`；systemone 是决策协议，入站与出站都是 `POST /v1/systemone`，只与自己互通，见下面「决策请求」）：`provider add --default-protocol` 显式存的优先，没显式存则按 `openai-chat` → `openai-responses` → `anthropic` 取第一条路由。改一家厂商的地址或默认协议立刻影响所有用它的账号（这是单一来源应有的行为）。厂商与各协议的路径在数据库里，`lax provider ls` 能看到，`provider add` / `set` / `unset` 可以增删改，不必重编译。入站协议与出站协议相同时直通，请求体只改 `model` 字段，其余字段与值原样带到上游，响应按字节原样返回（gemini 的报文里没有 `model` 字段，它直通时请求体一个字节都不改）；不同时经中间表示转换，请求与响应都只搬映射表里定义的字段，表外字段丢弃。未知路径返回 404，请求体解析失败返回 400，错误消息带协议名前缀。
 
 自己加一家厂商时，每个协议一条 flag（`--anthropic`、`--openai`、`--responses`、`--gemini`、`--systemone`），值有两种写法：相对 `--base-url` 的完整路径，或者整条地址。整条地址给同一厂商不同协议分域名的情况用，写进去直接使用、不再拼 `--base-url`，例如 `--openai https://openai.example.com/v1/chat/completions --anthropic https://claude.example.com/v1/messages`；整条地址要带主机名，`https://` 这种只有 scheme、`https:///x` 缺主机名与 `ftp://host/x` 这类别的 scheme 都是用法错误（退出码 2）。`--base-url` 可以省略，条件是每个要声明的路由（以及给了的话 `--models-path`）都是整条地址：那时它拼不进任何地址，省掉它账号的地址也留空，转发与模型同步全走整条地址。bigmodel 就是这种形状——三套协议分属不同 host 与路径，模型列表在 chat 路径的同级：
 
 ```bash
-switchboard provider add bigmodel \
+lax provider add bigmodel \
     --anthropic https://open.bigmodel.cn/api/anthropic/v1/messages \
     --openai https://open.bigmodel.cn/api/coding/paas/v4/chat/completions \
     --responses https://open.bigmodel.cn/api/v1/responses
@@ -71,7 +71,7 @@ switchboard provider add bigmodel \
 
 ```bash
 # 新建厂商：至少一条协议路由；--base-url 只在路由是相对路径时才需要
-switchboard provider add myco --base-url https://api.deepseek.com \
+lax provider add myco --base-url https://api.deepseek.com \
     --openai /v1/chat/completions \
     --anthropic /anthropic/v1/messages \
     --default-protocol openai
@@ -82,7 +82,7 @@ gemini 的入站与出站都可用，原生接口把模型名放在路径里，�
 
 ```bash
 # 只声明 gemini 一条路由，默认协议跟着写成 gemini
-switchboard provider add gem-proxy --base-url https://gemini-proxy.example.com \
+lax provider add gem-proxy --base-url https://gemini-proxy.example.com \
     --gemini /v1beta/models/{model}:generateContent \
     --default-protocol gemini
 已添加厂商 gem-proxy（https://gemini-proxy.example.com），1 条路由，默认协议 gemini
@@ -94,10 +94,10 @@ switchboard provider add gem-proxy --base-url https://gemini-proxy.example.com \
 
 ```bash
 # 补一条 responses 路由，并把默认协议换掉
-switchboard provider set myco --responses /v1/responses --default-protocol responses
+lax provider set myco --responses /v1/responses --default-protocol responses
 
 # 删一条路由；也可以一次删多个（models-path、default-protocol、note 同样可用）
-switchboard provider unset myco anthropic
+lax provider unset myco anthropic
 ```
 
 `provider unset` 幂等：要删的项本来就不存在时不报错，只说明一句「myco 本来就没有 anthropic 路由」。删到一条路由都不剩会被拒绝，那是不想要这家厂商了，用 `provider rm`。`--models-path <路径>` 是厂商级的模型列表覆盖，`provider unset myco models-path` 清掉它、回到按各路由取。
@@ -106,13 +106,13 @@ switchboard provider unset myco anthropic
 
 ```bash
 # 只加给 openai-chat 那条路由，值随对话稳定
-switchboard provider header set opencode x-opencode-session '{session}' --protocol openai-chat
+lax provider header set opencode x-opencode-session '{session}' --protocol openai-chat
 
 # 看这家声明了什么：厂商 / 协议（厂商级显示 -）/ 头名 / 值（脱敏）
-switchboard provider header ls opencode
+lax provider header ls opencode
 
 # 删一条：删不到会报错并列出这家现有的声明
-switchboard provider header unset opencode x-opencode-session --protocol openai-chat
+lax provider header unset opencode x-opencode-session --protocol openai-chat
 ```
 
 完整规则（四种写法、与凭据头冲突时声明优先、不进请求记录）见 DESIGN 5.10。
@@ -120,9 +120,9 @@ switchboard provider header unset opencode x-opencode-session --protocol openai-
 换 key 不删号重建：`account add` 时那份 key 失效了，用 `account set` 覆盖掉就行，探活结果、协议发现与请求记录的账号归属都留着。旧凭据留下的冷却与失败计数在同一个事务里清零，账号重新启用：
 
 ```bash
-switchboard account set ds --key sk-yyy          # 直接写值
-switchboard account set ds --key - < key.txt     # 从标准输入读
-SWITCHBOARD_KEY=sk-yyy switchboard account set ds # 留空则读环境变量 SWITCHBOARD_KEY
+lax account set ds --key sk-yyy          # 直接写值
+lax account set ds --key - < key.txt     # 从标准输入读
+LAX_KEY=sk-yyy lax account set ds         # 留空则读环境变量 LAX_KEY
 ```
 
 `update` 是 `set` 的同义词。`--json` 只回显掩码，明文不进输出；换完 key 不用再跑 `account add`，也不影响已经探出来的模型状态。
@@ -130,7 +130,7 @@ SWITCHBOARD_KEY=sk-yyy switchboard account set ds # 留空则读环境变量 SWI
 `account test` 判的是凭据与连通性，不是某个模型能不能用，所以它分两段。先 `GET` 模型列表证明地址通：地址与凭据头跟 `model sync` 同一套规则（厂商覆盖 → 该账号的默认协议那条路由的 `models_path`，整条地址直接访问，凭据头跟取到地址的那条路由的协议），2xx 说明上游连得上，顺带报出上游模型数，这一条不花 token。列表 2xx 之后**仍然**再发一条 `max_tokens=1` 的请求证明凭据有效：有的上游列表接口是公开的，任何 key 都回 200（commandcode 就是），光看列表判不出 key 好不好。这家没有列表接口（404、405）、列表被网关拦住（403）或连不上时也走这条请求，模型取账号模型列表第一项，为空时用默认模型名 `default` 并在备注里说明。两段都通过才判正常，状态与退出码按调用那段算；备注与 `--json` 写清两段各自的结果（`list` 对象是第一段的）。某个模型到底能不能用由 `model probe` 决定。
 
 ```bash
-switchboard account test ds
+lax account test ds
 账号  状态  HTTP  耗时   上游模型数  备注
 ds    正常  200   412ms  47          模型调用可用（模型 deepseek-chat）；列表接口可用（GET https://api.deepseek.com/v1/models，上游 47 个模型）
 ```
@@ -140,12 +140,12 @@ ds    正常  200   412ms  47          模型调用可用（模型 deepseek-chat
 模型列表不用手填。`model sync` 拉上游的模型清单，`model probe` 逐个试一遍，能用的才进入选号。两条命令都接受 `--provider` 与 `--account`，不给就处理全部账号：
 
 ```bash
-switchboard account add ds --provider deepseek --key sk-xxx
-switchboard model sync                                     # 全部账号各拉一次模型列表
-switchboard model sync --provider deepseek --account ds   # 只处理这一个账号
-switchboard model sync --account ds --endpoint /v1/models # 临时指定列表路径，只影响这一次调用
-switchboard model probe --account ds --limit 5            # 只探这个账号的前 5 个模型
-switchboard serve
+lax account add ds --provider deepseek --key sk-xxx
+lax model sync                                     # 全部账号各拉一次模型列表
+lax model sync --provider deepseek --account ds   # 只处理这一个账号
+lax model sync --account ds --endpoint /v1/models # 临时指定列表路径，只影响这一次调用
+lax model probe --account ds --limit 5            # 只探这个账号的前 5 个模型
+lax serve
 ```
 
 模型列表的形状不用管：`{data:[…]}`、`{models:[…]}`、顶层数组三种都认，gemini 的 `{models:[{"name":"models/…"}]}` 走第二种，清单按 `supportedGenerationMethods` 过滤、名字去掉 `models/` 前缀；分页带 `pageSize=1000`，有 `nextPageToken` 就接着取，最多 10 页。
@@ -155,10 +155,10 @@ switchboard serve
 模型名还可以起别名。客户端里的模型名往往写死（`claude-3-5-sonnet`、`gpt-4o`），而账号声明的是上游的真实名字；`model alias` 把那个写死的名字指到一个真实模型名上，网关按真名选号、改请求体与路径，客户端不必改：
 
 ```bash
-switchboard model alias set fast glm-4.6   # 客户端请求 fast 时按 glm-4.6 走；同名再写一次就是改目标
-switchboard model alias ls                 # 别名 / 目标 / 状态 / 解析
-switchboard model alias ls fast            # 只看一条
-switchboard model alias unset fast
+lax model alias set fast glm-4.6   # 客户端请求 fast 时按 glm-4.6 走；同名再写一次就是改目标
+lax model alias ls                 # 别名 / 目标 / 状态 / 解析
+lax model alias ls fast            # 只看一条
+lax model alias unset fast
 ```
 
 别名只影响请求方向：响应不重写，里面的模型名仍是上游的真实名字。客户端请求别名时，请求记录里的请求模型名与使用模型名会不同，`log tail` 的模型列打的是客户端请求的那个名字，一次别名命中一眼可见。别名精确匹配、区分大小写，可以指向另一个别名，链最长 8 跳；名字已经被某个账号或模型目录当成真实模型时写入会被拒绝，否则别名会遮蔽真名。目标眼下没有账号提供也能先写，之后加账号即生效；`model alias ls` 的解析列写的是链走到的真实名字，链断了（成环、超过 8 跳）时显示成不可解析并给出原因。
@@ -166,31 +166,31 @@ switchboard model alias unset fast
 模型单价也挂在模型目录上，不在账号上：同一家上游的同一个模型只有一份标价，否则改一次价要改 N 个账号，`usage` 还会给同一件事算出 N 个单价。管理员先用 `model price set` 定厂商级标价，套餐真的不同时才对某个账号加一份覆盖价：
 
 ```bash
-switchboard model price set glm-4.6 --in 0.6 --out 2.2           # 厂商级标价，模型名只在一家目录里时不用 --provider
-switchboard model price set glm-4.6 --in 0.6 --out 2.2 --provider bigmodel  # 同名模型出现在多家时用 --provider 指定
-switchboard model price set glm-4.6 --account ds --out 2.5       # 只给这个账号的覆盖价，不影响别的账号
-switchboard model price ls                                       # 模型 / 供应商 / 输入价 / 输出价 / 缓存读 / 缓存写
-switchboard model price ls glm-4.6 --account ds                  # 目录价与这个账号的有效价并排
-switchboard model price unset glm-4.6 cache-read                 # 清掉某一项；清第二次不报错，只说「本来就没有」
+lax model price set glm-4.6 --in 0.6 --out 2.2           # 厂商级标价，模型名只在一家目录里时不用 --provider
+lax model price set glm-4.6 --in 0.6 --out 2.2 --provider bigmodel  # 同名模型出现在多家时用 --provider 指定
+lax model price set glm-4.6 --account ds --out 2.5       # 只给这个账号的覆盖价，不影响别的账号
+lax model price ls                                       # 模型 / 供应商 / 输入价 / 输出价 / 缓存读 / 缓存写
+lax model price ls glm-4.6 --account ds                  # 目录价与这个账号的有效价并排
+lax model price unset glm-4.6 cache-read                 # 清掉某一项；清第二次不报错，只说「本来就没有」
 ```
 
 价格单位是每百万 token，0 合法（免费或打包），负数是用法错误。只写命令行上给过的那几项，没给的留空表示继承：账号级的「留空」就是回到厂商级标价（`model price unset` 同理，账号级清掉不是「免费」），缓存读写没定价时按输入价算（`model price ls` 的缓存那格写「回退输入价」）。`account add` 与 `account set` 因此不再收 `--price-*`：误敲会得到一个指向 `model price set` 的用法错误。
 
-## 决策请求：switchboard decide
+## 决策请求：lax decide
 
 systemone 是第五条线协议，不是对话：一条请求由一个 `state` 加一组带名字的问题组成，回的是每个问题的答案与概率（是非题给概率，选择题与打分题给置信度），不产文本。这类模型的入站与出站都是 `POST /v1/systemone`，只与自己互通，也不参与跨协议转换，所以发对话的 `call` 对它一律拒绝（退出码 1，文案指向 `decide`）。厂商一侧多了一条 `--systemone` 路由：
 
 ```bash
-switchboard provider add typesafe --base-url https://api.typesafe.ai \
+lax provider add typesafe --base-url https://api.typesafe.ai \
     --systemone /v1/systemone --default-protocol systemone
-switchboard account add ts --provider typesafe --key sk-xxx --models typesafe/jev   # 决策模型不在上游清单里，只能手工声明
-switchboard model probe --account ts
+lax account add ts --provider typesafe --key sk-xxx --models typesafe/jev   # 决策模型不在上游清单里，只能手工声明
+lax model probe --account ts
 ```
 
 只声明 systemone 一条路由时要同时给 `--default-protocol systemone`：固定回退顺序只认 `openai-chat` → `openai-responses` → `anthropic`，不给的话这家厂商算不出默认协议。删这条路由是 `provider unset typesafe systemone`（删掉的正好是默认协议时会被拒绝，先把默认协议改成别的）。
 
 ```bash
-switchboard decide --model typesafe/jev --state "客户说：这个月的账单被扣了两次" \
+lax decide --model typesafe/jev --state "客户说：这个月的账单被扣了两次" \
     --noul "present=Is this text present?" \
     --choice "mood=这是哪一类问题?" --choice "mood:billing=账单与付款,other" \
     --score "anger=有多生气?" --score "anger:calm,mild,angry"
@@ -210,7 +210,7 @@ anger    score   mild     -     0.61
 
 ```
 ANTHROPIC_BASE_URL=http://127.0.0.1:4567
-ANTHROPIC_AUTH_TOKEN=switchboard-local    # 本机网关不校验，填个非空值即可
+ANTHROPIC_AUTH_TOKEN=lax-local    # 本机网关不校验，填个非空值即可
 ANTHROPIC_MODEL=deepseek-v4-pro           # 必须是探活出来的可用模型名
 ```
 
@@ -231,10 +231,10 @@ curl -s http://127.0.0.1:4567/v1/models/deepseek-v4-pro   # 单个模型，未�
 
 ```bash
 make check        # go vet + go test + go build
-./switchboard --help
+./lax --help
 ```
 
-只需要 Go 工具链，生成的 `switchboard` 是单文件，不依赖外部服务。
+只需要 Go 工具链，生成的 `lax` 是单文件，不依赖外部服务。
 
 ## 文档站
 
@@ -255,9 +255,9 @@ make docs-build   # 生产构建，顺带跑一次类型检查
 
 | 路径 | 内容 |
 | --- | --- |
-| `$XDG_CONFIG_HOME/switchboard/config.json` | 监听地址、数据库路径 |
-| `$XDG_DATA_HOME/switchboard/switchboard.db` | 账号、模型状态、请求记录 |
-| `$XDG_DATA_HOME/switchboard/secret.key` | 加密凭据的密钥 |
+| `$XDG_CONFIG_HOME/lax/config.json` | 监听地址、数据库路径 |
+| `$XDG_DATA_HOME/lax/lax.db` | 账号、模型状态、请求记录 |
+| `$XDG_DATA_HOME/lax/secret.key` | 加密凭据的密钥 |
 
 凭据用 AES-256-GCM 加密后入库。这防的是备份文件与日志泄漏，不防同一台机器上以同一用户身份运行的程序。
 

@@ -1,6 +1,6 @@
 ---
 name: clu
-description: switchboard 命令行：子命令、参数、错误文案、--json 输出与 doctor 检查项
+description: lax 命令行：子命令、参数、错误文案、--json 输出与 doctor 检查项
 tools: read, write, edit, bash, grep, find, ls
 ---
 
@@ -15,7 +15,7 @@ tools: read, write, edit, bash, grep, find, ls
 5. 会改用户文件的命令默认不写盘，`--apply` 才写；写前备份，备份路径打印出来。
 6. 客户端配置改写只动设计文档列出的键，其它键原样保留，写完要能 `revert` 还原到字节一致。
 
-自检：`go build ./... && ./switchboard --help`，再逐个跑一遍改过的子命令，确认输出格式与退出码。`--json` 输出要能被 `jq` 解析。
+自检：`go build ./... && ./lax --help`，再逐个跑一遍改过的子命令，确认输出格式与退出码。`--json` 输出要能被 `jq` 解析。
 
 输出格式：
 

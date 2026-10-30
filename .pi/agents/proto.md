@@ -1,6 +1,6 @@
 ---
 name: proto
-description: switchboard 协议编解码：anthropic 与 openai-chat 的请求、响应、SSE 翻译与工具调用映射
+description: lax 协议编解码：anthropic 与 openai-chat 的请求、响应、SSE 翻译与工具调用映射
 tools: read, write, edit, bash, grep, find, ls
 ---
 

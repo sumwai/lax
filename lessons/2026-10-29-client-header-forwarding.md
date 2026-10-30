@@ -25,7 +25,7 @@ was never written down as a decision with its cost.
 Forward a whitelist, and only when the inbound and outbound protocol match: `anthropic-beta` and
 `anthropic-version` for anthropic, `openai-beta`, `openai-organization` and `openai-project` for the
 two OpenAI protocols, nothing for gemini because its switches live in the query string and body.
-Credentials, cookies, hop-by-hop headers and the gateway's own `x-switchboard-session` are never
+Credentials, cookies, hop-by-hop headers and the gateway's own `x-lax-session` are never
 forwarded. Order is `setAuth` defaults, then the client's whitelisted headers, then declared
 provider headers, so site configuration still overrides whatever the client sends.
 

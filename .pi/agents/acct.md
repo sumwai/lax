@@ -1,6 +1,6 @@
 ---
 name: acct
-description: switchboard 账号与存储：SQLite 迁移、凭据加解密、账号池、冷却与选号
+description: lax 账号与存储：SQLite 迁移、凭据加解密、账号池、冷却与选号
 tools: read, write, edit, bash, grep, find, ls
 ---
 
