@@ -274,7 +274,7 @@ func TestUsageCacheHintOnlyWithCacheTokens(t *testing.T) {
 	}
 	id := accountID(t, "ds1")
 
-	const hint = "缓存读写已按账号的缓存单价计入估算花费"
+	const hint = "缓存读写已按模型的缓存单价计入估算花费"
 	addRecord(t, store.RequestRecord{
 		TS: time.Now().Unix(), Inbound: "anthropic", Outbound: "anthropic",
 		ModelRequested: "m1", ModelUsed: "m1", AccountID: id,
@@ -287,9 +287,9 @@ func TestUsageCacheHintOnlyWithCacheTokens(t *testing.T) {
 	if strings.Contains(out, hint) {
 		t.Fatalf("缓存 token 全 0 时不该出现提示:\n%s", out)
 	}
-	// 没定价时「花费为 0」那句照旧。
-	if !strings.Contains(out, "花费为 0") {
-		t.Fatalf("没定价时应提示花费为 0:\n%s", out)
+	// 没定价时写「未定价」，与「算出来就是 0」分开。
+	if !strings.Contains(out, "花费未定价") {
+		t.Fatalf("没定价时应提示未定价:\n%s", out)
 	}
 
 	addRecord(t, store.RequestRecord{

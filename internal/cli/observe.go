@@ -76,6 +76,8 @@ func cmdUsage(e *Env, args []string) error {
 	table := make([][]string, 0, len(rows))
 	var totalReq, totalIn, totalOut, totalReasoning, totalCacheRead, totalCacheWrite int64
 	var totalCost float64
+	priced := 0
+	unpriced := 0
 	for _, r := range rows {
 		table = append(table, []string{
 			r.Key,
@@ -96,7 +98,14 @@ func cmdUsage(e *Env, args []string) error {
 		// Cost 为 nil 表示这一组未定价（缺价），合计里不当 0 累加。
 		if r.Cost != nil {
 			totalCost += *r.Cost
+			priced++
+		} else {
+			unpriced++
 		}
+	}
+	totalCell := "未定价"
+	if priced > 0 {
+		totalCell = usage.Yuan(totalCost)
 	}
 	table = append(table, []string{
 		"合计",
@@ -106,16 +115,20 @@ func cmdUsage(e *Env, args []string) error {
 		fmt.Sprintf("%d", totalReasoning),
 		fmt.Sprintf("%d", totalCacheRead),
 		fmt.Sprintf("%d", totalCacheWrite),
-		usage.Yuan(totalCost),
+		totalCell,
 	})
 	fmt.Fprint(e.Stdout, renderTable(
 		[]string{headerName, "请求", "输入 token", "输出 token", "思考 token", "缓存读 token", "缓存写 token", "估算花费"}, table))
-	if totalCost == 0 {
-		fmt.Fprintln(e.Stdout, "花费为 0：账号没定价，加账号时给 --price-in 与 --price-out（缓存单价可选，未填时回退输入价）")
+	if priced == 0 {
+		fmt.Fprintln(e.Stdout, "花费未定价：这些请求用到的模型没有单价，用 switchboard model price set <模型> --in N --out N 补上（缓存单价可选，未填时回退输入价）")
+	} else if unpriced > 0 {
+		fmt.Fprintf(e.Stdout, "有 %d 行没有单价，它们不计入合计；补价用 switchboard model price set <模型> --in N --out N\n", unpriced)
+	} else if totalCost == 0 {
+		fmt.Fprintln(e.Stdout, "花费为 0：单价已填且都是 0，这些请求算免费")
 	}
 	if totalCacheRead+totalCacheWrite > 0 {
 		// 缓存 token 已经折进花费，不说清就会被当成只显示；口径与 DESIGN 5.5 的公式一致。
-		fmt.Fprintln(e.Stdout, "缓存读写已按账号的缓存单价计入估算花费，未填缓存单价时按输入价算")
+		fmt.Fprintln(e.Stdout, "缓存读写已按模型的缓存单价计入估算花费，未填缓存单价时按输入价算")
 	}
 	return nil
 }
