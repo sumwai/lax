@@ -1,4 +1,4 @@
-module switchboard
+module lax
 
 go 1.26.0
 

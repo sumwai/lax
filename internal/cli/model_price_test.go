@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/store"
+	"lax/internal/store"
 )
 
 // 这个文件钉住 model price 这一组命令面（DESIGN 4 的三行）：厂商级标价写 provider_models，
@@ -117,7 +117,7 @@ func TestModelPriceSetProviderAndAccount(t *testing.T) {
 	if !strings.Contains(out, "厂商 mine 的厂商级标价") || !strings.Contains(out, "m1 输入价 0.60、输出价 2.20") {
 		t.Fatalf("确认行应写清作用域、模型与写入的几项价: %s", out)
 	}
-	if !strings.Contains(out, "下一步：switchboard model ls") {
+	if !strings.Contains(out, "下一步：lax model ls") {
 		t.Fatalf("确认行之后应给出下一步: %s", out)
 	}
 	row := providerPrice(t, "mine", "m1")
@@ -169,7 +169,7 @@ func TestModelPriceSetRejectsUnknownScopes(t *testing.T) {
 	if code != 2 || out != "" {
 		t.Fatalf("互斥的退出码 = %d，stdout = %q，期望 2 与空 stdout", code, out)
 	}
-	for _, want := range []string{"--provider 与 --account 只能给一个", "用法：switchboard model price set <模型>"} {
+	for _, want := range []string{"--provider 与 --account 只能给一个", "用法：lax model price set <模型>"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("互斥的 stderr 应包含 %q: %s", want, stderr)
 		}
@@ -247,7 +247,7 @@ func TestModelPriceSetMissingRows(t *testing.T) {
 	if code != 1 || out != "" {
 		t.Fatalf("模型不在目录里的退出码 = %d，stdout = %q，期望 1", code, out)
 	}
-	for _, want := range []string{"不在目录里", "switchboard model sync --provider mine"} {
+	for _, want := range []string{"不在目录里", "lax model sync --provider mine"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应包含 %q: %s", want, stderr)
 		}
@@ -257,7 +257,7 @@ func TestModelPriceSetMissingRows(t *testing.T) {
 	if code != 1 || out != "" {
 		t.Fatalf("账号没有该模型行的退出码 = %d，stdout = %q，期望 1", code, out)
 	}
-	for _, want := range []string{"还没有模型", "switchboard model sync --account ds1"} {
+	for _, want := range []string{"还没有模型", "lax model sync --account ds1"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应包含 %q: %s", want, stderr)
 		}
@@ -359,7 +359,7 @@ func TestModelPriceUnsetRejectsBadFields(t *testing.T) {
 		if code != 2 || out != "" {
 			t.Fatalf("%v 的退出码 = %d，stdout = %q，期望 2 与空 stdout", c.args, code, out)
 		}
-		for _, want := range []string{c.want, "in、out、cache-read、cache-write", "用法：switchboard model price unset <模型>"} {
+		for _, want := range []string{c.want, "in、out、cache-read、cache-write", "用法：lax model price unset <模型>"} {
 			if !strings.Contains(stderr, want) {
 				t.Fatalf("%v 的 stderr 应包含 %q: %s", c.args, want, stderr)
 			}
@@ -464,7 +464,7 @@ func TestModelPriceLsTextAndJSON(t *testing.T) {
 	if code != 1 || out != "" {
 		t.Fatalf("不在目录里的退出码 = %d，stdout = %q，期望 1", code, out)
 	}
-	if !strings.Contains(stderr, "switchboard model ls") {
+	if !strings.Contains(stderr, "lax model ls") {
 		t.Fatalf("不在目录里时应指向 model ls: %s", stderr)
 	}
 
@@ -553,10 +553,10 @@ func TestModelPriceHelp(t *testing.T) {
 		t.Fatalf("model price --help 退出码 = %d，stderr = %s", code, stderr)
 	}
 	for _, want := range []string{
-		"switchboard model price set <模型>",
-		"switchboard model price unset <模型>",
-		"switchboard model price ls [<模型>]",
-		"switchboard model price set glm-4.6 --in 0.6 --out 2.2",
+		"lax model price set <模型>",
+		"lax model price unset <模型>",
+		"lax model price ls [<模型>]",
+		"lax model price set glm-4.6 --in 0.6 --out 2.2",
 		"价格属于模型，不属于账号",
 		"账号级价格只在套餐不同时覆盖",
 	} {

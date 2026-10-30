@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/store"
-	"switchboard/internal/store/storetest"
+	"lax/internal/store"
+	"lax/internal/store/storetest"
 )
 
 // aliasRow 是 model alias ls --json 的一项。
@@ -41,7 +41,7 @@ func TestModelAliasSetTextAndJSON(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("model alias set 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"已设置别名 fast → glm-4.6", "switchboard model alias ls"} {
+	for _, want := range []string{"已设置别名 fast → glm-4.6", "lax model alias ls"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("set 的文本输出缺 %q:\n%s", want, out)
 		}
@@ -139,7 +139,7 @@ func TestModelAliasUsageErrors(t *testing.T) {
 		if code != 2 || out != "" {
 			t.Fatalf("%v 的退出码 = %d，stdout = %q", args, code, out)
 		}
-		if !strings.Contains(stderr, "switchboard model alias --help") {
+		if !strings.Contains(stderr, "lax model alias --help") {
 			t.Fatalf("%v 的提示应指向组级帮助: %s", args, stderr)
 		}
 	}
@@ -198,7 +198,7 @@ func TestModelAliasNotFoundListsAliases(t *testing.T) {
 	if code != 1 || out != "" {
 		t.Fatalf("空表 unset 的退出码 = %d，stdout = %q", code, out)
 	}
-	if !strings.Contains(stderr, "switchboard model alias set fast") {
+	if !strings.Contains(stderr, "lax model alias set fast") {
 		t.Fatalf("空表 unset 的文案应给出设置一条的命令: %s", stderr)
 	}
 
@@ -220,7 +220,7 @@ func TestModelAliasNotFoundListsAliases(t *testing.T) {
 		if out != "" {
 			t.Fatalf("%v 失败时不该写 stdout: %s", args, out)
 		}
-		for _, want := range []string{"nope", "fast", "quick", "switchboard model alias ls"} {
+		for _, want := range []string{"nope", "fast", "quick", "lax model alias ls"} {
 			if !strings.Contains(stderr, want) {
 				t.Fatalf("%v 的文案缺 %q: %s", args, want, stderr)
 			}
@@ -272,7 +272,7 @@ func TestModelAliasLsEmpty(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("model alias ls 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if want := "switchboard model alias set fast glm-4.6"; !strings.Contains(out, want) {
+	if want := "lax model alias set fast glm-4.6"; !strings.Contains(out, want) {
 		t.Fatalf("空表的提示缺示例 %q:\n%s", want, out)
 	}
 	if code, out, _ := run(t, "model", "alias", "ls", "--json"); code != 0 || strings.TrimSpace(out) != "[]" {
@@ -331,8 +331,8 @@ func TestModelAliasCycleRejected(t *testing.T) {
 	for _, want := range []string{
 		"已经写进库",
 		store.ErrModelAliasCycle.Error(),
-		"switchboard model alias ls b",
-		"switchboard model alias unset b",
+		"lax model alias ls b",
+		"lax model alias unset b",
 	} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("成环的文案缺 %q: %s", want, stderr)
@@ -363,10 +363,10 @@ func TestModelAliasGroupHelp(t *testing.T) {
 			t.Fatalf("组级帮助不该写 stderr: %s", stderr)
 		}
 		for _, want := range []string{
-			"switchboard model alias set <别名> <目标>",
-			"switchboard model alias unset <别名>",
-			"switchboard model alias ls [<别名>]",
-			"switchboard model alias set fast glm-4.6",
+			"lax model alias set <别名> <目标>",
+			"lax model alias unset <别名>",
+			"lax model alias ls [<别名>]",
+			"lax model alias set fast glm-4.6",
 			"只影响请求方向",
 			"log tail",
 		} {

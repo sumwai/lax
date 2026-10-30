@@ -10,8 +10,8 @@ import (
 	"os"
 	"testing"
 
-	"switchboard/internal/config"
-	"switchboard/internal/store"
+	"lax/internal/config"
+	"lax/internal/store"
 )
 
 // DB 是测试用的库句柄。读写仍走 store 的方法，这里只补测试需要的那几个捷径。
@@ -20,7 +20,7 @@ type DB struct {
 }
 
 // Open 按当前进程的 XDG 环境打开沙箱里的库，测试结束时关闭。
-// 库必须已经由 `switchboard init` 建好：这里不初始化，免得漏跑 init 的用例
+// 库必须已经由 `lax init` 建好：这里不初始化，免得漏跑 init 的用例
 // 拿到一个空库却以为是「还没同步」。
 func Open(t *testing.T) *DB {
 	t.Helper()

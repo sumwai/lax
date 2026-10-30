@@ -16,7 +16,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"switchboard/internal/translate"
+	"lax/internal/translate"
 )
 
 //go:embed migrations/*.sql

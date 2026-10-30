@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"switchboard/internal/gateway"
+	"lax/internal/gateway"
 )
 
 // geminiPage 是假上游返回的一页模型列表：body 与请求里看到的查询串都记下来。

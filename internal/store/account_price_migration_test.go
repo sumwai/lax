@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"testing"
 
-	"switchboard/internal/store"
+	"lax/internal/store"
 )
 
 // TestMigration0016MovesAccountPricesToOverride 用一个停在 0015 的库跑完 0016：

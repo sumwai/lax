@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"switchboard/internal/store"
-	"switchboard/internal/translate"
+	"lax/internal/store"
+	"lax/internal/translate"
 )
 
 // placeholderUpstream 记录每一次请求的 RequestURI，并按有没有 alt=sse 回对应的报文：

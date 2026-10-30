@@ -8,8 +8,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
+	"lax/internal/gateway"
+	"lax/internal/store"
 )
 
 // providerSubs 是 provider 一组的子命令清单，组级帮助与错误提示都读它。
@@ -36,9 +36,9 @@ var providerSubs = []groupItem{
 // `--base-url` 在 add 里是可选的：三条路由与 models_path 都是整条地址时它拼不进任何地址，
 // 写它只是为了过校验（见 DESIGN 5.8）。
 const (
-	providerAddUsage   = "用法：switchboard provider add <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]"
-	providerSetUsage   = "用法：switchboard provider set <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--models-path <路径>] [--default-protocol <协议>] [--note <备注>]"
-	providerUnsetUsage = "用法：switchboard provider unset <名称> <字段> [<字段>...]\n可用字段：anthropic、openai、responses、gemini、systemone、models-path、default-protocol、note"
+	providerAddUsage   = "用法：lax provider add <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]"
+	providerSetUsage   = "用法：lax provider set <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--models-path <路径>] [--default-protocol <协议>] [--note <备注>]"
+	providerUnsetUsage = "用法：lax provider unset <名称> <字段> [<字段>...]\n可用字段：anthropic、openai、responses、gemini、systemone、models-path、default-protocol、note"
 )
 
 // providerUnsetField 是一个可以被 `provider unset` 清掉的字段。字段名用 flag 名，
@@ -68,7 +68,7 @@ func cmdProvider(e *Env, args []string) error {
 		return nil
 	}
 	if len(args) == 0 {
-		return usagef("需要子命令：ls | add | set | unset | rm | header\n用 switchboard provider --help 查看子命令")
+		return usagef("需要子命令：ls | add | set | unset | rm | header\n用 lax provider --help 查看子命令")
 	}
 	switch args[0] {
 	case "ls":
@@ -84,7 +84,7 @@ func cmdProvider(e *Env, args []string) error {
 	case "header":
 		return cmdProviderHeader(e, args[1:])
 	default:
-		return usagef("未知子命令 %q，可用：ls | add | set | unset | rm | header\n用 switchboard provider --help 查看子命令", args[0])
+		return usagef("未知子命令 %q，可用：ls | add | set | unset | rm | header\n用 lax provider --help 查看子命令", args[0])
 	}
 }
 
@@ -279,7 +279,7 @@ func cmdProviderLs(e *Env, args []string) error {
 	}
 
 	if len(snaps) == 0 {
-		fmt.Fprintln(e.Stdout, "厂商表是空的，账号按 base_url 后缀猜路径。加一个厂商：switchboard provider add deepseek --base-url https://api.deepseek.com --openai /v1/chat/completions --anthropic /anthropic/v1/messages")
+		fmt.Fprintln(e.Stdout, "厂商表是空的，账号按 base_url 后缀猜路径。加一个厂商：lax provider add deepseek --base-url https://api.deepseek.com --openai /v1/chat/completions --anthropic /anthropic/v1/messages")
 		return nil
 	}
 
@@ -310,10 +310,10 @@ func newProviderPathFlags(fs *flagSet) providerPathFlags {
 		responses: fs.String("responses", "", "openai-responses 协议的路由路径：相对 --base-url 的完整路径，例如 /v1/responses；也可以写整条地址（相对路径的斜杠写法由程序规整）"),
 		gemini: fs.String("gemini", "", "gemini 协议的路由路径：相对 --base-url 的完整路径，例如 /v1beta/models/{model}:generateContent；也可以写整条地址（相对路径的斜杠写法由程序规整）。\n"+
 			"{model} 是占位符，原样落库，发请求时才换成模型名（按路径段转义），例：\n"+
-			"  switchboard provider add google-gemini --base-url https://generativelanguage.googleapis.com --gemini /v1beta/models/{model}:generateContent --default-protocol gemini"),
+			"  lax provider add google-gemini --base-url https://generativelanguage.googleapis.com --gemini /v1beta/models/{model}:generateContent --default-protocol gemini"),
 		systemone: fs.String("systemone", "", "systemone 决策协议的路由路径：相对 --base-url 的完整路径，例如 /v1/systemone；也可以写整条地址（相对路径的斜杠写法由程序规整）。\n"+
-			"这条协议一个 state 加一组问题、不出文本，switchboard decide 用它，例：\n"+
-			"  switchboard provider add typesafe --base-url https://api.typesafe.ai --systemone /v1/systemone\n"+
+			"这条协议一个 state 加一组问题、不出文本，lax decide 用它，例：\n"+
+			"  lax provider add typesafe --base-url https://api.typesafe.ai --systemone /v1/systemone\n"+
 			"  只声明 systemone 这一条时再加 --default-protocol systemone（固定回退顺序只认 openai-chat → openai-responses → anthropic）"),
 	}
 }
@@ -369,7 +369,7 @@ func checkModelsPathFlag(value string, setCmd bool, usageLine string) error {
 // 输入 openai 就是 chat，gemini 与 systemone 两种写法同形。
 func protocolFromCLI(value string) (string, error) {
 	return protocolFromCLIName(value, "--default-protocol",
-		"switchboard provider add acme --base-url https://api.example.com --openai /v1/chat/completions --default-protocol openai")
+		"lax provider add acme --base-url https://api.example.com --openai /v1/chat/completions --default-protocol openai")
 }
 
 // protocolFromCLIName 是 protocolFromCLI 的同一套映射，只把错误文案里的参数名与示例换成调用方那一个：
@@ -397,10 +397,10 @@ func protocolFromCLIName(value, flagName, example string) (string, error) {
 // 顺手把已有值抹掉（见 DESIGN 4）。末尾附上这个子命令的用法行，用户不必再猜语法。
 func emptyValueError(setCmd bool, flagName, usageLine string) error {
 	if setCmd {
-		return usagef("--%s 传了空值：provider set 只负责设值，取值不能为空；删除一条路由或清掉一项设置用 switchboard provider unset <名称> %s\n%s",
+		return usagef("--%s 传了空值：provider set 只负责设值，取值不能为空；删除一条路由或清掉一项设置用 lax provider unset <名称> %s\n%s",
 			flagName, flagName, usageLine)
 	}
-	return usagef("--%s 传了空值：新建厂商不接受空值，去掉这个参数再试；建好之后要删掉就用 switchboard provider unset <名称> %s\n%s",
+	return usagef("--%s 传了空值：新建厂商不接受空值，去掉这个参数再试；建好之后要删掉就用 lax provider unset <名称> %s\n%s",
 		flagName, flagName, usageLine)
 }
 
@@ -417,13 +417,13 @@ func lookupUnsetField(raw string) (providerUnsetField, error) {
 		return providerUnsetField{}, usagef("%s", providerUnsetUsage)
 	}
 	if strings.HasPrefix(name, "-") {
-		return providerUnsetField{}, usagef("字段名 %q 不要带 -- 前缀，直接写名字，例如 switchboard provider unset <名称> openai；可用：%s", raw, fields)
+		return providerUnsetField{}, usagef("字段名 %q 不要带 -- 前缀，直接写名字，例如 lax provider unset <名称> openai；可用：%s", raw, fields)
 	}
 	switch name {
 	case "base-url":
-		return providerUnsetField{}, usagef("base-url 不能 unset：清掉之后相对路径的路由就拼不出完整地址；改地址用 switchboard provider set <名称> --base-url <地址>，不需要地址的厂商从一开始就该省掉这个参数（见 DESIGN 5.8）")
+		return providerUnsetField{}, usagef("base-url 不能 unset：清掉之后相对路径的路由就拼不出完整地址；改地址用 lax provider set <名称> --base-url <地址>，不需要地址的厂商从一开始就该省掉这个参数（见 DESIGN 5.8）")
 	case "name", "名称", "厂商名":
-		return providerUnsetField{}, usagef("厂商名不能 unset：它是主键，清不掉；不再需要这家厂商就用 switchboard provider rm <名称>")
+		return providerUnsetField{}, usagef("厂商名不能 unset：它是主键，清不掉；不再需要这家厂商就用 lax provider rm <名称>")
 	}
 	for _, f := range providerUnsetFields {
 		if name == f.name {
@@ -435,7 +435,7 @@ func lookupUnsetField(raw string) (providerUnsetField, error) {
 			return providerUnsetField{}, usagef("字段名 %q 大小写不符，写 %s；可用：%s", raw, f.name, fields)
 		}
 	}
-	return providerUnsetField{}, usagef("字段名 %q 不认识，可用：%s，例如 switchboard provider unset <名称> openai", raw, fields)
+	return providerUnsetField{}, usagef("字段名 %q 不认识，可用：%s，例如 lax provider unset <名称> openai", raw, fields)
 }
 
 // cmdProviderAdd 只新建一家厂商。重名时报错并指向 provider set，不顺手改已有的行。
@@ -451,7 +451,7 @@ func cmdProviderAdd(e *Env, args []string) error {
 	}
 
 	if fs.NArg() != 1 || fs.Arg(0) == "" {
-		return usagef("%s\n每次只新建一家厂商，改一家已有的厂商用 switchboard provider set <名称>", providerAddUsage)
+		return usagef("%s\n每次只新建一家厂商，改一家已有的厂商用 lax provider set <名称>", providerAddUsage)
 	}
 	name := fs.Arg(0)
 
@@ -497,7 +497,7 @@ func cmdProviderAdd(e *Env, args []string) error {
 		routes = append(routes, store.ProviderRoute{Provider: name, Protocol: f.protocol, Path: f.value})
 	}
 	if len(routes) == 0 {
-		return usagef("缺少协议路由：--anthropic、--openai、--responses、--gemini、--systemone 至少给一条，例如 switchboard provider add %s --base-url https://api.example.com --openai /v1/chat/completions；不再需要这家厂商就用 switchboard provider rm %s\n%s", name, name, providerAddUsage)
+		return usagef("缺少协议路由：--anthropic、--openai、--responses、--gemini、--systemone 至少给一条，例如 lax provider add %s --base-url https://api.example.com --openai /v1/chat/completions；不再需要这家厂商就用 lax provider rm %s\n%s", name, name, providerAddUsage)
 	}
 
 	def, err := protocolFromCLI(*defProtocol)
@@ -521,7 +521,7 @@ func cmdProviderAdd(e *Env, args []string) error {
 	// 错误文案已经写清缺哪条、下一步敲什么；缺 base_url 是命令写法的问题，包成用法错误（退出码 2）。
 	switch err := a.st.CreateProvider(p, routes); {
 	case errors.Is(err, store.ErrProviderExists):
-		return fmt.Errorf("厂商 %s 已存在，改用 switchboard provider set %s 修改", name, name)
+		return fmt.Errorf("厂商 %s 已存在，改用 lax provider set %s 修改", name, name)
 	case errors.Is(err, store.ErrBaseURLRequired):
 		return usagef("%v\n%s", err, providerAddUsage)
 	case err != nil:
@@ -536,7 +536,7 @@ func cmdProviderAdd(e *Env, args []string) error {
 		return e.printJSON(snap.json)
 	}
 	fmt.Fprintf(e.Stdout, "已添加厂商 %s（%s），%d 条路由，默认协议 %s\n", snap.row.Name, baseURLSummary(snap.row.BaseURL), len(snap.routes), defaultProtocolCell(snap))
-	fmt.Fprintf(e.Stdout, "下一步：switchboard account add <名称> --provider %s --key <key> 用它加账号\n", name)
+	fmt.Fprintf(e.Stdout, "下一步：lax account add <名称> --provider %s --key <key> 用它加账号\n", name)
 	return nil
 }
 
@@ -554,7 +554,7 @@ func cmdProviderSet(e *Env, args []string) error {
 	}
 
 	if fs.NArg() != 1 || fs.Arg(0) == "" {
-		return usagef("%s\n每次只改一家厂商，新建厂商用 switchboard provider add", providerSetUsage)
+		return usagef("%s\n每次只改一家厂商，新建厂商用 lax provider add", providerSetUsage)
 	}
 	name := fs.Arg(0)
 
@@ -638,7 +638,7 @@ func cmdProviderSet(e *Env, args []string) error {
 	}
 	fmt.Fprintf(e.Stdout, "已修改厂商 %s：改动 %d 项（%s），现有 %d 条路由，默认协议 %s\n",
 		snap.row.Name, len(changed), strings.Join(changed, "、"), len(snap.routes), defaultProtocolCell(snap))
-	fmt.Fprintln(e.Stdout, "下一步：switchboard provider ls 核对")
+	fmt.Fprintln(e.Stdout, "下一步：lax provider ls 核对")
 	return nil
 }
 
@@ -759,7 +759,7 @@ func cmdProviderRm(e *Env, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return usagef("用法：switchboard provider rm <名称> [--force]")
+		return usagef("用法：lax provider rm <名称> [--force]")
 	}
 	name := fs.Arg(0)
 
@@ -786,7 +786,7 @@ func cmdProviderRm(e *Env, args []string) error {
 	}
 
 	if len(names) > 0 && !*force {
-		return fmt.Errorf("厂商 %q 还有 %d 个账号在用（%s），删掉后这些账号不能再用它补默认地址；确认要删就加 --force，或先 switchboard account rm 掉它们再用 switchboard provider rm %s",
+		return fmt.Errorf("厂商 %q 还有 %d 个账号在用（%s），删掉后这些账号不能再用它补默认地址；确认要删就加 --force，或先 lax account rm 掉它们再用 lax provider rm %s",
 			name, len(names), strings.Join(names, "、"), name)
 	}
 
@@ -809,7 +809,7 @@ func cmdProviderRm(e *Env, args []string) error {
 	}
 	fmt.Fprintf(e.Stdout, "已删除厂商 %s 与它的 %d 条路由\n", name, len(routes))
 	if len(names) > 0 {
-		fmt.Fprintf(e.Stdout, "这些账号已停用（地址与路由随厂商一起没了）：%s；重建厂商或改账号的厂商之后用 switchboard account enable 才能接着用\n", strings.Join(names, "、"))
+		fmt.Fprintf(e.Stdout, "这些账号已停用（地址与路由随厂商一起没了）：%s；重建厂商或改账号的厂商之后用 lax account enable 才能接着用\n", strings.Join(names, "、"))
 	}
 	return nil
 }
@@ -839,7 +839,7 @@ func unknownProviderError(st *store.Store, name string) error {
 	if err != nil {
 		return err
 	}
-	register := fmt.Sprintf("switchboard provider add %s --base-url <地址> --openai /v1/chat/completions", name)
+	register := fmt.Sprintf("lax provider add %s --base-url <地址> --openai /v1/chat/completions", name)
 	if len(providers) == 0 {
 		// 厂商表可以被删光，这时「最接近的名字」无从谈起，只给怎么登记。
 		return fmt.Errorf("厂商表是空的，没有地址可用；先运行 %s 登记这家厂商，再建账号", register)

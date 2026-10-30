@@ -8,7 +8,7 @@ import (
 
 // 这个文件钉住 systemone 的命令面（DESIGN 第 4 节的 decide 一行与 5.14）：
 // `provider add/set --systemone`、`provider unset systemone`、`--default-protocol systemone`、
-// `switchboard decide` 的三种拼法与错误，以及 `call` 撞上 systemone 模型时的拒绝。
+// `lax decide` 的三种拼法与错误，以及 `call` 撞上 systemone 模型时的拒绝。
 
 // systemOneDecideOK 是假决策上游的正常响应：三个问题的答案加一行用量。答案按真实形状写：
 // 结论平铺在顶层（noul / choice / score），不共用一个 answer 字段（DESIGN 5.14）。
@@ -136,7 +136,7 @@ func TestProviderSystemOneHelp(t *testing.T) {
 	for _, want := range []string{
 		"--systemone",
 		"/v1/systemone",
-		"switchboard provider add typesafe --base-url https://api.typesafe.ai --systemone /v1/systemone",
+		"lax provider add typesafe --base-url https://api.typesafe.ai --systemone /v1/systemone",
 		"--default-protocol systemone",
 		"anthropic、openai、responses、gemini、systemone",
 	} {
@@ -386,7 +386,7 @@ func TestDecideUsageErrors(t *testing.T) {
 				}
 			}
 			// 用法错误要打印用法行，不能只给一句「参数错误」。
-			if !strings.Contains(stderr, "用法：switchboard decide") {
+			if !strings.Contains(stderr, "用法：lax decide") {
 				t.Fatalf("用法错误应打印用法行: %s", stderr)
 			}
 		})
@@ -412,7 +412,7 @@ func TestDecideRejectsNonSystemOneModel(t *testing.T) {
 	if out != "" {
 		t.Fatalf("失败时不该写 stdout: %s", out)
 	}
-	for _, want := range []string{"m1", "openai-chat", "不是 systemone", "--systemone /v1/systemone", "switchboard call"} {
+	for _, want := range []string{"m1", "openai-chat", "不是 systemone", "--systemone /v1/systemone", "lax call"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 		}
@@ -432,7 +432,7 @@ func TestDecideModelNotFound(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("退出码 = %d，期望 1（运行失败）", code)
 	}
-	for _, want := range []string{"不在任何启用账号的模型列表里", "--models typesafe/jev", "switchboard model probe"} {
+	for _, want := range []string{"不在任何启用账号的模型列表里", "--models typesafe/jev", "lax model probe"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 		}
@@ -455,7 +455,7 @@ func TestDecideHTTPErrorUsesDetailMessage(t *testing.T) {
 	if out != "" {
 		t.Fatalf("失败时不该写 stdout: %s", out)
 	}
-	for _, want := range []string{"401", "authentication_error", "凭据不对", "switchboard log tail"} {
+	for _, want := range []string{"401", "authentication_error", "凭据不对", "lax log tail"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 		}
@@ -463,7 +463,7 @@ func TestDecideHTTPErrorUsesDetailMessage(t *testing.T) {
 }
 
 // TestCallRefusesSystemOne 钉住 call 的两条拒绝：--protocol systemone 是这一条命令接不了的协议，
-// 模型的出站协议是 systemone 时同样接不了。两者都是退出码 1，文案指向 switchboard decide。
+// 模型的出站协议是 systemone 时同样接不了。两者都是退出码 1，文案指向 lax decide。
 func TestCallRefusesSystemOne(t *testing.T) {
 	sandbox(t)
 	up := decideUpstream(t)
@@ -476,8 +476,8 @@ func TestCallRefusesSystemOne(t *testing.T) {
 	if out != "" {
 		t.Fatalf("失败时不该写 stdout: %s", out)
 	}
-	if !strings.Contains(stderr, "switchboard decide") {
-		t.Fatalf("文案应指向 switchboard decide: %s", stderr)
+	if !strings.Contains(stderr, "lax decide") {
+		t.Fatalf("文案应指向 lax decide: %s", stderr)
 	}
 
 	// 模型的出站协议是 systemone：不提 --protocol 也一样拒绝。
@@ -485,7 +485,7 @@ func TestCallRefusesSystemOne(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("call 撞上 systemone 模型退出码 = %d，期望 1", code)
 	}
-	if !strings.Contains(stderr, "systemone") || !strings.Contains(stderr, "switchboard decide") {
+	if !strings.Contains(stderr, "systemone") || !strings.Contains(stderr, "lax decide") {
 		t.Fatalf("文案应说明出站协议是 systemone 并指向 decide: %s", stderr)
 	}
 

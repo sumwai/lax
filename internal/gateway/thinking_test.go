@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
+	"lax/internal/gateway"
 )
 
 // 这个文件从网关这一层钉住思考内容跨协议的两侧：上游没有签名时 anthropic 客户端

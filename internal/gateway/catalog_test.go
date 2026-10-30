@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
+	"lax/internal/gateway"
+	"lax/internal/store"
 )
 
 // getJSON 发一个 GET，返回状态、响应体与响应头。
@@ -171,7 +171,7 @@ func TestModelByIDHitAndMiss(t *testing.T) {
 	if errBody.Error.Type != "not_found_error" {
 		t.Fatalf("错误类型 = %q", errBody.Error.Type)
 	}
-	for _, want := range []string{"清单里没有模型 no-such-model", "switchboard model ls", "model probe"} {
+	for _, want := range []string{"清单里没有模型 no-such-model", "lax model ls", "model probe"} {
 		if !strings.Contains(errBody.Error.Message, want) {
 			t.Fatalf("错误文案 %q 缺少 %q", errBody.Error.Message, want)
 		}
@@ -250,7 +250,7 @@ func TestModelByIDDisabledOnlyModelIs404(t *testing.T) {
 	if errBody.Error.Type != "not_found_error" {
 		t.Fatalf("错误类型 = %q", errBody.Error.Type)
 	}
-	for _, want := range []string{"清单里没有模型 m-off", "停用账号不计", "冷却中的账号仍然计入", "switchboard model ls", "model probe"} {
+	for _, want := range []string{"清单里没有模型 m-off", "停用账号不计", "冷却中的账号仍然计入", "lax model ls", "model probe"} {
 		if !strings.Contains(errBody.Error.Message, want) {
 			t.Fatalf("错误文案 %q 缺少 %q", errBody.Error.Message, want)
 		}

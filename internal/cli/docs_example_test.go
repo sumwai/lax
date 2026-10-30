@@ -181,7 +181,7 @@ func TestREADMEProviderGeminiExample(t *testing.T) {
 	if code != 1 || out != "" {
 		t.Fatalf("删掉唯一一条路由的退出码 = %d，stdout = %q", code, out)
 	}
-	if !strings.Contains(stderr, "switchboard provider rm gem-proxy") {
+	if !strings.Contains(stderr, "lax provider rm gem-proxy") {
 		t.Fatalf("拒绝文案应指向 provider rm: %s", stderr)
 	}
 }
@@ -296,7 +296,7 @@ func TestREADMEModelFlowExamples(t *testing.T) {
 // assertSyncTable 断言 model sync 的人读表格：表头五列、一行数据、下一步提示。
 func assertSyncTable(t *testing.T, out, account, provider string, models, added int) {
 	t.Helper()
-	for _, want := range []string{"账号", "厂商", "模型", "新增", "备注", "下一步：switchboard model probe"} {
+	for _, want := range []string{"账号", "厂商", "模型", "新增", "备注", "下一步：lax model probe"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("model sync 输出缺 %q:\n%s", want, out)
 		}

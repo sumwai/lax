@@ -2,7 +2,7 @@
   {
     "data": {
       "response": {
-        "id": "resp_switchboard",
+        "id": "resp_lax",
         "model": "m1",
         "object": "response",
         "output": [],
@@ -109,7 +109,7 @@
   {
     "data": {
       "response": {
-        "id": "resp_switchboard",
+        "id": "resp_lax",
         "model": "m1",
         "object": "response",
         "output": [

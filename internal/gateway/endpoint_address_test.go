@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
-	"switchboard/internal/translate"
+	"lax/internal/gateway"
+	"lax/internal/store"
+	"lax/internal/translate"
 )
 
 // TestForwardNormalizesDirtyProviderBaseURL 钉住读取侧的规整：厂商行里的 base_url 是脏的

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/translate"
+	"lax/internal/translate"
 )
 
 // fourProtocols 是四条线协议，矩阵按「入站 × 出站」全排列跑。

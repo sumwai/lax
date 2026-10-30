@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
+	"lax/internal/gateway"
+	"lax/internal/store"
 )
 
 // newGateway 构造直连上游的网关实例，模型同步与探活都走它。

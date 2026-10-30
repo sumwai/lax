@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
+	"lax/internal/gateway"
 )
 
 // 这个文件从网关这一层钉住工具约束（DESIGN 5.4「工具定义与选择」）：tools[].strict 只在两条

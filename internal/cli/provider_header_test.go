@@ -66,7 +66,7 @@ func TestProviderHeaderSetTextAndJSON(t *testing.T) {
 	for _, want := range []string{
 		"已声明 opencode 的附加头 x-opencode-session（openai-chat）",
 		"值 {ses…", // secret.Mask 只露前四位
-		"switchboard provider header ls opencode",
+		"lax provider header ls opencode",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("set 的文本输出缺 %q:\n%s", want, out)
@@ -260,17 +260,17 @@ func TestProviderHeaderUsageErrors(t *testing.T) {
 		{
 			name:  "头名带空格",
 			args:  []string{"provider", "header", "set", "opencode", "x bad", "v"},
-			wants: []string{"头名", "非法字符", "用法：switchboard provider header set"},
+			wants: []string{"头名", "非法字符", "用法：lax provider header set"},
 		},
 		{
 			name:  "头名带中文",
 			args:  []string{"provider", "header", "set", "opencode", "x中文", "v"},
-			wants: []string{"头名", "非法字符", "用法：switchboard provider header set"},
+			wants: []string{"头名", "非法字符", "用法：lax provider header set"},
 		},
 		{
 			name:  "不认识的协议",
 			args:  []string{"provider", "header", "set", "opencode", "x-a", "v", "--protocol", "cohere"},
-			wants: []string{"--protocol", "anthropic、openai、responses、gemini", "switchboard provider header set opencode x-opencode-session"},
+			wants: []string{"--protocol", "anthropic、openai、responses、gemini", "lax provider header set opencode x-opencode-session"},
 		},
 		{
 			name:  "协议传线协议全名也认",
@@ -280,27 +280,27 @@ func TestProviderHeaderUsageErrors(t *testing.T) {
 		{
 			name:  "值为空",
 			args:  []string{"provider", "header", "set", "opencode", "x-a", "  "},
-			wants: []string{"值不能为空", "provider header unset", "用法：switchboard provider header set"},
+			wants: []string{"值不能为空", "provider header unset", "用法：lax provider header set"},
 		},
 		{
 			name:  "缺位置参数",
 			args:  []string{"provider", "header", "set", "opencode", "x-a"},
-			wants: []string{"用法：switchboard provider header set"},
+			wants: []string{"用法：lax provider header set"},
 		},
 		{
 			name:  "unset 缺头名",
 			args:  []string{"provider", "header", "unset", "opencode"},
-			wants: []string{"用法：switchboard provider header unset"},
+			wants: []string{"用法：lax provider header unset"},
 		},
 		{
 			name:  "ls 多给一个厂商",
 			args:  []string{"provider", "header", "ls", "a", "b"},
-			wants: []string{"用法：switchboard provider header ls"},
+			wants: []string{"用法：lax provider header ls"},
 		},
 		{
 			name:  "未知子命令",
 			args:  []string{"provider", "header", "nope"},
-			wants: []string{"未知子命令", "switchboard provider header --help"},
+			wants: []string{"未知子命令", "lax provider header --help"},
 		},
 	}
 	for _, c := range cases {
@@ -345,8 +345,8 @@ func TestProviderHeaderUnsetMissing(t *testing.T) {
 	for _, want := range []string{
 		"没有声明附加头 x-missing（整个厂商）",
 		"现有 x-declared（整个厂商）",
-		"switchboard provider header ls opencode",
-		"switchboard provider header set opencode x-missing",
+		"lax provider header ls opencode",
+		"lax provider header set opencode x-missing",
 	} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
@@ -375,7 +375,7 @@ func TestProviderHeaderUnknownProvider(t *testing.T) {
 		if code != 1 || out != "" {
 			t.Fatalf("%v 退出码 = %d，stdout = %q，期望 1 且不写 stdout", args, code, out)
 		}
-		if !strings.Contains(stderr, "switchboard provider ls") {
+		if !strings.Contains(stderr, "lax provider ls") {
 			t.Fatalf("%v 的报错应指向 provider ls: %s", args, stderr)
 		}
 	}
@@ -385,7 +385,7 @@ func TestProviderHeaderUnknownProvider(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("空头表时 ls 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"还没有声明任何附加头", "switchboard provider header set opencode x-opencode-session"} {
+	for _, want := range []string{"还没有声明任何附加头", "lax provider header set opencode x-opencode-session"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("空头表的输出缺 %q:\n%s", want, out)
 		}
@@ -406,10 +406,10 @@ func TestProviderHeaderHelp(t *testing.T) {
 		t.Fatalf("provider header --help 退出码 = %d，stderr = %q", code, stderr)
 	}
 	for _, want := range []string{
-		"switchboard provider header set <厂商> <头名> <值> [--protocol <协议>]",
-		"switchboard provider header unset <厂商> <头名> [--protocol <协议>]",
-		"switchboard provider header ls [<厂商>]",
-		"switchboard provider header set opencode x-opencode-session '{session}' --protocol openai-chat",
+		"lax provider header set <厂商> <头名> <值> [--protocol <协议>]",
+		"lax provider header unset <厂商> <头名> [--protocol <协议>]",
+		"lax provider header ls [<厂商>]",
+		"lax provider header set opencode x-opencode-session '{session}' --protocol openai-chat",
 		"{session}", "{env:NAME}", "{model}",
 		"协议级覆盖厂商级",
 		"脱敏",

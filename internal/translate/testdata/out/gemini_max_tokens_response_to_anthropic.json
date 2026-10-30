@@ -5,7 +5,7 @@
       "type": "text"
     }
   ],
-  "id": "msg_switchboard",
+  "id": "msg_lax",
   "model": "gemini-2.5-flash",
   "role": "assistant",
   "stop_reason": "max_tokens",

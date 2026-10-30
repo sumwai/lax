@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/secret"
-	"switchboard/internal/store"
+	"lax/internal/secret"
+	"lax/internal/store"
 )
 
 // newCatalogAccount 建一个挂在给定厂商下的账号，模型清单留空：

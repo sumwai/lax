@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"switchboard/internal/account"
-	"switchboard/internal/secret"
-	"switchboard/internal/store"
-	"switchboard/internal/translate"
+	"lax/internal/account"
+	"lax/internal/secret"
+	"lax/internal/store"
+	"lax/internal/translate"
 )
 
 // ProbeStageModels 与 ProbeStageCall 是 `account test` 的两段：models 是模型列表接口，

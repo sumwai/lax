@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
+	"lax/internal/gateway"
 )
 
 // 这个文件从网关这一层钉住工具调用跨协议的两侧：客户端发来的工具结果怎么写到上游，

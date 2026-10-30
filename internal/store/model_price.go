@@ -311,7 +311,7 @@ func requireProviderModelTx(tx *sql.Tx, provider, model string) error {
 	err := tx.QueryRow(`SELECT 1 FROM provider_models WHERE provider = ? AND model = ?`,
 		provider, model).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("厂商 %q 的目录里没有模型 %q，%w：先 switchboard model sync --provider %s 或 switchboard model probe --model %s",
+		return fmt.Errorf("厂商 %q 的目录里没有模型 %q，%w：先 lax model sync --provider %s 或 lax model probe --model %s",
 			provider, model, ErrModelNotInCatalog, provider, model)
 	}
 	return err
@@ -323,7 +323,7 @@ func requireAccountModelTx(tx *sql.Tx, accountID int64, account, model string) e
 	err := tx.QueryRow(`SELECT 1 FROM account_models WHERE account_id = ? AND model = ?`,
 		accountID, model).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("账号 %q 还没有模型 %q 的可达性行，%w：先 switchboard model sync --account %s 或 switchboard model probe --account %s",
+		return fmt.Errorf("账号 %q 还没有模型 %q 的可达性行，%w：先 lax model sync --account %s 或 lax model probe --account %s",
 			account, model, ErrAccountModelNotRegistered, account, account)
 	}
 	return err
@@ -335,7 +335,7 @@ func accountIDByNameTx(tx *sql.Tx, account string) (int64, error) {
 	var id int64
 	err := tx.QueryRow(`SELECT id FROM accounts WHERE name = ?`, account).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, fmt.Errorf("账号 %q 不存在：先用 switchboard account add 建它", account)
+		return 0, fmt.Errorf("账号 %q 不存在：先用 lax account add 建它", account)
 	}
 	return id, err
 }

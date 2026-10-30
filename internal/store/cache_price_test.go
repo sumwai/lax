@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"switchboard/internal/store"
+	"lax/internal/store"
 
 	_ "modernc.org/sqlite"
 )

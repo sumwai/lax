@@ -8,8 +8,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/translate"
+	"lax/internal/gateway"
+	"lax/internal/translate"
 )
 
 // 这个文件钉住 gemini 上游的流式分帧边界。gemini 的帧没有事件名，一帧就是一个

@@ -104,7 +104,7 @@ func (s *Store) DeleteModelAlias(alias string) error {
 		return err
 	}
 	if n == 0 {
-		return fmt.Errorf("%w：%q，用 switchboard model alias ls 看已配置的别名", ErrModelAliasNotFound, a)
+		return fmt.Errorf("%w：%q，用 lax model alias ls 看已配置的别名", ErrModelAliasNotFound, a)
 	}
 	return nil
 }

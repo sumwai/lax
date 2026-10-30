@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
+	"lax/internal/gateway"
+	"lax/internal/store"
 )
 
 // 这个文件钉住「路由收紧之后」探活的两条结论：

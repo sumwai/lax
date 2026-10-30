@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/translate"
+	"lax/internal/translate"
 )
 
 // 各协议的最小流式响应，正文都是先 po 再 ng。

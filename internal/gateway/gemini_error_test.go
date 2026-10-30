@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/translate"
+	"lax/internal/gateway"
+	"lax/internal/translate"
 )
 
 // 这个文件钉住 gemini 账号在上游出错时的行为：429/5xx 进冷却并换下一个号，

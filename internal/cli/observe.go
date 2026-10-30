@@ -14,10 +14,10 @@ import (
 	"syscall"
 	"time"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
-	"switchboard/internal/translate"
-	"switchboard/internal/usage"
+	"lax/internal/gateway"
+	"lax/internal/store"
+	"lax/internal/translate"
+	"lax/internal/usage"
 )
 
 func cmdUsage(e *Env, args []string) error {
@@ -120,9 +120,9 @@ func cmdUsage(e *Env, args []string) error {
 	fmt.Fprint(e.Stdout, renderTable(
 		[]string{headerName, "请求", "输入 token", "输出 token", "思考 token", "缓存读 token", "缓存写 token", "估算花费"}, table))
 	if priced == 0 {
-		fmt.Fprintln(e.Stdout, "花费未定价：这些请求用到的模型没有单价，用 switchboard model price set <模型> --in N --out N 补上（缓存单价可选，未填时回退输入价）")
+		fmt.Fprintln(e.Stdout, "花费未定价：这些请求用到的模型没有单价，用 lax model price set <模型> --in N --out N 补上（缓存单价可选，未填时回退输入价）")
 	} else if unpriced > 0 {
-		fmt.Fprintf(e.Stdout, "有 %d 行没有单价，它们不计入合计；补价用 switchboard model price set <模型> --in N --out N\n", unpriced)
+		fmt.Fprintf(e.Stdout, "有 %d 行没有单价，它们不计入合计；补价用 lax model price set <模型> --in N --out N\n", unpriced)
 	} else if totalCost == 0 {
 		fmt.Fprintln(e.Stdout, "花费为 0：单价已填且都是 0，这些请求算免费")
 	}
@@ -161,10 +161,10 @@ func cmdLog(e *Env, args []string) error {
 		return nil
 	}
 	if len(args) == 0 {
-		return usagef("需要子命令：tail\n用 switchboard log --help 查看子命令")
+		return usagef("需要子命令：tail\n用 lax log --help 查看子命令")
 	}
 	if args[0] != "tail" {
-		return usagef("未知子命令 %q，可用：tail\n用 switchboard log --help 查看子命令", args[0])
+		return usagef("未知子命令 %q，可用：tail\n用 lax log --help 查看子命令", args[0])
 	}
 	fs := newFlagSet(e, "log tail", "查看最近的请求记录")
 	n := fs.Int("n", 20, "条数")
@@ -335,13 +335,13 @@ func cmdCall(e *Env, args []string) error {
 		// 没有提示词可发（DESIGN 5.14 的 CLI 一行）。这是「这个命令接不了它」，不是用法写歪了，
 		// 所以走运行失败（退出码 1）并直接指向真正该用的命令。
 		if strings.TrimSpace(*protocol) == gateway.ProtocolSystemOne {
-			return fmt.Errorf("systemone 不是对话协议：一条决策请求由一个 state 加一组问题组成，没有提示词可发，call 发不了它；改用 switchboard decide --model <模型> --state <文本或 JSON> --noul <名>=<问句>（见 switchboard decide --help）")
+			return fmt.Errorf("systemone 不是对话协议：一条决策请求由一个 state 加一组问题组成，没有提示词可发，call 发不了它；改用 lax decide --model <模型> --state <文本或 JSON> --noul <名>=<问句>（见 lax decide --help）")
 		}
 		return usagef("不支持的入站协议 %q，可用 anthropic、chat、responses、gemini", *protocol)
 	}
 	prompt := strings.Join(fs.Args(), " ")
 	if prompt == "" {
-		return usagef(`用法：switchboard call "提示词" [--model 模型] [--protocol 协议] [--stream] [--debug] [--json]
+		return usagef(`用法：lax call "提示词" [--model 模型] [--protocol 协议] [--stream] [--debug] [--json]
 可用协议：anthropic、chat、responses、gemini`)
 	}
 
@@ -364,7 +364,7 @@ func cmdCall(e *Env, args []string) error {
 			}
 		}
 		if usedModel == "" {
-			return usagef("没有可用模型：先 switchboard account add 加账号，再 switchboard model sync 拉上游模型列表、switchboard model probe 探活（模型列表为空的账号不参与选号）")
+			return usagef("没有可用模型：先 lax account add 加账号，再 lax model sync 拉上游模型列表、lax model probe 探活（模型列表为空的账号不参与选号）")
 		}
 	}
 
@@ -373,7 +373,7 @@ func cmdCall(e *Env, args []string) error {
 	if only, err := systemOneOnlyModel(a.st, usedModel); err != nil {
 		return err
 	} else if only {
-		return fmt.Errorf("模型 %s 的有效出站协议是 systemone：这条协议一个 state 加一组问题、不出文本，没有提示词可以发给它，所以 call 发不了；改用 switchboard decide --model %s --state <文本或 JSON> --noul <名>=<问句>，或换一个走对话协议的模型（switchboard model ls 看清单）", usedModel, usedModel)
+		return fmt.Errorf("模型 %s 的有效出站协议是 systemone：这条协议一个 state 加一组问题、不出文本，没有提示词可以发给它，所以 call 发不了；改用 lax decide --model %s --state <文本或 JSON> --noul <名>=<问句>，或换一个走对话协议的模型（lax model ls 看清单）", usedModel, usedModel)
 	}
 
 	logf := func(string, ...any) {}
@@ -519,7 +519,7 @@ func printGeminiStream(e *Env, body io.Reader) error {
 		}
 		deltas, err := dec.Decode([]byte(payload))
 		if err != nil {
-			return fmt.Errorf("gemini 流式帧解析失败（%v）；上游回来的可能不是 SSE，用 --debug 重跑一次看上游原文，或 switchboard log tail 看这一次的记录", err)
+			return fmt.Errorf("gemini 流式帧解析失败（%v）；上游回来的可能不是 SSE，用 --debug 重跑一次看上游原文，或 lax log tail 看这一次的记录", err)
 		}
 		for _, d := range deltas {
 			switch d.Kind {
@@ -535,7 +535,7 @@ func printGeminiStream(e *Env, body io.Reader) error {
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return fmt.Errorf("读取 gemini 流式响应失败（%v）；连接可能中途断了，用 switchboard log tail 看这一次的记录", err)
+		return fmt.Errorf("读取 gemini 流式响应失败（%v）；连接可能中途断了，用 lax log tail 看这一次的记录", err)
 	}
 	if !e.JSON {
 		fmt.Fprintln(e.Stdout)

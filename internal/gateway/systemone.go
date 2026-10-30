@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"strings"
 
-	"switchboard/internal/translate"
+	"lax/internal/translate"
 )
 
 // systemone 决策协议（DESIGN 5.14）。它不是对话：输入一个 state 加一组带名字的 questions，
@@ -81,7 +81,7 @@ func protocolInteropError(inbound, outbound, model string) string {
 	return fmt.Sprintf("模型 %s 的有效出站协议是 %s，与 systemone 入站不相通："+
 		"这条协议只与自己互通，决策请求没有对话消息序列可以转换；"+
 		"对话请求用 POST %s 发，或给提供这个模型的厂商配一条 systemone 路由"+
-		"（switchboard provider set <厂商> %s）",
+		"（lax provider set <厂商> %s）",
 		model, outbound, inboundPath(outbound), providerPathHint(ProtocolSystemOne))
 }
 

@@ -3,7 +3,7 @@ package store_test
 import (
 	"testing"
 
-	"switchboard/internal/store"
+	"lax/internal/store"
 )
 
 // TestMigration0015SplitsModelFactsFromAccess 用一个停在 0014 的库跑完 0015：

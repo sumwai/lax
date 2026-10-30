@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/translate"
+	"lax/internal/gateway"
+	"lax/internal/translate"
 )
 
 // 这个文件钉住「错误体按入站协议给形状」（DESIGN 5.2）：四条入站路径的客户端读的字段不同，
@@ -180,13 +180,13 @@ func TestInboundErrorShapeWhenModelMissing(t *testing.T) {
 	const model = "no-such-model"
 	cases := []errorShape{
 		{inbound: translate.ProtocolAnthropic, wantType: "not_found_error",
-			wantMessage: []string{model, "switchboard model ls", "switchboard model probe"}},
+			wantMessage: []string{model, "lax model ls", "lax model probe"}},
 		{inbound: translate.ProtocolChat, wantType: "invalid_request_error",
-			wantMessage: []string{model, "switchboard model ls"}},
+			wantMessage: []string{model, "lax model ls"}},
 		{inbound: translate.ProtocolResponses, wantType: "invalid_request_error",
-			wantMessage: []string{model, "switchboard model ls"}},
+			wantMessage: []string{model, "lax model ls"}},
 		{inbound: translate.ProtocolGemini, googleStatus: "NOT_FOUND",
-			wantMessage: []string{model, "switchboard model ls"}},
+			wantMessage: []string{model, "lax model ls"}},
 	}
 
 	for _, c := range cases {

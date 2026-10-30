@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"switchboard/internal/config"
-	"switchboard/internal/secret"
-	"switchboard/internal/store"
+	"lax/internal/config"
+	"lax/internal/secret"
+	"lax/internal/store"
 )
 
 // app 是一次命令执行会用到的基础依赖。
@@ -29,13 +29,13 @@ func openApp(e *Env, requireInit bool) (*app, error) {
 	cfg, err := config.Load(paths)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, errors.New("尚未初始化，先运行 switchboard init")
+			return nil, errors.New("尚未初始化，先运行 lax init")
 		}
 		return nil, fmt.Errorf("读取配置 %s 失败: %w", paths.Config, err)
 	}
 	if requireInit {
 		if _, err := os.Stat(paths.DB); err != nil {
-			return nil, errors.New("数据库不存在，先运行 switchboard init")
+			return nil, errors.New("数据库不存在，先运行 lax init")
 		}
 	}
 	st, err := store.Open(paths.DB)

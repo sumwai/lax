@@ -3,7 +3,7 @@
     "data": {
       "message": {
         "content": [],
-        "id": "msg_switchboard",
+        "id": "msg_lax",
         "model": "m1",
         "role": "assistant",
         "stop_sequence": null,

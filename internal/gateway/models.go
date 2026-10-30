@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"switchboard/internal/secret"
-	"switchboard/internal/store"
-	"switchboard/internal/translate"
+	"lax/internal/secret"
+	"lax/internal/store"
+	"lax/internal/translate"
 )
 
 // ModelsEndpoint 是 base_url 加 /v1/models 的兜底：账号没有厂商行、或厂商一条路由都没声明时用它，
@@ -84,7 +84,7 @@ func (s *Server) modelsEndpoint(a store.Account, override string) (endpoint, pro
 
 	path, routeProtocol := store.ResolveModelsPath(p.ModelsPath, routes, a.Protocol)
 	if path == "" {
-		return "", "", fmt.Errorf("厂商 %s 没有模型列表接口，用 --models 手填，或用 switchboard provider set %s --models-path <路径> 补上模型列表路径",
+		return "", "", fmt.Errorf("厂商 %s 没有模型列表接口，用 --models 手填，或用 lax provider set %s --models-path <路径> 补上模型列表路径",
 			a.Provider, a.Provider)
 	}
 	return joinEndpoint(a.BaseURL, path), routeProtocol, nil

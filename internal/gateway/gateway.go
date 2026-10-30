@@ -15,10 +15,10 @@ import (
 	"strings"
 	"time"
 
-	"switchboard/internal/account"
-	"switchboard/internal/secret"
-	"switchboard/internal/store"
-	"switchboard/internal/translate"
+	"lax/internal/account"
+	"lax/internal/secret"
+	"lax/internal/store"
+	"lax/internal/translate"
 )
 
 // 协议常量。入站按路径区分，出站按该模型的有效协议（account_models.protocol 优先，
@@ -296,7 +296,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeInboundError(w, inbound, http.StatusServiceUnavailable, "api_error",
-			fmt.Sprintf("模型 %s 的账号都在冷却或被停用，先用 switchboard account ls 看状态", req.Model))
+			fmt.Sprintf("模型 %s 的账号都在冷却或被停用，先用 lax account ls 看状态", req.Model))
 		return
 	}
 
@@ -318,7 +318,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			// 读库失败不猜协议：猜出来的协议会打到这家没声明的路径上，报错比打错地址好。
 			s.logf("读账号 %s 模型 %s 的有效协议失败: %v", cand.Name, req.Model, err)
-			lastErr = fmt.Sprintf("账号 %s：读有效出站协议失败（%v），先运行 switchboard doctor 检查数据库",
+			lastErr = fmt.Sprintf("账号 %s：读有效出站协议失败（%v），先运行 lax doctor 检查数据库",
 				cand.Name, err)
 			onlyInterop = false
 			continue
@@ -458,25 +458,25 @@ func modelNotFoundKind(inbound string) string {
 // （DESIGN 5.12）。
 func modelNotFoundMessage(requested, used string) string {
 	if requested != used {
-		return fmt.Sprintf("别名 %s 指向 %s，但没有账号提供 %s；用 switchboard model ls 看现有清单",
+		return fmt.Sprintf("别名 %s 指向 %s，但没有账号提供 %s；用 lax model ls 看现有清单",
 			requested, used, used)
 	}
-	return fmt.Sprintf("没有账号提供模型 %s；先运行 switchboard model ls 看现有清单，"+
-		"再用 switchboard model probe 探活", used)
+	return fmt.Sprintf("没有账号提供模型 %s；先运行 lax model ls 看现有清单，"+
+		"再用 lax model probe 探活", used)
 }
 
 // aliasBrokenMessage 说明别名链解不出真实名字（成环或太长）。store 的原文里带着整条链，
 // 这里只补上「下一步做什么」：改掉链上的一条，或先看一眼现有别名。
 func aliasBrokenMessage(name string, err error) string {
-	return fmt.Sprintf("模型名 %s 解析别名失败：%v；用 switchboard model alias ls 看别名链，"+
+	return fmt.Sprintf("模型名 %s 解析别名失败：%v；用 lax model alias ls 看别名链，"+
 		"改掉或删掉其中一条，客户端也可以直接写真实模型名", name, err)
 }
 
-// requestSession 取本次入站请求的会话键（见 DESIGN 5.3）：`x-switchboard-session` 头优先，
+// requestSession 取本次入站请求的会话键（见 DESIGN 5.3）：`x-lax-session` 头优先，
 // 其次请求体里的 metadata.user_id。选号粘性与附加头的 {session} 都走这一个函数，不写第二份——
 // 两处取到不同的值会让「同一个对话」在选号与上游看来不是同一个会话。
 func requestSession(r *http.Request, raw []byte) string {
-	if v := r.Header.Get("x-switchboard-session"); v != "" {
+	if v := r.Header.Get("x-lax-session"); v != "" {
 		return v
 	}
 	return sessionFromBody(raw)
@@ -1006,7 +1006,7 @@ func passthroughTail(protocol, message string, in, out int64) []translate.SSEEve
 			{Event: "response.failed", Data: marshal(map[string]any{
 				"type": "response.failed",
 				"response": map[string]any{
-					"id":     "resp_switchboard",
+					"id":     "resp_lax",
 					"object": "response",
 					"status": "failed",
 					"error":  map[string]string{"code": "server_error", "message": message},
@@ -1108,7 +1108,7 @@ func (s *Server) noAddressError(a store.Account, protocol string) error {
 		return fmt.Errorf("账号 %s 的厂商 %q 在 providers 里不存在，地址只能从厂商行取：%s",
 			a.Name, a.Provider, providerAddHint(a, protocol))
 	}
-	return fmt.Errorf("厂商 %s 没有 %s 路由，也没有 base_url 可供后缀猜测：用 switchboard provider set %s %s 声明这条路由，或在同一条命令里补上 --base-url",
+	return fmt.Errorf("厂商 %s 没有 %s 路由，也没有 base_url 可供后缀猜测：用 lax provider set %s %s 声明这条路由，或在同一条命令里补上 --base-url",
 		a.Provider, protocol, a.Provider, providerPathHint(protocol))
 }
 
@@ -1116,7 +1116,7 @@ func (s *Server) noAddressError(a store.Account, protocol string) error {
 // 所以要么重建这家厂商，要么把账号改指到已有厂商。两条都写出来，因为重建厂商要用原来的名字与地址，
 // 而用户手上未必还有那个地址。
 func providerAddHint(a store.Account, protocol string) string {
-	return fmt.Sprintf("先运行 switchboard provider add %s --base-url <地址> %s 重建厂商（用 switchboard provider ls 看现有厂商），或用 switchboard account set %s --provider <厂商> 把账号指到已有厂商",
+	return fmt.Sprintf("先运行 lax provider add %s --base-url <地址> %s 重建厂商（用 lax provider ls 看现有厂商），或用 lax account set %s --provider <厂商> 把账号指到已有厂商",
 		a.Provider, providerPathHint(protocol), a.Name)
 }
 
@@ -1144,13 +1144,13 @@ func providerPathHint(protocol string) string {
 func (s *Server) noProtocolMessage(a store.Account, model string) string {
 	switch {
 	case a.Provider == "":
-		return fmt.Sprintf("账号 %s 没有厂商，算不出出站协议：先运行 switchboard account set %s --provider <厂商>（用 switchboard provider ls 看现有厂商）",
+		return fmt.Sprintf("账号 %s 没有厂商，算不出出站协议：先运行 lax account set %s --provider <厂商>（用 lax provider ls 看现有厂商）",
 			a.Name, a.Name)
 	case s.providerMissing(a.Provider):
 		return fmt.Sprintf("账号 %s 的厂商 %q 不存在（历史孤儿行），地址与默认协议都只能从厂商行取：%s",
 			a.Name, a.Provider, providerAddHint(a, ProtocolChat))
 	default:
-		return fmt.Sprintf("账号 %s 在模型 %s 上没有可用的出站协议（厂商 %s 没有路由或默认协议为空）：先运行 switchboard provider set %s %s 声明一条路由，或 switchboard model probe --account %s 探出这个模型的协议",
+		return fmt.Sprintf("账号 %s 在模型 %s 上没有可用的出站协议（厂商 %s 没有路由或默认协议为空）：先运行 lax provider set %s %s 声明一条路由，或 lax model probe --account %s 探出这个模型的协议",
 			a.Name, model, a.Provider, a.Provider, providerPathHint(ProtocolChat), a.Name)
 	}
 }

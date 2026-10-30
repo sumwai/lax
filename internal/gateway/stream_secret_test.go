@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/translate"
+	"lax/internal/gateway"
+	"lax/internal/translate"
 )
 
 // 这个文件钉住流内错误帧的脱敏：上游自己发来的错误帧正文会写进 requests.error，也会随错误帧

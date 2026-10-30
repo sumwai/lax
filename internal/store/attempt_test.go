@@ -3,7 +3,7 @@ package store_test
 import (
 	"testing"
 
-	"switchboard/internal/store"
+	"lax/internal/store"
 )
 
 // TestRecordAttemptWritesRowAndStateTogether 钉住一次尝试的账与结论在同一个事务里落库：

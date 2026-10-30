@@ -11,7 +11,7 @@ const (
 	// DefaultAddr 是网关默认监听地址，只绑回环，不对外。
 	DefaultAddr = "127.0.0.1:4567"
 
-	dirName = "switchboard"
+	dirName = "lax"
 )
 
 // Config 是磁盘上的配置文件内容。账号与路由不放这里，放在数据库。
@@ -40,7 +40,7 @@ func Resolve(configOverride, dbOverride string) (Paths, error) {
 	}
 
 	p.Config = filepath.Join(cfgDir, "config.json")
-	p.DB = filepath.Join(dataDirPath, "switchboard.db")
+	p.DB = filepath.Join(dataDirPath, "lax.db")
 	if configOverride != "" {
 		p.Config = configOverride
 	}

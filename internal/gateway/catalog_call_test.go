@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/translate"
+	"lax/internal/gateway"
+	"lax/internal/translate"
 )
 
 // setPriority 直接把账号的 priority 改掉。addAs 固定写 100，而「owned_by 不看 priority」
@@ -295,7 +295,7 @@ func TestCatalogReadErrorIsReported(t *testing.T) {
 		if env.Error.Type != "api_error" {
 			t.Fatalf("%s 错误类型 = %q，期望 api_error", path, env.Error.Type)
 		}
-		for _, want := range []string{"读取模型清单失败", "switchboard doctor"} {
+		for _, want := range []string{"读取模型清单失败", "lax doctor"} {
 			if !strings.Contains(env.Error.Message, want) {
 				t.Fatalf("%s 错误文案 %q 缺少 %q", path, env.Error.Message, want)
 			}

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
+	"lax/internal/gateway"
+	"lax/internal/store"
 )
 
 // syncCatalog 用一个固定返回 body 的假上游跑一次 SyncModels，返回写库之后的目录行（按名字索引）。

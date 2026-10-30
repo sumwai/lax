@@ -843,7 +843,7 @@ func responsesOutputHasToolUse(items []responsesOutputItem) bool {
 // responsesNormalizeID 保证响应 id 以 resp_ 开头，客户端据此区分协议。
 func responsesNormalizeID(id string) string {
 	if id == "" {
-		return "resp_switchboard"
+		return "resp_lax"
 	}
 	if strings.HasPrefix(id, "resp_") {
 		return id
@@ -1274,7 +1274,7 @@ func (b *responsesToolBuffer) argumentsJSON() string {
 func newResponsesStreamEncoder(model string) *responsesStreamEncoder {
 	return &responsesStreamEncoder{
 		model:          model,
-		id:             "resp_switchboard",
+		id:             "resp_lax",
 		reasoningIndex: -1,
 		toolIndex:      map[int]int{},
 		toolBuffers:    map[int]*responsesToolBuffer{},

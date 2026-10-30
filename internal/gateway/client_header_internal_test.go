@@ -25,7 +25,7 @@ func TestClientHeaderWhitelistDoesNotOverlapNeverForward(t *testing.T) {
 	// 必须被挡下的三个凭据头与逐跳头都得在名单里。
 	for _, name := range []string{"Authorization", "x-api-key", "x-goog-api-key", "Cookie",
 		"Host", "Connection", "Content-Length", "Transfer-Encoding", "Expect", "Upgrade",
-		"x-switchboard-session"} {
+		"x-lax-session"} {
 		if !isNeverForwardedHeader(name) {
 			t.Fatalf("%s 应该在永远不透传名单里", name)
 		}

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"switchboard/internal/store"
+	"lax/internal/store"
 )
 
 // 这个文件钉住 `log tail` 的模型列怎么处理 requests 的两列（DESIGN 5.12）：

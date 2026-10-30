@@ -11,8 +11,8 @@ import (
 	"sync"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
+	"lax/internal/gateway"
+	"lax/internal/store"
 )
 
 // headerUpstream 是记录每次上游请求头与路径的假上游。附加头的用例只看「这个头发没发、值对不对」，
@@ -187,9 +187,9 @@ func TestProviderHeadersScopePerProtocol(t *testing.T) {
 // 都不发，且日志只说环境变量名与原因，不带值。
 func TestProviderHeaderEnvPlaceholder(t *testing.T) {
 	const (
-		envHit     = "SWITCHBOARD_TEST_HEADER_TOKEN"
-		envEmpty   = "SWITCHBOARD_TEST_HEADER_EMPTY"
-		envMissing = "SWITCHBOARD_TEST_HEADER_MISSING"
+		envHit     = "LAX_TEST_HEADER_TOKEN"
+		envEmpty   = "LAX_TEST_HEADER_EMPTY"
+		envMissing = "LAX_TEST_HEADER_MISSING"
 		tokenValue = "env-token-value-77"
 	)
 	t.Setenv(envHit, tokenValue)
@@ -266,7 +266,7 @@ func TestProviderHeaderSessionPlaceholder(t *testing.T) {
 		}
 		req.Header.Set("Content-Type", "application/json")
 		if session != "" {
-			req.Header.Set("x-switchboard-session", session)
+			req.Header.Set("x-lax-session", session)
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -469,11 +469,11 @@ func TestProviderHeaderReadFailureErrors(t *testing.T) {
 
 	gs, _ := newGatewayWith(t, f, gateway.Options{})
 	if _, err := gs.SyncModels(context.Background(), f.accountRow(t, "a1")); err == nil ||
-		!strings.Contains(err.Error(), "switchboard doctor") {
+		!strings.Contains(err.Error(), "lax doctor") {
 		t.Fatalf("模型同步读附加头失败时应报错并提示 doctor，实际 %v", err)
 	}
 	if _, err := gs.Probe(context.Background(), f.accountRow(t, "a1")); err == nil ||
-		!strings.Contains(err.Error(), "switchboard doctor") {
+		!strings.Contains(err.Error(), "lax doctor") {
 		t.Fatalf("探活读附加头失败时应报错并提示 doctor，实际 %v", err)
 	}
 
@@ -483,14 +483,14 @@ func TestProviderHeaderReadFailureErrors(t *testing.T) {
 	if status != http.StatusServiceUnavailable {
 		t.Fatalf("状态 = %d，期望 503（读配置失败不是协议错误）", status)
 	}
-	if !strings.Contains(body, "switchboard doctor") {
+	if !strings.Contains(body, "lax doctor") {
 		t.Fatalf("转发读附加头失败时应提示 doctor，响应 %s", body)
 	}
 	recs, err := f.st.RecentRequests(5)
 	if err != nil {
 		t.Fatalf("读请求记录: %v", err)
 	}
-	if len(recs) == 0 || !strings.Contains(recs[0].Error, "switchboard doctor") {
+	if len(recs) == 0 || !strings.Contains(recs[0].Error, "lax doctor") {
 		t.Fatalf("requests.error 应写清读附加头失败并提示 doctor，实际 %+v", recs)
 	}
 	if n := len(up.all()); n != 0 {

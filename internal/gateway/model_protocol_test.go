@@ -11,8 +11,8 @@ import (
 	"sync"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
+	"lax/internal/gateway"
+	"lax/internal/store"
 )
 
 // upstreamCall 是一次探活打到假上游的痕迹：路径与两种凭据头。

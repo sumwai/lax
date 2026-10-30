@@ -170,15 +170,15 @@ func (c *modelCatalog) find(id string) (ModelEntry, bool) {
 func (c *modelCatalog) notFoundMessage(id string) string {
 	if err, ok := c.brokenAliases[id]; ok {
 		return fmt.Sprintf("清单里没有模型 %s（停用账号不计，冷却中的账号仍然计入）；"+
-			"这是一个别名，但解不出真实模型名：%v；用 switchboard model alias ls 看别名链", id, err)
+			"这是一个别名，但解不出真实模型名：%v；用 lax model alias ls 看别名链", id, err)
 	}
 	if target, ok := c.aliasTargets[id]; ok {
 		return fmt.Sprintf("清单里没有模型 %s（停用账号不计，冷却中的账号仍然计入）；"+
 			"这是一个别名，目标是 %s，但没有启用账号提供它；"+
-			"用 switchboard model ls 看现有清单，或先运行 model probe", id, target)
+			"用 lax model ls 看现有清单，或先运行 model probe", id, target)
 	}
 	return fmt.Sprintf("清单里没有模型 %s（停用账号不计，冷却中的账号仍然计入）；"+
-		"用 switchboard model ls 看现有清单，或先运行 model probe", id)
+		"用 lax model ls 看现有清单，或先运行 model probe", id)
 }
 
 // handleModelList 是 `GET /v1/models`：列出账号池里现在能用的模型名，含别名。
@@ -191,7 +191,7 @@ func (s *Server) handleModelList(w http.ResponseWriter, r *http.Request) {
 	c, err := s.modelCatalog()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "api_error",
-			"读取模型清单失败: "+err.Error()+"；先用 switchboard doctor 检查数据库")
+			"读取模型清单失败: "+err.Error()+"；先用 lax doctor 检查数据库")
 		return
 	}
 	writeJSON(w, http.StatusOK, modelListBody{Object: listObject, Data: c.all()})
@@ -216,7 +216,7 @@ func (s *Server) handleModelByID(w http.ResponseWriter, r *http.Request) {
 	c, err := s.modelCatalog()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "api_error",
-			"读取模型清单失败: "+err.Error()+"；先用 switchboard doctor 检查数据库")
+			"读取模型清单失败: "+err.Error()+"；先用 lax doctor 检查数据库")
 		return
 	}
 	if e, ok := c.find(id); ok {

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/secret"
-	"switchboard/internal/store"
+	"lax/internal/secret"
+	"lax/internal/store"
 )
 
 // newAliasAccount 建一个声明了若干真实模型名的账号，别名冲突判定就看它。

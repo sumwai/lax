@@ -14,10 +14,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"switchboard/internal/account"
-	"switchboard/internal/gateway"
-	"switchboard/internal/secret"
-	"switchboard/internal/store"
+	"lax/internal/account"
+	"lax/internal/gateway"
+	"lax/internal/secret"
+	"lax/internal/store"
 )
 
 // accountSubs 是 account 一组的子命令清单，组级帮助与错误提示都读它。
@@ -37,7 +37,7 @@ func cmdAccount(e *Env, args []string) error {
 		return nil
 	}
 	if len(args) == 0 {
-		return usagef("需要子命令：add | ls | set | rm | test | enable | disable\n用 switchboard account --help 查看子命令")
+		return usagef("需要子命令：add | ls | set | rm | test | enable | disable\n用 lax account --help 查看子命令")
 	}
 	switch args[0] {
 	case "add":
@@ -56,7 +56,7 @@ func cmdAccount(e *Env, args []string) error {
 	case "disable":
 		return cmdAccountSetEnabled(e, args[1:], "disable", false)
 	default:
-		return usagef("未知子命令 %q，可用：add | ls | set | rm | test | enable | disable\n用 switchboard account --help 查看子命令", args[0])
+		return usagef("未知子命令 %q，可用：add | ls | set | rm | test | enable | disable\n用 lax account --help 查看子命令", args[0])
 	}
 }
 
@@ -66,7 +66,7 @@ func cmdAccountSetEnabled(e *Env, args []string, sub string, enabled bool) error
 		return err
 	}
 	if fs.NArg() != 1 {
-		return usagef("用法：switchboard account %s <名称>", sub)
+		return usagef("用法：lax account %s <名称>", sub)
 	}
 	name := fs.Arg(0)
 
@@ -106,14 +106,14 @@ func cmdAccountSetEnabled(e *Env, args []string, sub string, enabled bool) error
 }
 
 // accountSetUsage 是 account set 的用法行，用法错误与账号不存在时都打出来。
-const accountSetUsage = "用法：switchboard account set <名称> [--key <key>]\n" +
-	"--key 三种给法：直接写值、写 - 从标准输入读、留空读环境变量 SWITCHBOARD_KEY\n" +
-	"价格不在账号上：模型单价属于「供应商 × 模型」，改价用 switchboard model price set <模型> --in N --out N"
+const accountSetUsage = "用法：lax account set <名称> [--key <key>]\n" +
+	"--key 三种给法：直接写值、写 - 从标准输入读、留空读环境变量 LAX_KEY\n" +
+	"价格不在账号上：模型单价属于「供应商 × 模型」，改价用 lax model price set <模型> --in N --out N"
 
 // retiredAccountPriceFlags 是从 account add 与 account set 上删掉的四个价格参数（见 DESIGN 4、5.13）。
 // 单价搬到模型目录之后账号不再是价格的落点：同一家上游的同一个模型只该有一份标价，
 // 账号只在套餐不同时覆盖。误敲这四个参数仍是用法错误（退出码 2），文案说清它去了哪、下一步跑什么。
-const retiredAccountPriceHint = "模型单价已经只存在模型目录上：同一家上游的同一个模型只该有一份标价，账号不再是价格的落点；改价用 switchboard model price set <模型> --in N --out N，套餐不同时才对某个账号加 --account 覆盖"
+const retiredAccountPriceHint = "模型单价已经只存在模型目录上：同一家上游的同一个模型只该有一份标价，账号不再是价格的落点；改价用 lax model price set <模型> --in N --out N，套餐不同时才对某个账号加 --account 覆盖"
 
 var retiredAccountPriceFlags = map[string]string{
 	"--price-in":          retiredAccountPriceHint,
@@ -131,7 +131,7 @@ func cmdAccountSet(e *Env, args []string) error {
 		return err
 	}
 	fs := newFlagSet(e, "account set", "换掉账号的凭据，冷却与失败计数随之清零并重新启用")
-	key := fs.String("key", "", "新的上游 API key；给 - 从标准输入读，留空则读环境变量 SWITCHBOARD_KEY")
+	key := fs.String("key", "", "新的上游 API key；给 - 从标准输入读，留空则读环境变量 LAX_KEY")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -142,7 +142,7 @@ func cmdAccountSet(e *Env, args []string) error {
 
 	// 换凭据是这条子命令唯一的作用，因此在动库之前就要能解析出凭据。
 	// 三种给法与 account add 完全一致，共用 resolveKey：两处判定不一致时，换 key 会突然多出一个坑。
-	keyValue, err := resolveKey(*key, "switchboard account set "+name+" --key - < key.txt", accountSetUsage)
+	keyValue, err := resolveKey(*key, "lax account set "+name+" --key - < key.txt", accountSetUsage)
 	if err != nil {
 		return err
 	}
@@ -156,7 +156,7 @@ func cmdAccountSet(e *Env, args []string) error {
 	acc, err := a.st.GetAccount(name)
 	if err != nil {
 		// 改动针对已有账号：不存在时给下一步命令，不要只抛一句 sql.ErrNoRows。
-		return fmt.Errorf("账号 %q 不存在，先运行 switchboard account add %s --provider <厂商> --key <key>\n%s", name, name, accountSetUsage)
+		return fmt.Errorf("账号 %q 不存在，先运行 lax account add %s --provider <厂商> --key <key>\n%s", name, name, accountSetUsage)
 	}
 
 	// 与 account add 走同一条加密路径；明文不进日志，也不进 --json 输出（那里只有掩码）。
@@ -185,16 +185,16 @@ func cmdAccountSet(e *Env, args []string) error {
 }
 
 // accountAddUsage 是 account add 的用法行，用法错误与厂商不在表里时都打出来。
-const accountAddUsage = "用法：switchboard account add <名称> --provider <厂商> --key <key> [--models <模型>] [--priority N]\n" +
-	"地址与默认协议不落在账号上：先 switchboard provider add <厂商> --base-url <地址> --openai /v1/chat/completions 登记厂商，再建账号\n" +
+const accountAddUsage = "用法：lax account add <名称> --provider <厂商> --key <key> [--models <模型>] [--priority N]\n" +
+	"地址与默认协议不落在账号上：先 lax provider add <厂商> --base-url <地址> --openai /v1/chat/completions 登记厂商，再建账号\n" +
 	"--models 手填的名字写进模型目录（不带长度与价格），并把这个账号标成可用；留空则等 model sync 与 model probe"
 
 // retiredAccountAddFlags 是已经从 account add 上删掉的两个参数与各自的替代做法（见 DESIGN 4、5.8）：
 // 地址与默认协议只在厂商行上，账号不再持有副本。误用时给一句指出下一步的用法错误，
 // 而不是让人对着「参数不存在」自己找原因。
 var retiredAccountAddFlags = map[string]string{
-	"--base-url": "地址只在厂商行上，先用 switchboard provider add <厂商> --base-url <地址> --openai /v1/chat/completions 登记厂商",
-	"--protocol": "默认协议只在厂商行上，登记厂商时用 --default-protocol 指定，或改用 switchboard provider set <厂商> --default-protocol <协议>",
+	"--base-url": "地址只在厂商行上，先用 lax provider add <厂商> --base-url <地址> --openai /v1/chat/completions 登记厂商",
+	"--protocol": "默认协议只在厂商行上，登记厂商时用 --default-protocol 指定，或改用 lax provider set <厂商> --default-protocol <协议>",
 }
 
 // rejectRetiredFlags 在 flag 包之前拦下已经删掉的参数：flag 只会说「参数不认识」，
@@ -221,7 +221,7 @@ func cmdAccountAdd(e *Env, args []string) error {
 	}
 	fs := newFlagSet(e, "account add", "新增一个上游账号")
 	provider := fs.String("provider", "", "上游厂商标识，地址与默认协议都从这家厂商读，如 deepseek")
-	key := fs.String("key", "", "上游 API key；给 - 从标准输入读，留空则读环境变量 SWITCHBOARD_KEY")
+	key := fs.String("key", "", "上游 API key；给 - 从标准输入读，留空则读环境变量 LAX_KEY")
 	name := fs.String("name", "", "账号名称，也可以用位置参数给出")
 	models := fs.String("models", "", "该账号可用的模型，逗号分隔：名字进模型目录，账号侧记一条可用")
 	priority := fs.Int("priority", 100, "同模型多个账号时的优先级，小的先试")
@@ -240,7 +240,7 @@ func cmdAccountAdd(e *Env, args []string) error {
 		return usagef("--provider 必填，例如 --provider deepseek\n%s", accountAddUsage)
 	}
 
-	keyValue, err := resolveKey(*key, "switchboard account add x --provider p --key - < key.txt", accountAddUsage)
+	keyValue, err := resolveKey(*key, "lax account add x --provider p --key - < key.txt", accountAddUsage)
 	if err != nil {
 		return err
 	}
@@ -262,7 +262,7 @@ func cmdAccountAdd(e *Env, args []string) error {
 	}
 
 	if _, err := a.st.GetAccount(accountName); err == nil {
-		return fmt.Errorf("账号 %q 已存在，换个名称或先运行 switchboard account rm %s", accountName, accountName)
+		return fmt.Errorf("账号 %q 已存在，换个名称或先运行 lax account rm %s", accountName, accountName)
 	}
 
 	cipher, err := secret.Encrypt(a.key, []byte(keyValue))
@@ -313,7 +313,7 @@ func dashIfEmpty(v string) string {
 }
 
 func envKey() string {
-	for _, name := range []string{"SWITCHBOARD_KEY", "SWITCHBOARD_API_KEY"} {
+	for _, name := range []string{"LAX_KEY", "LAX_API_KEY"} {
 		if v := lookupEnv(name); v != "" {
 			return v
 		}
@@ -322,7 +322,7 @@ func envKey() string {
 }
 
 // resolveKey 把 --key 的三种给法解成一个值：直接写值、`-`（或 `--`）从标准输入读、
-// 留空读环境变量 SWITCHBOARD_KEY（兼容 SWITCHBOARD_API_KEY）。account add 与 account set 共用一份，
+// 留空读环境变量 LAX_KEY（兼容 LAX_API_KEY）。account add 与 account set 共用一份，
 // 两处判定不一致时，换 key 会突然多出一个坑。stdinExample 是「从管道读」错误文案里的示例命令，
 // usageLine 是这个子命令的用法行：缺凭据是用法错误，输出要带上正确用法（见 AGENTS.md）。
 func resolveKey(flagValue, stdinExample, usageLine string) (string, error) {
@@ -338,7 +338,7 @@ func resolveKey(flagValue, stdinExample, usageLine string) (string, error) {
 		value = v
 	}
 	if value == "" {
-		return "", usagef("缺少凭据：--key <key>、--key - 从标准输入读，或环境变量 SWITCHBOARD_KEY\n%s", usageLine)
+		return "", usagef("缺少凭据：--key <key>、--key - 从标准输入读，或环境变量 LAX_KEY\n%s", usageLine)
 	}
 	return value, nil
 }
@@ -413,7 +413,7 @@ func cmdAccountLs(e *Env, args []string) error {
 	}
 
 	if len(accounts) == 0 {
-		fmt.Fprintln(e.Stdout, "还没有账号。运行 switchboard account add <名称> --provider <厂商> --key <key>")
+		fmt.Fprintln(e.Stdout, "还没有账号。运行 lax account add <名称> --provider <厂商> --key <key>")
 		return nil
 	}
 
@@ -537,7 +537,7 @@ func cmdAccountRm(e *Env, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return usagef("用法：switchboard account rm <名称>")
+		return usagef("用法：lax account rm <名称>")
 	}
 	name := fs.Arg(0)
 
@@ -567,7 +567,7 @@ func cmdAccountTest(e *Env, args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return usagef("用法：switchboard account test <名称>")
+		return usagef("用法：lax account test <名称>")
 	}
 	name := fs.Arg(0)
 
@@ -668,7 +668,7 @@ func cmdModel(e *Env, args []string) error {
 		return nil
 	}
 	if len(args) == 0 {
-		return usagef("需要子命令：ls | sync | probe | alias | price\n用 switchboard model --help 查看子命令")
+		return usagef("需要子命令：ls | sync | probe | alias | price\n用 lax model --help 查看子命令")
 	}
 	switch args[0] {
 	case "ls":
@@ -682,7 +682,7 @@ func cmdModel(e *Env, args []string) error {
 	case "price":
 		return cmdModelPrice(e, args[1:])
 	default:
-		return usagef("未知子命令 %q，可用：ls | sync | probe | alias | price\n用 switchboard model --help 查看子命令", args[0])
+		return usagef("未知子命令 %q，可用：ls | sync | probe | alias | price\n用 lax model --help 查看子命令", args[0])
 	}
 }
 
@@ -819,7 +819,7 @@ func cmdModelLs(e *Env, args []string) error {
 	}
 
 	if len(order) == 0 {
-		fmt.Fprintln(e.Stdout, "还没有模型信息：先 switchboard model sync 拉上游模型列表，再 switchboard model probe 逐个探活；也可以用 switchboard account add --models 手填")
+		fmt.Fprintln(e.Stdout, "还没有模型信息：先 lax model sync 拉上游模型列表，再 lax model probe 逐个探活；也可以用 lax account add --models 手填")
 		return nil
 	}
 
@@ -958,9 +958,9 @@ func cmdModelSync(e *Env, args []string) error {
 	// 与「整条地址校验不过」——缺主机名或 scheme 不是 http(s)，判定交给 store.NormalizeEndpoint。
 	if flagWasSet(fs, "endpoint") {
 		if !pathGiven(*endpoint) {
-			return usagef("--endpoint %q 里没有路径：它是相对该厂商 base_url 的完整路径，例如 switchboard model sync --endpoint /v1/models；不想临时覆盖就整个去掉这个参数", *endpoint)
+			return usagef("--endpoint %q 里没有路径：它是相对该厂商 base_url 的完整路径，例如 lax model sync --endpoint /v1/models；不想临时覆盖就整个去掉这个参数", *endpoint)
 		}
-		if err := checkEndpoint(*endpoint, "用法：switchboard model sync [--provider 厂商] [--account 账号] [--endpoint <路径>]"); err != nil {
+		if err := checkEndpoint(*endpoint, "用法：lax model sync [--provider 厂商] [--account 账号] [--endpoint <路径>]"); err != nil {
 			return err
 		}
 	}
@@ -1024,7 +1024,7 @@ func cmdModelSync(e *Env, args []string) error {
 			})
 		}
 		fmt.Fprint(e.Stdout, renderTable([]string{"账号", "厂商", "模型", "新增", "备注"}, table))
-		fmt.Fprintln(e.Stdout, "下一步：switchboard model probe（对话模型发一条 max_tokens=1 的请求，决策模型发一条最小决策请求）")
+		fmt.Fprintln(e.Stdout, "下一步：lax model probe（对话模型发一条 max_tokens=1 的请求，决策模型发一条最小决策请求）")
 	}
 
 	if failed > 0 {
@@ -1133,7 +1133,7 @@ func cmdModelProbe(e *Env, args []string) error {
 		}
 		if len(targets) == 0 && skipped == 0 {
 			if !e.JSON {
-				fmt.Fprintf(e.Stdout, "%s：没有可探的模型，先运行 switchboard model sync --account %s\n", acc.Name, acc.Name)
+				fmt.Fprintf(e.Stdout, "%s：没有可探的模型，先运行 lax model sync --account %s\n", acc.Name, acc.Name)
 			}
 			continue
 		}
@@ -1256,7 +1256,7 @@ func zeroUsableReason(probed, skipped, syncFailed int) string {
 		if syncFailed > 0 {
 			return fmt.Sprintf("没有账号探出可用模型：%d 个账号同步失败，一个模型都没拉到", syncFailed)
 		}
-		return "没有可探的模型，先运行 switchboard model sync --account <名称>"
+		return "没有可探的模型，先运行 lax model sync --account <名称>"
 	}
 	msg := fmt.Sprintf("没有账号探出可用模型：本次探活 %d 个、跳过 %d 个", probed, skipped)
 	if skipped > 0 {
@@ -1399,7 +1399,7 @@ func selectAccounts(st *store.Store, provider, name string) ([]store.Account, er
 
 	if provider == "" {
 		if len(accounts) == 0 {
-			return nil, fmt.Errorf("还没有账号，先运行 switchboard account add")
+			return nil, fmt.Errorf("还没有账号，先运行 lax account add")
 		}
 		return accounts, nil
 	}

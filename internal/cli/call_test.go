@@ -83,7 +83,7 @@ func TestCallNoModelsHint(t *testing.T) {
 	if out != "" {
 		t.Fatalf("用法错误不该写 stdout: %s", out)
 	}
-	for _, want := range []string{"switchboard model sync", "switchboard model probe", "不参与选号"} {
+	for _, want := range []string{"lax model sync", "lax model probe", "不参与选号"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 		}

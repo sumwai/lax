@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/store"
-	"switchboard/internal/translate"
+	"lax/internal/store"
+	"lax/internal/translate"
 )
 
 // protocolUpstream 起一个假上游，按请求路径回该协议的响应，并把每次调用的路径与凭据头记进 rec。
@@ -157,7 +157,7 @@ func TestNoOutboundProtocolHintsProviderSet(t *testing.T) {
 	if !strings.Contains(body, `"type":"error"`) || !strings.Contains(body, `"api_error"`) {
 		t.Fatalf("错误体不是 anthropic 形状: %s", body)
 	}
-	for _, want := range []string{"switchboard provider set noroute", "--openai /v1/chat/completions"} {
+	for _, want := range []string{"lax provider set noroute", "--openai /v1/chat/completions"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("错误文案应含下一步命令 %q，实际 %s", want, body)
 		}
@@ -183,7 +183,7 @@ func TestAccountTestWithoutProtocolHintsProviderSet(t *testing.T) {
 
 	if _, err := gs.Probe(context.Background(), acc); err == nil {
 		t.Fatal("算不出出站协议时应报错")
-	} else if !strings.Contains(err.Error(), "switchboard provider set noroute") {
+	} else if !strings.Contains(err.Error(), "lax provider set noroute") {
 		t.Fatalf("报错应给出下一步命令，实际 %v", err)
 	}
 }
@@ -200,7 +200,7 @@ func TestOrphanAccountHintsProviderAdd(t *testing.T) {
 	if status != http.StatusServiceUnavailable {
 		t.Fatalf("状态 = %d，期望 503：%s", status, body)
 	}
-	for _, want := range []string{"switchboard provider add ghost", "--base-url", "--openai /v1/chat/completions"} {
+	for _, want := range []string{"lax provider add ghost", "--base-url", "--openai /v1/chat/completions"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("错误文案应含 %q，实际 %s", want, body)
 		}

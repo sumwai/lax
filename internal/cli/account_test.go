@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"switchboard/internal/config"
-	"switchboard/internal/secret"
-	"switchboard/internal/store"
+	"lax/internal/config"
+	"lax/internal/secret"
+	"lax/internal/store"
 )
 
 // accountAddJSON 是 account add --json 的输出里用例关心的字段。
@@ -101,11 +101,11 @@ func TestAccountAddRejectsRetiredFlags(t *testing.T) {
 		hint string
 	}{
 		{[]string{"--provider", "deepseek", "--base-url", "https://api.example.com", "--key", "sk-1"},
-			"switchboard provider add"},
+			"lax provider add"},
 		{[]string{"--provider", "deepseek", "--protocol", "anthropic", "--key", "sk-1"},
 			"--default-protocol"},
 		{[]string{"--provider", "deepseek", "--base-url=https://api.example.com", "--key", "sk-1"},
-			"switchboard provider add"},
+			"lax provider add"},
 	}
 	for _, c := range cases {
 		code, out, stderr := run(t, append([]string{"account", "add", "a1"}, c.args...)...)
@@ -115,7 +115,7 @@ func TestAccountAddRejectsRetiredFlags(t *testing.T) {
 		if out != "" {
 			t.Fatalf("用法错误不该写 stdout: %s", out)
 		}
-		for _, want := range []string{c.hint, "用法：switchboard account add"} {
+		for _, want := range []string{c.hint, "用法：lax account add"} {
 			if !strings.Contains(stderr, want) {
 				t.Fatalf("%v 的 stderr 应提到 %q: %s", c.args, want, stderr)
 			}
@@ -190,7 +190,7 @@ func TestAccountAddUnknownProvider(t *testing.T) {
 		t.Fatalf("报错时不该写 stdout: %s", out)
 	}
 	for _, want := range []string{"deepseek", "已知：", "最接近",
-		"switchboard provider add deepsek --base-url <地址> --openai /v1/chat/completions"} {
+		"lax provider add deepsek --base-url <地址> --openai /v1/chat/completions"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 		}
@@ -253,7 +253,7 @@ func TestAccountAddWithoutProviders(t *testing.T) {
 		t.Fatalf("报错时不该写 stdout: %s", out)
 	}
 	for _, want := range []string{"厂商表是空的",
-		"switchboard provider add deepseek --base-url <地址> --openai /v1/chat/completions"} {
+		"lax provider add deepseek --base-url <地址> --openai /v1/chat/completions"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 		}
@@ -482,7 +482,7 @@ func TestAccountSetErrors(t *testing.T) {
 	if code != 2 || out != "" {
 		t.Fatalf("缺凭据的退出码 = %d，stdout = %q", code, out)
 	}
-	for _, want := range []string{"缺少凭据", "SWITCHBOARD_KEY", "用法：switchboard account set"} {
+	for _, want := range []string{"缺少凭据", "LAX_KEY", "用法：lax account set"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应包含 %q: %s", want, stderr)
 		}
@@ -492,7 +492,7 @@ func TestAccountSetErrors(t *testing.T) {
 	if code != 2 || out != "" {
 		t.Fatalf("缺账号名的退出码 = %d，stdout = %q", code, out)
 	}
-	if !strings.Contains(stderr, "用法：switchboard account set") {
+	if !strings.Contains(stderr, "用法：lax account set") {
 		t.Fatalf("stderr 应给出用法: %s", stderr)
 	}
 
@@ -500,7 +500,7 @@ func TestAccountSetErrors(t *testing.T) {
 	if code != 1 || out != "" {
 		t.Fatalf("账号不存在的退出码 = %d，stdout = %q", code, out)
 	}
-	if !strings.Contains(stderr, "switchboard account add nope") {
+	if !strings.Contains(stderr, "lax account add nope") {
 		t.Fatalf("stderr 应指向 account add: %s", stderr)
 	}
 }
@@ -826,7 +826,7 @@ func TestAccountAddRejectsPriceFlags(t *testing.T) {
 			if code != 2 || out != "" {
 				t.Fatalf("%s 的退出码 = %d，stdout = %q，期望 2 与空 stdout", arg, code, out)
 			}
-			for _, want := range []string{flag, "switchboard model price set", "--in N --out N", "用法：switchboard account add"} {
+			for _, want := range []string{flag, "lax model price set", "--in N --out N", "用法：lax account add"} {
 				if !strings.Contains(stderr, want) {
 					t.Fatalf("%s 的 stderr 应包含 %q: %s", arg, want, stderr)
 				}
@@ -867,7 +867,7 @@ func TestAccountSetRejectsPriceFlags(t *testing.T) {
 		if code != 2 || out != "" {
 			t.Fatalf("%s 的退出码 = %d，stdout = %q，期望 2 与空 stdout", flag, code, out)
 		}
-		for _, want := range []string{flag, "switchboard model price set", "--in N --out N", "用法：switchboard account set"} {
+		for _, want := range []string{flag, "lax model price set", "--in N --out N", "用法：lax account set"} {
 			if !strings.Contains(stderr, want) {
 				t.Fatalf("%s 的 stderr 应包含 %q: %s", flag, want, stderr)
 			}

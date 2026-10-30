@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
-	"switchboard/internal/translate"
+	"lax/internal/gateway"
+	"lax/internal/store"
+	"lax/internal/translate"
 )
 
 // gemini 的入站路径：模型名在路径里，两条路径后缀各自表示非流式与流式（DESIGN 5.9）。

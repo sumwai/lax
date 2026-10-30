@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/store"
-	"switchboard/internal/store/storetest"
+	"lax/internal/store"
+	"lax/internal/store/storetest"
 )
 
 // TestModelLsShowsEffectiveProtocol 覆盖 model ls 的协议列：
@@ -360,7 +360,7 @@ func TestModelLsEmptyHintNamesRunnableCommands(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("model ls 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"switchboard model sync", "switchboard model probe"} {
+	for _, want := range []string{"lax model sync", "lax model probe"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("空清单的提示应给出下一步 %q: %s", want, out)
 		}

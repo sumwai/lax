@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
+	"lax/internal/gateway"
+	"lax/internal/store"
 )
 
 // TestMergeProbeErrorKeepsSettledStatus 钉住包装层的规矩：结论已定就不改写状态。

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/store"
-	"switchboard/internal/translate"
+	"lax/internal/store"
+	"lax/internal/translate"
 )
 
 // 这个文件钉住 gemini 流式两个方向的帧序列。gemini 的流没有事件名，一帧就是一个

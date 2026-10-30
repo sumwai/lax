@@ -38,11 +38,11 @@ var clientHeaderRules = []clientHeaderRule{
 //   - 凭据类：客户端的凭据不是我们的凭据，带上去只会让上游按客户端的身份鉴权，或者把
 //     客户端自己的 key 泄漏给另一家厂商。
 //   - 逐跳头：它们描述的是「这一段连接」，交给 http.Client 自己算。
-//   - x-switchboard-session：本网关自己的会话键，只用于选号粘性（见 5.3），不进上游。
+//   - x-lax-session：本网关自己的会话键，只用于选号粘性（见 5.3），不进上游。
 var neverForwardHeaders = []string{
 	"Authorization", "x-api-key", "x-goog-api-key", "Cookie",
 	"Host", "Connection", "Content-Length", "Transfer-Encoding", "Expect", "Upgrade",
-	"x-switchboard-session",
+	"x-lax-session",
 }
 
 // clientHeaderDropped 是一条因为超长被丢弃的客户端头：只带头名与长度，不带值。

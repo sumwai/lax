@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
-	"switchboard/internal/translate"
+	"lax/internal/gateway"
+	"lax/internal/store"
+	"lax/internal/translate"
 )
 
 // 这个文件钉住「模型事实在目录、账号只有可达性」之后网关的三条边界（见 DESIGN 5.13）：

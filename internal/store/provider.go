@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"switchboard/internal/translate"
+	"lax/internal/translate"
 )
 
 var (
@@ -116,7 +116,7 @@ func (s *Store) GetProvider(name string) (Provider, error) {
 	err := s.db.QueryRow(`SELECT `+providerColumns+` FROM providers WHERE name = ?`, name).
 		Scan(&p.Name, &p.BaseURL, &p.Note, &p.DefaultProtocol, &p.ModelsPath)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Provider{}, fmt.Errorf("%w：%q，用 switchboard provider ls 看已配置的厂商", ErrProviderNotFound, name)
+		return Provider{}, fmt.Errorf("%w：%q，用 lax provider ls 看已配置的厂商", ErrProviderNotFound, name)
 	}
 	if err != nil {
 		return Provider{}, err
@@ -324,7 +324,7 @@ func requireBaseURLCoverage(provider, base string, routes []ProviderRoute, model
 			ErrBaseURLRequired, provider, r.Protocol, r.Path, r.Path)
 	}
 	if modelsPath != "" && !IsFullAddress(modelsPath) {
-		return fmt.Errorf("%w：厂商 %s 的模型列表地址是相对路径（%s），它需要 --base-url 才能拼成完整地址；给 --base-url <地址>，或把它写成整条地址（例如 https://api.example.com%s），也可以用 switchboard provider unset %s models-path 回到按路由取",
+		return fmt.Errorf("%w：厂商 %s 的模型列表地址是相对路径（%s），它需要 --base-url 才能拼成完整地址；给 --base-url <地址>，或把它写成整条地址（例如 https://api.example.com%s），也可以用 lax provider unset %s models-path 回到按路由取",
 			ErrBaseURLRequired, provider, modelsPath, modelsPath, provider)
 	}
 	return nil
@@ -536,7 +536,7 @@ func (s *Store) CreateProvider(p Provider, routes []ProviderRoute) error {
 	err = tx.QueryRow(`SELECT 1 FROM providers WHERE name = ?`, name).Scan(&one)
 	switch {
 	case err == nil:
-		return fmt.Errorf("%w：%q，改这家厂商用 switchboard provider set %s", ErrProviderExists, name, name)
+		return fmt.Errorf("%w：%q，改这家厂商用 lax provider set %s", ErrProviderExists, name, name)
 	case !errors.Is(err, sql.ErrNoRows):
 		return err
 	}
@@ -573,7 +573,7 @@ func (s *Store) SetProvider(name string, patch ProviderPatch) error {
 	err = tx.QueryRow(`SELECT `+providerColumns+` FROM providers WHERE name = ?`, name).
 		Scan(&p.Name, &p.BaseURL, &p.Note, &p.DefaultProtocol, &p.ModelsPath)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("%w：%q，新建厂商用 switchboard provider add，用 switchboard provider ls 看已配置的厂商", ErrProviderNotFound, name)
+		return fmt.Errorf("%w：%q，新建厂商用 lax provider add，用 lax provider ls 看已配置的厂商", ErrProviderNotFound, name)
 	}
 	if err != nil {
 		return err
@@ -601,7 +601,7 @@ func (s *Store) SetProvider(name string, patch ProviderPatch) error {
 	if patch.DefaultProtocol != nil {
 		def := strings.TrimSpace(*patch.DefaultProtocol)
 		if def != "" && !IsWireProtocol(def) {
-			return fmt.Errorf("厂商 %s 的默认协议 %q 不认识，只能是 %s；清掉显式值、回到按固定顺序取第一条用 switchboard provider unset %s default-protocol",
+			return fmt.Errorf("厂商 %s 的默认协议 %q 不认识，只能是 %s；清掉显式值、回到按固定顺序取第一条用 lax provider unset %s default-protocol",
 				name, def, wireProtocolNames(), name)
 		}
 		p.DefaultProtocol = def
@@ -643,7 +643,7 @@ func (s *Store) SetProvider(name string, patch ProviderPatch) error {
 	}
 	// 删到一条不剩要拒绝；本来就没有路由的厂商（过渡期 AddProvider 能造出来）不因此挡住改备注这类操作。
 	if len(routes) == 0 && len(before) > 0 {
-		return fmt.Errorf("厂商 %s 至少要保留一条协议路由；不想再要这家厂商就用 switchboard provider rm %s", name, name)
+		return fmt.Errorf("厂商 %s 至少要保留一条协议路由；不想再要这家厂商就用 lax provider rm %s", name, name)
 	}
 	// 改完之后地址与路由必须自洽：库里地址为空时，改完的路由与 models_path 都得是整条地址。
 	// 把一条路由从整条地址改成相对路径、又没给 base_url、库里也没有时，整笔拒绝：
@@ -655,7 +655,7 @@ func (s *Store) SetProvider(name string, patch ProviderPatch) error {
 	// 不该挡住一次只改备注或地址的调用。
 	touchedRouting := len(patch.Routes) > 0 || patch.DefaultProtocol != nil
 	if touchedRouting && p.DefaultProtocol != "" && !hasRoute(routes, p.DefaultProtocol) {
-		return fmt.Errorf("厂商 %s 的默认协议 %q 对应的路由不存在（现有：%s）；先补上这条路由（switchboard provider set %s --%s <路径>），或把默认协议改成已声明的其中一个（switchboard provider set %s --default-protocol <协议>），也可以清掉显式值回到按固定顺序取第一条（switchboard provider unset %s default-protocol）",
+		return fmt.Errorf("厂商 %s 的默认协议 %q 对应的路由不存在（现有：%s）；先补上这条路由（lax provider set %s --%s <路径>），或把默认协议改成已声明的其中一个（lax provider set %s --default-protocol <协议>），也可以清掉显式值回到按固定顺序取第一条（lax provider unset %s default-protocol）",
 			name, p.DefaultProtocol, routeProtocols(routes), name, protocolFlagName(p.DefaultProtocol), name, name)
 	}
 
@@ -795,10 +795,10 @@ func requireDeclaredProtocol(tx *sql.Tx, provider, protocol string) error {
 		return err
 	}
 	if len(declared) == 0 {
-		return fmt.Errorf("厂商 %s 的默认协议是 %q，但这家还没有任何路由；先运行 switchboard provider set %s --%s <路径> 把这条路由加上，或去掉默认协议改回按固定顺序取第一条",
+		return fmt.Errorf("厂商 %s 的默认协议是 %q，但这家还没有任何路由；先运行 lax provider set %s --%s <路径> 把这条路由加上，或去掉默认协议改回按固定顺序取第一条",
 			provider, protocol, provider, protocolFlagName(protocol))
 	}
-	return fmt.Errorf("厂商 %s 的默认协议是 %q，但这家没有这个协议的路由（已声明：%s）；先运行 switchboard provider set %s --%s <路径> 补上这条路由，或把默认协议改成已声明的其中一个：%s",
+	return fmt.Errorf("厂商 %s 的默认协议是 %q，但这家没有这个协议的路由（已声明：%s）；先运行 lax provider set %s --%s <路径> 补上这条路由，或把默认协议改成已声明的其中一个：%s",
 		provider, protocol, strings.Join(declared, "、"), provider, protocolFlagName(protocol), strings.Join(declared, "、"))
 }
 

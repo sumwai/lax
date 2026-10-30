@@ -6,9 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
-	"switchboard/internal/translate"
+	"lax/internal/gateway"
+	"lax/internal/store"
+	"lax/internal/translate"
 )
 
 // 这个文件钉住 gemini 流式端点的后缀改写只认路径末尾（查询串之前）：url.PathEscape 不转义

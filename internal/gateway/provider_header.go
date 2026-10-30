@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"switchboard/internal/store"
+	"lax/internal/store"
 )
 
 // 厂商附加请求头的模板展开与注入（DESIGN 5.10）。声明存在 provider_headers 里，值可能是字面量，
@@ -99,7 +99,7 @@ func (s *Server) applyProviderHeaders(httpReq *http.Request, a store.Account,
 
 	headers, err := s.store.EffectiveProviderHeaders(a.Provider, protocol)
 	if err != nil {
-		return fmt.Errorf("读厂商 %s 的附加请求头失败: %w；先运行 switchboard doctor 检查数据库与配置",
+		return fmt.Errorf("读厂商 %s 的附加请求头失败: %w；先运行 lax doctor 检查数据库与配置",
 			a.Provider, err)
 	}
 

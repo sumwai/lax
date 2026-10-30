@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
+	"lax/internal/gateway"
 )
 
 // syncBody 用一个固定返回 body 的假上游跑一次 SyncModels，同时收集网关日志。

@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
-	"switchboard/internal/translate"
+	"lax/internal/gateway"
+	"lax/internal/store"
+	"lax/internal/translate"
 )
 
 // geminiRoute 是 gemini 的路由写法：相对 base_url 的路径，模型名用 {model} 占位符

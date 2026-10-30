@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"switchboard/internal/secret"
+	"lax/internal/secret"
 )
 
 // ErrProviderHeaderNotFound 表示这家厂商没有声明这条附加头。`provider header unset` 用 errors.Is
@@ -113,7 +113,7 @@ func (s *Store) DeleteProviderHeader(provider, protocol, name string) error {
 		if _, err := s.GetProvider(provider); err != nil {
 			return err
 		}
-		return fmt.Errorf("%w：%q 在协议 %s 下没有 %q，用 switchboard provider header ls %s 看已声明的头",
+		return fmt.Errorf("%w：%q 在协议 %s 下没有 %q，用 lax provider header ls %s 看已声明的头",
 			ErrProviderHeaderNotFound, provider, headerScope(proto), hname, provider)
 	}
 	return nil
@@ -194,7 +194,7 @@ func requireProviderTx(tx *sql.Tx, provider string) error {
 	case err == nil:
 		return nil
 	case errors.Is(err, sql.ErrNoRows):
-		return fmt.Errorf("%w：%q，用 switchboard provider ls 看已配置的厂商", ErrProviderNotFound, provider)
+		return fmt.Errorf("%w：%q，用 lax provider ls 看已配置的厂商", ErrProviderNotFound, provider)
 	default:
 		return err
 	}

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/translate"
+	"lax/internal/gateway"
+	"lax/internal/translate"
 )
 
 // 这个文件钉住思考 token 的记账链路（DESIGN 5.5）：scanner 与解码器读到的 reasoning 与 total

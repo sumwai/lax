@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
-	"switchboard/internal/translate"
+	"lax/internal/gateway"
+	"lax/internal/store"
+	"lax/internal/translate"
 )
 
 // 这个文件钉住「模型别名接进转发与清单」（DESIGN 5.12）：别名只在请求方向生效，
@@ -146,8 +146,8 @@ func TestAliasCycleIsBadRequest(t *testing.T) {
 	if !strings.Contains(msg, "别名链成环") || !strings.Contains(msg, "a-alias → b-alias → a-alias") {
 		t.Fatalf("文案应点出成环的那条链: %s", msg)
 	}
-	if !strings.Contains(msg, "switchboard model alias ls") {
-		t.Fatalf("文案应给出下一步命令 switchboard model alias ls: %s", msg)
+	if !strings.Contains(msg, "lax model alias ls") {
+		t.Fatalf("文案应给出下一步命令 lax model alias ls: %s", msg)
 	}
 
 	recs, err := f.st.RecentRequests(5)
@@ -160,7 +160,7 @@ func TestAliasCycleIsBadRequest(t *testing.T) {
 }
 
 // TestAliasTargetWithoutProvider 钉住 404 文案：别名解析得出的目标没有任何账号提供时，
-// 消息要同时说出别名与目标，并提示 switchboard model ls，而不是只说「没有账号提供 X」。
+// 消息要同时说出别名与目标，并提示 lax model ls，而不是只说「没有账号提供 X」。
 func TestAliasTargetWithoutProvider(t *testing.T) {
 	f := newFixture(t)
 	f.add(t, "ds1", gateway.ProtocolChat, "http://127.0.0.1:1", "sk-ds", []string{"m1"}, 100)
@@ -177,7 +177,7 @@ func TestAliasTargetWithoutProvider(t *testing.T) {
 	if kind != "not_found_error" {
 		t.Fatalf("error.type = %q，期望 not_found_error", kind)
 	}
-	const want = "别名 fast 指向 ghost-model，但没有账号提供 ghost-model；用 switchboard model ls 看现有清单"
+	const want = "别名 fast 指向 ghost-model，但没有账号提供 ghost-model；用 lax model ls 看现有清单"
 	if msg != want {
 		t.Fatalf("404 文案 = %q，期望 %q", msg, want)
 	}
@@ -305,7 +305,7 @@ func TestModelByIDAlias(t *testing.T) {
 		if !strings.Contains(msg, "这是一个别名，目标是 ghost-model") {
 			t.Fatalf("文案应说明这是一个别名与它的目标: %s", msg)
 		}
-		if !strings.Contains(msg, "switchboard model ls") {
+		if !strings.Contains(msg, "lax model ls") {
 			t.Fatalf("文案应给出下一步命令: %s", msg)
 		}
 	})

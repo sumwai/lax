@@ -5,8 +5,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"switchboard/internal/store"
-	"switchboard/internal/translate"
+	"lax/internal/store"
+	"lax/internal/translate"
 )
 
 // 三条出站协议的用量报文：都在输入里报了 100 个 token，其中 60 个命中缓存。

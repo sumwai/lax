@@ -11,8 +11,8 @@ import (
 	"sync"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
+	"lax/internal/gateway"
+	"lax/internal/store"
 )
 
 // 这个文件钉住第五条线协议 systemone 的入站、协议互通、错误体与探活（DESIGN 5.14）。

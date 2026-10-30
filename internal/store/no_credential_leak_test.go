@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"switchboard/internal/secret"
-	"switchboard/internal/store"
+	"lax/internal/secret"
+	"lax/internal/store"
 )
 
 // TestUsageAndAccountOutputsCarryNoCredential 钉住凭据只以密文出现：账号行、用量汇总行

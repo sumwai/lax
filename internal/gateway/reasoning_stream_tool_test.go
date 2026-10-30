@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
+	"lax/internal/gateway"
 )
 
 // 这个文件从网关这一层钉住「思考增量在前、工具参数分片在后」这类跨协议流式：

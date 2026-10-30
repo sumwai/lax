@@ -9,8 +9,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/translate"
+	"lax/internal/gateway"
+	"lax/internal/translate"
 )
 
 // 这个文件钉住流式转发的分帧边界：上游在事件中间、在 UTF-8 多字节字符中间、在收尾事件之前断开时，

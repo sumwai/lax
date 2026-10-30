@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/config"
-	"switchboard/internal/store"
+	"lax/internal/config"
+	"lax/internal/store"
 )
 
 // providerRouteRow 是 provider ls --json 里的一条路由。
@@ -337,7 +337,7 @@ func TestProviderAddCreates(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"已添加厂商 human", "1 条路由", "默认协议 anthropic", "switchboard account add"} {
+	for _, want := range []string{"已添加厂商 human", "1 条路由", "默认协议 anthropic", "lax account add"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("provider add 输出缺 %q: %s", want, out)
 		}
@@ -704,7 +704,7 @@ func TestProviderAddDuplicate(t *testing.T) {
 	if out != "" {
 		t.Fatalf("重名 add 不该往 stdout 写结果: %s", out)
 	}
-	for _, want := range []string{"厂商 mine 已存在", "switchboard provider set mine"} {
+	for _, want := range []string{"厂商 mine 已存在", "lax provider set mine"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 		}
@@ -745,7 +745,7 @@ func TestProviderAddEmptyValues(t *testing.T) {
 			if out != "" {
 				t.Fatalf("用法错误不该写 stdout: %s", out)
 			}
-			for _, want := range []string{c.flag, "传了空值", "switchboard provider unset"} {
+			for _, want := range []string{c.flag, "传了空值", "lax provider unset"} {
 				if !strings.Contains(stderr, want) {
 					t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 				}
@@ -772,7 +772,7 @@ func TestProviderAddUsageErrors(t *testing.T) {
 		}
 		// 缺 base_url 只在一个前提下算错：有相对路径要拼它。文案要说清是哪条路由与两条出路
 		//（给 --base-url，或把这条路由写成整条地址），判定与文案来自 store（见 DESIGN 5.8）。
-		for _, want := range []string{"openai-chat", "/v1/chat/completions", "相对路径", "需要 --base-url", "整条地址", "switchboard provider add <名称>"} {
+		for _, want := range []string{"openai-chat", "/v1/chat/completions", "相对路径", "需要 --base-url", "整条地址", "lax provider add <名称>"} {
 			if !strings.Contains(stderr, want) {
 				t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 			}
@@ -1011,7 +1011,7 @@ func TestProviderGeminiErrors(t *testing.T) {
 		if code != 2 || out != "" {
 			t.Fatalf("%v 退出码 = %d，stdout = %q", args, code, out)
 		}
-		for _, want := range []string{"传了空值", "--gemini", "switchboard provider unset <名称> gemini"} {
+		for _, want := range []string{"传了空值", "--gemini", "lax provider unset <名称> gemini"} {
 			if !strings.Contains(stderr, want) {
 				t.Fatalf("%v 的 stderr 应提到 %q: %s", args, want, stderr)
 			}
@@ -1032,7 +1032,7 @@ func TestProviderAddHelpMentionsGemini(t *testing.T) {
 		"--gemini",
 		"/v1beta/models/{model}:generateContent",
 		"{model} 是占位符",
-		"switchboard provider add google-gemini --base-url https://generativelanguage.googleapis.com",
+		"lax provider add google-gemini --base-url https://generativelanguage.googleapis.com",
 		"--default-protocol gemini",
 		"anthropic、openai、responses、gemini",
 	} {
@@ -1145,7 +1145,7 @@ func TestProviderSetErrors(t *testing.T) {
 			if !strings.Contains(stderr, "传了空值") {
 				t.Fatalf("stderr 应说明是空值: %s", stderr)
 			}
-			if c.name != "地址空值" && !strings.Contains(stderr, "switchboard provider unset") {
+			if c.name != "地址空值" && !strings.Contains(stderr, "lax provider unset") {
 				t.Fatalf("stderr 应指向 provider unset: %s", stderr)
 			}
 		})
@@ -1153,7 +1153,7 @@ func TestProviderSetErrors(t *testing.T) {
 
 	t.Run("没有参数", func(t *testing.T) {
 		code, _, stderr := run(t, "provider", "set", "mine")
-		if code != 2 || !strings.Contains(stderr, "switchboard provider set <名称>") {
+		if code != 2 || !strings.Contains(stderr, "lax provider set <名称>") {
 			t.Fatalf("退出码 = %d，stderr = %s", code, stderr)
 		}
 	})
@@ -1162,7 +1162,7 @@ func TestProviderSetErrors(t *testing.T) {
 
 	t.Run("厂商不存在", func(t *testing.T) {
 		code, _, stderr := run(t, "provider", "set", "nope", "--note", "x")
-		if code != 1 || !strings.Contains(stderr, "switchboard provider add") {
+		if code != 1 || !strings.Contains(stderr, "lax provider add") {
 			t.Fatalf("退出码 = %d，stderr = %s", code, stderr)
 		}
 	})
@@ -1299,8 +1299,8 @@ func TestProviderUnsetErrors(t *testing.T) {
 		{"带 -- 前缀", []string{"--", "--openai"}, []string{"不要带 -- 前缀", "可用："}},
 		{"大小写不符", []string{"OpenAI"}, []string{"大小写不符", "openai"}},
 		{"base-url", []string{"base-url"}, []string{"不能 unset", "--base-url"}},
-		{"厂商名", []string{"name"}, []string{"不能 unset", "switchboard provider rm"}},
-		{"没有字段", nil, []string{"用法：switchboard provider unset <名称> <字段>"}},
+		{"厂商名", []string{"name"}, []string{"不能 unset", "lax provider rm"}},
+		{"没有字段", nil, []string{"用法：lax provider unset <名称> <字段>"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -1322,7 +1322,7 @@ func TestProviderUnsetErrors(t *testing.T) {
 
 	t.Run("厂商不存在", func(t *testing.T) {
 		code, _, stderr := run(t, "provider", "unset", "nope", "openai")
-		if code != 1 || !strings.Contains(stderr, "switchboard provider ls") {
+		if code != 1 || !strings.Contains(stderr, "lax provider ls") {
 			t.Fatalf("退出码 = %d，stderr = %s", code, stderr)
 		}
 	})
@@ -1344,7 +1344,7 @@ func TestProviderUnsetDefaultRouteRefused(t *testing.T) {
 		t.Fatalf("拒绝写库时不该往 stdout 写结果: %s", out)
 	}
 	for _, want := range []string{"对应的路由不存在", `"openai-chat"`, "现有：anthropic",
-		"switchboard provider set deepseek --default-protocol", "switchboard provider unset deepseek default-protocol"} {
+		"lax provider set deepseek --default-protocol", "lax provider unset deepseek default-protocol"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 		}
@@ -1386,7 +1386,7 @@ func TestProviderUnsetLastRouteRefused(t *testing.T) {
 	if out != "" {
 		t.Fatalf("拒绝写库时不该往 stdout 写结果: %s", out)
 	}
-	for _, want := range []string{"至少要保留一条协议路由", "switchboard provider rm mine"} {
+	for _, want := range []string{"至少要保留一条协议路由", "lax provider rm mine"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 		}
@@ -1454,7 +1454,7 @@ func TestProviderRmRefusesWhileAccountsUse(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("--force 的退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"已删除厂商 mine", "这些账号已停用", "switchboard account enable", "use1"} {
+	for _, want := range []string{"已删除厂商 mine", "这些账号已停用", "lax account enable", "use1"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("--force 的输出应提到 %q: %s", want, out)
 		}
@@ -1477,7 +1477,7 @@ func TestProviderRmMissingAndJSON(t *testing.T) {
 	if out != "" {
 		t.Fatalf("删除失败不该写 stdout: %s", out)
 	}
-	if !strings.Contains(stderr, "switchboard provider ls") {
+	if !strings.Contains(stderr, "lax provider ls") {
 		t.Fatalf("stderr 应给出下一步命令: %s", stderr)
 	}
 
@@ -1532,7 +1532,7 @@ func TestProviderRmForceDisablesAccounts(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("--force 的退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"已删除厂商 deepseek", "这些账号已停用", "switchboard account enable", "ds1"} {
+	for _, want := range []string{"已删除厂商 deepseek", "这些账号已停用", "lax account enable", "ds1"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("--force 的输出应提到 %q: %s", want, out)
 		}
@@ -1745,7 +1745,7 @@ func TestProviderSetEmptyValueWritesNothing(t *testing.T) {
 			if out != "" {
 				t.Fatalf("用法错误不该写 stdout: %s", out)
 			}
-			for _, want := range []string{c.flag, "传了空值", "switchboard provider unset"} {
+			for _, want := range []string{c.flag, "传了空值", "lax provider unset"} {
 				if !strings.Contains(stderr, want) {
 					t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 				}
@@ -1888,7 +1888,7 @@ func TestProviderBaseURLValidation(t *testing.T) {
 			if code != 2 || out != "" {
 				t.Fatalf("退出码 = %d，stdout = %q", code, out)
 			}
-			for _, want := range []string{"里没有主机名", "https://api.deepseek.com", "用法：switchboard provider add"} {
+			for _, want := range []string{"里没有主机名", "https://api.deepseek.com", "用法：lax provider add"} {
 				if !strings.Contains(stderr, want) {
 					t.Fatalf("stderr 应包含 %q: %s", want, stderr)
 				}
@@ -1911,7 +1911,7 @@ func TestProviderBaseURLValidation(t *testing.T) {
 	if code != 2 || out != "" {
 		t.Fatalf("provider set 退出码 = %d，stdout = %q", code, out)
 	}
-	for _, want := range []string{"里没有主机名", "用法：switchboard provider set"} {
+	for _, want := range []string{"里没有主机名", "用法：lax provider set"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应包含 %q: %s", want, stderr)
 		}
@@ -2040,7 +2040,7 @@ func TestProviderPathsRejectBadFullAddress(t *testing.T) {
 			if code != 2 || out != "" {
 				t.Fatalf("%v 退出码 = %d，stdout = %q", args, code, out)
 			}
-			for _, want := range []string{b.want, "用法：switchboard provider add"} {
+			for _, want := range []string{b.want, "用法：lax provider add"} {
 				if !strings.Contains(stderr, want) {
 					t.Fatalf("%v 的 stderr 应包含 %q: %s", args, want, stderr)
 				}
@@ -2060,7 +2060,7 @@ func TestProviderPathsRejectBadFullAddress(t *testing.T) {
 		if code != 2 || out != "" {
 			t.Fatalf("set --%s 退出码 = %d，stdout = %q", flag, code, out)
 		}
-		for _, want := range []string{"里没有主机名", "用法：switchboard provider set"} {
+		for _, want := range []string{"里没有主机名", "用法：lax provider set"} {
 			if !strings.Contains(stderr, want) {
 				t.Fatalf("set --%s 的 stderr 应包含 %q: %s", flag, want, stderr)
 			}
@@ -2092,13 +2092,13 @@ func TestModelSyncEndpointBadValues(t *testing.T) {
 			t.Fatalf("--endpoint %q 的 stderr 应包含 %q: %s", c.value, c.want, stderr)
 		}
 	}
-	// 合法整条地址不需要先 init 就该走到「先 switchboard init」这条运行失败上，
+	// 合法整条地址不需要先 init 就该走到「先 lax init」这条运行失败上，
 	// 说明格式校验放行了它（用法错误的退出码是 2，运行失败是 1）。
 	code, _, stderr := run(t, "model", "sync", "--endpoint", "https://api.example.com/v1/models")
 	if code != 1 {
 		t.Fatalf("合法整条地址的退出码 = %d，期望 1（未初始化），stderr = %s", code, stderr)
 	}
-	if !strings.Contains(stderr, "switchboard init") {
+	if !strings.Contains(stderr, "lax init") {
 		t.Fatalf("合法整条地址应放行到打开数据库那一步: %s", stderr)
 	}
 }
@@ -2247,7 +2247,7 @@ func TestProviderAddWithoutBaseURLRejectsRelativeRoute(t *testing.T) {
 	if code != 2 || out != "" {
 		t.Fatalf("%v 退出码 = %d，stdout = %q", args, code, out)
 	}
-	for _, want := range []string{"anthropic", "/v1/messages", "相对路径", "需要 --base-url", "整条地址", "用法：switchboard provider add"} {
+	for _, want := range []string{"anthropic", "/v1/messages", "相对路径", "需要 --base-url", "整条地址", "用法：lax provider add"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应包含 %q: %s", want, stderr)
 		}
@@ -2285,7 +2285,7 @@ func TestProviderSetKeepsBaseURLCoverage(t *testing.T) {
 	if code != 2 || out != "" {
 		t.Fatalf("改成相对路径的退出码 = %d，stdout = %q", code, out)
 	}
-	for _, want := range []string{"anthropic", "/v1/messages", "相对路径", "需要 --base-url", "用法：switchboard provider set"} {
+	for _, want := range []string{"anthropic", "/v1/messages", "相对路径", "需要 --base-url", "用法：lax provider set"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应包含 %q: %s", want, stderr)
 		}

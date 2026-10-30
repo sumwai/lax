@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"switchboard/internal/usage"
+	"lax/internal/usage"
 )
 
 func TestParseSince(t *testing.T) {

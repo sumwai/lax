@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/store"
+	"lax/internal/store"
 )
 
 // TestIsFullAddress 钉住两种写法的判定：含 `://` 的是整条地址，其余都是相对 base_url 的路径。

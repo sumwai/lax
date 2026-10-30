@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
+	"lax/internal/gateway"
 )
 
 // catalogEntry 是 /v1/models 里的一项。四个字段都要，created 固定 0 是契约的一部分。

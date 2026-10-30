@@ -1030,7 +1030,7 @@ func chatUsageToWire(u Usage) ChatUsage {
 // chatCompletionID 保证 id 以 chatcmpl 开头，缺失时给固定值。
 func chatCompletionID(id string) string {
 	if id == "" {
-		return "chatcmpl-switchboard"
+		return "chatcmpl-lax"
 	}
 	if strings.HasPrefix(id, "chatcmpl-") {
 		return id

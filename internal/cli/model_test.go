@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"switchboard/internal/store"
-	"switchboard/internal/store/storetest"
+	"lax/internal/store"
+	"lax/internal/store/storetest"
 )
 
 // probeUpstream 是假 openai-chat 上游：GET /v1/models 给模型列表，

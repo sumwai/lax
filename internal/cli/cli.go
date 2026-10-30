@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	appName = "switchboard"
+	appName = "lax"
 	version = "0.1.0-dev"
 
 	exitOK    = 0

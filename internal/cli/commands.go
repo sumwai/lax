@@ -11,10 +11,10 @@ import (
 	"syscall"
 	"time"
 
-	"switchboard/internal/config"
-	"switchboard/internal/gateway"
-	"switchboard/internal/secret"
-	"switchboard/internal/store"
+	"lax/internal/config"
+	"lax/internal/gateway"
+	"lax/internal/secret"
+	"lax/internal/store"
 )
 
 var commandTable = map[string]command{
@@ -75,7 +75,7 @@ func cmdInit(e *Env, args []string) error {
 		})
 	}
 	fmt.Fprintf(e.Stdout, "配置 %s\n数据库 %s\n密钥 %s\n", paths.Config, paths.DB, keyPath)
-	fmt.Fprintln(e.Stdout, "下一步：switchboard account add <名称> --provider <厂商> --key <key>")
+	fmt.Fprintln(e.Stdout, "下一步：lax account add <名称> --provider <厂商> --key <key>")
 	return nil
 }
 
@@ -161,6 +161,24 @@ type check struct {
 	Note string `json:"note"`
 }
 
+// legacyDirName 是改名前的默认目录名，改名前的库文件名是它加 .db（见 DESIGN 5.1 的路径约定）。
+// 改名只换了默认目录，老用户的数据还留在旧路径下，doctor 用它判断要不要提示搬家：
+// 运行时不读这个位置，别的地方也不做兼容分支。
+const legacyDirName = "switchboard"
+
+// legacyDB 按与 config 相同的 XDG 约定拼出改名前的默认库文件位置。
+func legacyDB() string {
+	base := ""
+	if d := os.Getenv("XDG_DATA_HOME"); d != "" {
+		base = filepath.Join(d, legacyDirName)
+	} else if home, err := os.UserHomeDir(); err == nil {
+		base = filepath.Join(home, ".local", "share", legacyDirName)
+	} else {
+		return ""
+	}
+	return filepath.Join(base, legacyDirName+".db")
+}
+
 func cmdDoctor(e *Env, args []string) error {
 	fs := newFlagSet(e, "doctor", "自检配置、目录与端口")
 	if err := fs.Parse(args); err != nil {
@@ -179,7 +197,7 @@ func cmdDoctor(e *Env, args []string) error {
 	if _, statErr := os.Stat(paths.Config); statErr == nil {
 		add("配置文件", true, paths.Config)
 	} else {
-		add("配置文件", false, "不存在，先运行 switchboard init")
+		add("配置文件", false, "不存在，先运行 lax init")
 	}
 
 	dataDir := filepath.Dir(paths.DB)
@@ -198,7 +216,20 @@ func cmdDoctor(e *Env, args []string) error {
 	if _, statErr := os.Stat(keyPath); statErr == nil {
 		add("加密密钥", true, "权限 0600")
 	} else {
-		add("加密密钥", false, "不存在，先运行 switchboard init")
+		add("加密密钥", false, "不存在，先运行 lax init")
+	}
+
+	// 新库还没建、旧目录里的库还在：数据其实没丢，只是留在改名前的路径下。
+	// 这一项报 fail 而不是静默通过：现有检查项只有 ok/fail 两级（没有 warn），
+	// 而新库为空时用户看到的是空账号、空用量，正是需要动手才能恢复的状态。
+	// 必须在打开数据库之前判断——store.Open 会把新库建出来，之后再 stat 就看不到了。
+	if _, statErr := os.Stat(paths.DB); errors.Is(statErr, os.ErrNotExist) {
+		if old := legacyDB(); old != "" {
+			if _, oldErr := os.Stat(old); oldErr == nil {
+				add("旧数据搬迁", false, fmt.Sprintf("旧目录还有数据：mv %s %s %s（库与密钥一起搬，账号、单价与用量都还在）",
+					old, filepath.Join(filepath.Dir(old), "secret.key"), dataDir))
+			}
+		}
 	}
 
 	if cfg, loadErr := config.Load(paths); loadErr != nil {

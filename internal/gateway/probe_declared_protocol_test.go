@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
+	"lax/internal/gateway"
+	"lax/internal/store"
 )
 
 // 这个文件钉住「目录里声明的协议排在探活候选前面」这条排序（见 DESIGN 5.7）：

@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"switchboard/internal/account"
-	"switchboard/internal/store"
+	"lax/internal/account"
+	"lax/internal/store"
 )
 
 // TestSettledFresh 钉住新鲜度判定的每条边界：只有 0 <= 差值 <= maxAge 才算新鲜。

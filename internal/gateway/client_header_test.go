@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
+	"lax/internal/gateway"
+	"lax/internal/store"
 )
 
 // postWithHeaders 往入站路径发一条带自定义请求头的 POST，返回状态与响应体。
@@ -289,7 +289,7 @@ func TestClientCredentialsAndHopByHopNotForwarded(t *testing.T) {
 	headers.Set("x-api-key", "client-api-key")
 	headers.Set("x-goog-api-key", "client-goog-key")
 	headers.Set("Cookie", "session=client-cookie")
-	headers.Set("x-switchboard-session", "sess-client")
+	headers.Set("x-lax-session", "sess-client")
 	// 入站请求体故意写松（带空格与换行）：上游请求体是 patchModel 重新编的紧凑 JSON，
 	// 长度与入站不同，Content-Length 若照抄客户端值就会对不上。
 	inbound := "{\n  \"model\": \"claude-x\",\n  \"max_tokens\": 16,\n  \"messages\": [{\"role\": \"user\", \"content\": \"hi\"}]\n}"
@@ -314,8 +314,8 @@ func TestClientCredentialsAndHopByHopNotForwarded(t *testing.T) {
 	if got := h.Get("Cookie"); got != "" {
 		t.Fatalf("Cookie = %q，客户端 Cookie 不该透传", got)
 	}
-	if got := h.Get("x-switchboard-session"); got != "" {
-		t.Fatalf("x-switchboard-session = %q，本网关自己的会话键不该透传", got)
+	if got := h.Get("x-lax-session"); got != "" {
+		t.Fatalf("x-lax-session = %q，本网关自己的会话键不该透传", got)
 	}
 	if upstreamReq.Host != strings.TrimPrefix(up.URL, "http://") {
 		t.Fatalf("上游 Host = %q，期望上游自己的地址（客户端给的是 client.example）", upstreamReq.Host)

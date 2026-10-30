@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"switchboard/internal/gateway"
+	"lax/internal/gateway"
 )
 
 // probeCall 是一次打到假上游的探活请求：方法、路径与两种凭据头。

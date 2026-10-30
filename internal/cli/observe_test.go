@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"switchboard/internal/store"
-	"switchboard/internal/store/storetest"
+	"lax/internal/store"
+	"lax/internal/store/storetest"
 )
 
 // addRecord 往库里写一行请求记录，返回时带上自动生成的行 id。

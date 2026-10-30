@@ -2,7 +2,7 @@
   {
     "data": {
       "response": {
-        "id": "resp_switchboard",
+        "id": "resp_lax",
         "model": "gpt-5",
         "object": "response",
         "output": [],
@@ -119,7 +119,7 @@
   {
     "data": {
       "response": {
-        "id": "resp_switchboard",
+        "id": "resp_lax",
         "model": "gpt-5",
         "object": "response",
         "output": [

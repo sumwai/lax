@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"switchboard/internal/account"
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
+	"lax/internal/account"
+	"lax/internal/gateway"
+	"lax/internal/store"
 )
 
 // systemOnePath 是 systemone 的入站路径（DESIGN 5.14）：模型名在请求体里，不在路径上。
@@ -25,7 +25,7 @@ const systemOnePath = "/v1/systemone"
 
 // decideUsage 是所有用法错误都会打出来的那一行：参数形状、三种拼问题的写法与整块 JSON 的写法。
 // 用法错误只说「参数错误」等于让人去猜语法（见 AGENTS.md）。
-const decideUsage = "用法：switchboard decide --model <模型> --state <文本或 JSON> " +
+const decideUsage = "用法：lax decide --model <模型> --state <文本或 JSON> " +
 	"[--noul <名>=<问句>] [--choice <名>=<问句> --choice <名>:<选项>[,<选项>...]] " +
 	"[--score <名>=<问句> --score <名>:<级别>[,<级别>...]] [--questions <整块 JSON>] [--json]\n" +
 	"  --questions 与 --noul/--choice/--score 二选一：前者给整块 questions 对象，后者按问题逐条拼"
@@ -330,7 +330,7 @@ type decideTarget struct {
 func pickDecideTarget(st *store.Store, model string) (decideTarget, error) {
 	resolved, isAlias, err := st.ResolveModelAlias(model)
 	if err != nil {
-		return decideTarget{}, fmt.Errorf("模型名 %s 解析不了（%v）：别名链成环或超过 8 跳时换句话说不出真名，选号无从谈起；用 switchboard model alias ls 看这条链，改掉或删掉它，也可以直接把 --model 换成真实模型名", model, err)
+		return decideTarget{}, fmt.Errorf("模型名 %s 解析不了（%v）：别名链成环或超过 8 跳时换句话说不出真名，选号无从谈起；用 lax model alias ls 看这条链，改掉或删掉它，也可以直接把 --model 换成真实模型名", model, err)
 	}
 	if !isAlias {
 		// 不是别名时 ResolveModelAlias 回一个空串，名字照旧用命令行给的那个。
@@ -345,9 +345,9 @@ func pickDecideTarget(st *store.Store, model string) (decideTarget, error) {
 	candidates := account.Candidates(accounts, resolved, now, "")
 	if len(candidates) == 0 {
 		if len(account.Providers(accounts, resolved)) == 0 {
-			return decideTarget{}, fmt.Errorf("模型 %s 不在任何启用账号的模型列表里：决策请求按模型名选号，名字对不上就一个账号也选不出来；用 switchboard model ls 看现有清单，用 switchboard account add <名称> --provider <厂商> --key <key> --models %s 手工声明这个模型（决策模型不在上游清单里，只能手填），再 switchboard model probe --account <账号> 探活", resolved, resolved)
+			return decideTarget{}, fmt.Errorf("模型 %s 不在任何启用账号的模型列表里：决策请求按模型名选号，名字对不上就一个账号也选不出来；用 lax model ls 看现有清单，用 lax account add <名称> --provider <厂商> --key <key> --models %s 手工声明这个模型（决策模型不在上游清单里，只能手填），再 lax model probe --account <账号> 探活", resolved, resolved)
 		}
-		return decideTarget{}, fmt.Errorf("模型 %s 的账号都在冷却或被停用：这一次选不出账号；用 switchboard account ls 看状态，冷却几十秒后重试，被停用的用 switchboard account enable <账号> 启用", resolved)
+		return decideTarget{}, fmt.Errorf("模型 %s 的账号都在冷却或被停用：这一次选不出账号；用 lax account ls 看状态，冷却几十秒后重试，被停用的用 lax account enable <账号> 启用", resolved)
 	}
 
 	// 网关遇到算不出协议或协议不相通的候选会跳过它看下一个（DESIGN 5.14 的协议互通），
@@ -356,7 +356,7 @@ func pickDecideTarget(st *store.Store, model string) (decideTarget, error) {
 	for _, cand := range candidates {
 		protocol, err := st.EffectiveProtocol(cand.ID, resolved)
 		if err != nil {
-			return decideTarget{}, fmt.Errorf("读账号 %s 模型 %s 的有效出站协议失败（%v）：配置读不出来就不猜协议；用 switchboard doctor 检查数据库", cand.Name, resolved, err)
+			return decideTarget{}, fmt.Errorf("读账号 %s 模型 %s 的有效出站协议失败（%v）：配置读不出来就不猜协议；用 lax doctor 检查数据库", cand.Name, resolved, err)
 		}
 		if protocol == gateway.ProtocolSystemOne {
 			return decideTarget{model: resolved, account: cand.Name}, nil
@@ -375,11 +375,11 @@ func pickDecideTarget(st *store.Store, model string) (decideTarget, error) {
 			return decideTarget{}, err
 		}
 		if !containsProtocol(declared, gateway.ProtocolSystemOne) {
-			return decideTarget{}, fmt.Errorf("模型 %s 算不出有效出站协议：厂商 %s 没声明 systemone 路由，模型上也没有探出协议；先运行 switchboard provider set %s --systemone /v1/systemone 声明这条路由，再 switchboard model probe --account %s 把这个模型探出来", resolved, provider, provider, candidates[0].Name)
+			return decideTarget{}, fmt.Errorf("模型 %s 算不出有效出站协议：厂商 %s 没声明 systemone 路由，模型上也没有探出协议；先运行 lax provider set %s --systemone /v1/systemone 声明这条路由，再 lax model probe --account %s 把这个模型探出来", resolved, provider, provider, candidates[0].Name)
 		}
-		return decideTarget{}, fmt.Errorf("模型 %s 算不出有效出站协议：厂商 %s 声明了 systemone 路由，但默认协议是空的（回退顺序只认 openai-chat → openai-responses → anthropic，见 DESIGN 5.8）；运行 switchboard provider set %s --default-protocol systemone 把默认协议补上，或 switchboard model probe --account %s 把这个模型的协议探出来", resolved, provider, provider, candidates[0].Name)
+		return decideTarget{}, fmt.Errorf("模型 %s 算不出有效出站协议：厂商 %s 声明了 systemone 路由，但默认协议是空的（回退顺序只认 openai-chat → openai-responses → anthropic，见 DESIGN 5.8）；运行 lax provider set %s --default-protocol systemone 把默认协议补上，或 lax model probe --account %s 把这个模型的协议探出来", resolved, provider, provider, candidates[0].Name)
 	}
-	return decideTarget{}, fmt.Errorf("模型 %s 以 %s 协议出站，不是 systemone：decide 只发 POST %s 的决策请求，出站协议跟着账号与厂商路由走（见 DESIGN 5.13），这条协议不参与转换；要给这家厂商声明一条 systemone 路由就运行 switchboard provider set %s --systemone /v1/systemone 再 switchboard model probe --account %s，要发对话请求就改用 switchboard call \"提示词\" --model %s，也可以换一个走 systemone 的模型（switchboard model ls 看清单）",
+	return decideTarget{}, fmt.Errorf("模型 %s 以 %s 协议出站，不是 systemone：decide 只发 POST %s 的决策请求，出站协议跟着账号与厂商路由走（见 DESIGN 5.13），这条协议不参与转换；要给这家厂商声明一条 systemone 路由就运行 lax provider set %s --systemone /v1/systemone 再 lax model probe --account %s，要发对话请求就改用 lax call \"提示词\" --model %s，也可以换一个走 systemone 的模型（lax model ls 看清单）",
 		resolved, firstProtocol, systemOnePath, candidates[0].Provider, candidates[0].Name, resolved)
 }
 
@@ -516,7 +516,7 @@ func cmdDecide(e *Env, args []string) error {
 		return usagef("多余的参数 %q：decide 的输入都走参数，--state 给材料、--noul/--choice/--score 或 --questions 给问题\n%s", fs.Arg(0), decideUsage)
 	}
 	if strings.TrimSpace(*model) == "" {
-		return usagef("缺少 --model：决策请求按模型名选号，模型的有效出站协议必须是 systemone；用 switchboard model ls 看哪些模型可用\n%s", decideUsage)
+		return usagef("缺少 --model：决策请求按模型名选号，模型的有效出站协议必须是 systemone；用 lax model ls 看哪些模型可用\n%s", decideUsage)
 	}
 	if strings.TrimSpace(*state) == "" {
 		return usagef("缺少 --state：决策要看的材料就是它，纯文本与 JSON 都收（首字符是 {、[ 或 \" 时按 JSON 解析）；内容为空时给一对引号 --state '\"\"'\n%s", decideUsage)
@@ -605,13 +605,13 @@ func cmdDecide(e *Env, args []string) error {
 	started := time.Now()
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("连本进程的网关失败：%v；网关起不来时先运行 switchboard doctor 看端口与数据库", err)
+		return fmt.Errorf("连本进程的网关失败：%v；网关起不来时先运行 lax doctor 看端口与数据库", err)
 	}
 	defer resp.Body.Close()
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("读网关响应失败：%v；用 switchboard log tail 看这一次的记录", err)
+		return fmt.Errorf("读网关响应失败：%v；用 lax log tail 看这一次的记录", err)
 	}
 	latency := time.Since(started)
 
@@ -621,7 +621,7 @@ func cmdDecide(e *Env, args []string) error {
 
 	var env decideResponse
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("响应不是合法 JSON：%v；上游回来的可能是 HTML 错误页，用 switchboard log tail 看这一次的记录，或 switchboard account test %s 核对地址与凭据", err, target.account)
+		return fmt.Errorf("响应不是合法 JSON：%v；上游回来的可能是 HTML 错误页，用 lax log tail 看这一次的记录，或 lax account test %s 核对地址与凭据", err, target.account)
 	}
 
 	if e.JSON {
@@ -638,7 +638,7 @@ func cmdDecide(e *Env, args []string) error {
 	var answers map[string]json.RawMessage
 	if len(env.Answers) > 0 {
 		if err := json.Unmarshal(env.Answers, &answers); err != nil {
-			return fmt.Errorf("响应里的 answers 不是对象：%v；用 switchboard log tail 看这一次的记录，或 switchboard account test %s 核对上游", err, target.account)
+			return fmt.Errorf("响应里的 answers 不是对象：%v；用 lax log tail 看这一次的记录，或 lax account test %s 核对上游", err, target.account)
 		}
 	}
 
@@ -710,7 +710,7 @@ func decideHTTPError(status int, raw []byte, accountName string) error {
 	case kind == "":
 		kind = "错误体里没有类型"
 	}
-	return fmt.Errorf("网关返回 %d（%s）：%s；这一次的请求记录在 switchboard log tail 里，地址与凭据用 switchboard account test %s 核对", status, kind, message, accountName)
+	return fmt.Errorf("网关返回 %d（%s）：%s；这一次的请求记录在 lax log tail 里，地址与凭据用 lax account test %s 核对", status, kind, message, accountName)
 }
 
 // decideAnswerCell 把上游的 answer 原样写成文本：字符串去掉引号，布尔与数字原文，

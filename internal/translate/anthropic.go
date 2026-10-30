@@ -235,7 +235,7 @@ func DecodeAnthropicResponse(raw []byte, requestedModel string) (*Response, erro
 // EncodeAnthropicResponse 把 IR 编成 /v1/messages 的响应体。
 func EncodeAnthropicResponse(r *Response) ([]byte, error) {
 	wire := AnthropicResponse{
-		ID:         firstNonEmpty(r.ID, "msg_switchboard"),
+		ID:         firstNonEmpty(r.ID, "msg_lax"),
 		Type:       "message",
 		Role:       "assistant",
 		Model:      r.Model,
@@ -417,7 +417,7 @@ func (e *anthropicStreamEncoder) Start() []SSEEvent {
 	return []SSEEvent{e.event("message_start", map[string]any{
 		"type": "message_start",
 		"message": AnthropicResponse{
-			ID: "msg_switchboard", Type: "message", Role: "assistant",
+			ID: "msg_lax", Type: "message", Role: "assistant",
 			Model: e.model, Content: []ContentBlock{},
 		},
 	})}

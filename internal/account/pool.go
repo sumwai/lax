@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"switchboard/internal/store"
+	"lax/internal/store"
 )
 
 const (

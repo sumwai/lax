@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/secret"
-	"switchboard/internal/store"
-	"switchboard/internal/translate"
+	"lax/internal/secret"
+	"lax/internal/store"
+	"lax/internal/translate"
 )
 
 // systemOnePath 是决策协议的出站路径：入站与出站同一个路径（DESIGN 5.14）。

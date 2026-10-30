@@ -17,7 +17,7 @@ func LoadOrCreateKey(path string) ([]byte, error) {
 	b, err := os.ReadFile(path)
 	if err == nil {
 		if len(b) != keySize {
-			return nil, errors.New("密钥文件长度不对，删除后重新运行 switchboard init")
+			return nil, errors.New("密钥文件长度不对，删除后重新运行 lax init")
 		}
 		return b, nil
 	}

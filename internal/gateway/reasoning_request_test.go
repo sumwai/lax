@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
+	"lax/internal/gateway"
 )
 
 // 这个文件从网关这一层钉住思考内容的两个方向：

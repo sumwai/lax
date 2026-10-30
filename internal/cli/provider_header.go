@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"switchboard/internal/store"
+	"lax/internal/store"
 )
 
 // provider header 三条子命令只做命令面：校验参数、调 store、出文本与 --json 两条输出。
@@ -21,13 +21,13 @@ var providerHeaderSubs = []groupItem{
 
 // 三份用法行，所有用法错误都把它打出来。`--protocol` 不给就是厂商级：这家厂商的每条路由都带上它。
 const (
-	providerHeaderSetUsage   = "用法：switchboard provider header set <厂商> <头名> <值> [--protocol <协议>]"
-	providerHeaderUnsetUsage = "用法：switchboard provider header unset <厂商> <头名> [--protocol <协议>]"
-	providerHeaderLsUsage    = "用法：switchboard provider header ls [<厂商>]"
+	providerHeaderSetUsage   = "用法：lax provider header set <厂商> <头名> <值> [--protocol <协议>]"
+	providerHeaderUnsetUsage = "用法：lax provider header unset <厂商> <头名> [--protocol <协议>]"
+	providerHeaderLsUsage    = "用法：lax provider header ls [<厂商>]"
 	providerHeaderUsageText  = "用法：\n" +
-		"  switchboard provider header set <厂商> <头名> <值> [--protocol <协议>]\n" +
-		"  switchboard provider header unset <厂商> <头名> [--protocol <协议>]\n" +
-		"  switchboard provider header ls [<厂商>]"
+		"  lax provider header set <厂商> <头名> <值> [--protocol <协议>]\n" +
+		"  lax provider header unset <厂商> <头名> [--protocol <协议>]\n" +
+		"  lax provider header ls [<厂商>]"
 )
 
 // providerHeaderJSON 是 provider header ls 的一项，也是 set 的 --json 输出。
@@ -88,12 +88,12 @@ func printProviderHeaderHelp(w io.Writer) {
 	b.WriteString("值的写法（转发前才展开，展开后为空则这条头不发）：\n")
 	b.WriteString("  字面量      原样发出，例如 api-version 这类固定值\n")
 	b.WriteString("  {env:NAME}  取进程环境变量 NAME 的值，适合不该落库的会话 token\n")
-	b.WriteString("  {session}   本次请求的会话键（x-switchboard-session 或 metadata.user_id），都没有时每次新生成一个 UUID\n")
+	b.WriteString("  {session}   本次请求的会话键（x-lax-session 或 metadata.user_id），都没有时每次新生成一个 UUID\n")
 	b.WriteString("  {model}     本次请求的模型名（裸名，不转义）\n\n")
 	b.WriteString("值可能是密钥，ls 与 --json 只输出脱敏后的前四位，完整值不打印。\n\n")
 	b.WriteString("示例：\n")
-	b.WriteString("  switchboard provider header set opencode x-opencode-session '{session}' --protocol openai-chat\n\n")
-	b.WriteString("查看某个子命令的参数：switchboard provider header <子命令> --help\n")
+	b.WriteString("  lax provider header set opencode x-opencode-session '{session}' --protocol openai-chat\n\n")
+	b.WriteString("查看某个子命令的参数：lax provider header <子命令> --help\n")
 	_, _ = w.Write([]byte(b.String()))
 }
 
@@ -104,7 +104,7 @@ func cmdProviderHeader(e *Env, args []string) error {
 		return nil
 	}
 	if len(args) == 0 {
-		return usagef("需要子命令：set | unset | ls\n用 switchboard provider header --help 查看用法")
+		return usagef("需要子命令：set | unset | ls\n用 lax provider header --help 查看用法")
 	}
 	switch args[0] {
 	case "set":
@@ -114,7 +114,7 @@ func cmdProviderHeader(e *Env, args []string) error {
 	case "ls":
 		return cmdProviderHeaderLs(e, args[1:])
 	default:
-		return usagef("未知子命令 %q，可用：set | unset | ls\n用 switchboard provider header --help 查看用法", args[0])
+		return usagef("未知子命令 %q，可用：set | unset | ls\n用 lax provider header --help 查看用法", args[0])
 	}
 }
 
@@ -128,7 +128,7 @@ func headerProtocolFlag(fs *flagSet, raw, usageLine string) (string, error) {
 	if strings.TrimSpace(raw) == "" {
 		return "", usagef("--protocol 传了空值：厂商级（每一条路由都加）就是整个省掉这个参数，只加给某条协议才给协议名\n%s", usageLine)
 	}
-	proto, err := protocolFromCLIName(raw, "--protocol", "switchboard provider header set opencode x-opencode-session '{session}' --protocol openai")
+	proto, err := protocolFromCLIName(raw, "--protocol", "lax provider header set opencode x-opencode-session '{session}' --protocol openai")
 	if err != nil {
 		return "", err
 	}
@@ -168,7 +168,7 @@ func isHeaderTokenRune(r rune) bool {
 // 请求拆成两条）都是用法错误。store 的写入口还会再判一次。
 func checkHeaderValue(raw, usageLine string) error {
 	if strings.TrimSpace(raw) == "" {
-		return usagef("头的值不能为空：删掉这条头用 switchboard provider header unset <厂商> <头名>；值可能是环境变量里的密钥，写成 {env:NAME}\n%s", usageLine)
+		return usagef("头的值不能为空：删掉这条头用 lax provider header unset <厂商> <头名>；值可能是环境变量里的密钥，写成 {env:NAME}\n%s", usageLine)
 	}
 	if i := strings.IndexAny(raw, "\r\n\x00"); i >= 0 {
 		return usagef("头的值里不能有回车、换行或 NUL（第 %d 个字节）：值原样拼进上游请求头，带折行等于多拼出一条头\n%s", i+1, usageLine)
@@ -225,7 +225,7 @@ func cmdProviderHeaderSet(e *Env, args []string) error {
 	}
 	fmt.Fprintf(e.Stdout, "已声明 %s 的附加头 %s（%s），值 %s\n",
 		item.provider, item.header.Name, headerScopeLabel(proto), item.header.Masked())
-	fmt.Fprintf(e.Stdout, "值可能是密钥，输出只显示前四位；下一步：switchboard provider header ls %s 核对\n", provider)
+	fmt.Fprintf(e.Stdout, "值可能是密钥，输出只显示前四位；下一步：lax provider header ls %s 核对\n", provider)
 	return nil
 }
 
@@ -292,7 +292,7 @@ func cmdProviderHeaderUnset(e *Env, args []string) error {
 			}
 		}
 	}
-	fmt.Fprintf(e.Stdout, "现有 %d 条附加头，用 switchboard provider header ls %s 看全部\n", len(remaining), provider)
+	fmt.Fprintf(e.Stdout, "现有 %d 条附加头，用 lax provider header ls %s 看全部\n", len(remaining), provider)
 	return nil
 }
 
@@ -310,10 +310,10 @@ func headerNotFoundError(st *store.Store, provider, proto, name string) error {
 	}
 	msg := fmt.Sprintf("厂商 %s 没有声明附加头 %s（%s）", provider, lower, headerScopeLabel(proto))
 	if len(declared) == 0 {
-		msg += fmt.Sprintf("：这家厂商现在一条附加头都没有，声明一条用 switchboard provider header set %s %s <值> [--protocol <协议>]", provider, lower)
+		msg += fmt.Sprintf("：这家厂商现在一条附加头都没有，声明一条用 lax provider header set %s %s <值> [--protocol <协议>]", provider, lower)
 		return errors.New(msg)
 	}
-	return fmt.Errorf("%s：现有 %s；看全部用 switchboard provider header ls %s，声明一条用 switchboard provider header set %s %s <值> [--protocol <协议>]",
+	return fmt.Errorf("%s：现有 %s；看全部用 lax provider header ls %s，声明一条用 lax provider header set %s %s <值> [--protocol <协议>]",
 		msg, strings.Join(declared, "、"), provider, provider, lower)
 }
 
@@ -371,7 +371,7 @@ func cmdProviderHeaderLs(e *Env, args []string) error {
 	}
 
 	if len(items) == 0 {
-		fmt.Fprintln(e.Stdout, "还没有声明任何附加头。有些上游除凭据头之外还要额外的头才路由，例如：switchboard provider header set opencode x-opencode-session '{session}' --protocol openai-chat")
+		fmt.Fprintln(e.Stdout, "还没有声明任何附加头。有些上游除凭据头之外还要额外的头才路由，例如：lax provider header set opencode x-opencode-session '{session}' --protocol openai-chat")
 		return nil
 	}
 

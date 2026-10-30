@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"switchboard/internal/store"
+	"lax/internal/store"
 )
 
 // 这个文件钉住思考 token 的两处展示：`log tail` 逐行一列、`usage` 三种分组各一列，

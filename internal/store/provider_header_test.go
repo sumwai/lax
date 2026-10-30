@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/store"
+	"lax/internal/store"
 
 	_ "modernc.org/sqlite"
 )

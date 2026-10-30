@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
+	"lax/internal/gateway"
 )
 
 // 这个文件从网关这一层钉住请求侧的思考配置参数（DESIGN 5.4「思考配置参数」）：跨协议时

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
+	"lax/internal/gateway"
+	"lax/internal/store"
 )
 
 // modelsServer 起一个假上游，记下每一次模型列表请求的路径与凭据头。

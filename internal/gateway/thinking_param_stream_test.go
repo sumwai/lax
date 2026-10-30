@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
+	"lax/internal/gateway"
 )
 
 // 这个文件钉住流式请求上的思考配置参数：流式与非流式走同一条 buildRequest，但入站的

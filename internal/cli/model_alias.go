@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"switchboard/internal/store"
+	"lax/internal/store"
 )
 
 // model alias 三条子命令只做命令面：参数个数与空值在这里判（退出码 2），
@@ -22,13 +22,13 @@ var modelAliasSubs = []groupItem{
 
 // 三份用法行，所有用法错误都把它打出来。
 const (
-	modelAliasSetUsage   = "用法：switchboard model alias set <别名> <目标>"
-	modelAliasUnsetUsage = "用法：switchboard model alias unset <别名>"
-	modelAliasLsUsage    = "用法：switchboard model alias ls [<别名>]"
+	modelAliasSetUsage   = "用法：lax model alias set <别名> <目标>"
+	modelAliasUnsetUsage = "用法：lax model alias unset <别名>"
+	modelAliasLsUsage    = "用法：lax model alias ls [<别名>]"
 	modelAliasUsageText  = "用法：\n" +
-		"  switchboard model alias set <别名> <目标>\n" +
-		"  switchboard model alias unset <别名>\n" +
-		"  switchboard model alias ls [<别名>]"
+		"  lax model alias set <别名> <目标>\n" +
+		"  lax model alias unset <别名>\n" +
+		"  lax model alias ls [<别名>]"
 )
 
 // modelAliasJSON 是 alias ls 的一项，也是 set 的 --json 输出。
@@ -71,8 +71,8 @@ func printModelAliasHelp(w io.Writer) {
 	b.WriteString("或模型目录当成真实模型时写入会被拒绝，否则别名会遮蔽真名。目标眼下没有账号提供\n")
 	b.WriteString("也能先写，之后加账号即生效；解析不了时这条别名不参与选号。\n\n")
 	b.WriteString("示例：\n")
-	b.WriteString("  switchboard model alias set fast glm-4.6\n\n")
-	b.WriteString("查看某个子命令的参数：switchboard model alias <子命令> --help\n")
+	b.WriteString("  lax model alias set fast glm-4.6\n\n")
+	b.WriteString("查看某个子命令的参数：lax model alias <子命令> --help\n")
 	_, _ = io.WriteString(w, b.String())
 }
 
@@ -83,7 +83,7 @@ func cmdModelAlias(e *Env, args []string) error {
 		return nil
 	}
 	if len(args) == 0 {
-		return usagef("需要子命令：set | unset | ls\n用 switchboard model alias --help 查看用法")
+		return usagef("需要子命令：set | unset | ls\n用 lax model alias --help 查看用法")
 	}
 	switch args[0] {
 	case "set":
@@ -93,7 +93,7 @@ func cmdModelAlias(e *Env, args []string) error {
 	case "ls":
 		return cmdModelAliasLs(e, args[1:])
 	default:
-		return usagef("未知子命令 %q，可用：set | unset | ls\n用 switchboard model alias --help 查看用法", args[0])
+		return usagef("未知子命令 %q，可用：set | unset | ls\n用 lax model alias --help 查看用法", args[0])
 	}
 }
 
@@ -143,7 +143,7 @@ func cmdModelAliasSet(e *Env, args []string) error {
 	resolved, found, err := a.st.ResolveModelAlias(alias)
 	if err != nil {
 		return fmt.Errorf("别名 %s → %s 已经写进库，但它现在解析不出真实模型名：%w；"+
-			"用 switchboard model alias ls %s 看这条链，改掉链上一条或 switchboard model alias unset %s 撤掉它",
+			"用 lax model alias ls %s 看这条链，改掉链上一条或 lax model alias unset %s 撤掉它",
 			alias, target, err, alias, alias)
 	}
 
@@ -156,7 +156,7 @@ func cmdModelAliasSet(e *Env, args []string) error {
 		return e.printJSON(row.toJSON())
 	}
 	fmt.Fprintf(e.Stdout, "已设置别名 %s → %s\n", alias, target)
-	fmt.Fprintln(e.Stdout, "下一步：switchboard model alias ls 核对")
+	fmt.Fprintln(e.Stdout, "下一步：lax model alias ls 核对")
 	return nil
 }
 
@@ -213,14 +213,14 @@ func aliasNotFoundError(st *store.Store, alias string) error {
 		return err
 	}
 	if len(aliases) == 0 {
-		return fmt.Errorf("别名 %q 不存在：现在一条别名都没有，设置一条用 switchboard model alias set %s <目标>",
+		return fmt.Errorf("别名 %q 不存在：现在一条别名都没有，设置一条用 lax model alias set %s <目标>",
 			alias, alias)
 	}
 	names := make([]string, 0, len(aliases))
 	for _, m := range aliases {
 		names = append(names, m.Alias)
 	}
-	return fmt.Errorf("别名 %q 不存在：现有 %s；看全部用 switchboard model alias ls，设置一条用 switchboard model alias set <别名> <目标>",
+	return fmt.Errorf("别名 %q 不存在：现有 %s；看全部用 lax model alias ls，设置一条用 lax model alias set <别名> <目标>",
 		alias, strings.Join(names, "、"))
 }
 
@@ -279,7 +279,7 @@ func cmdModelAliasLs(e *Env, args []string) error {
 		default:
 			// 表里有这一行却说自己不是别名：只可能是判定与读出之间表被改掉了。
 			// 不当成「可解析」蒙混过去，也不编一个原因，照实说一句。
-			row.resolveErr = errors.New("库里读不出这条别名，重跑一次 switchboard model alias ls 确认")
+			row.resolveErr = errors.New("库里读不出这条别名，重跑一次 lax model alias ls 确认")
 		}
 		rows = append(rows, row)
 	}
@@ -293,7 +293,7 @@ func cmdModelAliasLs(e *Env, args []string) error {
 	}
 
 	if len(rows) == 0 {
-		fmt.Fprintln(e.Stdout, "还没有设置任何别名。客户端把模型名写死时，用 switchboard model alias set fast glm-4.6 把那个名字指到真实模型名上")
+		fmt.Fprintln(e.Stdout, "还没有设置任何别名。客户端把模型名写死时，用 lax model alias set fast glm-4.6 把那个名字指到真实模型名上")
 		return nil
 	}
 

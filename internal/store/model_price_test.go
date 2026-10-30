@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"switchboard/internal/secret"
-	"switchboard/internal/store"
+	"lax/internal/secret"
+	"lax/internal/store"
 )
 
 // 这一组用例钉住单价的归属与取值链（DESIGN 5.5、5.13）：价格属于「供应商 × 模型」，

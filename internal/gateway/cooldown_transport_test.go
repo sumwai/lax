@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"switchboard/internal/gateway"
+	"lax/internal/gateway"
 )
 
 // closedURL 返回一个已经没有服务监听的地址：向它发请求是连接被拒，一条 HTTP 响应都没拿到。

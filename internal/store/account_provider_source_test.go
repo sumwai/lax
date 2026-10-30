@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/secret"
-	"switchboard/internal/store"
+	"lax/internal/secret"
+	"lax/internal/store"
 )
 
 // accountColumns 返回某张表的列名，顺序按 PRAGMA table_info 给的主键/定义顺序。

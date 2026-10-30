@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/translate"
+	"lax/internal/gateway"
+	"lax/internal/translate"
 )
 
 // 这个文件钉住上游的分帧形状不影响跨协议转换的结果：上游怎么把同一串 SSE 字节写出来

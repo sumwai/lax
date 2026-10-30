@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/secret"
-	"switchboard/internal/store"
-	"switchboard/internal/translate"
+	"lax/internal/gateway"
+	"lax/internal/secret"
+	"lax/internal/store"
+	"lax/internal/translate"
 )
 
 type fixture struct {
@@ -508,7 +508,7 @@ func TestModelWithoutProviderIsNotFound(t *testing.T) {
 		if env.Error.Type != tc.wantTy {
 			t.Fatalf("%s 错误类型 = %q，期望 %q：%s", tc.path, env.Error.Type, tc.wantTy, body)
 		}
-		for _, want := range []string{model, "switchboard model ls", "switchboard model probe"} {
+		for _, want := range []string{model, "lax model ls", "lax model probe"} {
 			if !strings.Contains(env.Error.Message, want) {
 				t.Fatalf("%s 错误文案应含 %q：%s", tc.path, want, body)
 			}

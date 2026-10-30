@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"switchboard/internal/account"
-	"switchboard/internal/store"
+	"lax/internal/account"
+	"lax/internal/store"
 )
 
 func acc(id int64, name string, priority int, models []string, enabled bool, cooldownUntil int64) store.Account {

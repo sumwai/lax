@@ -3,7 +3,7 @@ package main
 import (
 	"os"
 
-	"switchboard/internal/cli"
+	"lax/internal/cli"
 )
 
 func main() {

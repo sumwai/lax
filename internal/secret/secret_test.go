@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"switchboard/internal/secret"
+	"lax/internal/secret"
 )
 
 func TestEncryptRoundTrip(t *testing.T) {

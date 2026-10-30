@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/store"
+	"lax/internal/store"
 )
 
 // TestNormalizePath 钉住路径规整的唯一规则：补一个前导斜杠、合并连续斜杠、去尾斜杠，

@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
-	"switchboard/internal/translate"
+	"lax/internal/gateway"
+	"lax/internal/store"
+	"lax/internal/translate"
 )
 
 // uriUpstream 起一个假上游，记下每一次请求的完整 RequestURI（含查询串）、Host 与两个凭据头。

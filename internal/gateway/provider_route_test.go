@@ -12,8 +12,8 @@ import (
 	"sync"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/store"
+	"lax/internal/gateway"
+	"lax/internal/store"
 )
 
 // addAs 建一个指定厂商的账号。账号行只存厂商名，地址与默认协议都在厂商行上（见 DESIGN 5.8），所以：

@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/secret"
-	"switchboard/internal/store"
+	"lax/internal/secret"
+	"lax/internal/store"
 )
 
 // bigmodelRoutes 是真实上游 bigmodel 的形状：三条协议分属不同 host 与路径，

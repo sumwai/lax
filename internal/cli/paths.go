@@ -1,7 +1,7 @@
 package cli
 
 import (
-	"switchboard/internal/store"
+	"lax/internal/store"
 )
 
 // checkBaseURL 是 --base-url 唯一的校验入口：provider add、provider set 与 account add 三处都走它。

@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"switchboard/internal/store"
+	"lax/internal/store"
 )
 
 // model price 三条子命令只做命令面：参数个数、互斥与空值在这里判（退出码 2 并打用法行），
@@ -21,15 +21,15 @@ import (
 // `model alias --help` 的做法），三条用法、一个示例与两段说明都写在 printModelPriceHelp 里。
 
 const (
-	modelPriceSetUsage = "用法：switchboard model price set <模型> [--provider 供应商] [--account 账号] " +
+	modelPriceSetUsage = "用法：lax model price set <模型> [--provider 供应商] [--account 账号] " +
 		"[--in N] [--out N] [--cache-read N] [--cache-write N]"
-	modelPriceUnsetUsage = "用法：switchboard model price unset <模型> [--provider 供应商] [--account 账号] " +
+	modelPriceUnsetUsage = "用法：lax model price unset <模型> [--provider 供应商] [--account 账号] " +
 		"<字段> [<字段>...]"
-	modelPriceLsUsage = "用法：switchboard model price ls [<模型>] [--provider 供应商] [--account 账号]"
+	modelPriceLsUsage = "用法：lax model price ls [<模型>] [--provider 供应商] [--account 账号]"
 	modelPriceUsage   = "用法：\n" +
-		"  switchboard model price set <模型> [--provider 供应商] [--account 账号] [--in N] [--out N] [--cache-read N] [--cache-write N]\n" +
-		"  switchboard model price unset <模型> [--provider 供应商] [--account 账号] <字段> [<字段>...]\n" +
-		"  switchboard model price ls [<模型>] [--provider 供应商] [--account 账号]"
+		"  lax model price set <模型> [--provider 供应商] [--account 账号] [--in N] [--out N] [--cache-read N] [--cache-write N]\n" +
+		"  lax model price unset <模型> [--provider 供应商] [--account 账号] <字段> [<字段>...]\n" +
+		"  lax model price ls [<模型>] [--provider 供应商] [--account 账号]"
 )
 
 // printModelPriceHelp 是 `model price --help` 的输出：三条用法、一个示例与两段说明（见 DESIGN 4）。
@@ -44,8 +44,8 @@ func printModelPriceHelp(w io.Writer) {
 	b.WriteString("其它账号，也不改厂商级标价。清掉账号覆盖（model price unset --account）表示回到厂商级\n")
 	b.WriteString("标价，不是「免费」；缓存读写没定价时按输入价算。\n\n")
 	b.WriteString("示例：\n")
-	b.WriteString("  switchboard model price set glm-4.6 --in 0.6 --out 2.2\n\n")
-	b.WriteString("查看某个子命令的参数：switchboard model price <子命令> --help\n")
+	b.WriteString("  lax model price set glm-4.6 --in 0.6 --out 2.2\n\n")
+	b.WriteString("查看某个子命令的参数：lax model price <子命令> --help\n")
 	_, _ = io.WriteString(w, b.String())
 }
 
@@ -56,7 +56,7 @@ func cmdModelPrice(e *Env, args []string) error {
 		return nil
 	}
 	if len(args) == 0 {
-		return usagef("需要子命令：set | unset | ls\n用 switchboard model price --help 查看用法")
+		return usagef("需要子命令：set | unset | ls\n用 lax model price --help 查看用法")
 	}
 	switch args[0] {
 	case "set":
@@ -66,7 +66,7 @@ func cmdModelPrice(e *Env, args []string) error {
 	case "ls":
 		return cmdModelPriceLs(e, args[1:])
 	default:
-		return usagef("未知子命令 %q，可用：set | unset | ls\n用 switchboard model price --help 查看用法", args[0])
+		return usagef("未知子命令 %q，可用：set | unset | ls\n用 lax model price --help 查看用法", args[0])
 	}
 }
 
@@ -136,7 +136,7 @@ func priceFlagValue(fs *flagSet, name string, v *float64) *float64 {
 func checkPriceModel(raw, usageLine string) (string, error) {
 	model := strings.TrimSpace(raw)
 	if model == "" {
-		return "", usagef("模型名不能为空，例如 switchboard model price set glm-4.6 --in 0.6 --out 2.2\n%s", usageLine)
+		return "", usagef("模型名不能为空，例如 lax model price set glm-4.6 --in 0.6 --out 2.2\n%s", usageLine)
 	}
 	return model, nil
 }
@@ -185,11 +185,11 @@ func resolvePriceProvider(st *store.Store, model, flagValue, usageLine string) (
 	}
 	switch len(names) {
 	case 0:
-		return "", fmt.Errorf("模型 %q 不在任何厂商的目录里：先用 switchboard model sync 拉上游清单或 switchboard model probe 探活，把它写进目录；switchboard model ls 能看到现有的模型名", model)
+		return "", fmt.Errorf("模型 %q 不在任何厂商的目录里：先用 lax model sync 拉上游清单或 lax model probe 探活，把它写进目录；lax model ls 能看到现有的模型名", model)
 	case 1:
 		return names[0], nil
 	default:
-		return "", usagef("模型 %q 同时出现在 %d 家厂商的目录里：%s\n价格按「供应商 × 模型」存，用 --provider 指定其中一家（例如 switchboard model price set %s --provider %s --in N）\n%s",
+		return "", usagef("模型 %q 同时出现在 %d 家厂商的目录里：%s\n价格按「供应商 × 模型」存，用 --provider 指定其中一家（例如 lax model price set %s --provider %s --in N）\n%s",
 			model, len(names), strings.Join(names, "、"), model, names[0], usageLine)
 	}
 }
@@ -261,7 +261,7 @@ func cmdModelPriceSet(e *Env, args []string) error {
 		CacheWrite: priceFlagValue(fs, "cache-write", cacheWrite),
 	}
 	if prices.In == nil && prices.Out == nil && prices.CacheRead == nil && prices.CacheWrite == nil {
-		return usagef("四项单价一项都没给：至少给一项，例如 switchboard model price set %s --in 0.6 --out 2.2\n%s",
+		return usagef("四项单价一项都没给：至少给一项，例如 lax model price set %s --in 0.6 --out 2.2\n%s",
 			model, modelPriceSetUsage)
 	}
 
@@ -306,7 +306,7 @@ func cmdModelPriceSet(e *Env, args []string) error {
 		scope = fmt.Sprintf("账号 %s（%s）的覆盖价", account, dashIfEmpty(prov))
 	}
 	fmt.Fprintf(e.Stdout, "已写入%s：%s %s（每百万 token）\n", scope, model, priceFieldText(prices))
-	fmt.Fprintln(e.Stdout, "下一步：switchboard model ls")
+	fmt.Fprintln(e.Stdout, "下一步：lax model ls")
 	return nil
 }
 
@@ -618,7 +618,7 @@ func cmdModelPriceLs(e *Env, args []string) error {
 		}
 	}
 	if want != "" && !inCatalog {
-		return fmt.Errorf("模型 %q 不在目录里：先用 switchboard model ls 看现有的模型名；模型要先由 switchboard model sync 或 switchboard model probe 写进目录，价格才挂得上", want)
+		return fmt.Errorf("模型 %q 不在目录里：先用 lax model ls 看现有的模型名；模型要先由 lax model sync 或 lax model probe 写进目录，价格才挂得上", want)
 	}
 
 	// 按模型名升序；同名模型在多家目录里时再按供应商名排，顺序固定。
@@ -633,7 +633,7 @@ func cmdModelPriceLs(e *Env, args []string) error {
 		acc, err := a.st.GetAccount(account)
 		if err != nil {
 			// 账号名写错时给下一步，不把一句 sql.ErrNoRows 摔给用户。
-			return fmt.Errorf("账号 %q 不存在：用 switchboard account ls 看现有的账号，或 switchboard account add %s --provider <厂商> --key <key> 建它", account, account)
+			return fmt.Errorf("账号 %q 不存在：用 lax account ls 看现有的账号，或 lax account add %s --provider <厂商> --key <key> 建它", account, account)
 		}
 		infos, err := a.st.EffectiveModels(acc.ID)
 		if err != nil {
@@ -680,7 +680,7 @@ func cmdModelPriceLs(e *Env, args []string) error {
 	}
 
 	if len(rows) == 0 {
-		fmt.Fprintln(e.Stdout, "一项价格都没有。模型先进目录（switchboard model sync 或 model probe），再定它的价，例如 switchboard model price set glm-4.6 --in 0.6 --out 2.2")
+		fmt.Fprintln(e.Stdout, "一项价格都没有。模型先进目录（lax model sync 或 model probe），再定它的价，例如 lax model price set glm-4.6 --in 0.6 --out 2.2")
 		return nil
 	}
 

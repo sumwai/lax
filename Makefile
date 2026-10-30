@@ -1,7 +1,7 @@
 .PHONY: build test vet fmt check clean
 
 build:
-	go build -o switchboard ./cmd/switchboard
+	go build -o lax ./cmd/lax
 
 test:
 	go test ./...
@@ -15,4 +15,4 @@ fmt:
 check: vet test build
 
 clean:
-	rm -f switchboard
+	rm -f lax

@@ -5,7 +5,7 @@
       "type": "response.created",
       "sequence_number": 0,
       "response": {
-        "id": "resp_switchboard",
+        "id": "resp_lax",
         "object": "response",
         "status": "in_progress",
         "model": "m1",
@@ -156,7 +156,7 @@
       "type": "response.completed",
       "sequence_number": 11,
       "response": {
-        "id": "resp_switchboard",
+        "id": "resp_lax",
         "object": "response",
         "status": "completed",
         "model": "m1",

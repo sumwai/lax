@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"switchboard/internal/gateway"
-	"switchboard/internal/translate"
+	"lax/internal/gateway"
+	"lax/internal/translate"
 )
 
 // 这个文件钉住「一帧怎么才算收尾」：判据是帧里的 type 字段或 SSE 的 event 名，不是字节子串，
