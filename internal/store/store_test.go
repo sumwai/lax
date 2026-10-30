@@ -24,7 +24,6 @@ func openTemp(t *testing.T) *store.Store {
 func TestAccountLifecycle(t *testing.T) {
 	st := openTemp(t)
 
-	price := 2.5
 	acc := store.Account{
 		Name:      "ds1",
 		Provider:  "deepseek",
@@ -32,7 +31,6 @@ func TestAccountLifecycle(t *testing.T) {
 		BaseURL:   "https://api.deepseek.com",
 		KeyCipher: []byte{1, 2, 3},
 		Models:    []string{"m1", "m2"},
-		PriceIn:   &price,
 		Enabled:   true,
 	}
 	if err := st.CreateAccount(&acc); err != nil {
@@ -48,9 +46,6 @@ func TestAccountLifecycle(t *testing.T) {
 	}
 	if len(got.Models) != 2 || got.Models[1] != "m2" {
 		t.Fatalf("模型 = %v", got.Models)
-	}
-	if got.PriceIn == nil || *got.PriceIn != 2.5 {
-		t.Fatalf("价格 = %v", got.PriceIn)
 	}
 	if !got.Enabled {
 		t.Fatal("新账号应启用")
@@ -114,10 +109,16 @@ func TestRequestRecordsAndUsage(t *testing.T) {
 	acc := store.Account{
 		Name: "ds1", Provider: "deepseek", Protocol: "openai-chat",
 		BaseURL: "u", KeyCipher: []byte{1}, Models: []string{"m1"},
-		PriceIn: &priceIn, PriceOut: &priceOut, Enabled: true,
+		Enabled: true,
 	}
 	if err := st.CreateAccount(&acc); err != nil {
 		t.Fatalf("新增: %v", err)
+	}
+	// 单价不在账号上：写到这个账号在这个模型上的覆盖值（DESIGN 5.13）。
+	if err := st.SetAccountModelPrices("ds1", "m1", store.ModelPrices{
+		In: &priceIn, Out: &priceOut,
+	}); err != nil {
+		t.Fatalf("写单价: %v", err)
 	}
 
 	now := time.Now().Unix()
@@ -151,7 +152,7 @@ func TestRequestRecordsAndUsage(t *testing.T) {
 	if rows[0].Key != "ds1" || rows[0].Requests != 1 {
 		t.Fatalf("行 = %+v", rows[0])
 	}
-	if rows[0].Cost != 6.0 {
+	if rows[0].Cost == nil || *rows[0].Cost != 6.0 {
 		t.Fatalf("花费 = %v，期望 6（1M 输入 2 元 + 1M 输出 4 元）", rows[0].Cost)
 	}
 

@@ -55,14 +55,16 @@ func TestUsageCostUsesCachePrices(t *testing.T) {
 	acc := store.Account{
 		Name: "ds1", Provider: "test", Protocol: "openai-chat",
 		BaseURL: "http://127.0.0.1:1", KeyCipher: []byte{1}, Models: []string{"m1"},
-		PriceIn:         floatPtr(2),
-		PriceOut:        floatPtr(4),
-		PriceCacheRead:  floatPtr(0.5),
-		PriceCacheWrite: floatPtr(3),
-		Enabled:         true,
+		Enabled: true,
 	}
 	if err := st.CreateAccount(&acc); err != nil {
 		t.Fatalf("建账号: %v", err)
+	}
+	if err := st.SetAccountModelPrices("ds1", "m1", store.ModelPrices{
+		In: floatPtr(2), Out: floatPtr(4),
+		CacheRead: floatPtr(0.5), CacheWrite: floatPtr(3),
+	}); err != nil {
+		t.Fatalf("写单价: %v", err)
 	}
 	rec := store.RequestRecord{
 		TS: time.Now().Unix(), Inbound: "anthropic", Outbound: "anthropic",
@@ -82,7 +84,7 @@ func TestUsageCostUsesCachePrices(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("行数 = %d", len(rows))
 	}
-	if rows[0].Cost != 10 {
+	if rows[0].Cost == nil || *rows[0].Cost != 10 {
 		t.Fatalf("花费 = %v，期望 10（输入 2 + 缓存读 1 + 缓存写 3 + 输出 4）", rows[0].Cost)
 	}
 	// 展示用的输入 token 仍是上游原值，只有花费用归一化后的那一列。
@@ -98,11 +100,15 @@ func TestUsageCostFallsBackToInputPrice(t *testing.T) {
 	acc := store.Account{
 		Name: "ds1", Provider: "test", Protocol: "anthropic",
 		BaseURL: "http://127.0.0.1:1", KeyCipher: []byte{1}, Models: []string{"m1"},
-		PriceIn: floatPtr(2), PriceOut: floatPtr(4),
 		Enabled: true,
 	}
 	if err := st.CreateAccount(&acc); err != nil {
 		t.Fatalf("建账号: %v", err)
+	}
+	if err := st.SetAccountModelPrices("ds1", "m1", store.ModelPrices{
+		In: floatPtr(2), Out: floatPtr(4),
+	}); err != nil {
+		t.Fatalf("写单价: %v", err)
 	}
 
 	// 只有输入输出价时：1M 未命中输入 + 1M 输出 = 6，与旧公式一模一样。
@@ -119,7 +125,7 @@ func TestUsageCostFallsBackToInputPrice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("汇总: %v", err)
 	}
-	if len(rows) != 1 || rows[0].Cost != 6 {
+	if len(rows) != 1 || rows[0].Cost == nil || *rows[0].Cost != 6 {
 		t.Fatalf("只有输入输出价时的花费 = %+v，期望 6", rows)
 	}
 
@@ -136,12 +142,13 @@ func TestUsageCostFallsBackToInputPrice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("再汇总: %v", err)
 	}
-	if rows[0].Cost != 10 {
+	if rows[0].Cost == nil || *rows[0].Cost != 10 {
 		t.Fatalf("缓存单价缺失时的花费 = %v，期望 10（缓存读写各按输入价 2 元）", rows[0].Cost)
 	}
 }
 
-// TestUsageCostWithoutAnyPrice 钉住「不猜价格」：账号一个价都没填时花费是 0。
+// TestUsageCostWithoutAnyPrice 钉住「缺价记 null」（DESIGN 5.5）：一个价都没填时花费是 nil（未定价），
+// 而不是 0——0 是「确实不花钱」，两件事混成一个数就看不出该不该去补价。
 func TestUsageCostWithoutAnyPrice(t *testing.T) {
 	st := openTemp(t)
 	acc := newAccount(t, st, "ds1", []string{"m1"})
@@ -158,63 +165,55 @@ func TestUsageCostWithoutAnyPrice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("汇总: %v", err)
 	}
-	if len(rows) != 1 || rows[0].Cost != 0 {
-		t.Fatalf("没定价时的花费 = %+v，期望 0", rows)
+	if len(rows) != 1 || rows[0].Cost != nil {
+		t.Fatalf("没定价时的花费 = %+v，期望 nil（未定价）", rows)
+	}
+	// 缺价不影响 token 合计：用量是真的，只是不知道多少钱。
+	if rows[0].InTokens != 100 || rows[0].OutTokens != 50 || rows[0].CacheRead != 1000 {
+		t.Fatalf("缺价不该把用量一起抹掉: %+v", rows[0])
 	}
 }
 
-// TestSetAccountPricesOnlyTouchesGivenFields 钉住 account set 的价格写入是增量：
-// 只传的列被改，其余列（含没填的缓存单价）保持原值，账号状态一个字段不动。
-func TestSetAccountPricesOnlyTouchesGivenFields(t *testing.T) {
+// TestAccountRowHasNoPriceColumns 钉住迁移 0016 的结果：账号行上不再有四个价格列，
+// 单价只存在 provider_models 与 account_models 上（DESIGN 5.13）。
+func TestAccountRowHasNoPriceColumns(t *testing.T) {
 	st := openTemp(t)
-	acc := store.Account{
-		Name: "ds1", Provider: "test", Protocol: "anthropic",
-		BaseURL: "http://127.0.0.1:1", KeyCipher: []byte{1}, Models: []string{"m1"},
-		PriceIn: floatPtr(2), PriceOut: floatPtr(4),
-		Enabled: true,
-	}
-	if err := st.CreateAccount(&acc); err != nil {
-		t.Fatalf("建账号: %v", err)
-	}
-	if err := st.RecordFailure(acc.ID, time.Now().Add(time.Hour).Unix(), "上游 429"); err != nil {
-		t.Fatalf("造失败状态: %v", err)
-	}
+	// 从空库跑到最新也该是这个形状，不只能升级来的库。
+	assertAccountHasNoPriceColumns(t, st)
 
-	// 只给缓存读价：输入价、输出价与缓存写价（本来就没填）都不动。
-	if err := st.SetAccountPrices(acc.ID, store.AccountPrices{CacheRead: floatPtr(0.5)}); err != nil {
-		t.Fatalf("改缓存读价: %v", err)
-	}
-	got, err := st.GetAccount("ds1")
-	if err != nil {
-		t.Fatalf("读账号: %v", err)
-	}
-	if got.PriceIn == nil || *got.PriceIn != 2 || got.PriceOut == nil || *got.PriceOut != 4 {
-		t.Fatalf("没传的价格被改动: 输入 %v、输出 %v", got.PriceIn, got.PriceOut)
-	}
-	if got.PriceCacheRead == nil || *got.PriceCacheRead != 0.5 {
-		t.Fatalf("缓存读价 = %v，期望 0.5", got.PriceCacheRead)
-	}
-	if got.PriceCacheWrite != nil {
-		t.Fatalf("没给缓存写价，应保持未填，实际 %v", *got.PriceCacheWrite)
-	}
-	// 改价格不顺手清冷却与失败计数：那是换凭据该做的事。
-	if got.FailStreak != 1 || got.CooldownUntil == 0 || got.LastError != "上游 429" {
-		t.Fatalf("改价格动了账号状态: %+v", got)
-	}
+	newAccount(t, st, "ds1", []string{"m1"})
+	assertAccountHasNoPriceColumns(t, st)
+}
 
-	// 再只给输出价：缓存读价保留上一步的值。
-	if err := st.SetAccountPrices(acc.ID, store.AccountPrices{Out: floatPtr(8)}); err != nil {
-		t.Fatalf("改输出价: %v", err)
-	}
-	got, err = st.GetAccount("ds1")
+// assertAccountHasNoPriceColumns 直接问表结构：四个价格列一个都不许在。
+// 写字入口已经不碰它们了，只剩迁移能保证它们真的消失。
+func assertAccountHasNoPriceColumns(t *testing.T, st *store.Store) {
+	t.Helper()
+	rows, err := st.DB().Query(`PRAGMA table_info(accounts)`)
 	if err != nil {
-		t.Fatalf("再读账号: %v", err)
+		t.Fatalf("读 accounts 表结构: %v", err)
 	}
-	if got.PriceOut == nil || *got.PriceOut != 8 {
-		t.Fatalf("输出价 = %v，期望 8", got.PriceOut)
+	defer rows.Close()
+	var cols []string
+	for rows.Next() {
+		var cid int
+		var name, kind string
+		var notnull int
+		var dflt any
+		var pk int
+		if err := rows.Scan(&cid, &name, &kind, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("读列: %v", err)
+		}
+		cols = append(cols, name)
 	}
-	if got.PriceCacheRead == nil || *got.PriceCacheRead != 0.5 {
-		t.Fatalf("缓存读价被清掉了: %v", got.PriceCacheRead)
+	if err := rows.Err(); err != nil {
+		t.Fatalf("读列: %v", err)
+	}
+	for _, col := range cols {
+		switch col {
+		case "price_in", "price_out", "price_cache_read", "price_cache_write":
+			t.Fatalf("accounts 上还有价格列 %q：迁移 0016 应该删掉它，现有列 %v", col, cols)
+		}
 	}
 }
 
@@ -304,12 +303,15 @@ func TestMigration0011BackfillsUncachedTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读老账号: %v", err)
 	}
-	if acc.PriceCacheRead != nil || acc.PriceCacheWrite != nil {
-		t.Fatalf("老账号的缓存单价应为空（回退输入价），实际 %v / %v",
-			acc.PriceCacheRead, acc.PriceCacheWrite)
+	// 老账号的价搬进了 account_models 的覆盖值（迁移 0016）：这个账号名下的 m1 行拿到 2 与 4，
+	// 缓存两列本来就没填，搬完仍是空（回退输入价）。
+	info := oneInfo(t, st, acc.ID, "m1")
+	if info.PriceIn == nil || *info.PriceIn != 2 || info.PriceOut == nil || *info.PriceOut != 4 {
+		t.Fatalf("老账号的输入输出价没搬成覆盖值: %v / %v", info.PriceIn, info.PriceOut)
 	}
-	if acc.PriceIn == nil || *acc.PriceIn != 2 || acc.PriceOut == nil || *acc.PriceOut != 4 {
-		t.Fatalf("老账号的输入输出价被改动: %v / %v", acc.PriceIn, acc.PriceOut)
+	if info.PriceCacheRead != nil || info.PriceCacheWrite != nil {
+		t.Fatalf("老账号的缓存单价应为空（回退输入价），实际 %v / %v",
+			info.PriceCacheRead, info.PriceCacheWrite)
 	}
 
 	// 回填之后老数据的估算与旧公式一致：1M 未命中输入按 2 元 + 1M 输出按 4 元。
@@ -326,7 +328,7 @@ func TestMigration0011BackfillsUncachedTokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("汇总: %v", err)
 	}
-	if len(rows) != 1 || rows[0].Cost != 6 {
+	if len(rows) != 1 || rows[0].Cost == nil || *rows[0].Cost != 6 {
 		t.Fatalf("新行的花费 = %+v，期望 6", rows)
 	}
 }

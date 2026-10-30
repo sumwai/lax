@@ -48,12 +48,15 @@ func TestUsageCostCountsIndependentReasoning(t *testing.T) {
 	acc := store.Account{
 		Name: "relay", Provider: "test", Protocol: "openai-chat",
 		BaseURL: "http://127.0.0.1:1", KeyCipher: []byte{1}, Models: []string{"m1"},
-		// 输入价不填：这个用例只看输出侧，输入价为 0 时金额只剩输出与思考两项。
-		PriceOut: &priceOut,
-		Enabled:  true,
+		Enabled: true,
 	}
 	if err := st.CreateAccount(&acc); err != nil {
 		t.Fatalf("建账号: %v", err)
+	}
+	// 单价不在账号上：写到这个账号在这个模型上的覆盖值（DESIGN 5.13）。输入价不填，
+	// 这个用例只看输出侧，没价的输入项不计（不是按 0 元算）。
+	if err := st.SetAccountModelPrices("relay", "m1", store.ModelPrices{Out: &priceOut}); err != nil {
+		t.Fatalf("写输出价: %v", err)
 	}
 
 	const in, out, total, reasoning = 7, 1, 132, 124
@@ -77,7 +80,7 @@ func TestUsageCostCountsIndependentReasoning(t *testing.T) {
 		t.Fatalf("行数 = %d，期望 1", len(rows))
 	}
 	want := float64(out+reasoning) * 8 / 1e6
-	if math.Abs(rows[0].Cost-want) > 1e-15 {
+	if math.Abs(costOf(t, rows[0])-want) > 1e-15 {
 		t.Fatalf("花费 = %v，期望 (1+124)×8/1e6 = %v", rows[0].Cost, want)
 	}
 	// 思考 token 原值整列进汇总，展示与计价是两件事。
@@ -97,11 +100,15 @@ func TestUsageCostIgnoresSubsetReasoning(t *testing.T) {
 	acc := store.Account{
 		Name: "official", Provider: "test", Protocol: "openai-chat",
 		BaseURL: "http://127.0.0.1:1", KeyCipher: []byte{1}, Models: []string{"m1"},
-		PriceIn: &priceIn, PriceOut: &priceOut,
 		Enabled: true,
 	}
 	if err := st.CreateAccount(&acc); err != nil {
 		t.Fatalf("建账号: %v", err)
+	}
+	if err := st.SetAccountModelPrices("official", "m1", store.ModelPrices{
+		In: &priceIn, Out: &priceOut,
+	}); err != nil {
+		t.Fatalf("写单价: %v", err)
 	}
 
 	const in, out, reasoning int64 = 7, 1, 124
@@ -124,7 +131,7 @@ func TestUsageCostIgnoresSubsetReasoning(t *testing.T) {
 	}
 	// 7 × 2 + 1 × 8 = 22，思考不再另算，否则会凭空多出 124 × 8 / 1e6。
 	want := float64(in)*priceIn/1e6 + float64(out)*priceOut/1e6
-	if math.Abs(rows[0].Cost-want) > 1e-15 {
+	if math.Abs(costOf(t, rows[0])-want) > 1e-15 {
 		t.Fatalf("子集场景的花费 = %v，期望 %v（思考已在输出里，不重复计价）", rows[0].Cost, want)
 	}
 	// 展示上仍然能看到思考 token：0 extra 不等于 0 思考。
@@ -245,7 +252,7 @@ func TestMigration0012KeepsHistoryAtZero(t *testing.T) {
 		t.Fatalf("汇总: %v", err)
 	}
 	want := 7*2.0/1e6 + 1*8.0/1e6
-	if len(rows) != 1 || math.Abs(rows[0].Cost-want) > 1e-15 {
+	if len(rows) != 1 || math.Abs(costOf(t, rows[0])-want) > 1e-15 {
 		t.Fatalf("历史行的花费 = %+v，期望 %v", rows, want)
 	}
 	if rows[0].ReasoningTokens != 0 {

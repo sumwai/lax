@@ -347,11 +347,24 @@ func oneUsage(t *testing.T, st *store.Store, dimension, key string) store.UsageR
 }
 
 // wantCost 断言花费，容差 1e-9：几个小数相乘之后不该指望浮点精确相等。
-func wantCost(t *testing.T, got, want float64) {
+// nil（未定价）不算通过：用这个辅助的用例都是「这一组有价」的场景。
+func wantCost(t *testing.T, got *float64, want float64) {
 	t.Helper()
-	if math.Abs(got-want) > 1e-9 {
-		t.Fatalf("花费 = %v，期望 %v（容差 1e-9）", got, want)
+	if got == nil {
+		t.Fatalf("花费 = nil（未定价），期望 %v", want)
 	}
+	if math.Abs(*got-want) > 1e-9 {
+		t.Fatalf("花费 = %v，期望 %v（容差 1e-9）", *got, want)
+	}
+}
+
+// costOf 取一行的花费，nil 直接失败：与 wantCost 一样，给「期望有金额」的断言用。
+func costOf(t *testing.T, r store.UsageRow) float64 {
+	t.Helper()
+	if r.Cost == nil {
+		t.Fatalf("花费 = nil（未定价），这个用例期望一个具体金额: %+v", r)
+	}
+	return *r.Cost
 }
 
 // TestUsageCostOnlyProviderPrices 钉住「只有厂商级标价」时的花费：
@@ -397,23 +410,93 @@ func TestUsageCostAccountOverrideWins(t *testing.T) {
 	wantCost(t, oneUsage(t, st, "model", "m1").Cost, 6.5)
 }
 
-// TestUsageCostAccountPricesFallback 钉住老库兜底：目录里没有这个模型的行，`accounts` 上的旧价
-// 仍然能算出花费，这一行也不从汇总里消失。
-// 1M 未命中输入 × 3 + 2M 缓存读 × 3（回退输入价）+ 4M 缓存写 × 3 + 1M 输出 × 5 = 26。
-func TestUsageCostAccountPricesFallback(t *testing.T) {
+// TestUsageCostWithoutAnyPriceStayNull 钉住「缺价记 null」（DESIGN 5.5）：目录与账号都没有这个模型的价、
+// 账号行上的旧价又已经删了，这一行仍然进汇总（请求确实发生过），但花费是 nil——不知道多少钱，
+// 不是 0（0 是确实不花钱）。
+func TestUsageCostWithoutAnyPriceStayNull(t *testing.T) {
 	st := openTemp(t)
 	mustProvider(t, st, "acme", "https://api.example.com",
 		store.ProviderRoute{Protocol: "openai-chat", Path: "/v1/chat/completions"})
-	acc := store.Account{
-		Name: "a1", Provider: "acme", KeyCipher: []byte{1}, Enabled: true,
-		PriceIn: floatPtr(3), PriceOut: floatPtr(5),
-	}
-	if err := st.CreateAccount(&acc); err != nil {
-		t.Fatalf("建账号: %v", err)
-	}
+	acc := newCatalogAccount(t, st, "a1", "acme")
 	insertUsageRow(t, st, acc.ID, "old-model")
 
-	wantCost(t, oneUsage(t, st, "model", "old-model").Cost, 26)
+	row := oneUsage(t, st, "model", "old-model")
+	if row.Cost != nil {
+		t.Fatalf("没有任何单价的模型花费 = %v，期望 nil（未定价）", *row.Cost)
+	}
+	// 用量不受缺价影响。
+	if row.InTokens != 3_000_000 || row.OutTokens != 1_000_000 {
+		t.Fatalf("缺价把用量一起抹掉了: %+v", row)
+	}
+}
+
+// TestUsageCostPartialPriceStillCounts 钉住「部分缺项照算」：只有输出价时输入与缓存三项没有价，
+// 不计；输出那一项照算，整组不是 null。1M 输出 × 4 = 4。
+func TestUsageCostPartialPriceStillCounts(t *testing.T) {
+	st := openTemp(t)
+	acc := catalogAccountForPrice(t, st, "a1")
+	if err := st.SetProviderModelPrices("acme", "m1", store.ModelPrices{Out: floatPtr(4)}); err != nil {
+		t.Fatalf("写厂商级价: %v", err)
+	}
+	insertUsageRow(t, st, acc.ID, "m1")
+
+	wantCost(t, oneUsage(t, st, "model", "m1").Cost, 4)
+}
+
+// TestUsageCostGroupNullOnlyWhenEveryRequestUnpriced 钉住聚合的口径：一组里只要有一行请求算出过钱，
+// 整组就不是 null，缺价的行按「缺项不计」处理，不当成 0 元把合计拉低成别的数。
+// 两行各 1M 输出：m1 有输出价 4 → 4；m2 一个价都没有 → 不计，合计仍是 4。
+func TestUsageCostGroupNullOnlyWhenEveryRequestUnpriced(t *testing.T) {
+	st := openTemp(t)
+	acc := catalogAccountForPrice(t, st, "a1")
+	if _, err := st.ReplaceModels(acc.ID, []string{"m1", "m2"}); err != nil {
+		t.Fatalf("标可达: %v", err)
+	}
+	if err := st.UpsertProviderModels("acme", []store.ProviderModel{{
+		Model: "m2", Source: store.SourceSync,
+	}}); err != nil {
+		t.Fatalf("写目录: %v", err)
+	}
+	if err := st.SetProviderModelPrices("acme", "m1", store.ModelPrices{Out: floatPtr(4)}); err != nil {
+		t.Fatalf("写厂商级价: %v", err)
+	}
+	for _, model := range []string{"m1", "m2"} {
+		rec := store.RequestRecord{
+			TS: time.Now().Unix(), Inbound: "anthropic", Outbound: "anthropic",
+			ModelRequested: model, ModelUsed: model, AccountID: acc.ID,
+			HTTPStatus: 200, OK: true, OutTokens: 1_000_000,
+		}
+		if err := st.InsertRequest(&rec); err != nil {
+			t.Fatalf("写请求记录 %s: %v", model, err)
+		}
+	}
+
+	rows, err := st.Usage("account", time.Now().Add(-time.Hour).Unix())
+	if err != nil {
+		t.Fatalf("汇总: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Requests != 2 {
+		t.Fatalf("按账号汇总 = %+v，期望一行两条请求", rows)
+	}
+	wantCost(t, rows[0].Cost, 4)
+	// m2 自己那一组一项价都没有 → null，与它所在的账号组不同。
+	byModel, err := st.Usage("model", time.Now().Add(-time.Hour).Unix())
+	if err != nil {
+		t.Fatalf("按模型汇总: %v", err)
+	}
+	found := false
+	for _, r := range byModel {
+		if r.Key != "m2" {
+			continue
+		}
+		found = true
+		if r.Cost != nil {
+			t.Fatalf("全部缺价的模型组花费 = %v，期望 nil", *r.Cost)
+		}
+	}
+	if !found {
+		t.Fatalf("按模型汇总里没有 m2: %+v", byModel)
+	}
 }
 
 // TestUsageCostCachePriceFallsBackToMergedInputPrice 钉住缓存价的回退：

@@ -19,8 +19,8 @@ import (
 // 清空另走 ClearProviderModelPrices / ClearAccountModelPrices：`model price set` 只写命令行上
 // 给过的那几项，nil 表示「这一项不动」（继承），删除必须显式声明（DESIGN 4）。
 //
-// `accounts` 上的四个价格列是模型事实还没拆出账号时的过渡形态，现在只剩 Usage 的兜底还会读它，
-// 删列时那条兜底一起删（见 usagePriceIn 那段）。
+// `accounts` 上曾经有同名四列，是模型事实还没拆出账号时的过渡形态：迁移 0016 把它们搬成
+// account_models 的覆盖值后删掉，取值链因此只剩上面两层。
 
 var (
 	// ErrNegativePrice 表示单价是负数。0 是合法值（免费或打包），负数只可能是写错了。
@@ -119,10 +119,8 @@ func parsePriceFields(fields []string) ([]PriceField, error) {
 }
 
 // ModelPrices 是四个单价的增量改动：nil 表示「这一项不动」（保留库里已有的值，账号侧即继承目录），
-// 0 是合法值（免费），负数报 ErrNegativePrice。
-//
-// 与 AccountPrices 的区别就在这里：后者是「只改给过的那几项」的老入口，账号级价格整体叫停之后
-// 只剩 `account set` 还在用；ModelPrices 是模型目录与账号覆盖这两个新写入口共用的形状。
+// 0 是合法值（免费），负数报 ErrNegativePrice。目录里的厂商级标价与 account_models 上的账号覆盖价
+// 共用这个形状。
 type ModelPrices struct {
 	In         *float64
 	Out        *float64
@@ -344,29 +342,26 @@ func accountIDByNameTx(tx *sql.Tx, account string) (int64, error) {
 
 // 花费公式里单价的取值链（DESIGN 5.5、5.13）。顺序只有这一处：这一行请求的账号 + 这一行的
 // model_used 在 account_models 里的覆盖值 → provider_models 里 (账号的厂商, model_used) 的
-// 厂商级标价 → accounts 行上的旧价。
-//
-// 最后一步是过渡分支：`accounts` 的四个价格列是模型事实还没拆出账号时的形态，现在只为老库兜底
-// （老库里 provider_models 可能一行价都没有，全掉到 0 会让历史花费凭空消失）。删列那一步
-// 把这里第三个参数一起删掉。
+// 厂商级标价 → 都没有就是 NULL（这一项不计，整组都没价时花费记 null，见 store.Usage）。
 //
 // 缓存读写的回退保持原来的语义：自己那一项没填就回退到输入价，而输入价本身也走这条合并链
-// （所以账号只覆盖了输入价时，没覆盖的缓存读写按账号的输入价算，不按目录的）。
+// （所以账号只覆盖了输入价时，没覆盖的缓存读写按账号的输入价算，不按目录的）。回退链的尽头
+// 也是 NULL 而不是 0：输入价缺时缓存那一项就真的没价，不能拿 0 冒充「免费」。
 const (
-	usagePriceIn         = "COALESCE(am.price_in, pm.price_in, a.price_in)"
-	usagePriceOut        = "COALESCE(am.price_out, pm.price_out, a.price_out)"
-	usagePriceCacheRead  = "COALESCE(am.price_cache_read, pm.price_cache_read, a.price_cache_read, " + usagePriceIn + ")"
-	usagePriceCacheWrite = "COALESCE(am.price_cache_write, pm.price_cache_write, a.price_cache_write, " + usagePriceIn + ")"
+	usagePriceIn         = "COALESCE(am.price_in, pm.price_in)"
+	usagePriceOut        = "COALESCE(am.price_out, pm.price_out)"
+	usagePriceCacheRead  = "COALESCE(am.price_cache_read, pm.price_cache_read, " + usagePriceIn + ")"
+	usagePriceCacheWrite = "COALESCE(am.price_cache_write, pm.price_cache_write, " + usagePriceIn + ")"
 )
 
-// usagePriceJoin 给请求行挂上算单价要用的三张表。
+// usagePriceJoin 给请求行挂上算单价要用的两张表。
 //
 // account_models 以 (account_id, model) 为键、provider_models 以 (provider, model) 为键，
 // 两者的 model 都对着 r.model_used（解析别名之后的真实名字）：这两次 join 因此都是唯一匹配，
 // 不会把一行请求乘成多行。厂商从这一行请求的账号取（accounts.provider），不从别处猜。
 //
-// 两个目录 join 都是 LEFT JOIN：老数据里的模型名可能在目录里没有行，那时按账号旧价算，
-// 这一行仍要进汇总——模型清单是后加的，历史请求不该从 `usage` 里消失。
+// 两个目录 join 都是 LEFT JOIN：老数据里的模型名可能在目录里没有行，那一行仍要进汇总
+// （模型清单是后加的，历史请求不该从 `usage` 里消失），只是它的花费按缺价记 null。
 const usagePriceJoin = `LEFT JOIN accounts a ON a.id = r.account_id
 	LEFT JOIN account_models am ON am.account_id = r.account_id AND am.model = r.model_used
 	LEFT JOIN provider_models pm ON pm.provider = a.provider AND pm.model = r.model_used`

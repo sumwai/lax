@@ -47,17 +47,13 @@ type Account struct {
 	// （迁移 0015 删掉了 accounts.models 列，见 DESIGN 5.13），按模型名升序。
 	// 写账号时（CreateAccount）它表示「这个账号要声明哪些模型」：这些名字会被落成
 	// provider_models 里 source='manual' 的行与该账号 access='allowed' 的可达性行。
-	Models   []string
-	PriceIn  *float64
-	PriceOut *float64
-	// PriceCacheRead 与 PriceCacheWrite 是缓存读写的单价（每百万 token），可空：
-	// 空表示没填，花费估算回退到输入价（见 Usage）。
-	PriceCacheRead  *float64
-	PriceCacheWrite *float64
-	Priority        int
-	Enabled         bool
-	CooldownUntil   int64
-	LastError       string
+	Models []string
+	// 价格不在这里：单价属于「供应商 × 模型」，厂商级标价在 provider_models、套餐差异在
+	// account_models 的覆盖列（见 DESIGN 5.13）。账号行上的四个价格列由迁移 0016 删除。
+	Priority      int
+	Enabled       bool
+	CooldownUntil int64
+	LastError     string
 	// FailStreak 是连续失败次数，跨请求累计，用于冷却翻倍。成功一次即清零。
 	FailStreak int
 	CreatedAt  int64
@@ -210,7 +206,6 @@ func (s *Store) execScript(script string, version int) error {
 // Protocol 不在这里取：它是这家厂商路由算出来的有效默认协议，一条 JOIN 算不出来，
 // 由 fillDerivedProtocols 填（规则只有 ResolveDefaultProtocol 一份）。
 const accountSelect = `SELECT a.id, a.name, a.provider, a.key_cipher,
-	a.price_in, a.price_out, a.price_cache_read, a.price_cache_write,
 	a.priority, a.enabled, COALESCE(a.cooldown_until, 0), COALESCE(a.last_error, ''), a.fail_streak,
 	a.created_at, COALESCE(p.base_url, '')
 	FROM accounts a LEFT JOIN providers p ON p.name = a.provider`
@@ -230,11 +225,9 @@ func (s *Store) CreateAccount(a *Account) error {
 	}
 	return s.withTx(func(tx *sql.Tx) error {
 		res, err := tx.Exec(`INSERT INTO accounts
-			(name, provider, key_cipher, price_in, price_out,
-			 price_cache_read, price_cache_write, priority, enabled, cooldown_until, last_error, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, '', ?)`,
-			a.Name, a.Provider, a.KeyCipher,
-			a.PriceIn, a.PriceOut, a.PriceCacheRead, a.PriceCacheWrite, a.Priority, boolInt(a.Enabled), a.CreatedAt)
+			(name, provider, key_cipher, priority, enabled, cooldown_until, last_error, created_at)
+			VALUES (?, ?, ?, ?, ?, NULL, '', ?)`,
+			a.Name, a.Provider, a.KeyCipher, a.Priority, boolInt(a.Enabled), a.CreatedAt)
 		if err != nil {
 			return err
 		}
@@ -284,7 +277,6 @@ func scanAccounts(rows *sql.Rows) ([]Account, error) {
 		var a Account
 		var enabled int
 		if err := rows.Scan(&a.ID, &a.Name, &a.Provider, &a.KeyCipher,
-			&a.PriceIn, &a.PriceOut, &a.PriceCacheRead, &a.PriceCacheWrite,
 			&a.Priority, &enabled, &a.CooldownUntil, &a.LastError, &a.FailStreak, &a.CreatedAt, &a.BaseURL); err != nil {
 			return nil, err
 		}
@@ -396,29 +388,6 @@ func (s *Store) RotateKey(id int64, cipher []byte) error {
 		}
 		return setEnabledTx(tx, id, true, "")
 	})
-}
-
-// AccountPrices 是账号价格的增量改动：nil 表示这一项不动。
-// `account set` 用它只改传入的价格字段，不顺手把没给的那些清掉。
-type AccountPrices struct {
-	In         *float64
-	Out        *float64
-	CacheRead  *float64
-	CacheWrite *float64
-}
-
-// SetAccountPrices 只写这个结构里非 nil 的价格列，其余原样保留。
-// 单独开一个写入口而不复用换凭据的 RotateKey：换 key 会顺手清冷却与失败计数，
-// 改价格不能把账号状态一起抹掉（见 DESIGN 4 的 `account set`）。
-func (s *Store) SetAccountPrices(id int64, p AccountPrices) error {
-	// COALESCE 把「没给」（NULL 参数）变成「保留原值」：一条 UPDATE 就够，不拼动态 SQL。
-	_, err := s.db.Exec(`UPDATE accounts
-		SET price_in = COALESCE(?, price_in),
-		    price_out = COALESCE(?, price_out),
-		    price_cache_read = COALESCE(?, price_cache_read),
-		    price_cache_write = COALESCE(?, price_cache_write)
-		WHERE id = ?`, p.In, p.Out, p.CacheRead, p.CacheWrite, id)
-	return err
 }
 
 // recordFailureTx 是冷却的写入口（加一），只给事务内部用。
@@ -578,7 +547,7 @@ func ReasoningExtra(total, in, out, reasoning int64) int64 {
 // UsageRow 是一行用量汇总。
 // Cost 按 UncachedInTokens 归一化之后的输入、缓存读、缓存写、输出与独立的思考 token 折价
 // （见 DESIGN 5.5）：单价按「这一行的账号 + 这一行的 model_used」现算，取值链见
-// usagePriceIn 那一组常量；缓存单价未填时回退到输入价，整条链都没有价时是 0。
+// usagePriceIn 那一组常量（账号覆盖 → 目录标价）；缓存单价未填时回退到输入价。
 type UsageRow struct {
 	Key       string
 	Requests  int64
@@ -589,11 +558,17 @@ type UsageRow struct {
 	ReasoningTokens int64
 	CacheRead       int64
 	CacheWrite      int64
-	Cost            float64
+	// Cost 是这一组的估算花费（单位元）。nil 表示未定价：这一组里所有请求的所有计价项都
+	// 因缺价没算，不知道多少钱。nil 与 0 是两件事：0 是「确实不花钱」（免费或打包价）。
+	Cost *float64
 }
 
 // Usage 按 dimension 汇总 since 之后的请求。dimension 取 account、model 或 day。
 // 每行花费按它自己的账号与 model_used 现算单价，见 usagePriceIn 那一组常量。
+//
+// 花费分两层算（DESIGN 5.5）：内层按行把每一项折成金额，单价缺的那一项整项是 NULL（不计，
+// 而不是按 0 元算）；外层只把非 NULL 的项加起来，并数一遍有没有任何一项拿到价——
+// 一项价都没拿到时整组是 NULL（未定价），拿到过就是那些项的和（部分缺项照算）。
 func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 	var expr string
 	switch dimension {
@@ -607,19 +582,29 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 		return nil, fmt.Errorf("不支持的维度 %q，可用 account、model、day", dimension)
 	}
 
-	// 单价按行现算：账号 + 模型 → 目录标价 → 账号旧价（见 usagePriceIn 与 usagePriceJoin）。
+	// 单价按行现算：账号覆盖 → 目录标价（见 usagePriceIn 与 usagePriceJoin）。
 	// 不把单价快照进 requests：改价之后历史行按新价重算，与账号级价格时的行为一致。
-	q := fmt.Sprintf(`SELECT %s AS k, COUNT(*), COALESCE(SUM(r.in_tokens),0), COALESCE(SUM(r.out_tokens),0),
-		COALESCE(SUM(r.reasoning_tokens),0),
-		COALESCE(SUM(r.cache_read),0), COALESCE(SUM(r.cache_write),0),
-		COALESCE(SUM(
-			r.in_tokens_uncached * COALESCE(%s,0)
-			+ r.cache_read * COALESCE(%s,0)
-			+ r.cache_write * COALESCE(%s,0)
-			+ r.out_tokens * COALESCE(%s,0)
-			+ r.reasoning_tokens_extra * COALESCE(%s,0)
-		) / 1e6, 0)
-		FROM requests r %s WHERE r.ts >= ? GROUP BY k ORDER BY 2 DESC`,
+	q := fmt.Sprintf(`SELECT k, COUNT(*), COALESCE(SUM(in_tokens),0), COALESCE(SUM(out_tokens),0),
+		COALESCE(SUM(reasoning_tokens),0),
+		COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_write),0),
+		CASE WHEN SUM((c_in IS NOT NULL) + (c_cache_read IS NOT NULL) + (c_cache_write IS NOT NULL)
+		              + (c_out IS NOT NULL) + (c_reasoning IS NOT NULL)) = 0
+		     THEN NULL
+		     ELSE SUM(COALESCE(c_in,0) + COALESCE(c_cache_read,0) + COALESCE(c_cache_write,0)
+		              + COALESCE(c_out,0) + COALESCE(c_reasoning,0)) / 1e6
+		END
+		FROM (
+			SELECT %s AS k,
+				r.in_tokens AS in_tokens, r.out_tokens AS out_tokens,
+				r.reasoning_tokens AS reasoning_tokens,
+				r.cache_read AS cache_read, r.cache_write AS cache_write,
+				r.in_tokens_uncached * (%s) AS c_in,
+				r.cache_read * (%s) AS c_cache_read,
+				r.cache_write * (%s) AS c_cache_write,
+				r.out_tokens * (%s) AS c_out,
+				r.reasoning_tokens_extra * (%s) AS c_reasoning
+			FROM requests r %s WHERE r.ts >= ?
+		) GROUP BY k ORDER BY 2 DESC`,
 		expr, usagePriceIn, usagePriceCacheRead, usagePriceCacheWrite, usagePriceOut, usagePriceOut, usagePriceJoin)
 
 	rows, err := s.db.Query(q, since)
@@ -631,9 +616,13 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 	var out []UsageRow
 	for rows.Next() {
 		var u UsageRow
+		var cost sql.NullFloat64
 		if err := rows.Scan(&u.Key, &u.Requests, &u.InTokens, &u.OutTokens, &u.ReasoningTokens,
-			&u.CacheRead, &u.CacheWrite, &u.Cost); err != nil {
+			&u.CacheRead, &u.CacheWrite, &cost); err != nil {
 			return nil, err
+		}
+		if cost.Valid {
+			u.Cost = &cost.Float64
 		}
 		out = append(out, u)
 	}

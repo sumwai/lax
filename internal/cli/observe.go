@@ -85,7 +85,7 @@ func cmdUsage(e *Env, args []string) error {
 			fmt.Sprintf("%d", r.ReasoningTokens),
 			fmt.Sprintf("%d", r.CacheRead),
 			fmt.Sprintf("%d", r.CacheWrite),
-			usage.Yuan(r.Cost),
+			usage.YuanOrUnpriced(r.Cost),
 		})
 		totalReq += r.Requests
 		totalIn += r.InTokens
@@ -93,7 +93,10 @@ func cmdUsage(e *Env, args []string) error {
 		totalReasoning += r.ReasoningTokens
 		totalCacheRead += r.CacheRead
 		totalCacheWrite += r.CacheWrite
-		totalCost += r.Cost
+		// Cost 为 nil 表示这一组未定价（缺价），合计里不当 0 累加。
+		if r.Cost != nil {
+			totalCost += *r.Cost
+		}
 	}
 	table = append(table, []string{
 		"合计",
