@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -179,6 +180,54 @@ func legacyDB() string {
 	return filepath.Join(base, legacyDirName+".db")
 }
 
+// legacyConfig 按与 config 相同的 XDG 约定拼出改名前的配置文件位置。
+// 只给 doctor 用：配置文件里存的是库地址，只搬库不搬它，新名字下仍指向旧路径。
+func legacyConfig() string {
+	base := ""
+	if d := os.Getenv("XDG_CONFIG_HOME"); d != "" {
+		base = filepath.Join(d, legacyDirName)
+	} else if home, err := os.UserHomeDir(); err == nil {
+		base = filepath.Join(home, ".config", legacyDirName)
+	} else {
+		return ""
+	}
+	return filepath.Join(base, "config.json")
+}
+
+// legacyMoveNote 在「新库是空的、旧目录还有数据」时给出一条可执行的搬家命令，否则返回空串。
+//
+// 命令写成逐个 mv 而不是 mv 多个文件到目录：旧目录里的文件未必齐全（有人只搬过库），
+// 缺一个就整条 mv 失败，比列清楚哪一个该到哪更难看。配置也一并提：它里面存的是库地址，
+// 只搬库不搬配置，新名字下仍指向旧路径。
+func legacyMoveNote(paths config.Paths, dataDir string) string {
+	oldDB := legacyDB()
+	if oldDB == "" {
+		return ""
+	}
+	if _, err := os.Stat(oldDB); err != nil {
+		return ""
+	}
+
+	oldDir := filepath.Dir(oldDB)
+	moves := []string{fmt.Sprintf("mv %s %s", oldDB, dataDir)}
+	hasKey := true
+	if _, err := os.Stat(filepath.Join(oldDir, "secret.key")); err != nil {
+		hasKey = false
+	} else {
+		moves = append(moves, fmt.Sprintf("mv %s %s", filepath.Join(oldDir, "secret.key"), dataDir))
+	}
+	if oldConfig := legacyConfig(); oldConfig != "" {
+		if _, err := os.Stat(oldConfig); err == nil {
+			moves = append(moves, fmt.Sprintf("mv %s %s", oldConfig, filepath.Dir(paths.Config)))
+		}
+	}
+	note := fmt.Sprintf("新库是空的，旧目录还有数据：%s（账号、单价与用量都还在）", strings.Join(moves, "；"))
+	if !hasKey {
+		note += fmt.Sprintf("；旧目录里没有 %s，密钥丢了旧凭据解不开，账号要重新录 key", filepath.Join(oldDir, "secret.key"))
+	}
+	return note
+}
+
 func cmdDoctor(e *Env, args []string) error {
 	fs := newFlagSet(e, "doctor", "自检配置、目录与端口")
 	if err := fs.Parse(args); err != nil {
@@ -222,15 +271,8 @@ func cmdDoctor(e *Env, args []string) error {
 	// 新库还没建、旧目录里的库还在：数据其实没丢，只是留在改名前的路径下。
 	// 这一项报 fail 而不是静默通过：现有检查项只有 ok/fail 两级（没有 warn），
 	// 而新库为空时用户看到的是空账号、空用量，正是需要动手才能恢复的状态。
-	// 必须在打开数据库之前判断——store.Open 会把新库建出来，之后再 stat 就看不到了。
-	if _, statErr := os.Stat(paths.DB); errors.Is(statErr, os.ErrNotExist) {
-		if old := legacyDB(); old != "" {
-			if _, oldErr := os.Stat(old); oldErr == nil {
-				add("旧数据搬迁", false, fmt.Sprintf("旧目录还有数据：mv %s %s %s（库与密钥一起搬，账号、单价与用量都还在）",
-					old, filepath.Join(filepath.Dir(old), "secret.key"), dataDir))
-			}
-		}
-	}
+	// 判断放在打开数据库之后用「账号数为 0」而不是「新库文件不存在」：doctor 自己就会把
+	// 新库建出来，按文件存在与否判，第一次运行之后提示就永久消失了，而用户看到的一直是空账号。
 
 	if cfg, loadErr := config.Load(paths); loadErr != nil {
 		add("配置解析", false, loadErr.Error())
@@ -253,6 +295,11 @@ func cmdDoctor(e *Env, args []string) error {
 			add("数据库", false, listErr.Error())
 		} else {
 			add("数据库", true, fmt.Sprintf("%d 个账号", len(accounts)))
+			if len(accounts) == 0 {
+				if note := legacyMoveNote(paths, dataDir); note != "" {
+					add("旧数据搬迁", false, note)
+				}
+			}
 		}
 	}
 

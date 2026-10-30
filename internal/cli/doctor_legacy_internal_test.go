@@ -50,6 +50,12 @@ func TestDoctorLegacyDataHint(t *testing.T) {
 		}
 	}
 
+	// 上一步 doctor 已经把新库建出来了（0 个账号）。提示按「新库为空」判，不是按「新库文件不存在」判：
+	// 按文件判的话第一次运行之后提示就永久消失，而用户看到的一直是空账号。
+	if _, out := doctor(); !strings.Contains(out, "旧数据搬迁") {
+		t.Fatalf("新库已建但为空时仍应提示搬迁: %s", out)
+	}
+
 	// 照着文案把库搬到新位置之后，这一项就该消失。
 	if err := os.Rename(oldDB, paths.DB); err != nil {
 		t.Fatalf("搬库失败: %v", err)
