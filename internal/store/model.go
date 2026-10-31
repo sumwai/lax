@@ -1,6 +1,6 @@
 package store
 
-// 这个文件是数据库形状的唯一来源：八张表的 model 定义、种子数据与旧库搬迁要用的表清单。
+// 这个文件是数据库形状的唯一来源：十二张表的 model 定义、种子数据与旧库搬迁要用的表清单。
 //
 // model 与业务结构体分开写，因为两者形状不同：
 //
@@ -67,12 +67,16 @@ type requestRow struct {
 func (requestRow) TableName() string { return "requests" }
 
 // providerRow 是 providers 表的一行。行里没有凭据，只有地址与路径。
+//
+// PluginID 记这一行是哪次插件安装建起来的，空串表示用户自己配的厂商。它只服务插件生命周期的
+// 连带清理（见 DeletePlugin），Provider 业务结构体上没有对应字段：读写厂商的既有入口不看它。
 type providerRow struct {
 	Name            string `gorm:"column:name;size:191;primaryKey"`
 	BaseURL         string `gorm:"column:base_url;not null"`
 	Note            string `gorm:"column:note;not null;default:''"`
 	DefaultProtocol string `gorm:"column:default_protocol;not null;default:''"`
 	ModelsPath      string `gorm:"column:models_path;not null;default:''"`
+	PluginID        string `gorm:"column:plugin_id;not null;default:''"`
 }
 
 func (providerRow) TableName() string { return "providers" }
@@ -154,6 +158,91 @@ type modelAliasRow struct {
 
 func (modelAliasRow) TableName() string { return "model_aliases" }
 
+// pluginRow 是 plugins 表的一行：插件的当前状态与活动版本。
+type pluginRow struct {
+	ID            string `gorm:"column:id;size:191;primaryKey"`
+	ActiveVersion string `gorm:"column:active_version;not null;default:''"`
+	Kind          string `gorm:"column:kind;not null;default:''"`
+	Trust         string `gorm:"column:trust;not null;default:''"`
+	Enabled       bool   `gorm:"column:enabled;not null;default:true"`
+	State         string `gorm:"column:state;not null;default:''"`
+	Source        string `gorm:"column:source;not null;default:''"`
+	LastError     string `gorm:"column:last_error;not null;default:''"`
+	InstalledAt   int64  `gorm:"column:installed_at;not null;default:0"`
+	UpdatedAt     int64  `gorm:"column:updated_at;not null;default:0"`
+}
+
+func (pluginRow) TableName() string { return "plugins" }
+
+// pluginVersionRow 是 plugin_versions 表的一行：一个已安装版本的不可变元数据。
+type pluginVersionRow struct {
+	PluginID        string `gorm:"column:plugin_id;size:191;primaryKey"`
+	Version         string `gorm:"column:version;size:191;primaryKey"`
+	ABI             string `gorm:"column:abi;not null;default:''"`
+	Runtime         string `gorm:"column:runtime;not null;default:''"`
+	ManifestJSON    string `gorm:"column:manifest_json;not null;default:''"`
+	PermissionsJSON string `gorm:"column:permissions_json;not null;default:''"`
+	PackageSHA256   string `gorm:"column:package_sha256;not null;default:''"`
+	ManifestSHA256  string `gorm:"column:manifest_sha256;not null;default:''"`
+	Source          string `gorm:"column:source;not null;default:''"`
+	SignatureStatus string `gorm:"column:signature_status;not null;default:''"`
+	InstalledAt     int64  `gorm:"column:installed_at;not null;default:0"`
+}
+
+func (pluginVersionRow) TableName() string { return "plugin_versions" }
+
+// pluginOptionRow 是一行插件配置项。key 在 MySQL 里是保留字，引用它要显式写列名。
+type pluginOptionRow struct {
+	PluginID  string `gorm:"column:plugin_id;size:191;primaryKey"`
+	Key       string `gorm:"column:key;size:191;primaryKey"`
+	ValueJSON string `gorm:"column:value_json;not null;default:''"`
+	UpdatedAt int64  `gorm:"column:updated_at;not null;default:0"`
+}
+
+func (pluginOptionRow) TableName() string { return "plugin_options" }
+
+// modelOperationRow 是一行模型与操作的绑定：用哪条方言、声明了哪些能力与上限。
+type modelOperationRow struct {
+	Provider         string `gorm:"column:provider;size:191;primaryKey"`
+	Model            string `gorm:"column:model;size:191;primaryKey"`
+	Operation        string `gorm:"column:operation;size:191;primaryKey"`
+	DialectID        string `gorm:"column:dialect_id;not null;default:''"`
+	CapabilitiesJSON string `gorm:"column:capabilities_json;not null;default:''"`
+	LimitsJSON       string `gorm:"column:limits_json;not null;default:''"`
+	Source           string `gorm:"column:source;not null;default:''"`
+	UpdatedAt        int64  `gorm:"column:updated_at;not null;default:0"`
+}
+
+func (modelOperationRow) TableName() string { return "model_operations" }
+
+// pluginAuditRow 是一行插件审计。只增不改：安装、升级、回滚、启停、卸载、权限变化都记一条。
+type pluginAuditRow struct {
+	ID                    int64  `gorm:"column:id;primaryKey;autoIncrement"`
+	PluginID              string `gorm:"column:plugin_id;size:191;not null;index:plugin_audit_plugin,priority:1"`
+	Version               string `gorm:"column:version;not null;default:''"`
+	Action                string `gorm:"column:action;not null"`
+	Actor                 string `gorm:"column:actor;not null;default:''"`
+	Result                string `gorm:"column:result;not null;default:''"`
+	Error                 string `gorm:"column:error;not null;default:''"`
+	PermissionsBeforeJSON string `gorm:"column:permissions_before_json;not null;default:''"`
+	PermissionsAfterJSON  string `gorm:"column:permissions_after_json;not null;default:''"`
+	At                    int64  `gorm:"column:at;not null;index:plugin_audit_plugin,priority:2,sort:desc"`
+}
+
+func (pluginAuditRow) TableName() string { return "plugin_audit" }
+
+// pluginLogRow 是一行插件日志。日志是排障用的，只按插件保留最近若干条，不归档。
+type pluginLogRow struct {
+	ID       int64  `gorm:"column:id;primaryKey;autoIncrement"`
+	PluginID string `gorm:"column:plugin_id;size:191;not null;index:plugin_log_plugin,priority:1"`
+	Level    string `gorm:"column:level;not null;default:''"`
+	Hook     string `gorm:"column:hook;not null;default:''"`
+	Message  string `gorm:"column:message;not null;default:''"`
+	At       int64  `gorm:"column:at;not null;index:plugin_log_plugin,priority:2,sort:desc"`
+}
+
+func (pluginLogRow) TableName() string { return "plugin_logs" }
+
 // tables 是 AutoMigrate 与旧库搬迁共用的表清单，顺序不影响结果（GORM 会按依赖重排）。
 func tables() []any {
 	return []any{
@@ -165,6 +254,12 @@ func tables() []any {
 		&providerModelRow{},
 		&accountModelRow{},
 		&modelAliasRow{},
+		&pluginRow{},
+		&pluginVersionRow{},
+		&pluginOptionRow{},
+		&modelOperationRow{},
+		&pluginAuditRow{},
+		&pluginLogRow{},
 	}
 }
 
