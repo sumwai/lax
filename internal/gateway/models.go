@@ -1056,7 +1056,7 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 		return att
 	}
 	// 模型同步与探活没有客户端请求可依，入站头传 nil：客户端头透传只作用于转发路径。
-	upReq, err := s.buildRequest(ctx, a, protocol, protocol, nil, raw, ir, key, "", embedding)
+	upReq, err := s.buildRequest(ctx, a, protocol, nil, protocol, nil, raw, ir, key, "", embedding)
 	if err != nil {
 		res.setUndecided()
 		res.Message = "构造探活请求失败: " + err.Error()

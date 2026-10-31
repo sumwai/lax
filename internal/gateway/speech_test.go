@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"lax/internal/gateway"
+	"lax/internal/plugin"
 	"lax/internal/store"
 )
 
@@ -42,8 +43,20 @@ func voiceProvider(t *testing.T, f *fixture, baseURL string, models []string) st
 		}); err != nil {
 			t.Fatalf("声明 %s 的能力: %v", model, err)
 		}
+		bindDialect(t, f, "voice", model, plugin.OpSpeechSynthesize, plugin.DialectOpenAISpeech)
+		bindDialect(t, f, "voice", model, plugin.OpSpeechTranscribe, plugin.DialectOpenAITranscriptions)
 	}
 	return acc
+}
+
+// bindDialect 把一个模型的一个操作绑到方言上：语音请求按绑定决定上游形状。
+func bindDialect(t *testing.T, f *fixture, provider, model, operation, dialect string) {
+	t.Helper()
+	if err := f.st.SetModelOperation(store.ModelOperation{
+		Provider: provider, Model: model, Operation: operation, DialectID: dialect, Source: "manual",
+	}); err != nil {
+		t.Fatalf("绑定方言 %s 到 %s/%s: %v", dialect, provider, model, err)
+	}
 }
 
 // captureVoiceUpstream 记下最近一次请求的路径、Content-Type 与请求体，
@@ -154,12 +167,14 @@ func TestSpeechWithoutRouteIsRejected(t *testing.T) {
 		t.Fatalf("建厂商: %v", err)
 	}
 	f.createAccount(t, "claude1", "claudeonly", "sk-claude", []string{"tts-1"}, 100)
-	// 声明能力但厂商没声明语音路由、有效协议也不是 chat：这一用例要验的是「缺路由」而不是「缺能力」。
+	// 声明能力但厂商没声明语音路由：这一用例验的是「缺路由」而不是「缺能力」，
+	// 绑一条 chat 方言，让报文因为路由缺失而卡住。
 	if _, err := f.st.AddProviderModelCapability("claudeonly", "tts-1", store.CapabilityPatch{
 		Capabilities: []string{store.CapabilitySpeech},
 	}); err != nil {
 		t.Fatalf("声明能力: %v", err)
 	}
+	bindDialect(t, f, "claudeonly", "tts-1", plugin.OpSpeechSynthesize, plugin.DialectMiMoChatSpeech)
 	srv := f.server(t)
 
 	status, body := postPath(t, srv, "/v1/audio/speech", `{"model":"tts-1","input":"hi"}`)
@@ -413,6 +428,14 @@ func chatAdapterProvider(t *testing.T, f *fixture, baseURL, model string,
 	}); err != nil {
 		t.Fatalf("声明能力: %v", err)
 	}
+	for _, capability := range capabilities {
+		switch capability {
+		case store.CapabilitySpeech:
+			bindDialect(t, f, "mimo", model, plugin.OpSpeechSynthesize, plugin.DialectMiMoChatSpeech)
+		case store.CapabilityTranscription:
+			bindDialect(t, f, "mimo", model, plugin.OpSpeechTranscribe, plugin.DialectMiMoChatASR)
+		}
+	}
 	return acc
 }
 
@@ -480,6 +503,36 @@ func TestSpeechChatAdapter(t *testing.T) {
 	}
 	if rec.InTokens != 125 || rec.OutTokens != 7 || rec.CacheRead != 121 {
 		t.Fatalf("用量 = in %d / out %d / cache %d，期望 125 / 7 / 121", rec.InTokens, rec.OutTokens, rec.CacheRead)
+	}
+}
+
+// TestSpeechChatAdapterPCM 钉住格式名两侧不一的情况：入站写 OpenAI 的 pcm，
+// 上游与能力声明写 pcm16，本地校验要按适配后的名字放行。
+func TestSpeechChatAdapterPCM(t *testing.T) {
+	f := newFixture(t)
+	chatBody := `{"choices":[{"message":{"audio":{"data":"` +
+		base64.StdEncoding.EncodeToString([]byte("pcm-bytes")) + `"}}}]}`
+	up, seen := captureVoiceUpstream(t, "application/json", []byte(chatBody))
+	chatAdapterProvider(t, f, up.URL, "mimo-v2.5-tts",
+		[]string{store.CapabilitySpeech}, nil, []string{"mp3", "wav", "pcm16"})
+	srv := f.server(t)
+
+	status, body := postPath(t, srv, "/v1/audio/speech",
+		`{"model":"mimo-v2.5-tts","input":"hi","response_format":"pcm"}`)
+	if status != http.StatusOK {
+		t.Fatalf("状态 = %d，响应 = %s", status, body)
+	}
+	_, _, got := seen()
+	var sent struct {
+		Audio struct {
+			Format string `json:"format"`
+		} `json:"audio"`
+	}
+	if err := json.Unmarshal(got, &sent); err != nil {
+		t.Fatalf("解析上游请求体: %v", err)
+	}
+	if sent.Audio.Format != "pcm16" {
+		t.Fatalf("audio.format = %q，期望 pcm16", sent.Audio.Format)
 	}
 }
 

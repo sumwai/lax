@@ -13,9 +13,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"lax/internal/account"
+	"lax/internal/plugin"
 	"lax/internal/secret"
 	"lax/internal/store"
 	"lax/internal/translate"
@@ -56,6 +58,8 @@ type Options struct {
 	Now    func() time.Time
 	// DumpBodies 为真时把发往上游的请求体也打出来，供排障用。
 	DumpBodies bool
+	// Dialects 是宿主认识的方言集合。不注入时只有内置方言，已安装插件由 serve 装好后传进来。
+	Dialects *plugin.Registry
 	// RouteProtocols 给出探活一个模型时该试哪些协议：入参是账号的厂商与模型名，返回按优先
 	// 次序排好的候选（nil 表示没有意见）。不注入时用该厂商在 provider_routes 里声明过的协议，
 	// 厂商一个路由都没声明时退回 anthropic、openai-chat、openai-responses 三种全试。
@@ -75,6 +79,9 @@ type Server struct {
 	dumpBodies bool
 	// routeProtocols 是 Options.RouteProtocols 的原样保存，nil 表示用库里的厂商路由。
 	routeProtocols func(provider, model string) []string
+	// dialects 与 dialectsMu 保护方言表的整体替换：重启不是唯一的生效方式。
+	dialectsMu sync.RWMutex
+	dialects   *plugin.Registry
 }
 
 // New 构造网关。
@@ -86,7 +93,10 @@ func New(o Options) (*Server, error) {
 		return nil, errors.New("缺少解密密钥")
 	}
 	s := &Server{store: o.Store, key: o.Key, client: o.Client, logf: o.Logf, now: o.Now,
-		dumpBodies: o.DumpBodies, routeProtocols: o.RouteProtocols}
+		dumpBodies: o.DumpBodies, routeProtocols: o.RouteProtocols, dialects: o.Dialects}
+	if s.dialects == nil {
+		s.dialects = plugin.DefaultRegistry()
+	}
 	if s.client == nil {
 		s.client = &http.Client{Timeout: 0}
 	}
@@ -97,6 +107,27 @@ func New(o Options) (*Server, error) {
 		s.now = time.Now
 	}
 	return s, nil
+}
+
+// SetDialects 整张换掉方言表。在途请求手里拿的是换表前取到的方言指针，继续用旧版本完成；
+// 换表本身不影响已经开始的请求。传 nil 表示只剩内置方言。
+func (s *Server) SetDialects(registry *plugin.Registry) {
+	if registry == nil {
+		registry = plugin.DefaultRegistry()
+	}
+	s.dialectsMu.Lock()
+	s.dialects = registry
+	s.dialectsMu.Unlock()
+}
+
+// currentDialects 取当前方言表。
+func (s *Server) currentDialects() *plugin.Registry {
+	s.dialectsMu.RLock()
+	defer s.dialectsMu.RUnlock()
+	if s.dialects == nil {
+		return plugin.DefaultRegistry()
+	}
+	return s.dialects
 }
 
 // Handler 返回 http 处理器。五条固定入站路径（anthropic、openai-chat、openai-responses、
@@ -280,7 +311,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	var req *translate.Request
 	// speechChars 是 TTS 的计费字符数：入站时数好，不靠响应体（这条端点不报 token）。
 	var speechChars int64
-	// ttsReq / asrReq 留着给能力校验与 chat 适配器用（同一份解析结果，不重复解）。
+	// ttsReq / asrReq 留着给能力校验用（同一份解析结果，不重复解）。
 	var ttsReq *speechRequest
 	var asrReq *transcriptionsRequest
 	switch {
@@ -404,9 +435,34 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// 所有账号都失败才是 503，换个时间才有意义。混成 503 会让客户端反复重试一个永远失败的写法。
 	interopRejected := ""
 	onlyInterop := true
+	operation := operationFor(inbound, embedding)
 	for _, cand := range candidates {
 		if r.Context().Err() != nil {
 			return
+		}
+		// 方言绑定按模型与操作查一次：非语音操作也能绑插件方言，由它在宿主编好的报文上打补丁、
+		// 解回响应（见 chatDialectApplies）。语音两条走 speechRoute，绑定是必需项。
+		var dialect plugin.Dialect
+		if !voice {
+			d, msg := s.checkOperationDialect(cand.Provider, req.Model, operation)
+			if msg != "" {
+				interopRejected = msg
+				lastErr = msg
+				s.logf("账号 %s：%s", cand.Name, msg)
+				continue
+			}
+			if d != nil && req.Stream {
+				// 客户端要流式而方言不会解流：明确拒绝，不静默退回非流式——
+				// 一次「说好是流式却只收到一整块」在客户端那边是一次超时或一次解析失败。
+				if _, ok := d.(plugin.StreamDialect); !ok {
+					writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error",
+						fmt.Sprintf("模型 %s 的 %s 绑定的方言 %s 不支持流式：这条方言只实现了整包解码，"+
+							"改绑一条支持流式的方言，或客户端用 \"stream\": false 发一次非流式请求",
+							req.Model, operation, d.ID()))
+					return
+				}
+			}
+			dialect = d
 		}
 
 		// 有效出站协议只有一处算：store.EffectiveProtocol 按「账号覆盖 → 目录里这个模型支持的协议 →
@@ -429,10 +485,10 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 		case voice:
-			// 语音与向量化不同：它有两种出站。厂商声明了语音路由就直通，
-			// 没声明但模型声明了能力且走 chat 的就经适配器（见 speechOutbound）。
+			// 语音的出站由模型绑定的方言决定：方言与入站同协议就原样转发，
+			// 是 chat 方言就经它双向翻译。
 			var msg string
-			outbound, msg = s.speechOutbound(cand, inbound, req.Model)
+			outbound, dialect, msg = s.speechRoute(cand, inbound, req.Model)
 			if outbound == "" {
 				interopRejected = msg
 				lastErr = msg
@@ -467,10 +523,21 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			s.logf("账号 %s 的模型 %s 走 %s 协议，与入站协议 %s 不相通", cand.Name, req.Model, outbound, inbound)
 			continue
 		}
+		// 方言声明的线协议必须与这次的有效出站协议一致：方言按 Input.Wire 打补丁，
+		// 两者不一致时它扣的字段会落在另一条协议的报文上，报错比默默发出去强。
+		if dialect != nil && dialect.UpstreamWire() != outbound {
+			msg := fmt.Sprintf("模型 %s 绑定的方言 %s 声明走 %s，但这个模型的有效出站协议是 %s："+
+				"改绑一条同协议的方言，或用 lax model dialect set 把绑定改成 lax/%s@1 让宿主自己编解码",
+				req.Model, dialect.ID(), dialect.UpstreamWire(), outbound, outbound)
+			interopRejected = msg
+			lastErr = msg
+			s.logf("账号 %s：%s", cand.Name, msg)
+			continue
+		}
 		onlyInterop = false
 
 		attemptStart := s.now()
-		res := s.tryUpstream(r.Context(), w, cand, outbound, inbound, r.Header, raw, req, session, embedding)
+		res := s.tryUpstream(r.Context(), w, cand, outbound, dialect, inbound, r.Header, raw, req, session, embedding)
 		latency := s.now().Sub(attemptStart)
 
 		// 两列正好分工：model_requested 记客户端给的名字（可能是别名），
@@ -637,15 +704,15 @@ func sessionFromBody(raw []byte) string {
 }
 
 func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store.Account, outbound string,
-	inbound string, inboundHeaders http.Header, raw []byte, req *translate.Request, session string,
-	embedding bool) attempt {
+	dialect plugin.Dialect, inbound string, inboundHeaders http.Header, raw []byte,
+	req *translate.Request, session string, embedding bool) attempt {
 
 	key, err := secret.Decrypt(s.key, a.KeyCipher)
 	if err != nil {
 		return attempt{status: http.StatusInternalServerError, message: "解密账号凭据失败"}
 	}
 
-	upReq, err := s.buildRequest(ctx, a, outbound, inbound, inboundHeaders, raw, req, string(key), session, embedding)
+	upReq, err := s.buildRequest(ctx, a, outbound, dialect, inbound, inboundHeaders, raw, req, string(key), session, embedding)
 	if err != nil {
 		// 本地构造请求失败（编码、拼地址），请求根本没发出去：与网络无关，不走连接层档，
 		// 仍按 502 的 5xx 档冷却。
@@ -676,14 +743,19 @@ func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store
 		return res
 	}
 
-	if speechNeedsChatAdapter(inbound, outbound) {
-		// 语音入站 + chat 出站：把 chat completion 解成音频字节或转写结果。
-		return s.chatSpeechSuccess(w, resp, inbound, raw, inboundHeaders.Get("Content-Type"))
+	if speechUsesDialect(inbound, outbound, dialect) {
+		// 语音入站走 chat 方言：把 chat completion 解成音频字节或转写结果。
+		return s.speechDialectSuccess(w, resp, inbound, req.Model, raw, inboundHeaders.Get("Content-Type"), dialect)
 	}
 	if outbound == ProtocolSpeech || outbound == ProtocolTranscriptions {
 		// 语音的响应要么是音频字节、要么是 JSON 或 SSE，都不走 jsonSuccess/streamSuccess：
 		// 那两个按对话协议解析用量与帧，读一条音频只会得到零值或报错。
 		return s.speechSuccess(w, resp, outbound, raw)
+	}
+	if chatDialectApplies(inbound, dialect) {
+		// 非语音操作绑了插件方言：响应由方言解，流式能不能解由它自己决定。
+		return s.chatDialectSuccess(ctx, w, resp, inbound, outbound,
+			operationFor(inbound, embedding), req, dialect, string(key))
 	}
 	if req.Stream {
 		return s.streamSuccess(ctx, w, resp, inbound, outbound, req, string(key))
@@ -697,7 +769,8 @@ func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store
 // 白名单里的头原样透传：客户端自己带的 trace id、地域限制等参数由它传到上游，
 // 网关不维护第二份意图表。
 // session 是本次请求的会话键（必要时是空串），供附加头的 {session} 用；模型名取 req.Model。
-func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, inbound string,
+func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound string,
+	dialect plugin.Dialect, inbound string,
 	inboundHeaders http.Header, raw []byte,
 	req *translate.Request, key, session string, embedding bool) (*http.Request, error) {
 
@@ -731,10 +804,10 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, in
 		body, contentType, err = rewriteTranscriptionsBody(raw, inboundHeaders.Get("Content-Type"), req.Model)
 	case outbound == ProtocolTranscriptions:
 		body = raw
-	case speechNeedsChatAdapter(inbound, outbound):
-		// 语音入站 + chat 出站：上游把语音做成 chat 方言，请求要重新编。
+	case speechUsesDialect(inbound, outbound, dialect):
+		// 语音入站 + chat 方言：上游把语音做成 chat 的一种形状，请求要重新编。
 		// 能力校验已经在上游调用之前做过（见 checkSpeechInbound）。
-		body, err = s.encodeSpeechAsChat(inbound, raw, req.Model, inboundHeaders.Get("Content-Type"))
+		body, err = s.encodeSpeechDialect(dialect, inbound, raw, req.Model, inboundHeaders.Get("Content-Type"))
 	case outbound == ProtocolSpeech:
 		// 语音合成是 JSON，与其余直通协议一样只换 model。
 		body, err = patchModel(raw, req.Model)
@@ -750,6 +823,26 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, in
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	if chatDialectApplies(inbound, dialect) {
+		// 插件方言在宿主编好的报文上再动一次：宿主负责编出这条线协议的合法报文，
+		// 方言只补它认得的那几个字段（例如多一个思考开关），两个职责不混。
+		var path string
+		var perr error
+		body, path, perr = s.applyChatDialect(dialect, operationFor(inbound, embedding), inbound, outbound, req, body)
+		if perr != nil {
+			return nil, perr
+		}
+		if path != "" {
+			// 地址只认「厂商 base_url + 相对路径」：域名与凭据注入因此仍然只有宿主一份。
+			// {model} 占位符与其它路径一样替换，gemini 这类把模型名放在路径里的厂商也能用。
+			if !dialectRelativePath(path) {
+				return nil, fmt.Errorf("方言 %s 给的地址 %q 不是以 / 开头的相对路径（不能含 .. 段与反斜杠）："+
+					"地址只能由厂商 base_url 加相对路径得到，插件不选域名", dialect.ID(), path)
+			}
+			endpoint = modelEndpoint(joinEndpoint(a.BaseURL, path), req.Model)
+		}
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
