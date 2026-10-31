@@ -24,3 +24,6 @@ commit in the row so a later reader can tell whether the note still applies.
 | 2026-10-31 | AutoMigrate cannot take over a schema written by hand-rolled DDL | [lessons/2026-10-31-automigrate-takes-over-legacy-ddl.md](lessons/2026-10-31-automigrate-takes-over-legacy-ddl.md) | fixed in 54702cf |
 | 2026-10-31 | A deliberately malformed probe request proves reachability, not credentials | [lessons/2026-10-31-malformed-probe-proves-reachability.md](lessons/2026-10-31-malformed-probe-proves-reachability.md) | fixed in 4cf6959 |
 | 2026-10-31 | Speech endpoints built on chat completions need an adapter and a capability declaration | [lessons/2026-10-31-speech-as-chat-dialect.md](lessons/2026-10-31-speech-as-chat-dialect.md) | fixed in ce0d0d8 |
+| 2026-10-31 | Declared upstream audio-format names differ from the inbound OpenAI names | [lessons/2026-10-31-pcm-name-mismatch.md](lessons/2026-10-31-pcm-name-mismatch.md) | fixed in 65b191e |
+| 2026-10-31 | Pinning `speech.*` to the speech wire protocols makes a chat-shaped vendor impossible to declare | [lessons/2026-10-31-wire-operation-table.md](lessons/2026-10-31-wire-operation-table.md) | fixed in 5063c32 |
+| 2026-10-31 | goja has no heap cap, and Interrupt cannot stop in-flight native calls | [lessons/2026-10-31-sandbox-limits.md](lessons/2026-10-31-sandbox-limits.md) | fixed in 5063c32 |

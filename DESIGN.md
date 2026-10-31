@@ -4,7 +4,7 @@
 
 本机上的模型总机。手上有几家模型的账号，客户端只连 `http://127.0.0.1:4567`，由 lax 挑账号、转协议、记用量。
 
-入站收八种线协议，按路径区分：`POST /v1/messages` 是 anthropic，`POST /v1/chat/completions` 是 openai-chat，`POST /v1/responses` 是 openai-responses，`POST /v1beta/models/{model}:generateContent` 与 `:streamGenerateContent` 是 gemini，`POST /v1/systemone` 是 systemone，`POST /v1/embeddings` 是 openai-embeddings，`POST /v1/audio/speech` 是 openai-speech，`POST /v1/audio/transcriptions` 是 openai-transcriptions。前四种之间可以互相转换，出站协议归属在模型上（见 5.7）；systemone、向量化与两条语音协议不参与转换，只与各自互通（见 5.14、5.15、5.16）。入站协议与有效出站协议相同则直通，不同则经中间表示转换，前四种入站 × 前四种出站共十六种组合，流式与非流式都可用（gemini 的原生形状见 5.9）。
+入站收八种线协议，按路径区分：`POST /v1/messages` 是 anthropic，`POST /v1/chat/completions` 是 openai-chat，`POST /v1/responses` 是 openai-responses，`POST /v1beta/models/{model}:generateContent` 与 `:streamGenerateContent` 是 gemini，`POST /v1/systemone` 是 systemone，`POST /v1/embeddings` 是 openai-embeddings，`POST /v1/audio/speech` 是 openai-speech，`POST /v1/audio/transcriptions` 是 openai-transcriptions。前四种之间可以互相转换，出站协议归属在模型上（见 5.7）；systemone、向量化与两条语音协议不参与中间表示的转换：systemone 与向量化只与各自互通，语音按模型绑定的方言出站（见 5.14、5.15、5.16）。入站协议与有效出站协议相同则直通，不同则经中间表示转换，前四种入站 × 前四种出站共十六种组合，流式与非流式都可用（gemini 的原生形状见 5.9）。
 
 与同类产品的差别：
 
@@ -24,6 +24,7 @@
 | 存储 | SQLite 单文件，可选 PostgreSQL 与 MySQL | 缺省不装数据库服务，事务与查询都够用；需要多进程共享同一份状态时换外部库（见第 6 节） |
 | 界面 | 纯命令行 | 用量由 `usage` 与 `log` 子命令查看 |
 | 计费 | 不做 | 没有第三方付款方，只记录 token 与估算花费 |
+| 插件运行时 | 分阶段做：本版落地声明式插件、内置方言与 `moejs` JS 沙箱 | 厂商差异写在 Go 里，每加一个上游都要改路由、写请求构造与响应解码，再重新编译发版。声明式插件把请求映射变成数据，装之前能静态审计；只用声明表达不了「给宿主编好的报文补一个字段」与「按块解上游流」，这两件事要可执行代码，所以带一个进程内 JS 解释器，用字节闸门与逐 hook 超时圈住（见 5.17）。`trusted-worker`、Magpie 导入、OAuth 与插件市场仍未做（见第 9 节） |
 
 协议矩阵。行列都按线协议算，四条入站 × 四条出站的十六种组合全部可用，非流式与流式都支持：
 
@@ -34,7 +35,7 @@
 | openai-responses | 转换 | 转换 | 直通 | 转换 |
 | gemini | 转换 | 转换 | 转换 | 直通 |
 
-同行同列是“直通”，其余是“转换”。“直通”只需重写请求体里的 `model` 字段，其余字段与值原样带到上游，响应与流式帧按字节原样返回（上游中途断流时按同一协议补上错误帧与收尾帧，见 5.4），用量另由该协议的 scanner 读出；gemini 的报文里没有 `model` 字段（模型名在路径里），它的直通因此一个字节都不改。语音与向量化不进这张矩阵：向量化只做同协议直通；语音另有一条“同协议直通或经 chat 适配”的路（见 5.16），它转的不是中间表示，是特定上游的 chat 方言。“转换”走中间表示：请求与响应都只搬映射表里定义过的字段（见 5.4 与 5.9）。gemini 的原生路径、凭据头与流式端点见 5.9。
+同行同列是“直通”，其余是“转换”。“直通”只需重写请求体里的 `model` 字段，其余字段与值原样带到上游，响应与流式帧按字节原样返回（上游中途断流时按同一协议补上错误帧与收尾帧，见 5.4），用量另由该协议的 scanner 读出；gemini 的报文里没有 `model` 字段（模型名在路径里），它的直通因此一个字节都不改。语音与向量化不进这张矩阵：向量化只做同协议直通；语音另有一条按模型绑定的方言走的路（见 5.16），它转的不是中间表示，是某个上游自己的报文形状。“转换”走中间表示：请求与响应都只搬映射表里定义过的字段（见 5.4 与 5.9）。gemini 的原生路径、凭据头与流式端点见 5.9。
 
 ## 3 用起来是这样
 
@@ -135,14 +136,14 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 
 全局参数：`--json` 可以写在子命令前后任意位置；`--config <路径>` 与 `--db <路径>` 必须写在子命令之前。
 
-`account` 一组的子命令：`add`、`ls`、`set`、`rm`、`test`、`enable`、`disable`（`update` 作为 `set` 的同义词接受，帮助里只列 `set`）。`model` 一组的子命令：`ls`、`show`、`add`、`sync`、`probe`，后两个都支持 `--provider` 与 `--account` 筛选账号；`add` 手写一条「这个账号能用这个模型」，同时写目录与可达性两张表（见 5.7、5.13）；`show` 按账号看一个模型的可达性事实（协议、HTTP 状态、探活时间、错误）；`alias` 一组（`set`、`unset`、`ls`）维护模型别名，把客户端写死的模型名指到真实模型名上（见 5.12）；`price` 一组（`set`、`unset`、`ls`）维护模型单价，写的是目录里的厂商级标价与某个账号的覆盖价（见 5.13）；`capability` 一组（`add`、`set`、`unset`、`ls`）维护能力声明：能力位、音色与音频格式，语音端点只打声明过对应能力的模型（见 5.16）。`provider` 一组的子命令：`ls`、`add`、`set`、`unset`、`rm`，维护厂商默认地址、模型列表覆盖与它的路由（见 5.8）；`header set`、`header unset`、`header ls` 维护上游除凭据头之外还要的附加请求头（见 5.10）；`add` 只新建，改一家已有厂商用 `set`，删一条路由或清掉一项设置用 `unset`（删除不做成「传空串」：空值一律是用法错误）。`--models` 只是手填的初始值，模型列表的常规来源是 `model sync` 拉取加 `model probe` 探活（见 5.7）。
+`account` 一组的子命令：`add`、`ls`、`set`、`rm`、`test`、`enable`、`disable`（`update` 作为 `set` 的同义词接受，帮助里只列 `set`）。`model` 一组的子命令：`ls`、`show`、`add`、`sync`、`probe`，后两个都支持 `--provider` 与 `--account` 筛选账号；`dialect` 一组（`ls`、`set`、`unset`）直接读写按操作的方言绑定（见 5.16、5.17）；`add` 手写一条「这个账号能用这个模型」，同时写目录与可达性两张表（见 5.7、5.13）；`show` 按账号看一个模型的可达性事实（协议、HTTP 状态、探活时间、错误）；`alias` 一组（`set`、`unset`、`ls`）维护模型别名，把客户端写死的模型名指到真实模型名上（见 5.12）；`price` 一组（`set`、`unset`、`ls`）维护模型单价，写的是目录里的厂商级标价与某个账号的覆盖价（见 5.13）；`capability` 一组（`add`、`set`、`unset`、`ls`）维护能力声明：能力位、音色、音频格式与按操作的方言绑定，语音端点只打声明过对应能力的模型（见 5.16）。`provider` 一组的子命令：`ls`、`add`、`set`、`unset`、`rm`，维护厂商默认地址、模型列表覆盖与它的路由（见 5.8）；`header set`、`header unset`、`header ls` 维护上游除凭据头之外还要的附加请求头（见 5.10）；`add` 只新建，改一家已有厂商用 `set`，删一条路由或清掉一项设置用 `unset`（删除不做成「传空串」：空值一律是用法错误）。`plugin` 一组的子命令：`install`、`update`、`rollback`、`verify`、`logs`、`reload`、`config`、`ls`、`show`、`enable`、`disable`、`rm`、`doctor`，装的是本地目录里的插件（目录里要有 `lax.plugin.json`，`runtime` 是 `declarative` 或 `moejs`），登记它带来的厂商、模型与方言；`update` 与 `rollback` 切版本，`verify` 与 `doctor` 校验，`logs` 看运行日志，`reload` 让正在跑的网关热加载方言表，`config` 读写 manifest 声明的配置项（见 5.8、5.16、5.17、第 8 节）。`model dialect` 一组（`ls`、`set`、`unset`）直接读写 `model_operations` 里的方言绑定（见 5.16、5.17）。`--models` 只是手填的初始值，模型列表的常规来源是 `model sync` 拉取加 `model probe` 探活（见 5.7）。
 
-`account`、`model`、`provider`、`log` 四组支持 `-h`、`--help` 与 `help`：把该组的用途与子命令清单（每个子命令一行中文说明）打到 stdout，退出码 0，不读数据库。子命令自己的 `--help` 仍打印该子命令的参数清单。未知子命令退出码 2，提示里给出 `lax <组> --help`。`provider header` 这一组同样支持 `--help`，但它打印的是三条用法、一个示例与四种取值写法（见 5.10）：光列子命令说不清值怎么展开。`model alias` 这一组也一样：它的 `--help` 打印三条用法、一个示例与两段说明（别名只影响请求方向、客户端请求别名时 `log tail` 的模型列写成 `别名 → 真名`），光列子命令说不清别名改的是什么、不改的是什么。`model price` 同样按这个形状打印（三条用法、一个示例 `lax model price set glm-4.6 --in 0.6 --out 2.2`、两段说明：价格属于模型不属于账号；账号级只在套餐不同时覆盖，不影响其它账号）。
+`account`、`model`、`provider`、`plugin`、`log` 五组支持 `-h`、`--help` 与 `help`：把该组的用途与子命令清单（每个子命令一行中文说明）打到 stdout，退出码 0，不读数据库。子命令自己的 `--help` 仍打印该子命令的参数清单。未知子命令退出码 2，提示里给出 `lax <组> --help`。`provider header` 这一组同样支持 `--help`，但它打印的是三条用法、一个示例与四种取值写法（见 5.10）：光列子命令说不清值怎么展开。`model alias` 这一组也一样：它的 `--help` 打印三条用法、一个示例与两段说明（别名只影响请求方向、客户端请求别名时 `log tail` 的模型列写成 `别名 → 真名`），光列子命令说不清别名改的是什么、不改的是什么。`model price` 同样按这个形状打印（三条用法、一个示例 `lax model price set glm-4.6 --in 0.6 --out 2.2`、两段说明：价格属于模型不属于账号；账号级只在套餐不同时覆盖，不影响其它账号）。
 
 | 命令 | 参数 | 行为 | 输出 |
 | --- | --- | --- | --- |
 | `init` | `--force` | 建配置目录与数据目录，写默认配置；`--force` 覆盖 | 两个路径 |
-| `serve` | `--addr`、`--log-level` | 前台起网关，注册八条入站路由、`/healthz` 与两个只读的模型清单接口（`GET /v1/models`、`GET /v1/models/{id}`，见 5.2.1）；启动只统计账号与模型数，不发上游请求 | 启动摘要，之后按请求打日志 |
+| `serve` | `--addr`、`--log-level` | 前台起网关，注册八条入站路由、`/healthz` 与两个只读的模型清单接口（`GET /v1/models`、`GET /v1/models/{id}`，见 5.2.1）；启动只统计账号与模型数，不发上游请求。启动时先装配方言注册表（内置方言打底，再按活动版本登记启用的插件：安装时记的 `runtime` 是 `declarative` 就走 `RegisterPlugin`，是 `moejs` 就打开沙箱后 `Register`；带代码的插件起不来时把 `state` 写成 `failed`），再调 `store.BackfillSpeechDialects` 把已有语音能力声明补成绑定；插件加载失败或回填失败只打一行警告，不阻止启动（装坏的插件不该让网关起不来）。pid 文件写到 `<数据目录>/lax.pid`（0600，退出时删掉），收到 `SIGHUP` 重读插件表并整表换掉方言注册表（见 5.17）。 | 启动摘要，之后按请求打日志；补了绑定时多一行「补齐语音方言绑定 N 条」 |
 | `account add` | `<名称> --provider --key [--models] [--priority]` | 加密存 key。价格不在账号上：模型单价属于供应商×模型，账号只在套餐不同时覆盖（`model price set`，见 5.13）。`--price-in`、`--price-out`、`--price-cache-read`、`--price-cache-write` 误敲仍是用法错误（退出码 2），文案说明价格已经只存在模型目录上并给出 `lax model price set` 的命令形状。地址与默认协议不落在账号上：转发时按账号的 `provider` 取厂商行的 `base_url` 与有效默认协议（见 5.8），因此不再有 `--base-url` 与 `--protocol` 两个参数；厂商不在表里时报错，列出已知厂商、编辑距离不超过 2 时给出最接近的名字，并提示先 `lax provider add <名称> --base-url <地址> --openai /v1/chat/completions` 再建账号。这两个参数删掉之后，误敲仍然是用法错误（退出码 2）：文案说清地址与默认协议已经只存在厂商行上，并给出 `provider add` 的命令（`--base-url`）或 `provider set --default-protocol`（`--protocol`）。`--models` 手工声明该账号可用的模型（写入按 5.13 的新结构：模型进 `provider_models`，账号侧记一条可用结论），留空则等 `model sync` 与 `model probe`。厂商行在、但一条路由都没声明不算错：此时算不出默认协议，账号照建，转发时按厂商默认协议推导，推导为空由转发层报错（见 5.8）；`--json` 里 `protocol` 与 `base_url` 报的是写完再读一次的派生值（厂商的默认协议与 `base_url`，算不出来时是空串），另有 `name`、`provider`、`models`（这个账号 `access='allowed'` 的名字集合，写完再读一次）、`key`（掩码）。 | 确认一行（名称、厂商、默认协议、脱敏凭据），协议算不出来时写 `-` |
 | `account ls` | `--json` | 列账号、模型数、是否处在冷却；模型列按可达性统计，两种情况：`account_models` 有行时显示「N 可用 / M 已登记」（分子数 `access='allowed'` 的行，分母数这个账号在 `account_models` 里的全部行；分母写「已登记」而不是「已同步」，因为同步、手填与探活都会留行，其中同步与手填的行还没探过。零可用同样走这条分支，「0 可用 / M 已登记」说明这个账号眼下接不了任何模型），一行都没有时写「无模型（先 model sync）」——没有行表示该账号不提供任何模型、不参与候选，不写成「不限」这类看起来表示「什么模型都收」的文案；地址列与协议列都取厂商行：地址是该厂商的 `base_url`（厂商 `base_url` 为空时写 `-`，与 `provider ls` 同一种写法，见 5.8），协议是该厂商的有效默认协议（`store.Account.Protocol` 这个派生值，算不出来时写 `-`）；存在与默认协议不同的已发现协议时写成「openai-chat + 另 1 种」；`--json` 每行的 `base_url`、`protocol` 与两列同源（厂商行不在时都是空串），另多 `models_usable`、`models_synced` 两个计数与 `protocols`（默认协议在前，其余是模型行上发现到的协议；默认协议为空串时不把空串放进列表），两个计数与文本同源：`models_usable` 是 `access='allowed'` 的行数，`models_synced` 是 `account_models` 的全部行数，`models_synced` 为 0 就是文本的「无模型」，`models` 是这份 allowed 名字集合（与 `models_usable` 同源，不含 forbidden / missing / error 的行） | 表格 |
 | `account set` | `<名称> [--key <key>]` | 换掉已有账号的凭据，不删号重建：删号会丢掉 `account_models` 里的探活结果、协议发现与请求记录的账号归属。`--key` 的三种给法与 `account add` 一致（直接写值、`--key -` 从标准输入读、留空读 `LAX_KEY`），解析不出凭据时是用法错误（退出码 2 并打出用法）——价格参数已经不在这条命令上，换凭据是它唯一的作用。key 走同一条加密路径覆盖 `key_cipher`，明文不进日志、不进 `--json` 输出。旧凭据的结论一并作废：同一个事务里清掉 `cooldown_until`、`fail_streak`、`last_error` 并把账号重新启用（`enabled=1`），写入口是 `store.RotateKey`。不动 `account_models` 与协议发现结果，也不碰厂商表与模型目录——账号的地址与默认协议是厂商行的派生值（见 5.8），换凭据不该影响它们，价格也不在账号上（见 5.13，改价用 `model price set`）。账号不存在时报错并提示先 `lax account add`。只接受 `--key` 一个参数；`--price-in` 一类误敲是用法错误（退出码 2）并指向 `model price set`。`--key` 给了就走 `store.RotateKey`（同事务清冷却、`fail_streak`、`last_error` 并重新启用），换凭据是这条子命令唯一的作用，凭据在动库之前就要能解析出来 | 确认一行（账号名、厂商、脱敏凭据、是否清了冷却）；`--json` 含 `name`、`key_rotated`、`key`（掩码）、`cooldown_cleared`、`fail_streak_cleared`、`enabled` |
@@ -161,16 +162,29 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | `provider header set` | `<厂商> <头名> <值> [--protocol <协议>]` | 声明上游除凭据头之外还要的附加请求头（见 5.10），覆盖语义：同一个 (厂商, 作用范围, 头名) 再写一次就是改值，不存在就新建，不报错也不留旧行。头名按 HTTP 头名的规矩校验（token 字符、大小写不敏感、落库归一成小写：写 `X-Opencode-Session` 与写 `x-opencode-session` 是同一行），值不能是空白串、也不能带 CR/LF/NUL，非法头名与空值都是用法错误（退出码 2，打出用法行）。`--protocol` 收命令行写法 `anthropic`、`openai`、`responses`、`gemini`（与 `--default-protocol` 同一套映射，落库的是线协议全名 `openai-chat` 这类），不给就是厂商级：这家厂商的每条路由都带上它；给了就是协议级：只加给这条协议，同名头覆盖厂商级。厂商不存在时报错并指向 `provider ls`（退出码 1） | 确认一行（厂商、头名、作用范围、脱敏后的值）与下一步 `provider header ls`；`--json` 含 `provider`、`protocol`（空串是厂商级）、`name`、`value`（脱敏）、`value_masked` |
 | `provider header unset` | `<厂商> <头名> [--protocol <协议>]` | 删掉一条声明，定位用的是 `set` 给的同一个 (厂商, `--protocol`, 头名)。删不到时报错并列出这家厂商现有的声明（多半是头名或 `--protocol` 写错了），退出码 1：与 `provider unset` 删路由「删不到也报错」一致——头没删掉，转发照旧带它，静默当成功等于让人以为解决了。删的是协议级那行而厂商级还有同名头时，输出说明转发会回退到厂商级那条 | 确认一行（厂商、头名、作用范围）与现有几条声明；`--json` 含 `provider`、`protocol`、`name`、`removed`、`remaining`（这家还剩几条） |
 | `provider header ls` | `[<厂商>]` `--json` | 列已声明的附加请求头：不给厂商就列全部厂商的，给了就只列这一家（厂商不在表里时报错、退出码 1，不把「写错厂商名」显示成「一条头都没有」）。文本四列：厂商、协议（厂商级显示 `-`）、头名、值（脱敏）。值一律走 `ProviderHeader.Masked`，只露前四位：值可能是密钥（会话 token、自定义鉴权头），完整值不打印，`--json` 也一样。厂商级与协议级各占一行，同一头名两边都有时两行都在，协议列就是区分；合并后的有效集合（协议级按同名覆盖厂商级，见 5.10）不在这里展开，转发时才算 | 表格；一条都没有时输出一行提示与一条示例命令；`--json` 是数组，每项 `provider`、`protocol`（空串是厂商级）、`name`、`value`（脱敏）、`value_masked`（恒 true，说明 `value` 不是明文） |
+| `plugin install` | `<目录> [--trust declarative\|sandboxed] [--no-enable] [--dry-run] [--yes]` | 从本地目录装一个插件，`runtime` 可以是 `declarative`（只有映射数据）或 `moejs`（带 JS 入口）。流水线固定：解析并严格校验 manifest、方言文件、模型目录与三者之间的引用（`moejs` 的 `kind` 必须是 `provider`、`entry` 必填且落在包根内、文件/进程/环境变量权限只能是 `none`，见 5.17）→ 定信任级别（`--trust` 与 manifest 的 runtime 必须一致，判定表见本节末）→ 拒掉声明式方言承载非语音操作（`checkExecutableOperations`：对话、向量化与决策操作只收 hook 方言或 `lax/` 宿主方言）→ 算包目录哈希（`plugin.PluginDirHash`）→ 版本冲突（`plugin_versions` 不可变，同一个版本再装一次直接拒）→ 方言冲突（内置方言打底，加其余已装插件的方言一起试登记：ID 撞车、冒用 `lax/` 前缀都整包拒）→ `--dry-run` 到这里返回，不复制也不写库 → 复制到 `<数据目录>/plugins/installed/<插件 ID>/<版本>/`（先落 `staging/` 再整目录 `os.Rename`；符号链接与特殊文件一律拒）→ 逐家厂商一个事务写目录（`store.ApplyPluginCatalog`：厂商、路由、模型目录、方言绑定、别名；冲突整包回滚）→ 写 `plugin_versions`（`runtime` 记安装时的那一个，网关启动按它选加载路径）与 `plugins` → `--no-enable` 时置 `disabled`；最后写一条 `install` 审计。已经装过别的版本时要 `--yes` 才切活动版本（旧版本行留着）。失败时删掉刚复制的包并提示「前面几家厂商可能已经写进去了」，用 `lax plugin rm` 或 `lax provider rm` 清。 | 确认行（插件 ID、版本、类型、信任、包目录、包哈希、权限摘要、运行时与钩子超时），每家厂商一段（地址、路由、方言、别名）加每个模型一行（客户端名、上游名、操作 → 方言）；`--json` 含 `id`、`name`、`version`、`kind`、`runtime`、`trust`、`target`、`package_sha256`、`permissions`（一句中文）、`providers`（每项 `id`、`name`、`base_url`、`routes`、`models`（每项 `model`、`upstream_id`、`operations`（操作名 → 方言 ID））、`dialects`、`aliases`）、`dry_run`、`enabled` |
+| `plugin update` | `<插件 ID> --source <目录> [--dry-run] [--yes]` | 把已装插件升到源目录里的新版本，流水线与 `install` 同一套：解析校验、包哈希、版本与方言冲突、复制到 `installed/<插件 ID>/<版本>/`、逐家厂商写目录。差别在版本规则与失败时的去处：源目录 manifest 的 ID 必须与命令给的一致；新版本号要与活动版本不同、也不能是已装版本（版本行不可变）；信任级别按新包的 runtime 推断，不接受 `--trust`；启停状态跟随插件，不被升级改变；活动指针只在版本行入库那一步切，包或目录写不进去时旧版本仍可服务（复制过去的目录删掉）。不给 `--yes` 时先打印计划再返回错误（退出码 1），不静默不动；`--dry-run` 不复制也不写库。写一条 `update` 审计，权限有变化时另写一条 `permissions`。 | 与 `plugin install` 同形（首行按「已更新 / 将更新」写），`--json` 字段也同形：`id`、`name`、`version`、`kind`、`runtime`、`trust`、`target`、`package_sha256`、`permissions`、`providers`、`dry_run`、`enabled` |
+| `plugin rollback` | `<插件 ID> --version <已装版本>` | 把活动版本切回一个装过的旧版本，并按那个版本重写厂商目录事实。目标必须是已装版本、且不是当前活动版本；先读包（读不动就拒，切过去网关也加载不进来）与方言冲突，再切活动指针、再写目录；目录写失败把活动指针改回原版本，避免「活动版本指着一份没写回目录事实的包」。没有 `--dry-run`。写一条 `rollback` 审计，权限有变化时另写一条 `permissions`。 | 确认行（从哪个版本到哪个版本、包目录、重写了几家厂商）与下一步 `plugin doctor`、`plugin reload`；`--json` 含 `id`、`from`、`to`、`package_dir`、`providers` |
+| `plugin verify` | `[<插件 ID>] [--all]` | 只读校验，不改库、不开沙箱：活动版本、版本记录、manifest 可读、方言静态登记（不与内置方言、也不与已装插件撞车）、运行时与安装时记的一致、manifest 哈希、包哈希。`--all` 与插件 ID 互斥；不带 ID 时校验全部已装插件。任一项不通过退出码 1。与 `doctor` 的分工：`verify` 只看静态事实，随时可跑；`doctor` 会写状态、开沙箱并试登记方言。 | 逐个插件一段（`ok` / `fail` 标记加检查项名与说明）；`--json` 是数组，每项 `name`、`ok`、`checks`（每项 `name`、`ok`、`detail`） |
+| `plugin logs` | `<插件 ID> [--level debug\|info\|warn\|error] [--since <RFC3339 或时长>] [--limit N] [--follow]` | 读 `plugin_logs`（每个插件保留最近 500 条，按时间倒序）。`--limit` 默认 50，要正数；`--since` 收 RFC3339 时间或 `1h`、`30m` 这类时长；`--follow` 每秒按自增 ID 取新行，Ctrl-C 退出。插件 ID 不存在时报错并列出已装 ID。 | 表格（时间 / 级别 / 消息）；没有符合条件的行为一行提示；`--json` 是数组，每项 `id`、`level`、`hook`（当前恒为空串）、`message`、`at` |
+| `plugin reload` | `[<插件 ID>]` | 读 `<数据目录>/lax.pid`（`lax serve` 启动时写、退出时删），给那个进程发 `SIGHUP`：serve 重读插件表并整表换掉方言注册表，在途请求继续用换表前取到的方言。`SIGHUP` 不能只换一个，带插件 ID 只做存在性校对，输出里写明实际是整表重载。pid 文件不在、内容不是进程号或进程已退出时报错并给出下一步（删掉旧 pid 再启动 serve），不猜进程号。审计给每个会被加载的插件各写一条 `reload`（`actor=cli`；带插件 ID 时只给那一个写，实际动作仍是整表重载）。 | 确认行（pid、重载了哪些插件）与下一步 `plugin logs`；`--json` 含 `pid`、`plugins` |
+| `plugin config get\|set\|unset` | `get <插件 ID> [键]`；`set <插件 ID> <键> <值> [--stdin]`；`unset <插件 ID> <键>` | 读写 manifest 的 `options`：`set` 按声明的 `type`（`string` / `number` / `boolean`）与 `enum` 校验，写进 `plugin_options.value_json`；`--stdin` 从标准输入读值（去掉末尾换行，上限 64 KiB）；`get` 没写过的键回落到 manifest 的 `default`，一个都没写过时列出全部声明；`unset` 幂等，本来没设过也退出 0，并说明现在生效的是哪个默认值。键必须在活动版本的 manifest 里声明过，否则报错并列出可用键。取值只落库，运行中的沙箱要继续用新值仍要 `plugin reload`。 | `get` 全量：表格（配置项 / 取值），`--json` 为 `{plugin, options}`；单键：`<键> = <值>`，`--json` 为 `{plugin, key, value, declared}`；`set`：`--json` 为 `{plugin, key, value, stored}`；`unset`：`--json` 为 `{plugin, key, removed}` |
+| `plugin ls` | `[--enabled]` `--json` | 一行一个已装插件。读 `plugins` 行，厂商与方言数从磁盘上的活动版本现读：包读不动时退回安装时入库的 manifest 快照（厂商还看得见，方言数记 0）。状态取 `plugins.state`：`ok`、`disabled`、`tampered`、`failed`（上次启动加载带代码的插件失败，原因在 `last_error`）。`--enabled` 只列启用的。 | 表格（ID / 版本 / 类型 / 运行时 / 信任 / 状态 / 厂商 / 方言数）；一个插件都没有时给一条 `lax plugin install <目录>` 提示；`--json` 每项 `id`、`version`、`kind`、`runtime`、`trust`、`state`、`enabled`、`providers`、`dialect_count`、`last_error` |
+| `plugin show` | `<插件 ID>` `--json` | 显示一个插件：库里的 manifest 原文（安装当时的样子，手改目录不会改它）、权限、已装版本与活动版本、每家厂商的路由与方言、方言冲突、状态与最近错误、最近 5 条审计与最近 5 条日志。插件 ID 不在库里时报错并列出已装的 ID 与最接近的一个。 | 文本（插件行、信任、状态、包目录、权限、版本、厂商分块、冲突、最近审计、最近日志、manifest 原文）；`--json` 含 `manifest`、`permissions`、`versions`、`providers`（每项 `id`、`name`、`base_url`、`routes`、`dialects`、`models`）、`dialects`、`state`、`last_error`、`conflicts`、`audit`（每项 `id`、`version`、`action`、`actor`、`result`、`error`、`at`）、`logs`（每项 `id`、`level`、`hook`、`message`、`at`） |
+| `plugin enable\|disable` | `<插件 ID>` | 改 `plugins.enabled` 与 `state`，重启或 `plugin reload` 之后生效（方言表整表装配，见 5.17）。写一条 `enable` / `disable` 审计。停用把状态写成 `disabled`，最近一次错误原样保留（它说明上次为什么被挡下来）；启用把状态写回 `ok`，但 `tampered` 不会因此洗掉——包被改过这件事只有 `plugin doctor` 的哈希对上才能翻回去。 | 确认一行（插件 ID、版本、状态）与下一步；`--json` 含 `id`、`version`、`enabled`、`state`、`last_error` |
+| `plugin rm` | `<插件 ID> [--purge]` | 删库里的插件行、全部版本、配置项、它带来的方言绑定与它自己的厂商（连带这些厂商的路由、模型目录、绑定与别名）。归属按 `providers.plugin_id` 与方言 ID 的 `<插件 ID>/` 前缀判，且只删 `source='plugin'` 的绑定：手写与回填的行留着。指向这些厂商的账号不删，但与 `provider rm --force` 一样停用（`last_error` 写明重新安装后 `account enable` 可恢复）。包目录默认保留，`--purge` 一起删。写一条 `remove` 审计。 | 确认一行（清掉几个版本、几条方言绑定、几家厂商）；`--json` 含 `removed`、`versions`、`dialect_bindings`、`providers`、`purged`、`package_dir` |
+| `plugin doctor` | `[<插件 ID>]` | 检查包完整性、manifest 哈希、包哈希、方言登记与状态；`moejs` 插件多两项：沙箱能否打开（入口语法、缺文件在这里露出来）与入口导出了哪几个钩子。不带 ID 时检查全部启用的插件；注册表按 ID 顺序累积，后面的插件与前面的撞名会在这里露出来。哈希与安装时记的不一致就把 `state` 写成 `tampered` 并列出两个哈希的前 12 位，网关不再加载它；哈希已经对上时把 `tampered` 恢复成 `ok`（状态只由宿主写，插件改不了自己的状态）；上次启动写成 `failed` 的那一行在本次全部检查通过后也翻回 `ok`。有检查未通过时退出码 1。 | 逐个插件一段（`ok` 或 `fail` 标记加检查项名与说明）；`--json` 是数组，每项 `name`、`ok`、`checks`（每项 `name`、`ok`、`detail`） |
 | `model sync` | `[--provider 厂商]` `[--account 账号]` `[--endpoint <路径>]` | 对选中的账号 GET 上游模型列表：地址按厂商的 `models_path` 覆盖、该账号的默认协议那条路由的 `models_path`、同厂商按协议名排序的第一条非空 `models_path` 的顺序取，都没有时按 `base_url` 后缀猜；凭据头跟「实际取到这条路径的那条路由」的协议走，不是账号的默认协议（见 5.7）。`--endpoint` 只影响这一次调用，值是相对账号的 `base_url` 的完整路径，也可以是整条地址（见 5.8；相对路径只规整，`v1/models` 与 `//v1//models/` 都可用；整条地址直接访问、不再拼 `base_url`），给了就压过厂商覆盖与路由，作用于被选中的每个账号；传空值或只有斜杠是用法错误，整条地址缺主机名、scheme 不是 http(s) 同样是用法错误（退出码 2，文案指出缺什么），不需要临时覆盖就整个去掉这个参数；解析 `{data:[{id}]}`、`{models:[{…}]}` 与顶层数组三种形状（见 5.7），按名字排序去重，空列表算该账号失败。结果写「目录 + 该账号可达性」（见 5.13）：名字进 `provider_models`（同步只说明这个名字存在，不写长度、价格与能力位），该账号在 `account_models` 里的这些名字标 `access='allowed'`；已有的行只改可达性，`http_status`、`error`、`checked_at` 与协议发现一律保留，这一轮清单里没出现的行也不删——可达性只由探活结论改动。抓取走 `gateway.SyncModelsWithEndpoint`，写库走 `store.ReplaceModels`，cli 不自己拼 SQL。某个账号失败时其余账号照常处理完 | 表格（账号 / 厂商 / 模型 / 新增 / 备注）与下一步 `model probe` 的提示；`--json` 是数组，每项 `account`、`provider`、`models`、`added`、`error`（只有失败才有） |
 | `model probe` | `[--provider 厂商]` `[--account 账号]` `[--sync]` `[--model 模型]` `[--protocol 协议]` `[--limit N]` `[--concurrency N]` `[--max-age 时长]` `[--refresh]` | 逐账号对每个模型发一条 `max_tokens=1` 的请求判定可用性，结果写 `account_models.access`（`allowed` / `forbidden` / `missing`；`error` 不再由这一轮探活写出，没拿到判定时保留原值），协议发现另写 `protocol`，每次上游调用同时写一行 `requests`（见 5.5）。选号本来就只读 `access='allowed'`（见 5.13），探活因此不再回写另一份模型清单：探完一条，这个账号能不能用这个模型当场就有答案。跳过规则不变：`allowed`、`forbidden`、`missing` 且 `checked_at` 在 `--max-age`（默认 `24h`）以内的模型跳过，不发上游请求、不写库、不出现在输出里；`error` 旧行与 `checked_at` 为 0 的照常探；`--refresh` 或 `--max-age 0` 忽略新鲜度全部重探。没有模型行或带 `--sync` 时先同步；`--model` 只探一个模型名，`--limit` 截断的是跳过之后剩下的待探模型，`--concurrency` 默认 4 且不超过待探模型数；`--protocol` 只探这一条协议（候选就是它一个，不读已发现协议、不读目录声明、不取厂商默认协议），收 `anthropic`、`openai`、`responses`、`gemini`、`systemone`、`embeddings`、`speech`、`transcriptions` 与线协议全名；它用来只验一条路，例如模型已声明 systemone 时 `--protocol systemone`；待探模型被全部跳过时一条上游请求都不发，库里已有的 `allowed` 行照旧算数，这个账号因此算作已满足；任一账号出现 401 即停止后续账号并返回错误（已经探完的行留在库里，凭据被拒的那条不写可达性、保留原值，下一轮重探）；所有账号库里都零 `allowed` 时退出码 1，错误信息带本次探活数与跳过数，并说明可达性已记录、`access` 为 `forbidden` / `missing` 的模型不会进候选 | 表格（账号 / 模型 / 状态 / HTTP / 耗时 / 备注）与该账号的「本次探活 N 个 / 跳过 M 个」、可用 / 无权 / 不存在 / 失败计数与「可达 N 个」（这个账号库里 `access='allowed'` 的行数），有未判定的模型时另多一项「未判定 N」，一项都没有时这一项不出现（输出形状不多变）；零可用的账号改说一句「库里没有可用模型；可达性已记录，`access` 为 forbidden / missing 的模型不会进候选」，不再说「模型列表保持原样」——探活的结论现在直接就是选号依据；`--json` 是数组，每项 `account`、`model`、`status`、`http_status`、`latency_ms`、`message`，只含本次被探的模型，计数只出现在人读输出里；没拿到判定（连接层失败重试之后、429/5xx、本地编码或构造失败）的那一行 `status` 是空串、`message` 写清原因，可达性保持原值（见 5.7）。人读输出在 stderr 用单行原地刷新（`\r`）打实时进度，形如 `ds1 探活中 37/94  deepseek-v4.1-flash`：账号名、已完成 / 待探总数、最近完成的那个模型（并发大于 1 时显示刚回来的那个），被跳过的模型不计入总数；账号探完补一个换行，随后照旧打印汇总行与表格。进度只在 stderr 是终端时开，非终端（管道、CI、测试）与 `--json` 一个字节都不打，标准输出始终只有结果 |
+| `model dialect ls\|set\|unset` | `ls [<模型>] [--provider <厂商>]`；`set <模型> <操作> <方言 ID> [--provider <厂商>]`；`unset <模型> <操作> [--provider <厂商>]` | 读写 `model_operations` 的方言绑定（见 5.16、5.17）。`ls` 按模型名、操作排序，不给模型名就列全部；`set` 是覆盖语义（同一个 `(厂商, 模型, 操作)` 再写一次就是改绑），写 `source='manual'`，操作只收宿主认识的五个；`unset` 删不到时报错并提示用 `ls` 看现有绑定。`--provider` 不给时按目录里的模型名唯一确定，模型出现在多家厂商目录里时报错并要求指定。非语音操作绑到插件方言时 `set` 会当场提醒：提醒文案说网关会拒绝，但当前实现里 hook 方言可以承接这些操作（对话响应能解回，向量化的响应解不回来，见 5.17），声明式方言绑非语音操作仍在安装时被拒；绑宿主方言不提醒。 | `ls` 表格（模型 / 厂商 / 操作 / 方言 / 来源 / 更新时间），一条都没有时给一条 `model capability add` 的示例；`--json` 是数组，每项 `model`、`provider`、`operation`、`dialect`、`source`、`updated_at`；`set` 的 `--json` 是同一形状的一行；`unset` 的 `--json` 含 `model`、`provider`、`operation`、`removed` |
 | `model alias set` | `<别名> <目标>` | 覆盖语义：同一个别名再写一次就是改目标（`created_at` 不动），不存在就新建，不报错也不留旧行。参数个数不对、别名或目标为空（含只有空白）是用法错误（退出码 2，打出用法行）；名字里的控制字符、别名等于目标、别名与真实模型名同名，判定都在 `store.SetModelAlias` 这一处（见 5.12）。遮蔽真名是运行失败（退出码 1），文案由 store 给（写清命中的是哪个账号或哪家厂商的目录、下一步换个别名还是改哪一处），cli 原样带出、不另写一份规则。写完再解析一次：成环与超过 8 跳当场报出来，文案说明这一行已经进库并给出查看与撤掉两条命令，不等到请求时才炸。目标可以暂时没有任何账号提供：先把别名写好，之后加账号即生效 | 确认一行（`已设置别名 <别名> → <目标>`）与下一步 `lax model alias ls`；`--json` 含 `alias`、`target`、`resolved`（解析到的真实模型名）、`ok` |
 | `model alias unset` | `<别名>` | 删不到时报错并列出当前有哪些别名（多半是别名写错了），退出码 1：没删掉而静默当成功，会让人以为客户端那个名字已经能解析。一条别名都没有时把下一步写成设置一条的命令。参数个数不对与空值是用法错误（退出码 2） | 确认一行（删掉的是哪个别名、还剩几条）；`--json` 含 `alias`、`removed`、`remaining` |
 | `model alias ls` | `[<别名>]` `--json` | 不给别名就列全部（按别名升序），给了就只列这一条；别名不在表里时报错并列出已有的（退出码 1），不把写错一个字母显示成「一条别名都没有」。能不能解析问 `store.ResolveModelAlias`，cli 不自己走链：链断了（成环、超过 8 跳）时状态写「不可解析」，解析列写 store 的原文——它带着是哪几条串在一起，照着就能找到要改的那一条。别名链解析到真名才算可解析，「目标眼下没有账号提供」不影响这一列（那是请求到达时 404 的事，见 5.12）。一条别名都没有时输出一行提示与一条 `model alias set` 示例 | 表格（别名 / 目标 / 状态 / 解析）；`--json` 是数组，每项 `alias`、`target`、`resolved`（解析到的真实模型名，不可解析时为空串）、`ok` |
 | `model price set` | `<模型> [--provider 供应商] [--account 账号] [--in N] [--out N] [--cache-read N] [--cache-write N] [--tts-char N] [--audio-second N]` | 写模型单价（默认为每百万 token 的浮点，`--tts-char` 是每百万字符、`--audio-second` 是每秒，0 是合法值，负数是用法错误、退出码 2），价格归属见 5.13。两个作用域互斥：给 `--account` 写该账号在这个模型上的覆盖价（账号必须有这个模型的可达性行，否则报错并提示先 `model sync` 或 `model probe`），否则写厂商级标价（`--provider` 给定时用它，不给时按模型名唯一确定供应商，多于一家的时报错并列出候选）。只写命令行上给过的那几项，没给的留空（表示继承），不做「一次写四个」。模型不在目录里时报错并提示先同步或探活。同名模型出现在多家供应商的目录里、又没给 `--provider` 时是用法错误（退出码 2），文案列出候选供应商并给出带 `--provider` 的命令形状。 | 确认一行（作用域、模型、写入的几项价）与下一步 `model ls`；`--json` 含 `model`、`provider`、`account`（账号级才有值）、`price_in`、`price_out`、`price_cache_read`、`price_cache_write`、`price_tts_char`、`price_audio_second`（未写的为 null） |
 | `model price unset` | `<模型> [--provider 供应商] [--account 账号] <字段> [<字段>...]` | 清掉某一项或几项：字段是 `in`、`out`、`cache-read`、`cache-write`、`tts-char`、`audio-second`，一次可给多个，重复的只处理一次。账号级清掉表示回到厂商级标价（不是「免费」），厂商级清掉表示这一项未知。要清的那一项本来为空时不报错（幂等），输出说明「本来就没有」。未知字段、带 `--` 前缀、大小写不符报错并列出可用字段。 | 逐项确认 + 剩余几项；`--json` 含 `model`、`provider`、`account`（账号级才有值）、`cleared`、`unchanged`（两者都用字段名）、`remaining`（这一行还剩几项有价） |
-| `model capability add\|set` | `<模型> [--provider 厂商] [--capability <能力>]... [--voices <音色[,音色...]>] [--audio-formats <格式[,格式...]>]` | 声明模型能用于哪些端点与可用取值。`add` 把取值并进现有集合（幂等），`set` 用整份新列表替换命令行给过的那几项（没给的字段不动）。能力位取 `chat`、`embedding`、`speech`、`transcription`；音色与格式是任意可见字符串（中文音色名合法）。模型必须先在目录里（`model sync`、`model add` 或探活写过一行），否则报错并给下一步。同名模型在多家目录里、又没给 `--provider` 时是用法错误，列出候选。 | 确认一行（合并后的能力、音色与格式）与下一步 `lax model capability ls`；`--json` 含 `model`、`provider`、`capabilities`、`voices`、`audio_formats` |
+| `model capability add\|set` | `<模型> [--provider 厂商] [--capability <能力>]... [--voices <音色[,音色...]>] [--audio-formats <格式[,格式...]>] [--dialect <方言>]` | 声明模型能用于哪些端点、可用取值与按操作的方言绑定。`add` 把取值并进现有集合（幂等），`set` 用整份新列表替换命令行给过的那几项（没给的字段不动）。能力位取 `chat`、`embedding`、`speech`、`transcription`；音色与格式是任意可见字符串（中文音色名合法）。模型必须先在目录里（`model sync`、`model add`、插件安装或探活写过一行），否则报错并给下一步。同名模型在多家目录里、又没给 `--provider` 时是用法错误，列出候选。`--dialect` 写的是方言绑定（`model_operations`）：按这个模型当时声明的语音能力选出操作名，`speech` → `speech.synthesize@1`、`transcription` → `speech.transcribe@1`，两项都声明就各写一条；没有声明任何语音能力时是用法错误（方言只绑在语音操作上）。只校验格式与前提，不检查方言是否注册：方言由网关启动时装配，写的时候可能还没装好。 | 确认一行（合并后的能力、音色与格式）与每个绑定一条「已把哪个操作绑到哪条方言」；`--json` 含 `model`、`provider`、`capabilities`、`voices`、`audio_formats`、`dialects`（操作名 → 方言 ID，只在本次给了 `--dialect` 时出现，否则整个字段省略） |
 | `model capability unset` | `<模型> [--provider 厂商] <字段> [<字段>...]` | 字段是 `capability`、`voices`、`audio-formats`，清掉对应列；本来为空不报错（幂等）。字段名先过白名单：写错一个就在动库之前拦住。 | 逐字段确认与现有声明；`--json` 同上 |
-| `model capability ls` | `[<模型>] [--provider 厂商]` `--json` | 列出已声明的模型（三项全空的不列）。 | 表格（模型 / 厂商 / 能力 / 音色 / 音频格式）；一条声明都没有时给一条 `model capability add` 示例 |
+| `model capability ls` | `[<模型>] [--provider 厂商]` `--json` | 列出已声明的模型（三项全空的不列）。不列方言绑定：这一组回答「声明了什么」，绑定存在另一张表，插件带来的方言用 `lax plugin show` 看。 | 表格（模型 / 厂商 / 能力 / 音色 / 音频格式）；一条声明都没有时给一条 `model capability add` 示例 |
 | `model price ls` | `[<模型>] [--provider 供应商] [--account 账号]` `--json` | 不给模型就列目录里所有有价格的模型行（按模型名升序），给了就只列这一个。文本五列：模型、供应商、输入价、输出价、缓存读 / 缓存写（空着写 `-`，两者都空时合成一列「回退输入价」），语音单价的 `tts-char` 与 `audio-second` 同样有值时各占一列。`--account` 给定时额外显示该账号覆盖后的有效价，两列并排：目录价与有效价。`--json` 每项含 `model`、`provider`、`price_in`、`price_out`、`price_cache_read`、`price_cache_write`、`price_tts_char`、`price_audio_second`、`effective`（给了 `--account` 时才有，同六个字段的合并结果）。 | 表格；一项价格都没有时输出一行提示与一条 `model price set` 示例 |
 | `usage` | `--since`、`--by account\|model\|day` | 汇总请求数、token（含思考与缓存读写）、语音字符数与音频秒数与估算花费；`--by account`、`--by model`、`--by day` 三种分组都给出思考、缓存读与缓存写的合计，语音两列同样合计（其余协议的这两列恒为 0），文本表格另有一行合计，成本已按 5.5 的公式计入缓存读写与独立的思考 token（思考在输出之外时才另计，口径见 5.5），合计之后在缓存 token 不为 0 时用一句话写明这个口径（未填缓存单价按输入价算） | 表格；`--json` 是数组，每项 `key`、`requests`、`in_tokens`、`out_tokens`、`reasoning_tokens`、`cache_read`、`cache_write`、`tts_chars`、`audio_seconds`、`cost` |
 | `log tail` | `-n`、`--follow` | 最近的请求记录；`--follow` 跟随。思考与输出分两列：思考是上游单独报的那一项（anthropic 没有独立字段，显示 0），0 显示 `0`。模型列把 `requests` 的两列都摆出来：客户端给的名字与解析别名后的真实模型名不同时写成 `别名 → 真名`（`fast → glm-4.6`），相同时只写一个名字，不引入恒定的重复；两个名字各自按 24 个显示宽度截断（与单名字时的上限相同），一次别名命中因此一眼能看出实际打了哪个模型（见 5.12） | 表格（时间、协议、模型、账号、状态、输入、输出、思考、缓存读、缓存写、耗时、错误）；`--json` 是数组，每项 `ts`、`inbound`、`outbound`、`model`、`model_used`、`account`、`http_status`、`ok`、`in_tokens`、`out_tokens`、`reasoning_tokens`、`cache_read`、`cache_write`、`tts_chars`、`audio_seconds`、`latency_ms`、`error`；`model` 是客户端给的名字（可能是别名），`model_used` 是解析后的真实模型名，两者相同时两个字段都有值、不做省略 |
@@ -181,10 +195,22 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | `doctor` | 无 | 检查配置文件、数据目录、数据库、端口 | 逐项 ok / fail |
 | `version` | 无 | 版本号 | 一行 |
 
+`plugin install --trust` 只对装进来的包做一次显式确认，取值与 manifest 的 `runtime` 一一对应；对不上是用法错误（退出码 2），不静默改成推断值。`plugin update` 没有这个参数：新版本的信任级别按它的 runtime 重新推断。
+
+| `--trust` | manifest 的 `runtime` | 结果 |
+| --- | --- | --- |
+| 省略 | `declarative` | 按 `declarative` 装：包里只有映射数据，不执行代码 |
+| 省略 | `moejs` | 按 `sandboxed` 装：进程内 JS 沙箱（见 5.17） |
+| `declarative` | `declarative` | 按 `declarative` 装 |
+| `sandboxed` | `moejs` | 按 `sandboxed` 装 |
+| `declarative` | `moejs` | 用法错误：带代码的包不能按声明式装 |
+| `sandboxed` | `declarative` | 用法错误：包里没有代码可跑，升不上去 |
+| `trusted-worker` 或其它取值 | 任意 | 用法错误：本版只有 `declarative` 与 `sandboxed` 两级 |
+
 退出码：`0` 成功；`1` 运行失败（含 `doctor` 有检查未通过、`call` 与 `decide` 非 2xx、`decide` 的模型不是 systemone 出站）；`2` 用法错误。
 错误信息写 stderr，`--json` 时结果写 stdout，两者不混在一起。
 
-`serve` 暴露八条入站路径：`/v1/messages`（anthropic）、`/v1/chat/completions`（openai-chat）、`/v1/responses`（openai-responses）、`/v1/embeddings`（openai-embeddings，向量化，只做同协议直通，见 5.15）、`/v1/audio/speech`（openai-speech）与 `/v1/audio/transcriptions`（openai-transcriptions，两条语音协议，只做同协议直通，见 5.16）、gemini 的 `/v1beta/models/{model}:generateContent` 与 `:streamGenerateContent`（以及向量化的 `:embedContent`），以及 `/v1/systemone`（systemone，非流式、模型名在请求体里，见 5.14），路径决定入站协议（见 5.2），都只收 POST，其余方法 405 并带 `Allow: POST`；另有两条只读的模型清单接口 `GET /v1/models` 与 `GET /v1/models/{id}`，给客户端发现模型名用，它们不是入站协议入口，只收 GET（见 5.2.1）。`/healthz` 的响应里带 `inbound` 与 `outbound` 两份协议清单，都是这八条协议（见 5.2.1）。未知路径返回 404，这与清单接口的两条路径不冲突：它们各自注册了处理器，`/v1/models/` 之后一律当作模型名，不会落进「未知路径」；这条「之后全部算模型名」有一个例外，来自 `http.ServeMux` 的路径规整（见 5.2.1）。
+`serve` 暴露八条入站路径：`/v1/messages`（anthropic）、`/v1/chat/completions`（openai-chat）、`/v1/responses`（openai-responses）、`/v1/embeddings`（openai-embeddings，向量化，只做同协议直通，见 5.15）、`/v1/audio/speech`（openai-speech）与 `/v1/audio/transcriptions`（openai-transcriptions，两条语音协议，出站按模型绑定的方言走直通或 chat 方言，见 5.16）、gemini 的 `/v1beta/models/{model}:generateContent` 与 `:streamGenerateContent`（以及向量化的 `:embedContent`），以及 `/v1/systemone`（systemone，非流式、模型名在请求体里，见 5.14），路径决定入站协议（见 5.2），都只收 POST，其余方法 405 并带 `Allow: POST`；另有两条只读的模型清单接口 `GET /v1/models` 与 `GET /v1/models/{id}`，给客户端发现模型名用，它们不是入站协议入口，只收 GET（见 5.2.1）。`/healthz` 的响应里带 `inbound` 与 `outbound` 两份协议清单，都是这八条协议（见 5.2.1）。未知路径返回 404，这与清单接口的两条路径不冲突：它们各自注册了处理器，`/v1/models/` 之后一律当作模型名，不会落进「未知路径」；这条「之后全部算模型名」有一个例外，来自 `http.ServeMux` 的路径规整（见 5.2.1）。
 
 ## 5 程序内部做什么
 
@@ -209,10 +235,10 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 
 ### 5.2 请求生命周期
 
-1. 收到入站请求，按路径定入站协议：`/v1/messages` 是 anthropic，`/v1/chat/completions` 是 openai-chat，`/v1/responses` 是 openai-responses，`/v1/embeddings` 是 openai-embeddings（向量化，只做同协议直通，见 5.15），`/v1/audio/speech` 是 openai-speech、`/v1/audio/transcriptions` 是 openai-transcriptions（语音，只做同协议直通，见 5.16），`/v1beta/models/{model}:generateContent` 与 `/v1beta/models/{model}:streamGenerateContent` 是 gemini（模型名从路径取、`url.PathUnescape` 还原，`:` 之后的后缀不算模型名的一部分，流式标志也由后缀定），`/v1beta/models/{model}:embedContent` 也是 gemini（向量化动作，见 5.15），`/v1/systemone` 是 systemone（模型名在请求体里，见 5.14），其余路径返回 404。请求体解析失败返回 400，错误消息前缀协议名。定好协议后记下模型名与开始时间。
+1. 收到入站请求，按路径定入站协议：`/v1/messages` 是 anthropic，`/v1/chat/completions` 是 openai-chat，`/v1/responses` 是 openai-responses，`/v1/embeddings` 是 openai-embeddings（向量化，只做同协议直通，见 5.15），`/v1/audio/speech` 是 openai-speech、`/v1/audio/transcriptions` 是 openai-transcriptions（语音，出站形状由模型绑定的方言决定，见 5.16），`/v1beta/models/{model}:generateContent` 与 `/v1beta/models/{model}:streamGenerateContent` 是 gemini（模型名从路径取、`url.PathUnescape` 还原，`:` 之后的后缀不算模型名的一部分，流式标志也由后缀定），`/v1beta/models/{model}:embedContent` 也是 gemini（向量化动作，见 5.15），`/v1/systemone` 是 systemone（模型名在请求体里，见 5.14），其余路径返回 404。请求体解析失败返回 400，错误消息前缀协议名。定好协议后记下模型名与开始时间。
 2. 按模型名取候选账号：`enabled=1`、模型列表包含该模型（列表为空表示该账号不提供任何模型，不参与选号）、冷却已过。没有任何账号声明提供该模型时返回 404，错误消息说明「没有账号提供模型 X」并提示下一步：`lax model ls` 看现有清单、`lax model probe` 探活；错误类型按入站协议取：anthropic 入站是 `not_found_error`，两条 openai 入站是 `invalid_request_error`。有账号提供但全部在冷却或被停用时不算这种情况，仍按第 8 步返回 503。
 3. 按 `priority` 升序，同一会话（见 5.3）优先沿用上次的账号。
-4. 解密凭据，按该账号该模型的有效出站协议构造上游请求：入站协议与有效出站协议相同则直通，否则经中间表示转换（见 5.4）。上游路径、凭据头、请求体编码都跟有效出站协议走。上游请求头不从零开始也不照抄入站：先放 `Content-Type` 与流式时的 `Accept`，再用 `setAuth` 按出站协议设凭据头，再透传客户端白名单头（见 5.11），最后叠厂商附加头（5.10）。
+4. 解密凭据，按该账号该模型的有效出站协议构造上游请求：入站协议与有效出站协议相同则直通，否则经中间表示转换（见 5.4）。上游路径、凭据头、请求体编码都跟有效出站协议走。语音是例外：出站协议由方言给出（见 5.16），不是 `EffectiveProtocol` 的派生值。上游请求头不从零开始也不照抄入站：先放 `Content-Type` 与流式时的 `Accept`，再用 `setAuth` 按出站协议设凭据头，再透传客户端白名单头（见 5.11），最后叠厂商附加头（5.10）。
 5. 发上游请求，读响应头。上游返回 429、5xx，或一条 HTTP 响应都没拿到（连接建立失败、请求发不出去、响应体没读完），且尚未向客户端写出任何字节时，把该账号打入冷却（档位见 5.3）并换下一个候选。
 6. 已开始向客户端输出后不再换号；上游中断则向客户端发一个错误事件并结束本次请求。直通与转换两条路径在这里行为一致，判据同为「有没有见到上游的收尾帧」：收尾帧没到（读到这里就干净 EOF 也算）就是断流，两条路径都补一个错误帧加该入站协议的合法结尾，并把这一次请求记成失败；收尾帧到齐的完整流不追加任何字节。收尾帧按帧里的 `type` 字段或 SSE 的 `event` 名判定，不按字节子串（见 5.4）。
 
@@ -564,11 +590,27 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 
 探活结果反过来成为选号依据：一个账号库里至少一个模型是 `allowed`，5.2 与 5.3 的候选集合就按这些行算，不再有第二份账号级清单要同步。取全库而非本次结果，是因为 `--limit` 与 `--model` 都可能只探一部分：只探两个却把另外三个之前探通的模型从选号里除掉，属于退化。某账号零个可用模型时它自然不进候选，目录行与可达性行（`forbidden` / `missing` / `error`）都留着，等下一轮探活或手工改可达性时不用重建；一次网络抖动因此不会把账号清空成「什么都不提供」，也不会让它接下任何模型名。所有账号都没探出可用模型时退出码 1。
 
+插件目录与方言绑定。目录的 `source` 列有四个来源：`sync`、`manual`、`probe`，加插件安装写的 `plugin`（见 5.8）。插件目录不另开一张模型表，写的是同一张 `provider_models`，另有四条规则：
+
+- 只插不改：已有行带着同步或探活写下的上下文长度、价格与能力位，覆盖等于把这些列清空（`TestApplyPluginCatalogFreshInstall` 一并钉住重复安装的幂等）。
+- 按操作声明的能力位并进目录（只在 `supported` 为 true 时；`unknown` 与缺失都不算支持）：`speech.synthesize@1` → `speech`，`speech.transcribe@1` → `transcription`，只并进不清；方言里写的 `formats` 与 `voices` 同样并进 `audio_formats` 与 `voices`（`seedModelCapabilitiesTx`）。语音入站的第一道闸读的是这张表（见 5.16）：不写它，插件声明了语音操作也照样被本地 400。
+- 客户端可见名与上游名不同时写一条别名（`model_aliases`），相同就不写：指向自己的别名会挡住以后给这个名字加别名。
+- 按操作的方言绑定写在 `model_operations`，主键 `(厂商, 模型, 操作)`（见 6）。操作名是第一版固定的五个；只有 `speech.synthesize@1` 与 `speech.transcribe@1` 走方言分发，其余三个按协议走各自的路径（见 5.4、5.14、5.15）。
+
+绑定的写入口与读入口：
+
+- 手工写是 `store.SetModelOperation`，命令面入口 `lax model capability add|set --dialect`（见第 4 节），`source` 记 `manual`。
+- 插件安装写同一条，`source` 记 `plugin`；手写的行（`source` 不是 `plugin`）已绑到别的方言时插件安装整笔失败，文案给出改绑命令。
+- 启动回填写 `source='declared'`（回填规则见 5.16）。
+- 读入口是 `store.ModelOperation(厂商, 模型, 操作)`，只有语音分发用它（见 5.16）。探活与选号的候选协议仍按 `account_models.protocol`、目录里的 `protocols` 与厂商默认协议算，方言绑定不参与：绑定回答「上游是什么形状」，选号回答「打哪个账号」。
+- 没有列出绑定的命令：`model capability ls` 只列能力位、音色与格式，`plugin show` 列插件带来的方言 ID，逐模型看绑定要读 `model_operations`。
+
 ### 5.8 厂商与路由
 
 出站地址不由代码里的厂商表决定，也不靠 `base_url` 末尾有没有 `/v1` 猜后缀：同一个 `base_url` 上不同协议的路径并不一样，猜出来的地址对其中一种协议一定是错的。deepseek 的 chat 在 `/v1/chat/completions`，anthropic 在 `/anthropic/v1/messages`；commandcode 的 base 是 `https://api.commandcode.ai/provider/v1`，chat 在 `/chat/completions`、anthropic 在 `/messages`，模型列表在 `/models`。
 
 - `providers` 一行提供 `base_url`、备注、一列默认协议与一列模型列表路径覆盖；协议的路径细节一律在 `provider_routes` 上，厂商行不存转发路径。
+- `providers.plugin_id` 记这一行是哪次插件安装建起来的，空串表示用户自己配的（`provider add`、种子与旧库补建的厂商都是空串）。插件安装对同名厂商分三种：没有这一行就建（地址、备注、`plugin_id` 一起写）；有且地址相同、`plugin_id` 为空就只补归属，其余列不动；地址不同则整笔失败，文案给出「对齐 manifest 里的 `base_url`」与「先 `provider rm` 再把厂商交给插件管」两条出路；已经属于另一个插件同样整笔失败。插件带来的路由按声明式方言的 `request.path` 推导，一条带路径的方言一条路由；hook 方言没有声明式 `request`，按线协议的默认端点建。同一家厂商的两条方言落在同一条线协议上时只建第一条；请求时方言可以用 `Plan.Path` 换一条相对路径，但域名与凭据仍只能由厂商路由给（见 5.17）。同名路由已存在但路径不同、同名别名已指向别的目标，同样整笔失败。删除插件时按这一列找到它自己的厂商，连带删掉路由、模型目录、绑定与别名（见第 4 节的 `plugin rm`）。
 - `provider_routes` 按 `(厂商, 协议)` 存完整路径 `path` 与模型列表路径 `models_path`。`path` 是相对路径时，完整地址是 `base_url` 去掉末尾斜杠后直接拼它；`path` 是整条地址时直接用它，不做任何猜测与补全（两种写法见下一条）。`path` 里可以出现 `{model}` 占位符，两种写法都支持：拼好的完整地址在发请求之前把 `{model}` 换成转义后的模型名（见 5.9）。规整只合并斜杠，花括号与冒号原样落库。
 - 路由的 `path`、路由与厂商的 `models_path`、`model sync --endpoint` 三处收两种写法，判定与解释只有一份（`store.IsFullAddress` 与 `store.NormalizeEndpoint`）：含 `://` 的是整条地址，用 `url.Parse` 校验 scheme 为 `http` 或 `https`、主机名非空，规整时 scheme 归一成小写、路径合并重复斜杠去尾斜杠，授权部分、查询串与 `#` 之后原文保留，使用时不再拼 `base_url`；不含 `://` 的是相对路径，走 `NormalizePath` 拼厂商的 `base_url`（账号行不再存地址）。整条地址让同一厂商的不同协议落在不同域名上：openai 兼容端点在 `https://openai.example.com/v1/chat/completions`、anthropic 端点在 `https://claude.example.com/v1/messages`，此时 `base_url` 可以不写（见下一段的「整条地址路由不需要 base_url」）。`https://`、`https:///x` 这类只有 scheme 没有主机名的写法报错，`ftp://host/x` 这类其它 scheme 同样报错，错误文案用中文指出缺什么；写入侧（`CreateProvider`、`SetProvider`、`AddProvider`）碰到坏整条地址整笔拒绝、一个字段都不落库，读取侧（`joinEndpoint`、`modelsEndpoint`）把存量的脏值原样交给 `http.NewRequest` 报错，不改写用户数据。
 - 相对路径只规整、不拒绝输入，规则是 `store.NormalizePath`（由 `store.NormalizeEndpoint` 在取值不含 `://` 时调用）：去掉首尾空白、把连续斜杠合并成一个、补上恰好一个前导斜杠、去掉末尾斜杠；空串、只有斜杠、只有空白的输入一律视为空。`v1/chat/completions`、`//v1//chat//completions`、`/v1/chat/completions/` 因此是同一个地址，`--openai`、`--models-path`、`model sync --endpoint` 都不再要求「必须以 `/` 开头」。写入侧（`CreateProvider`、`SetProvider`、`AddProvider` 的 `path` 与 `models_path`）与读取侧（拼转发地址、拼模型列表地址、`--endpoint`）走同一个入口：库里存的永远是规整形态，读取侧拼地址时再过一遍，历史库里的不规整写法因此也拼得出正确地址。理由：路径是照着上游文档抄的，多一个或少一个斜杠是写法差异，不是用法错误；为此报错只会让人先改命令再重敲一遍，得到的仍是同一个地址。真正的用法错误是非空字段规整之后为空（删除语义归 `provider unset`），以及整条地址校验不过，那两条仍然报错。
@@ -779,7 +821,7 @@ gemini 的原生接口（Generative Language API 的 `generateContent`）与另�
 
 模型的事实（上下文长度、最大输出、支持哪些协议、能力位、厂商级价格）属于上游，与哪个账号去访问无关；账号只该回答「我能不能用这个模型」以及在个别模型上「我这里的能力/价格与目录不同」。把这两件事混在一张表里，会出现「同一个模型在三个账号下有三份重复元数据」，改一次要改三处。
 
-- `provider_models(provider, model)` 存模型事实：`source`（`sync` / `manual` / `probe`）、`context_window`、`max_output`、`protocols`（该模型支持的协议集合，逗号分隔）、`capabilities`（能力位，逗号分隔）、四个价格列（厂商级默认价）、`updated_at`。主键 `(provider, model)`。
+- `provider_models(provider, model)` 存模型事实：`source`（`sync` / `manual` / `probe` / `plugin`）、`context_window`、`max_output`、`protocols`（该模型支持的协议集合，逗号分隔）、`capabilities`（能力位，逗号分隔）、四个价格列（厂商级默认价）、`updated_at`。主键 `(provider, model)`。
 - `protocols` 的取值口径：只存四条线协议全名（`anthropic`、`openai-chat`、`openai-responses`、`gemini`，即 `store.IsWireProtocol` 认的那些），按这个固定顺序排列、去重，**空串表示上游没声明**。来源只有 `model sync` 从清单条目里认出来的那几个端点名与方法名（见 5.7 的「元数据来源」），未识别的写法一律不计。这一列只用来给探活排候选的顺序（见 5.7），不改变「这条路由存不存在」：候选范围仍由厂商的 `provider_routes` 决定。
 - `capabilities` 只写上游真的声明过的两类：`chat`（出现 `supportedGenerationMethods` 里的 `generateContent`，或 `supported_endpoints` 里的 `/chat/completions`）与 `embedding`（出现 `embedContent`、`batchEmbedContents` 或端点 `/embeddings`）。**空表示未知，不表示不支持**：响应里没有这两个键时留空，`supported_parameters` 这类形状各家不同的字段仍不解析。能力位目前只有一个消费者——探活按它决定打对话还是打向量化（见 5.15），其余用途等有需求再接。同理，`context_window`、`max_output` 为空是「上游没给」，不是 0 也不是「没有限制」。
 - `account_models(account_id, model)` 存账号侧的两件事：**可达性**（`access` 取 `allowed` / `forbidden` / `missing` / `error`，另有 `http_status`、`error`、`checked_at`）与**覆盖值**（`protocol`、`context_window`、`max_output`、四个价格列，NULL 表示继承目录）。主键 `(account_id, model)`。
@@ -873,38 +915,121 @@ TypeSafe 的 System One（Jev）不是对话：输入一个 `state` 加一组带
 
 ### 5.16 语音（TTS 与 ASR）
 
-语音有两条线协议，报文都按 OpenAI 的形状：`openai-speech`（文本转语音）与 `openai-transcriptions`（语音转文本）。它们不进中间表示：音频字节与消息序列之间没有可定义的映射。出站有两种，按厂商与模型声明决定：
+语音有两条线协议，报文都按 OpenAI 的形状：`openai-speech`（文本转语音）与 `openai-transcriptions`（语音转文本）。它们不进中间表示：音频字节与消息序列之间没有可定义的映射。出站形状不由网关里的厂商分支决定，而由模型绑定的**方言**决定。
 
-1. **同协议直通**：厂商声明了语音路由（真正的 OpenAI audio 端点），只换 `model`，响应字节原样。
-2. **chat 适配**：厂商没有语音路由、但模型声明了语音能力、且有效协议是 `openai-chat` 时，把语音请求编成 chat completions 方言发给上游，再把 chat 响应解成音频字节或转写结果。MiMo 的 `mimo-v2.5-tts` 与 `mimo-v2.5-asr` 就是这种形状（实测：文本在 `messages` 里、音频用 `audio` 对象描述、响应里的音频是 base64）。
+三件事分开记：
 
-两个方向都有适配：
+- 能力位（`provider_models.capabilities` 的 `speech` / `transcription`）：这个模型能不能用于这个端点。
+- 方言绑定（`model_operations` 的 `(厂商, 模型, 操作)`）：这个模型的上游是什么形状。
+- 厂商路由（`provider_routes` 的 `(厂商, 协议)`）：这条请求发到哪个地址。
+
+操作名固定且不含线协议名：`speech.synthesize@1`、`speech.transcribe@1`。语音两条由方言分发到插件提供的映射；`chat.complete@1`、`embeddings.create@1`、`system.decide@1` 既可以绑宿主方言（宿主用 `internal/translate` 编解码、直通或走 systemone），也可以绑 hook 方言（宿主编好上游报文后交给它打补丁、解响应，见 5.17）；声明式方言只能承载语音两条。
+
+内置方言十条，随二进制发布，不经 `plugin install` 安装。前四条是语音专用的形状，后六条是「宿主自己实现」的线协议方言：绑定它们只表示这条操作由宿主编解码，`Prepare` 与 `Decode` 不会被调用。
+
+| 方言 | 操作 | `upstream_wire` | 实现 |
+| --- | --- | --- | --- |
+| `lax/openai-speech@1` | `speech.synthesize@1` | `openai-speech` | 同协议直通：宿主原样转发，方言的 `Prepare` 与 `Decode` 被调用即报错 |
+| `lax/openai-transcriptions@1` | `speech.transcribe@1` | `openai-transcriptions` | 同上 |
+| `lax/mimo-chat-speech@1` | `speech.synthesize@1` | `openai-chat` | Go 实现的 chat 方言 |
+| `lax/mimo-chat-asr@1` | `speech.transcribe@1` | `openai-chat` | Go 实现的 chat 方言 |
+| `lax/anthropic@1` | `chat.complete@1` | `anthropic` | 宿主编解码（`internal/translate`） |
+| `lax/openai-chat@1` | `chat.complete@1` | `openai-chat` | 同上 |
+| `lax/openai-responses@1` | `chat.complete@1` | `openai-responses` | 同上 |
+| `lax/gemini@1` | `chat.complete@1` | `gemini` | 同上 |
+| `lax/openai-embeddings@1` | `embeddings.create@1` | `openai-embeddings` | 同协议直通 |
+| `lax/systemone@1` | `system.decide@1` | `systemone` | 同协议直通 |
+
+插件目录里的模型可以直接引用后六条（`plugin.IsHostDialect` 认 `lax/` 前缀）：对话上游因此能靠插件装起来，路由按 `plugin.DefaultRoutePath` 推默认端点，请求仍然走宿主自己的编解码与直通，不执行任何插件提供的映射。对话操作可以绑到插件自己的 **hook** 方言上（`runtime` 是 `moejs`，宿主编好报文后交它打补丁、解响应，见 5.17）；绑到声明式方言上不行，`plugin install` 直接拒绝（见第 4 节）。
+
+`lax/` 前缀保留给内置方言，插件不能冒用（`plugin.Registry.RegisterPluginDialect` 与方言 ID 校验两处都拦）。插件方言是另一条来路：`dialects.json` 里的 `DialectDecl` 由 `plugin.CompileDialect` 编成声明式方言；`implementation.prepare` 与 `implementation.decode` 都写 `hook` 的方言只能由 `moejs` 插件承载：一半声明式一半 hook 的写法安装时被拒，沙箱打不开或入口没导出相应钩子时网关不登记它（见 5.17）。声明式方言能表达哪些形状见本节末的「声明式方言的边界」；可声明的 operation × `upstream_wire` 组合由 `internal/plugin` 的配对表判（`speech.synthesize@1` 与 `speech.transcribe@1` 除自己的语音线协议外也允许 `openai-chat`，理由见 `lessons/2026-10-31-wire-operation-table.md`）。
+
+方言接口只有五个方法：`ID`、`Operation`、`UpstreamWire`、`Prepare(Input) (Plan, error)`、`Decode(Input, Response) (Result, error)`。宿主负责选号、凭据、路由、超时、重试、错误形状与记账，方言只描述形状：`Plan` 是上游请求体（`Body` 字节或 `JSON` 对象）加一个可选的 `Path`——`Path` 只能改相对路径（以 `/` 开头、不含 `..` 段），域名与凭据仍由厂商路由与宿主注入；`Result` 是媒体字节、纯文本或一条**出站线协议形状**的 JSON 响应体，外加一份用量事实。能逐块解上游流的方言另实现 `StreamDialect`（见 5.17）。`plugin` 包不读库、不读宿主配置，网络只经沙箱给插件的 `lax.http.request`（见 5.17），也不 import 别的内部包；依赖方向是 `gateway`、`store`、`cli` → `plugin`。
+
+#### 按绑定分发
+
+`internal/gateway/speech_dialect.go` 在每次语音请求之前定出站：
+
+1. 入站协议换成操作名（`plugin.OperationForInbound`），读 `store.ModelOperation(厂商, 模型, 操作)`。厂商取候选账号的 `provider`，模型名取解析别名后的名字。
+2. 方言的 `upstream_wire` 与入站协议相同 → 同协议直通：只换 `model`，请求体其余字节与响应字节原样（TTS 的 JSON 只改一个字段，ASR 的 multipart 只重写 `model` 那个 part 并重生成 boundary）。
+3. `upstream_wire` 是 `openai-chat` → 由方言 `Prepare` 编上游请求、`Decode` 解上游响应，双向翻译：
 
 ```
-用户 → POST /v1/audio/speech (audio) → 适配 → POST /v1/chat/completions (chat) → 上游
-用户 ← 音频字节 (audio)            ← 适配 ← chat completion (chat)             ← 上游
+用户 → POST /v1/audio/speech (openai-speech) → 方言 Prepare → POST /v1/chat/completions (openai-chat) → 上游
+用户 ← 音频字节 / 文本 (openai-speech)       ← 方言 Decode ← chat completion (openai-chat)             ← 上游
 ```
 
-**能力声明是入站放行的唯一依据。** 一个模型能不能用于语音端点，由 `model capability` 写进目录的能力位回答（`speech` / `transcription`），与协议无关：`deepseek-v4.1-flash` 没有声明 `speech`，`POST /v1/audio/speech` 请求它在本地就 400，一条上游调用都不发。目录同步拿不到这类事实（上游清单只给模型名），所以必须手工声明；音色列表（`voices`）与音频格式（`audio_formats`）同样只能声明，客户端靠它们知道能传什么，`/v1/models` 也把它们带出去。
+4. 没有绑定 → 400，文案给 `lax model capability add <模型> --capability <能力> --dialect <方言>`，并列出当前注册的方言 ID。
+5. 绑定的方言没注册（插件被停用或删除）→ 400，**明确不回落**：静默回落到别的方言会把一次配置删除变成一次上游形状变化。文案指向 `lax plugin ls` 与重新绑定一条现有方言。
+6. 方言要打的那条厂商路由没声明（`speechRouteFor`）→ 400，文案给 `lax provider set <厂商> <协议>=<路径>`。
+
+语音路径不看 `Plan.Path`：地址只按厂商路由走（`Plan.Path` 只在非语音入站的插件方言上生效，见 5.17）。让语音方言覆写地址会把「按绑定选形状」变成「插件选域名」，而它的收益只是省一行配置。插件的方言声明里的 `request.path` 在安装时被推导成厂商路由（见 5.8），发请求时用的就是它。
+
+#### 绑定从哪来
+
+- 插件安装：模型目录里的 `operations` 每条写一行 `model_operations`，`source='plugin'`（见 5.7、5.8）。
+- 手工绑：`lax model capability add|set <模型> --capability <能力> --dialect <方言>`，`source='manual'`。`--dialect` 不检查方言是否注册，只检查模型声明了语音能力。
+- 直接改绑：`lax model dialect set <模型> <操作> <方言 ID>` 也写 `source='manual'`，同一个 `(厂商, 模型, 操作)` 覆盖；`lax model dialect ls` 列现有绑定，`unset` 删掉一条（见第 4 节）。
+- 启动回填：`lax serve` 调 `store.BackfillSpeechDialects`，把 `provider_models` 里已有 `speech` / `transcription` 能力声明、但还没有绑定的模型补成绑定，`source='declared'`。选法与改造前语音出站的判定一致：厂商声明了对应那条语音路由（`path` 非空）就绑同协议直通的 `lax/openai-speech@1` / `lax/openai-transcriptions@1`，否则绑 MiMo 的 chat 方言。幂等，第二次返回 0；只补缺的、不覆盖已有绑定；新增条数打一行「补齐语音方言绑定 N 条」，失败只打一行警告、不阻止启动。
+
+MiMo 的迁移因此是「代码搬家 + 一次回填」：网关不再认识 MiMo。`internal/gateway/speech_adapter.go` 已删除，请求构造与响应解码在 `internal/plugin/speech.go` 的两个内置方言里；`internal/gateway/speech_capability.go` 只保留能力位、音色与音频格式的校验（`checkSpeechInbound`）。旧库里声明过 `speech` 能力的模型由回填补上绑定，行为与迁移前一致。
+
+#### 能力声明是入站放行的唯一依据
+
+一个模型能不能用于语音端点，由 `model capability` 写进目录的能力位回答（`speech` / `transcription`），与协议无关：`deepseek-v4.1-flash` 没有声明 `speech`，`POST /v1/audio/speech` 请求它在本地就 400，一条上游调用都不发。目录同步拿不到这类事实（上游清单只给模型名），所以必须手工声明或由插件目录带进来；音色列表（`voices`）与音频格式（`audio_formats`）同样只能声明，客户端靠它们知道能传什么，`/v1/models` 也把它们带出去。
 
 | 项 | TTS（`openai-speech`） | ASR（`openai-transcriptions`） |
 | --- | --- | --- |
 | 入站路径 | `POST /v1/audio/speech` | `POST /v1/audio/transcriptions` |
 | 直通请求体 | JSON：只把 `model` 换成解析别名后的真名，其余字段原样 | `multipart/form-data`：只换 `model` 那个 part 的值，其余 part 原样拷贝（含音频字节），boundary 重生成 |
 | 直通响应 | 音频字节与 `Content-Type` 原样 | JSON 或 SSE 原样 |
-| 适配请求体 | `{"model":…,"messages":[…],"audio":{…}}`：`input` → assistant 正文（数组按换行拼接）、`instructions` → user 风格指令（没有就省略）、`voice` → `audio.voice`、`response_format` → `audio.format`（mp3→mp3、wav→wav、pcm→pcm16），`speed` 丢弃 | `messages[0].content` 里唯一的 `input_audio` part（data URL + base64），`language` → `asr_options.language`，`prompt`、`temperature` 丢弃（实测上游拒绝 text part：`ASR request must not include text parts`） |
-| 适配响应 | `choices[0].message.audio.data` 解 base64 后作音频字节写出，`Content-Type` 按 `response_format`；没有 `audio.data` 时 502（说明模型不是 TTS 模型） | `choices[0].message.content` 按 `response_format` 包：json → `{"text":…}`、text → 纯文本、verbose_json → 带 `task`、`language` 与 `duration`（取 `usage.seconds`） |
-| 用量 | 直通：`tts_chars` = `input` 的字符数，token 三列记 0；适配：按上游报的 token 记 `in_tokens` / `out_tokens` / 缓存读（`prompt_tokens_details.cached_tokens`），`tts_chars` 只作展示 | 直通：`audio_seconds` = 响应里的 `usage.duration` 或顶层 `duration`，取整到最近一秒；适配：`audio_seconds` 取上游 `usage.seconds`，token 同样入账 |
-| 计价 | 直通按 `price_tts_char`（每百万字符）；适配按 token 四项，`tts_chars` 不进花费 | 直通按 `price_audio_second`（每秒）；适配按 token 四项，`audio_seconds` 不进花费 |
 | 错误体 | openai 的 `invalid_request_error` / `not_found_error` / `authentication_error`（5.2） | 同左 |
 | 探活 | 应错结构 `{"model":<模型>,"input":null}`，按错误码判定（见下） | 应错结构：`multipart/form-data` 里只放 `model`、不放 `file`，按错误码判定 |
 
-能力声明与拒绝规则。`model capability add` 把取值并进现有集合（幂等），`set` 替换命令行给过的那几项，`unset` 清字段，`ls` 列出已经声明的模型：
+#### MiMo 的 chat 方言
+
+MiMo 的 `mimo-v2.5-tts` 与 `mimo-v2.5-asr` 把语音做成 chat completions 的一种形状：文本在 `messages` 里、音频用 `audio` 对象描述、响应里的音频是 base64（实测）。这条形状由 `lax/mimo-chat-speech@1` 与 `lax/mimo-chat-asr@1` 描述：
+
+| 入站 | 出站 |
+| --- | --- |
+| TTS `input` | `messages` 里 assistant 的正文（数组按换行拼接） |
+| TTS `instructions` | `messages` 里 user 的风格指令（没有就省略） |
+| TTS `voice` | `audio.voice` 原样；空则省略 |
+| TTS `response_format` | `audio.format`：mp3→mp3、wav→wav、pcm→pcm16 |
+| TTS `speed` | 丢弃（上游没有这个参数） |
+| ASR `file` | `messages[0].content` 里唯一的 `input_audio`（data URL + base64） |
+| ASR `language` | `asr_options.language`（auto / zh / en） |
+| ASR `prompt`、`temperature` | 丢弃（上游拒绝 text part） |
+| ASR `response_format` | 只影响本地包装：json → `{"text":…}`、text → 纯文本、verbose_json → 带 `task`、`language`、`duration` |
+
+TTS 的 `choices[0].message.audio.data` 解 base64 后作为音频字节写出，`Content-Type` 按 `response_format`；没有 `audio.data` 时 502（说明这个模型不是 TTS 模型）。ASR 取 `choices[0].message.content` 按 `response_format` 包装，`duration` 取 `usage.seconds`。
+
+#### 声明式方言的边界
+
+插件的方言由数据描述，能表达的只有这么多：
+
+- 请求侧节点的来源键只有 `const`、`input`、`model`、`option`（`model` 第一版只能读 `upstream_id`），修饰键只有 `map`、`default`、`omit_if_empty`，其余是普通对象与数组。
+- 没有表达式、正则替换、循环、脚本片段，也不读环境变量、文件、网络与凭据原文。
+- `input` 的字段白名单只有语音那八项：`text`、`voice`、`format`、`instructions`、`language`、`speed`、`model`、`chars`。
+- 响应侧只有 `mode: "passthrough"`（响应体就是结果，`mime` 可映射）与 `mode: "json_pointer"`（RFC 6901 取一个字段，`encoding` 取 `base64`、`text` 或 `json`），`usage` 只能把上游字段指到规范用量字段上。
+- 求值上限：嵌套 32 层、序列化后 1 MiB。
+
+边界之外的转换要写 hook 方言（`runtime: "moejs"`，见 5.17）。由此有三条现在就要写清的取舍：
+
+- 同协议直通不经过声明式映射。入站协议与方言的 `upstream_wire` 相同时走第 2 条路，`request` 与 `response` 的声明不执行；声明式方言在这种组合里提供的是厂商路由、绑定与能力位。
+- 对话操作没有声明式映射的节点：`input` 白名单只有语音那八项，给非语音操作绑声明式方言会在安装时被拒。
+- 对话操作有 `Input.Body`：宿主编好出站报文后交给 hook 方言打补丁，方言也能从零构建报文；`Input.Messages` 还空着（宿主没填），要读消息只能解析 `ctx.body`。响应侧约定见 5.17。
+
+#### 本地拒绝与转码边界
+
+`model capability add` 把取值并进现有集合（幂等），`set` 替换命令行给过的那几项，`unset` 清字段，`ls` 列出已经声明的模型：
 
 ```bash
 lax model capability set mimo-v2.5-tts --provider mimo --capability speech \
-    --voices "mimo_default,冰糖,茉莉,苏打,白桦,Mia,Chloe,Milo,Dean" --audio-formats mp3,wav,pcm16
-lax model capability set mimo-v2.5-asr --provider mimo --capability transcription --audio-formats wav,mp3
+    --voices "mimo_default,冰糖,茉莉,苏打,白桦,Mia,Chloe,Milo,Dean" --audio-formats mp3,wav,pcm16 \
+    --dialect lax/mimo-chat-speech@1
+lax model capability set mimo-v2.5-asr --provider mimo --capability transcription --audio-formats wav,mp3 \
+    --dialect lax/mimo-chat-asr@1
 ```
 
 本地拒绝的几种情况（全部不发上游请求）：
@@ -912,8 +1037,10 @@ lax model capability set mimo-v2.5-asr --provider mimo --capability transcriptio
 | 情况 | 结果 |
 | --- | --- |
 | 模型没有对应的 `speech` / `transcription` 能力 | 400，文案给 `model capability add` 的完整命令 |
+| 模型没有这一操作的方言绑定 | 400，文案给带 `--dialect` 的 `model capability add`，并列出已注册的方言 ID |
+| 绑定的方言没注册 | 400，明确不回落，文案指向 `lax plugin ls` |
 | `voice` 非空且不在声明的音色里 | 400，列出可用音色 |
-| `response_format` 不在 `audio_formats` 里 | 400，列出可用格式 |
+| `response_format` 不在 `audio_formats` 里（`pcm` 与 `pcm16` 按同一项比较） | 400，列出可用格式 |
 | `response_format` 是 `opus` / `aac` / `flac` | 400：需要转码，本版不做 |
 | `stream_format: "sse"` | 400：需要把上游音频重包成 OpenAI 事件，本版不做 |
 | ASR 请求里的 `stream: true` | 400：同上 |
@@ -921,11 +1048,13 @@ lax model capability set mimo-v2.5-asr --provider mimo --capability transcriptio
 | ASR 的 `language` 不是 `auto` / `zh` / `en` | 400：上游只认这三个取值 |
 | 入站音频不是 wav / mp3（ogg/opus、silk） | 400：本版不转码，文案说明先在客户端转换 |
 
-路由：真正的 OpenAI audio 厂商靠厂商路由声明，`provider add/set --speech <路径或整条地址>` 与 `--transcriptions`，退出用 `provider unset` 加线协议全名；迁移种子给 `openai` 种上两条，其它厂商按各自文档手工声明。没有语音路由不一定是错：模型声明了能力且有效协议是 `openai-chat` 时走适配（见上），否则 400 并说明只能经 chat 适配。协议与能力的分工：**能力是模型事实**（能不能用于这个端点），**路由是地址事实**（直通打哪里）。
+路由：真正的 OpenAI audio 厂商靠厂商路由声明，`provider add/set --speech <路径或整条地址>` 与 `--transcriptions`，退出用 `provider unset` 加线协议全名；迁移种子给 `openai` 种上两条，其它厂商按各自文档手工声明，说 chat 形状的厂商由插件或内置方言覆盖。协议与能力的分工：**能力是模型事实**（能不能用于这个端点），**方言绑定是形状事实**（上游怎么表达），**路由是地址事实**（打哪里）。
 
 multipart 的转发不改整体字节：只在 `model` 那个 part 上重写值，音频 part 用 `io.Copy` 搬到新报文，不额外复制一份（请求体本身已按 32 MiB 上限读入内存，这一点与对话路径一致）。boundary 重生成而不是复用入站的：复用要把原 boundary 抄进新报文，抄错一个字符上游就只能报「找不到 boundary」。`model` 的别名解析在重写时做一次，与其余协议同一个入口。
 
-用量口径的选择：直通路径下 TTS 的音频时长要解析容器（mp3 帧头、ogg granule、ADTS 头、wav 头），而 `response_format` 有六种取值，等于在网关里塞六个解析器；主流厂商的 TTS 计费按字符（OpenAI、ElevenLabs、Google、Azure 一致），按字符数也正好只读入站 JSON。ASR 反过来，主流按音频时长（whisper 按分钟），上游自己在响应里报 `duration`。适配路径不同：上游按 token 计费（实测 MiMo 一次 TTS 报 125~161 个 prompt token），所以花费走 token 四项，`tts_chars` 与 `audio_seconds` 只记录展示、不进花费，否则同一笔账会被 token 价与字符价各算一次。两边都缺价时记 null，与 token 计价的规则一致（5.5）。
+用量口径：直通路径 TTS 的 `tts_chars` 取入站 `input` 的字符数、token 三列记 0，花费按 `price_tts_char`；直通 ASR 的 `audio_seconds` 取响应里的 `usage.duration` 或顶层 `duration`（取整到最近一秒），花费按 `price_audio_second`；chat 方言把上游报的 token 记进 `in_tokens` / `out_tokens` 与缓存读（`prompt_tokens_details.cached_tokens`），花费按 token 四项。选择直通按字符与秒数的理由是：直通路径下 TTS 的音频时长要解析容器（mp3 帧头、ogg granule、ADTS 头、wav 头），而 `response_format` 有六种取值，等于在网关里塞六个解析器；主流厂商的 TTS 计费按字符（OpenAI、ElevenLabs、Google、Azure 一致），按字符数也正好只读入站 JSON。ASR 反过来，主流按音频时长（whisper 按分钟），上游自己在响应里报 `duration`。chat 方言不同：上游按 token 计费（实测 MiMo 一次 TTS 报 125~161 个 prompt token），所以花费走 token 四项，`tts_chars` 与 `audio_seconds` 只记录展示、不进花费，否则同一笔账会被 token 价与字符价各算一次。方言能覆盖字符数：`Decode` 报出 `Usage.TTSChars` 时以它为准，否则用宿主从入站数出的字符数。两边都缺价时记 null，与 token 计价的规则一致（5.5）。
+
+#### 探活
 
 探活不用真实任务，发一条结构错的请求，靠上游的错误码判定：
 
@@ -939,11 +1068,174 @@ multipart 的转发不改整体字节：只在 `model` 那个 part 上重写值�
 
 这条规则的代价要写清：不校验 key 的上游对任何请求都回 400，这个 400 只证明路由存在、证明不了凭据有效。因此语音的 `allowed` 只表示「端点可达」，`model show` 与 `doctor` 不把它当作凭据通过的证据；真要验凭据仍是 `account test` 的模型列表那条路。这是「A public model list proves nothing about credentials」的同类问题，记进 `LESSONS.md`。
 
+探活按协议走，不读方言绑定：声明了 `speech` / `transcription` 的模型这一版仍按对话请求探（`max_tokens=1`），因为方言探活需要另一套应错文体与一条能落到方言的分发；可达性用 `model add <模型> --account <账号> --protocol openai-chat` 手写，`model ls` 显示「待探活」，选号不受影响。对这类模型跑 `model probe` 之前要想清楚：探活的 400 会把一行 `allowed` 改写成 `forbidden`；别自动跑，或者先把方言探活补上。下一版把方言探活做进 `probeOnce`（发一条 `messages:[assistant "ping"]` 加错格式的 TTS 应错请求），规则与直通探活相同。
+
 目录：端点名 `/audio/speech` 折成 `openai-speech` 协议与 `speech` 能力位，`/audio/transcriptions` 折成 `openai-transcriptions` 与 `transcription`；能力位与音色、音频格式一起进 `/v1/models`（见 5.2.1），客户端不必猜能传哪些值。
 
-探活：声明了 `speech` / `transcription` 的模型这一版仍按对话请求探（`max_tokens=1`），因为方言探活需要另一套应错文体；可达性用 `model add <模型> --account <账号> --protocol openai-chat` 手写，`model ls` 显示「待探活」，选号不受影响。对这类模型跑 `model probe` 之前要想清楚：探活的 400 会把一行 `allowed` 改写成 `forbidden`；别自动跑，或者先把方言探活补上。下一版把方言探活做进 `probeOnce`（发一条 `messages:[assistant "ping"]` 加错格式的 TTS 应错请求），规则与直通探活相同。
+CLI：`lax speak` 发一条 TTS 请求，`lax transcribe` 发一条 ASR 请求；`model capability add/set/unset/ls` 维护能力、音色、格式与 `--dialect` 绑定，`model dialect ls/set/unset` 直接读写绑定（见第 4 节）；`call` 不接这两条，它发的是对话。`model add --protocol`、`model probe --protocol`、`provider --default-protocol` 接受 `speech` / `transcriptions` 两种写法（线协议全名 `openai-speech` / `openai-transcriptions` 也认）。
 
-CLI：`lax speak` 发一条 TTS 请求，`lax transcribe` 发一条 ASR 请求；`model capability add/set/unset/ls` 维护能力、音色与格式声明（见第 4 节）；`call` 不接这两条，它发的是对话。`model add --protocol`、`model probe --protocol`、`provider --default-protocol` 接受 `speech` / `transcriptions` 两种写法（线协议全名 `openai-speech` / `openai-transcriptions` 也认）。
+### 5.17 插件运行时：沙箱、对话方言与生命周期
+
+插件有两种运行时，安装时由 manifest 的 `runtime` 决定，信任级别由它推断（判定表见第 4 节）：
+
+| 运行时 | 信任 | 执行方式 | 能承载的操作 |
+| --- | --- | --- | --- |
+| `declarative` | `declarative` | 不执行代码，宿主按 `dialects.json` 的映射求值（见 5.16） | 语音两条；对话、向量化与决策操作只能引用 `lax/` 宿主方言 |
+| `moejs` | `sandboxed` | 每次 hook 在进程内 goja Runtime 里执行插件脚本 | 任意操作：语音两条走 `Prepare` / `Decode`，非语音入站走「宿主编好报文 → 方言打补丁 → 方言解响应」 |
+
+`moejs` 的 manifest 另有几条硬要求（`internal/plugin/manifest.go`）：`kind` 必须是 `provider`（变换与鉴权插件还没有调用点）；`entry` 必填、相对包根、落在包内；`permissions.filesystem`、`process`、`env` 只能是 `none`；`network.mode` 只能是空、`none` 或 `host-proxy`（`host-proxy` 时 `hosts` 不能为空、`schemes` 只能写 `https`、裸 `*` 拒收、`redirects` 只能是空、`none` 或 `same-host`）；`secrets.mode` 只能是空、`none` 或 `host-inject`。`plugin_versions.runtime` 记下安装当时那一个，网关启动按这一列选加载路径：与包里的 manifest 对不上就不加载（让包按自报的 runtime 走等于让它自己选信任级别），并把 `state` 写成 `failed`。
+
+#### 执行模型
+
+一个插件版本一个沙箱实例（`plugin.OpenSandbox`），同一个版本的 hook 串行执行：同一段流的 `decode_stream` 复用同一个 Runtime，并发跑会让插件的模块级变量互相踩。
+
+- `prepare_request` 与 `decode_response` 每次调用新建一个 goja Runtime，入口模块与它 import 的文件每次都重新求值，模块级变量因此不跨调用。
+- 同一段上游流的 `decode_stream` 复用同一个 Runtime 与上一块返回的 `state`；`Final` 之后两者都丢弃，下一个流从干净的 Runtime 开始；方言报 `done` 只丢 `state`，Runtime 留到流真正收尾。某一块解失败时同样丢 `state`（半条流的状态留着只会错得更晚）；被中断过的 Runtime 作废，下一块重建。
+- 打开沙箱时编译并执行一次入口模块（上限 2 s），确认导出了哪几个 hook：`prepare_request`、`decode_response`、`decode_stream` 至少要有一个，缺 hook 不算加载失败（可以只实现解码侧）。
+- 返回值的 JS → Go 转换是一次 JSON 深拷贝：函数、循环引用与 `__proto__`、`constructor`、`prototype` 键一律拒绝（后者会把键名注入原型），嵌套上限 32 层。
+- 沙箱没有事件循环：microtask 在调用返回前已经跑完，async hook 返回的 Promise 只可能是已完成；一直挂着的 Promise 报 `plugin_error`。
+
+每次 hook 的上限与实现：
+
+| hook | 默认 | 上限 | 说明 |
+| --- | --- | --- | --- |
+| `prepare_request` | 100 ms | 2 s | 编请求，不联网时应在这个量级 |
+| `decode_response` | 2 s | 30 s | 解整包响应，允许搬 base64 音频 |
+| `decode_stream` | 100 ms | 2 s | 每块一次，块大小 4 KiB |
+| 加载入口模块 | 2 s | — | 顶层死循环在这一步就报 `plugin_timeout` |
+
+超时用 `time.AfterFunc` 加 `Runtime.Interrupt` 实现：计时器触发时给正在跑的 Runtime 打一个中断标记，这一次调用按 `plugin_timeout` 报错，该 Runtime 不再复用。中断只在 JS 代码里生效，卡在原生 Go 调用（例如 `lax.http.request` 正在等上游响应）时不会立刻返回，要等原生调用自己结束——**一个 100 ms 的 hook 可能实际占用几秒**。goja 没有堆上限 API，所以沙箱**没有内存硬上限**；能限制的只有四道字节闸门：
+
+| 闸门 | 上限 | 位置 |
+| --- | --- | --- |
+| 单个源文件 | 4 MiB | `maxModuleBytes` |
+| 一个插件的全部源文件 | 8 MiB，最多 64 个文件 | `maxModuleTotal`、`maxModules` |
+| 一次 hook 的返回值 | 8 MiB | `MaxHookOutputBytes` |
+| 注入 ctx 的音频、媒体与流块 | 8 MiB，超出只给空串并置 `truncated` | `sandboxInlineLimit` |
+| 一个插件的 `lax.cache` | 1 MiB | `cacheMaxBytes` |
+
+#### 模块边界
+
+插件包里的 `.js` 按受限 ESM 写，加载时逐 token 改写成 CommonJS：每个文件包进 `(function(module, exports, __require){ … })`，`__require` 只认相对路径并落在插件根目录之内。不引入 JS 解析器，所以支持的写法就是下面这些，其余带行号报错：
+
+- `export function` / `export async function` / `export const|let|var` / `export class`；`export default` 一个对象（hook 放对象方法里）。
+- `import X from "./a.js"`、`import {a, b as c} from "./a.js"`、`import X, {a} from "./a.js"`、`import "./a.js"`（只求值副作用）。
+- import 路径必须是 `./` 或 `../` 开头的相对路径，要带扩展名，不能是目录，不能逃出包根。
+
+不支持的写法：`import * as`、裸模块名与 `node:` 内置模块、动态 `import()`、`import.meta`、`export *`、`export { … }`、顶层 `await`。hook 从默认导出对象的键上取（`export default` 也可以是一个具名函数，但函数上没有键可读，等于没有导出 hook）；具名导出与默认导出可以同时用。
+
+#### 注入的全局
+
+插件唯一的出口是 `lax` 对象、`console` 与 `URL`：
+
+| API | 行为 |
+| --- | --- |
+| `lax.log([level], message)` | 写一行日志，`level` 取 `debug` / `info` / `warn` / `error`，认不出按 `info`；单条 8 KiB 截断，换行替换成空格 |
+| `console.log` / `info` / `warn` / `error` | 同一入口，`log` 记 `info` |
+| `lax.now()` | Unix 毫秒 |
+| `lax.randomUUID()` | v4，走 `crypto/rand` |
+| `lax.base64.encode` / `decode` | 标准 base64；解不开抛 `invalid_input` |
+| `lax.sha256(text)` / `lax.hmacSHA256(text, key)` | 十六进制小写 |
+| `lax.error(code, message, {retryable?, details?})` | 造错误对象，由插件决定在哪 `throw`；未知码归一成 `plugin_error`；`details` 当前没有出口，既不回客户端也不落库 |
+| `lax.http.request({method?, url, headers?, body?, timeout_ms?})` | 控制面请求，返回 `{status, headers, body}`，`body` 是字符串 |
+| `lax.cache.get(ns, key)` / `set(ns, key, value[, ttl_ms])` / `delete(ns, key)` | 进程内缓存，见下 |
+| `lax.media.*` | 本版不可用：调用即抛 `plugin_error`（没有媒体引用通道，音频走 `ctx.input.audio_base64`） |
+| `URL` | 只做解析与格式化，不发请求 |
+
+不注入、并且显式从全局删掉的：`fetch`、`process`、`require`、`module`、`exports`、`Bun`、`child_process`、`XMLHttpRequest`、`WebSocket`、`fs`、`global`、`Buffer`、`setTimeout`、`setInterval`。插件读不到文件、进程、环境变量与凭据原文；`secrets.account` 只声明这个插件接受哪几种凭据（`api_key` / `bearer`），凭据头仍由宿主按账号注入，插件拿不到 key 原文。
+
+`lax.http.request` 的边界：manifest 必须声明 `permissions.network.mode = "host-proxy"` 与主机白名单；方法只收 GET、POST、PUT、PATCH、DELETE、HEAD；主机按精确名或 `*.example.com` 前缀通配匹配；只放行 https（`allowedURL` 里还有一条「http 仅限本机回环」的分支，但 manifest 校验只让写 `https`，所以走不到）；不跟随重定向（重定向会把已校验的主机换成白名单外的主机）；单次 15 s、每次 hook 最多 4 次、每次 hook 总共 30 s；响应体上限取 `permissions.network.max_control_body_bytes`，默认 1 MiB，超过就报错。
+
+`lax.cache` 是进程内缓存，按插件 ID 隔离，不落盘、重启即空：值必须先能转成 JSON，`ttl_ms` 为 0 表示不过期，一个插件所有命名空间加起来 1 MiB，沙箱 `Close` 时整插件清空。它不能当持久存储用。
+
+日志去两处：`plugin_logs` 一行加 `lax serve` 的一段输出。`plugin_logs.hook` 列当前恒为空串——日志入口拿不到正在跑的是哪个 hook，编一个比空着更误导。
+
+#### hook 的输入与返回值
+
+`ctx` 的字段固定：
+
+| 键 | 内容 |
+| --- | --- |
+| `abi` | `lax.plugin/v1` |
+| `operation` / `model` / `wire` / `stream` / `dialect` | 这次操作、上游模型名、出站线协议、客户端是否要流式、方言 ID（由包装层填，插件不需要自报） |
+| `input` | 归一后的输入：`text`、`voice`、`format`、`instructions`、`language`、`model`、`audio_container`、`chars`、`speed`、`audio_base64`、`audio_truncated` |
+| `options` | manifest 里声明的配置项取值（见下文的 `plugin config`） |
+| `limits` | `deadline_ms`、`max_input_chars`、`max_input_bytes`、`max_output_bytes`；对话与语音路径的输入输出上限都是 32 MiB，systemone 是 8 MiB；`deadline_ms` 与字符数当前都是 0 |
+| `body` | 宿主编好的上游请求体：能解成 JSON 就给结构化值，解不开给原始字符串 |
+| `messages` | 规范化的对话消息；**当前恒为 `null`**，宿主还没填这一项，要读消息只能解析 `body` |
+| `response` | 只在 `decode_response` 里有：`status`、`content_type`、`text`、`body`、`media_base64`、`media_truncated`；文本类 `Content-Type` 给 `text` 与 `body`，其它给 `media_base64` |
+| `chunk` / `state` | 只在 `decode_stream` 里有：`chunk` 是 `{seq, data, final, encoding, truncated}`，`state` 是上一块返回的值 |
+
+返回值形状：
+
+| hook | 返回 | 说明 |
+| --- | --- | --- |
+| `prepare_request` | `{path?, body?}` | `body` 可以是字符串（原样当请求体）、对象（当 JSON 报文）或 `{kind:"json", value:{…}}`；`path` 必须以 `/` 开头。`method` 与 `headers` 没有对应字段，给了只打一行警告并忽略 |
+| `decode_response` | `{result:{kind, mime?, text?, body_base64?, json?}, usage?}` | `kind` 取 `media`（`body_base64` 必填）、`text`（`text` 必填）或 `json`（`json` 必填）；`usage` 的键见下；`finish_reason` 没有对应字段，给了只警告 |
+| `decode_stream` | `{events:[…], state?, done?}` | `events` 是下面那张表里的事件；`state` 原样传回下一块；`done` 表示这条流结束，之后不再解 |
+
+`usage` 的键：`input_tokens`、`output_tokens`、`cached_input_tokens`、`cache_write_tokens`、`reasoning_tokens`、`total_tokens`、`audio_seconds`、`tts_characters`、`source`（`upstream` / `estimated` / `partial` / `none`）。计费只在宿主一侧按价格表算，方言没有金额概念。
+
+流事件：
+
+| `type` | 必填字段 | 作用 |
+| --- | --- | --- |
+| `text.delta` | `text` | 正文增量 |
+| `reasoning.delta` | `text` | 思考增量 |
+| `tool_call.start` | `id`、`name`，`arguments` 可选 | 工具块开始 |
+| `tool_call.delta` | `arguments` | 工具参数增量 |
+| `tool_call.end` | — | 工具块结束；编码器在换块或收尾时关块，不产生单独一帧 |
+| `usage` | `usage` | 用量，后到的覆盖先到的 |
+| `finish` | `reason`：`stop` / `length` / `tool_use` / `stop_sequence` | 收尾，带累计用量 |
+| `error` | `error` | 方言报错，按入站协议的错误增量下发（正文脱敏并截到 300 字符） |
+
+`index` 区分同一条流里的并行工具块：`tool_call.*` 事件把它带到 `translate.Delta.Index`，入站编码器按它分块。宿主读到干净 EOF 后再交一块 `Final: true`，方言可以在这一块里吐出攒着的半帧（最后一行没有换行）。
+
+插件抛错用 `lax.error(code, message)`：`invalid_input`、`unsupported_operation`、`unsupported_dialect`、`model_not_found`、`model_forbidden`、`auth_invalid`、`auth_expired`、`rate_limited`、`upstream_unavailable`、`upstream_timeout`、`upstream_protocol_error`、`plugin_error`、`plugin_timeout`、`plugin_plan_invalid`、`cancelled`、`internal`。未知码归一成 `plugin_error`；超时固定 `plugin_timeout`。
+
+#### 对话与流式方言
+
+非语音入站（含 gemini 与 systemone）按 `(厂商, 模型, 操作)` 读 `model_operations`：绑定为空或指向 `lax/` 宿主方言时由宿主编解码；指向插件方言时由 `internal/gateway/chat_dialect.go` 执行，绑定没注册就 400，**不回落**。
+
+请求侧分两步：
+
+1. 宿主照常拼出上游报文：直通只改 `model`，跨协议走 `translate.EncodeRequest`，地址、凭据头、客户端头与附加头都由宿主决定（见 5.4、5.10、5.11）。
+2. 方言在宿主的报文上打补丁。`Plan.Body` 非空就用它（通常是给宿主报文补了字段），否则 `Plan.JSON` 非 nil 时序列化成请求体（方言自己从零构建），两者都没有就是没改。请求头不采用方言给的值（`Plan` 也没有这个字段）：凭据注入只有宿主一份，让插件另开一个注入口，凭据的落点就变成两处。
+
+`Plan.Path` 这时参与地址选择，但只能改路径：必须以 `/` 开头、不能含 `..` 段与反斜杠；主机与 scheme 只能来自厂商 `base_url`。`{model}` 占位符与其它路由一样替换，gemini 这类把模型名放在路径里的厂商因此也能用。绝对地址被拒，理由与语音那边一样：一个写错的方言最多打错路径，不会把账号的 key 带到别的主机上。
+
+响应侧：非流式时方言返回 `Result`，宿主按 `Kind` 分派：
+
+- `ResultJSON`：方言给的是**出站线协议形状**的整条响应体（不是入站形状）。宿主 `translate.DecodeResponse(outbound)` 解析成中间表示，再 `translate.EncodeResponse(inbound)` 编成客户端协议。让方言按四种入站各编一遍既重复又容易漏字段，所以约定只描述上游那一种。只有四条对话入站（anthropic、openai-chat、openai-responses、gemini）认这条约定；其它入站返回 502。
+- `ResultText`：只允许 systemone 入站（决策协议的响应不是对话结构）；其它入站返回 502，对话客户端拿到一段纯文本只会解析失败。
+- `ResultMedia`：非语音路径不接受，与其它未知种类一样按 502 记（`chatDialectSuccess` 只认 json 与 text）；语音路径的结果由 `speechDialectSuccess` 另行处理（见 5.16）。
+
+流式时方言要实现 `StreamDialect`（`HookDialect` 在 `decode_stream` 导出时满足它）：宿主按 4 KiB 读上游，逐块交 `DecodeStream`，把事件翻成 `translate.Delta` 后由入站协议的流编码器发出。客户端要流式而方言没实现 `StreamDialect` 时在发上游请求之前就 400，不静默退回非流式；方言报 `finish` 之后宿主停止读上游，剩下的收尾帧不再解一遍；方言报 `error` 事件时那条错误增量按入站协议发给客户端；解流失败、上游流中断或流没走到收尾都按失败记（已经写出的字节收不回来，不换号）。
+
+失败关闭清单（要么在发上游请求之前拒绝，要么按失败记下；都不静默退回宿主编解码或非流式）：
+
+| 情况 | 结果 |
+| --- | --- |
+| 模型绑了未注册的插件方言 | 400，不回落宿主编解码，文案指向 `plugin ls` 与现有方言 |
+| 方言声明的 `UpstreamWire` 与模型的有效出站协议不一致 | 400，绑定与协议必须一致，否则补丁会落在另一条协议的报文上 |
+| 客户端要流式，方言没有实现 `StreamDialect` | 400，发上游请求之前 |
+| 声明式方言绑到非语音操作 | 安装时拒绝（`checkExecutableOperations`） |
+| `ResultJSON` 但入站不是四条对话协议 | 502 |
+| `ResultText` 但入站不是 systemone | 502 |
+| `ResultJSON` 解不成出站协议的响应体 | 502，文案带 `translate.DecodeResponse` 的原文 |
+| 方言给的 `path` 不是相对路径 | 502，请求没发出去；按 5xx 档冷却这个账号并换下一个候选 |
+| 方言解流失败 | 已写出的字节收不回来，记失败并且不换号、不落冷却 |
+| hook 超时或被中断 | 编请求或解整包响应时失败：502，按 5xx 档冷却这个账号并换下一个候选；解流时失败时已经向客户端写出了字节，按失败记、不重试 |
+
+#### 版本、重载与审计
+
+`plugins.active_version` 是唯一的活动指针，`plugin_versions` 的行不可变：升级（`plugin update`）装一个新版本号并把指针切过去，回滚（`plugin rollback`）只切指针并按那个版本重写厂商目录事实。活动指针只在版本行入库那一步切；包或目录写不进去时旧版本仍可服务。`plugin verify` 只看静态事实（哈希、运行时、方言声明），`plugin doctor` 会开沙箱、试登记方言并写 `tampered` / `failed` 状态。
+
+方言表整表装配，改插件之后要让正在跑的网关看见有两种办法：重启，或 `plugin reload` 给 `<数据目录>/lax.pid` 里的进程发 `SIGHUP`。`lax serve` 收到信号后重建注册表并 `gateway.SetDialects` 整表换掉，在途请求手里拿的是换表前取到的方言指针，继续用旧版本跑完。重载失败（插件表读不动）只打一行日志，当前注册表一个字不动。
+
+审计表 `plugin_audit` 只增不改，记录「谁在什么时候做了哪个动作、权限有没有变」：`install`、`update`、`rollback`、`remove`、`enable`、`disable`、`reload` 各一条，权限前后原文不同时再写一条 `permissions`（两边都要有原文才算：安装没有前一版，归在 `install` 那条里）。`actor` 是 `cli`（命令行敲的）或 `sighup`（serve 收到信号自己重载的）。审计写不进去只打一行警告：账没记上不该让一次已经完成的安装或卸载整体失败。`plugin show` 带最近 5 条审计与最近 5 条日志。
+
+`plugin config` 读写 manifest 的 `options`（`string` / `number` / `boolean`，字符串可以带 `enum`）：值落 `plugin_options.value_json`，键必须在活动版本的 manifest 里声明过；没写过的键回落到 `default`；`unset` 幂等。取值只落库，运行中的沙箱不会自己换：`secrets` 不走这里，配置项只放非敏感值。
 
 ## 6 数据模型
 
@@ -1028,7 +1320,7 @@ MySQL 的文本列在有默认值或主键时落成 `varchar(191)`：这是 GORM
 | --- | --- | --- |
 | `provider` | 文本，主键之一 | |
 | `model` | 文本，主键之一 | |
-| `source` | 文本 | `sync` / `manual` / `probe` |
+| `source` | 文本 | `sync` / `manual` / `probe` / `plugin`（插件安装写的行，见 5.7） |
 | `context_window` | 整数，可空 | NULL 表示不知道 |
 | `max_output` | 整数，可空 | NULL 表示不知道 |
 | `protocols` | 文本，默认空串 | 该模型支持的协议，逗号分隔 |
@@ -1076,6 +1368,7 @@ MySQL 的文本列在有默认值或主键时落成 `varchar(191)`：这是 GORM
 | `note` | 文本，默认空串 | 备注 |
 | `default_protocol` | 文本，默认空串 | 空串表示没有显式默认协议，按固定顺序回退（见 5.8） |
 | `models_path` | 文本，默认空串 | 厂商级模型列表覆盖，相对路径或整条地址，空串表示不覆盖 |
+| `plugin_id` | 文本，默认空串 | 这一行是哪次插件安装建起来的；空串表示用户自己配的（见 5.8）。删除插件时按它找到要一起清的厂商 |
 
 ### provider_routes
 
@@ -1156,6 +1449,103 @@ gemini 路由的 `models_path` 必须显式给：写入侧的默认值只推导 
 
 `migrations/` 目录留在仓库里但**不参与构建**（没有 `go:embed`），只作为搬迁用例的旧库样本：`TestMigrationChainFrom0001ToLatest` 用 `0001_init.sql` 到 `0008_provider_models_path.sql` 建一个真正的老库，再验证搬迁结果。新增或修改表结构不再写迁移文件，改 `model.go` 的 row 定义。
 
+### plugins
+
+一个已安装插件的当前状态（见 5.8、第 4 节的 `plugin` 一组）。一行一个插件，`id` 是 manifest 里的反向域名。
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `id` | 文本，主键 | 插件 ID，`lax.plugin.json` 里的 `id` |
+| `active_version` | 文本，默认空串 | 网关加载的版本；空串表示还没有活动版本 |
+| `kind` | 文本，默认空串 | `provider` / `transform` / `auth` |
+| `trust` | 文本，默认空串 | `declarative` 或 `sandboxed`；安装时由 manifest 的 `runtime` 推断，判定表见第 4 节 |
+| `enabled` | 布尔，默认 true | 停用的插件不进方言注册表 |
+| `state` | 文本，默认空串 | `ok` / `disabled` / `tampered` / `failed`；`tampered` 只由 `plugin doctor` 写，`failed` 由网关启动加载失败时写，两项都在检查全部通过后翻回 `ok` |
+| `source` | 文本，默认空串 | 包的来源，本版一律 `dir` |
+| `last_error` | 文本，默认空串 | 最近一次失败的原因；停用时保留 |
+| `installed_at` | 整数，默认 0 | 首次安装的 Unix 秒 |
+| `updated_at` | 整数，默认 0 | 这一行最后一次写入的 Unix 秒 |
+
+### plugin_versions
+
+已安装版本的不可变元数据（见第 4 节）。主键 `(plugin_id, version)`，只插不改：升级要换版本号，改哈希会让已经校验过的包对不上号。
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `plugin_id` | 文本，主键之一 | 插件 ID |
+| `version` | 文本，主键之一 | 三段数字版本 |
+| `abi` | 文本，默认空串 | manifest 的 `abi`，本版必须是 `lax.plugin/v1` |
+| `runtime` | 文本，默认空串 | `declarative` 或 `moejs`，安装时记下，网关启动按这一列选加载路径；与包里的 manifest 对不上时那个包不加载 |
+| `manifest_json` | 文本，默认空串 | `lax.plugin.json` 原文，安装当时的样子 |
+| `permissions_json` | 文本，默认空串 | 权限声明原文 |
+| `package_sha256` | 文本，默认空串 | 包目录的哈希，`plugin doctor` 用它判 `tampered` |
+| `manifest_sha256` | 文本，默认空串 | manifest 原文的哈希 |
+| `source` | 文本，默认空串 | 包的来源，本版一律 `dir` |
+| `signature_status` | 文本，默认空串 | 本版一律 `unverified`：没有签名与插件市场 |
+| `installed_at` | 整数，默认 0 | 安装的 Unix 秒 |
+
+### plugin_options
+
+一行插件配置项（见 5.17 的 `plugin config`）。安装时不写，`lax plugin config set` 写，`unset` 删；键必须在活动版本的 manifest 的 `options` 里声明过，值按声明的 `type` 与 `enum` 校验后以 JSON 原文落库。
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `plugin_id` | 文本，主键之一 | 插件 ID |
+| `key` | 文本，主键之一 | 配置项名；`key` 在 MySQL 里是保留字，引用它要显式写列名 |
+| `value_json` | 文本，默认空串 | 配置值原文 |
+| `updated_at` | 整数，默认 0 | 这一行最后一次写入的 Unix 秒 |
+
+### model_operations
+
+一个模型在一个操作上的方言绑定与能力声明（见 5.7、5.16）。主键 `(provider, model, operation)`。
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `provider` | 文本，主键之一 | 厂商名 |
+| `model` | 文本，主键之一 | 上游模型名 |
+| `operation` | 文本，主键之一 | `chat.complete@1` / `embeddings.create@1` / `speech.synthesize@1` / `speech.transcribe@1` / `system.decide@1` |
+| `dialect_id` | 文本，默认空串 | 方言 ID；网关按它去注册表取实现，取不到就 400 |
+| `capabilities_json` | 文本，默认空串 | 插件按操作声明的三态能力与 `formats` / `voices` |
+| `limits_json` | 文本，默认空串 | 这次调用的上限；插件安装留空串，回填写 `{}`，本版没有读这列的路径 |
+| `source` | 文本，默认空串 | `plugin` / `manual` / `declared`；删除插件只清 `plugin` 且方言 ID 属于它的行 |
+| `updated_at` | 整数，默认 0 | 这一行最后一次写入的 Unix 秒 |
+
+写入口只有 `store.SetModelOperation`（upsert）、`store.DeleteModelOperation` 与 `ApplyPluginCatalog` 里的那一条；读入口是 `ModelOperation`（单行）与 `ListModelOperations`（按厂商、模型筛）。
+
+### plugin_audit
+
+插件动作的记账，只增不改（见 5.17）。一次性动作（安装、升级、回滚、启停、卸载、热加载）各一行；权限前后原文不同时另起一行 `permissions`。写入口只有 `store.AppendPluginAudit`，读入口只有 `PluginAuditLog`（按时间倒序，`plugin show` 取最近 5 条）。审计写不进去只打一行警告，不让已经完成的动作整体失败。
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `id` | 整数，自增主键 | |
+| `plugin_id` | 文本，索引之一 | 插件 ID |
+| `version` | 文本，默认空串 | 这次动作针对的版本 |
+| `action` | 文本 | `install` / `update` / `rollback` / `remove` / `enable` / `disable` / `reload` / `permissions` |
+| `actor` | 文本，默认空串 | `cli`（命令行）或 `sighup`（serve 收到信号自己重载） |
+| `result` | 文本，默认 `ok` | 这次动作的结果 |
+| `error` | 文本，默认空串 | 失败原因 |
+| `permissions_before_json` | 文本，默认空串 | 动作前的权限声明原文 |
+| `permissions_after_json` | 文本，默认空串 | 动作后的权限声明原文 |
+| `at` | 整数，索引之一（同插件内倒序） | Unix 秒 |
+
+### plugin_logs
+
+插件运行日志，只用来排障（见 5.17）。沙箱的 `lax.log` 与 `console.*` 经 CLI sink 落这张表，同时打一行到 `lax serve` 的输出。日志入口拿不到当前 hook 名，`hook` 列恒为空串。
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `id` | 整数，自增主键 | `plugin logs --follow` 按它取新行 |
+| `plugin_id` | 文本，索引之一 | 插件 ID |
+| `level` | 文本，默认空串 | `debug` / `info` / `warn` / `error`，认不出按 `info` |
+| `hook` | 文本，默认空串 | 当前恒为空串 |
+| `message` | 文本，默认空串 | 一行，换行替换成空格，单条 8 KiB 截断 |
+| `at` | 整数，索引之一（同插件内倒序） | Unix 秒 |
+
+保留策略：每个插件只留最近 500 条（`store.pluginLogRetention`），每次写入顺手删掉更老的；不归档、不跨插件查询、不单独提供删除命令，删插件时一起清。
+
+六张新表与 `providers.plugin_id` 同样只由 `AutoMigrate` 建，没有迁移文件与版本号（见本节开头）：旧库升上来时先跑 `AutoMigrate`，六张表就是那一刻建出来的，不需要单独搬迁；再开一次不会重复回填，也不会弄丢插件行（`TestPluginTablesOnLegacyDatabase` 覆盖这条路径）。插件没有独立的密钥表与持久缓存表：凭据仍只存在 `accounts.key_cipher`，由宿主注入，插件看不到原文；`lax.cache` 只在进程内存里，重启即空（见 5.17）。
+
 ## 7 里程碑
 
 | 里程碑 | 内容 | 验收 |
@@ -1177,8 +1567,11 @@ gemini 路由的 `models_path` 必须显式给：写入侧的默认值只推导 
 | M14 | 向量化：第六条线协议 `openai-embeddings` 与两个入站路径（`/v1/embeddings`、gemini 的 `/v1beta/models/{model}:embedContent`，迁移 `0017` 给 `openai` 与 `ollama` 种上路由），目录不再丢 embedding 条目、改记 `capabilities`，探活按能力位打向量化请求（见 5.15） | `/v1/embeddings` 打到有效协议为 `openai-embeddings` 的假上游：只换 `model`、响应字节原样、用量从 `usage.prompt_tokens` 入账；有效协议是其它五条时 400 且文案带两条修法；`stream: true` 400；gemini 入站 `:embedContent` 打 gemini 账号时路径改写成 `:embedContent`、请求体一个字节不改、响应原样，两种动作不混；gemini 清单里只有 `embedContent` 的条目进目录且能力位是 `embedding`，`model probe` 对它打 `:embedContent` 而不是对话 |
 | M16 | 语音两条线协议与 chat 适配：能力声明（`model capability add/set/unset/ls` 写 `capabilities`、`voices`、`audio_formats`，入站只放行声明过 `speech` / `transcription` 的模型）；两种出站——同协议直通与 chat 适配（`POST /v1/audio/speech` 或 `/v1/audio/transcriptions` → `POST /v1/chat/completions`，响应解回音频字节或 `{"text":…}`）；`/v1/models` 带能力、音色与格式；本地拒绝规则（未声明能力、未声明音色/格式、ogg/silk、sse、ASR stream、srt/vtt、language）；`tts_chars` / `audio_seconds` 与两个单价列；应错结构探活；`lax speak` 与 `lax transcribe`（见 5.16） | `internal/gateway` 的 `TestForwardSpeechPassthrough`（只换 `model`、音频字节与 `Content-Type` 原样、`tts_chars` 入账）、`TestSpeechAliasIsResolved`、`TestSpeechWithoutRouteIsRejected`（两条各一遍，零上游调用）、`TestTranscriptionsRewritesOnlyModelField`（其余 part 与音频字节逐字节相同、boundary 重生成）、`TestTranscriptionsRejectsNonMultipart`、`TestTranscriptionsMissingFile`、`TestSpeechErrorShapeIsOpenAI`、`TestProbeSpeechWrongShape`、`TestProbeTranscriptionsMissingFile`（400 → allowed、401 → 停用、404 → missing）、`TestSpeechRejectsSSEStreamFormat`、`TestSpeechChatAdapter`（messages/audio 映射、音频 base64 解出、token 入账）、`TestSpeechChatAdapterInstructions`、`TestSpeechWithoutCapabilityRejected`（零上游调用）、`TestSpeechVoiceRejected`、`TestTranscriptionsChatAdapter`（input_audio data URL、`{"text":…}`、`usage.seconds`）、`TestTranscriptionsRejectsOGG`；`internal/store` 的 `TestProvidersSeededByMigration` 覆盖两条种子路由，`TestPriceTTSAndAudioFields` 与 `TestUsageTTSAndAudioCost` 覆盖单价与花费，`TestSetProviderModelCapability`、`TestAddProviderModelCapability`、`TestModelCapabilityRejectsUnknown`、`TestClearProviderModelCapability`、`TestModelCapabilityOrder` 覆盖能力声明的写入口；`internal/cli` 的 `TestSpeakUsageErrors` 与 `TestTranscribeUsageErrors` 覆盖命令面 |
 | M15 | 模型声明与探活判定：`model add` 手写一条账号可达性并同事务写目录与 `account_models.protocol`（可重复执行），`model probe --protocol` 只探一条路，探活候选优先取模型目录里声明的协议，连接层失败先重试两次再判、且连接层失败与 429/5xx/其它 400 不改可达性，`model show` 与 `model ls --json` 给出协议、HTTP 状态、探活时间与错误 | `internal/store` 的 `TestDeclareAccountModel*` 覆盖两表写入、协议合并、幂等、旧结论清理与非法取值；`internal/gateway` 的 `TestProbeModelDeclaredProtocolOutsideRoutes`、`TestProbeModelExplicitProtocolOnly`、`TestProbeModelTransportRetrySucceeds`、`TestProbeModelTransportFailureKeepsAccess` 覆盖候选顺序、单协议与不写可达性；`internal/cli` 的 `TestModelAddWritesBothTables`、`TestModelAddIsIdempotent`、`TestModelAddErrors`、`TestModelShow`、`TestModelLsJSONProbeFacts`、`TestModelProbeProtocolOnly`、`TestModelProbeUndecidedKeepsAllowed` 与 `TestDecideMissingModelPointsToModelAdd` 覆盖命令面与 `decide` 的下一步文案 |
+| M17 | 插件与方言：`internal/plugin`（manifest、方言文件、模型目录的严格解析与校验，声明式映射执行器，方言注册表，插件目录加载与目录哈希），`plugin.Dialect` 接口与十条内置方言（四条语音、六条宿主线协议），`model_operations` 的方言绑定，语音按绑定分发（`lax model capability add\|set --dialect`、启动回填 `BackfillSpeechDialects`），对话等操作在 M17 只收宿主方言（M18 打开 hook 方言），`plugin install/ls/show/enable/disable/rm/doctor` 与 `providers.plugin_id`（见 5.7、5.8、5.16、第 4 节） | `internal/plugin` 的 `TestLoadDir`、`TestRegisterPluginDialect`、`TestSystemDialectsAreComplete`、`TestMiMoSpeechPrepare`、`TestMiMoSpeechDecode`、`TestChatWireDeclarativeDialect`、`TestLoadChatProviderWithHostDialect`、`TestLoadRejectsUnknownHostDialect`、`TestPrepare`、`TestDecodeJSONPointer`、`TestLoadCatalogOK`、`TestDecodeManifestRejects`；`internal/gateway` 的 `TestSpeechDialectDrivesRequestAndResponse`（方言编请求、解响应、用量入账）、`TestSpeechDialectNotRegistered` 与 `TestSpeechWithoutDialectBinding`（两种 400、零上游调用）、`TestSpeechChatAdapter`（内置 chat 方言的映射）、`TestChatBoundToUnregisteredDialectRejected` 与 `TestChatBoundToHostDialectAllowed`（未注册的插件方言 400，宿主方言照旧）；`internal/store` 的 `TestApplyPluginCatalog*`（新建、幂等、厂商地址冲突、路由冲突、手写绑定优先、别名冲突）、`TestDeletePluginRemovesCatalog`（连带清厂商与绑定、停用账号）、`TestBackfillSpeechDialects`（选方言、行数、幂等）、`TestPluginTablesOnLegacyDatabase`（旧库升级后四张表可用）；`internal/cli` 的 `TestPluginLifecycle`（装、看、停用、启用、删）、`TestPluginInstallChatProvider`（对话上游的路由、模型、宿主方言绑定与别名）、`TestPluginInstallDryRun`、`TestPluginInstallVersionRules`、`TestPluginInstallRejectsSymlink`、`TestPluginInstallRejectsUnexecutableOperation`、`TestPluginDoctorTampered` |
 
-M0 到 M16 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkeleton` 用假上游验证：初始化、加账号、`call`、`log tail`、`usage`、`doctor` 全链路走通。协议矩阵由 `internal/gateway/matrix_test.go` 与 `matrix_stream_test.go` 验证：三条入站 × 三条出站共 9 种组合的非流式与流式各跑一遍（出站 gemini 的三条另由下面 gemini 那批用例覆盖），同协议直通的「不改字节」「保留陌生字段」与跨协议的「丢弃陌生字段」单独有用例。思考内容的映射与它的代价由 `internal/translate` 的 `TestGolden` 按 `testdata/in` 与 `testdata/out` 对拍：四条协议两两之间的请求、响应与流式都有用例（gemini 那几对见本段末尾），含带签名的往返、无签名时盖回执签名再回填与请求方向不回填（`anthropic_thinking_request_to_chat_dropped`、`responses_reasoning_request_to_chat_dropped`、`chat_reasoning_response_to_anthropic_replay_signature`、`anthropic_replay_thinking_request_to_chat_reasoning_content`、`anthropic_replay_thinking_request_to_chat_without_tools_dropped`、`anthropic_replay_thinking_request_to_anthropic_dropped` 等）。工具调用的五条规则同样各有用例：`chat_tool_results_to_anthropic_user_message` 与 `responses_tool_results_to_anthropic_user_message` 钉住工具结果折叠进 user 消息，`chat_tool_result_then_user_followup_to_anthropic_merged_user` 与 `responses_tool_result_then_user_followup_to_anthropic_merged_user` 钉住工具结果之后的追问并进同一条 user 消息，`anthropic_parallel_tools_stream_to_chat_dense_index` 钉住 chat 的稠密工具序号，`chat_tool_stream_to_responses_done_events` 与 `responses_output_item_done_stream_to_anthropic` 钉住 responses 的 done 事件与 output 回填、只发 done 的上游，`chat_text_stream_to_responses_message_output`、`chat_text_tool_text_stream_to_responses_output_order` 与 `anthropic_two_text_blocks_stream_to_responses_message_items` 钉住文本 item 的 added 与 done、`completed.response.output` 的正文与顺序，1MB 上限与断流时的空 `output` 由 `TestResponsesStreamEncoderTextCap` 与 `TestResponsesStreamEncoderErrorKeepsTextOutOfOutput` 钉住，`anthropic_builtin_tool_to_chat_dropped` 钉住内置工具丢弃，请求侧的思考配置参数与工具白名单由 `anthropic_thinking_budget_to_chat_reasoning_effort`、`chat_reasoning_effort_to_anthropic_thinking_budget`、`chat_reasoning_object_to_responses_reasoning`、`gemini_thinking_budget_to_anthropic_thinking`、`anthropic_thinking_budget_to_gemini_thinking_config`、`anthropic_thinking_disabled_to_chat_dropped`、`anthropic_thinking_disabled_to_responses_dropped`、`anthropic_thinking_disabled_to_gemini_zero_budget`、`chat_tool_strict_to_responses_kept`、`responses_tool_strict_to_chat_kept`、`anthropic_allowed_tools_to_responses_allowed_tools`、`responses_allowed_tools_to_anthropic_allowed_tools`、`anthropic_allowed_tools_to_chat_auto`、`anthropic_allowed_tools_to_gemini_allowed_function_names`、`gemini_allowed_function_names_to_anthropic_allowed_tools` 钉住（规则见 5.4 的两小节）；思考与工具参数交替时的块开关由 `chat_reasoning_between_tool_args_stream_to_anthropic_reopen_block` 与 `TestAnthropicStreamEncoderKeepsDeltasOnOpenBlocks` 验证，缺 `parameters` 的工具补空 schema 由 `responses_tool_without_parameters_to_anthropic_empty_input_schema` 验证；断流时工具参数不完整的文案与 `ok=0` 由 `internal/gateway` 的 `TestConversionStreamTruncatedToolArgsNote` 与三个编码器的单元用例验证。协议降级到模型的那部分由 `internal/gateway` 的 `TestProbeModel*` 与 `TestForwardUsesModelProtocol` 验证，迁移兼容由 `internal/store` 的 `TestMigration0005*`、`TestMigration0006*`、`TestMigration0007*` 与 `TestMigrationsRunToLatestFromEmptyDB` 验证；厂商路由的解析、探活收紧与模型列表回退由 `internal/store` 的 `TestProvider*` 与 `internal/gateway` 的 `TestForwardUsesProviderRoute`、`TestEndpointFallsBackWithoutProviderRoute`、`TestProbeModelNarrowsCandidatesByProvider`、`TestProbeModelStartsFromDiscoveredProtocol`、`TestSyncModelsUsesProviderModelsPath`、`TestSyncModelsWithoutModelsPath` 验证。厂商写入口与模型列表路径由 `internal/store` 的 `TestCreateProvider*`、`TestSetProvider*`、`TestDeriveModelsPath`、`TestResolveModelsPath`、`TestRouteModelsPathDerivedOnWrite`、`TestStoreWritePathsValidateBaseURL`、`TestMigration0008*` 与 `internal/gateway` 的 `TestSyncModelsAuthFollowsModelsPathRoute`、`TestSyncModelsProviderModelsPathOverride`、`TestSyncModelsWithEndpointOverride`、`TestSyncModelsNoModelsPathAnywhere` 验证；路径与地址的规整由 `internal/store` 的 `TestNormalizePath`、`TestNormalizeBaseURL`、`TestCreateProviderNormalizesPaths`、`TestSetProviderNormalizesPaths` 与 `internal/gateway` 的 `TestJoinEndpoint` 验证；端点取值的两种写法（相对路径与整条地址）由 `internal/store` 的 `TestIsFullAddress`、`TestNormalizeEndpoint`、`TestDeriveModelsPathFullAddress`、`TestCreateProviderStoresFullAddressRoutes`、`TestSetProviderFullAddressRoutesAreIndependent`、`TestStoreWritePathsRejectBadFullAddress` 与 `internal/gateway` 的 `TestForwardUsesFullAddressRoute`、`TestForwardMixesFullAddressAndRelativeRoutes`、`TestSyncModelsFullAddressModelsPath`、`TestSyncModelsWithEndpointFullAddress`、`TestSyncModelsWithEndpointRejectsBadFullAddress` 验证；一次尝试的账与结论一起提交由 `internal/store` 的 `TestRecordAttemptWritesRowAndStateTogether` 验证；直通路径的断流结尾由 `internal/gateway` 的 `TestPassthroughStreamDisconnectKeepsLegalEnding`、`TestPassthroughCRLFTailStartsAtFrameBoundary` 逐协议验证，转换路径的干净截断与 responses 入站的 `response.failed` 由 `TestConversionStreamCleanTruncationIsFailure`、`TestConversionStreamResponsesInboundEndsFailed` 验证，收尾帧按 `type` 或 `event` 名判定（带空格、多行缩进、只写事件名）由 `TestPassthroughEndFrameShapeDoesNotMatter` 验证，完整流不被追加字节由 `TestProtocolMatrixStreaming` 的逐字节断言保证；端点两种写法在命令面上的行为与 `account set --key` 由 `internal/cli` 的 `TestProviderPathsAcceptFullAddress`、`TestProviderPathsRejectBadFullAddress`、`TestModelSyncEndpointFullAddress`、`TestModelSyncEndpointBadValues`、`TestAccountSetRotatesKey`、`TestAccountSetKeyFromStdin`、`TestAccountSetErrors`、`TestAccountSetJSONMasksKey`、`TestAccountUpdateIsSynonymForSet`、`TestAccountTestWithoutModels` 与 `internal/gateway` 的 `TestProbeEmptyModelsUsesFallbackModel`、`TestProbeEmptyModelsKeepsNoteOnFailure` 验证；模型清单接口由 `internal/gateway` 的 `TestModelsListDedupesSortsAndPicksOwner`、`TestModelsListSkipsDisabledKeepsCooling`、`TestModelsListEmpty`、`TestModelByIDHitAndMiss`、`TestModelByIDPathIsCleanedBeforeMatching`、`TestModelByIDDisabledOnlyModelIs404`、`TestModelsRejectNonGet`、`TestModelsEndpointsAreReadOnly`、`TestModelsEndpointsLeaveExistingRoutesAlone` 验证，四条入站路径 405 的 `Allow: POST` 由 `TestInboundRejectsOtherMethodsWithAllowPost` 与 `TestGeminiInboundUnknownPathAndMethod` 验证；错误体按入站协议给形状由 `internal/gateway` 的 `TestInboundErrorShapeWhenAllAccountsFail`、`TestInboundErrorShapeWhenModelMissing`、`TestInboundErrorShapeScrubsSecret`、`TestInboundStreamErrorFrameShapePerProtocol`、`TestInboundStreamErrorFrameScrubsSecretPerProtocol`、`TestReadOnlyAndUnknownPathsKeepUnifiedErrorShape` 按四条入站逐字段核对（形状、`type`/`status`/`code`/`param`、脱敏与没有入站协议的入口不变）。gemini 的映射由 `internal/translate` 的对拍用例 `chat_tools_to_gemini_function_declarations`、`anthropic_image_request_to_gemini_inline_data`、`gemini_tool_call_response_to_chat_tool_calls`、`gemini_tool_call_response_to_anthropic_tool_use`、`gemini_max_tokens_response_to_anthropic`、`gemini_contents_request_to_chat`、`gemini_request_to_chat_image_and_named_tool`、`chat_response_to_gemini_candidate`、`gemini_safety_response_to_chat_end_turn`、`gemini_stream_to_anthropic_text_and_tool`、`anthropic_stream_to_gemini_tool_call` 钉住，边界（孤立工具结果丢弃、非对象 `args` 省略、`promptFeedback.blockReason`、用量读取、非正常 `finishReason` 的 `StopNote`、入站路径解析、两端的流式增量序列）由 `internal/translate` 的 `TestGemini*` 与 `TestEncodeGemini*` 钉住，转发路径（路径里的模型名、`x-goog-api-key`、两种路由写法与占位符共存、模型名转义、不含占位符的路由不变、直通不改请求体、流式端点改写、gemini 入站的非流式与流式、错误体解包、断流收尾、探活）由 `internal/gateway` 的 `TestForwardChatToGemini`、`TestForwardAnthropicToGemini`、`TestGeminiRoutePlaceholderInFullAddress`、`TestGeminiModelNameIsPathEscaped`、`TestRouteWithoutPlaceholderUnchanged`、`TestGeminiOutboundStreamEndpoint`、`TestForwardGeminiInboundToChat`、`TestForwardGeminiInboundStreamToAnthropic`、`TestForwardGeminiOutboundStream`、`TestGeminiPassthroughKeepsBytes`、`TestGeminiInboundStreamToGeminiPassthrough`、`TestGeminiInboundErrorBodyUnwrapped`、`TestGeminiInboundModelNameIsPathUnescaped`、`TestGeminiInboundUnknownModel`、`TestGeminiStreamTruncatedEndsWithErrorAndFinish`、`TestGeminiStopNoteLogged`、`TestProbeGeminiRoute`、`TestModelEndpoint` 与 `internal/store` 的 `TestGeminiRouteKeepsModelPlaceholder` 验证。gemini 的模型列表同步由 `internal/gateway` 的 `TestSyncModelsGeminiShape`、`TestSyncModelsGeminiAuthHeader`、`TestSyncModelsGeminiPaginates`、`TestSyncModelsGeminiPageLimit`、`TestSyncModelsNoNextPageTokenStops`、`TestSyncModelsWithoutGenerationMethodsUnfiltered` 验证（方法过滤、去前缀、两页拼接、超过 10 页报错、游标为空即停、ollama 风格不受影响），种子行与升级路径由 `internal/store` 的 `TestMigration0009SeedsGeminiProvider`、`TestMigration0009UpgradesOldDatabase`、`TestMigration0009KeepsUserDefinedGeminiProvider` 与 `TestProvidersSeededByMigration` 验证。向量化的两条入站与探活由 `internal/gateway` 的 `TestForwardEmbeddingsPassthrough`、`TestEmbeddingsAliasIsResolved`、`TestEmbeddingsWithoutRouteIsRejected`、`TestEmbeddingsRejectsStream`、`TestEmbeddingsRejectsUnknownPath`、`TestEmbeddingsErrorShapeIsOpenAI`、`TestGeminiEmbedContentPassthrough`、`TestProbeEmbeddingsModelSendsEmbeddingsBody`、`TestProbeGeminiEmbeddingOnlyModelUsesEmbedContent` 验证（字节直通、别名、缺路由的 400 与零上游调用、流式拒绝、动作后缀改写、OpenAI 错误体、两条探活路径），路由种子由迁移 `0017` 与 `TestProvidersSeededByMigration` 的 `seedRoutes` 验证。语音的两条直通与探活由 `internal/gateway` 的 `TestForwardSpeechPassthrough`、`TestSpeechStreamFormatPassthrough`、`TestSpeechAliasIsResolved`、`TestSpeechWithoutRouteIsRejected`、`TestTranscriptionsRewritesOnlyModelField`、`TestTranscriptionsRejectsNonMultipart`、`TestTranscriptionsMissingFile`、`TestSpeechErrorShapeIsOpenAI`、`TestProbeSpeechWrongShape`、`TestProbeTranscriptionsMissingFile` 验证（字节直通、别名、缺路由的 400 与零上游调用、boundary 重生成、两种应错探活）；两个单价列与语音花费由 `internal/store` 的 `TestPriceTTSAndAudioFields` 与 `TestUsageTTSAndAudioCost` 验证，路由种子由 `TestProvidersSeededByMigration` 的 `seedRoutes`（迁移 `0018`）验证；命令面由 `internal/cli` 的 `TestSpeakUsageErrors` 与 `TestTranscribeUsageErrors` 验证。上游是 `httptest` 假服务，M5、M6、M7、M8、M9 与 M10 里涉及真实厂商的那部分需要拿到 key 后手工验收。
+| M18 | 插件运行时：`moejs` JS 沙箱（goja、每次 prepare/decode 新建 Runtime、同一段流复用、`Runtime.Interrupt` 超时、返回值 JSON 深拷贝与 `__proto__` 拒绝、受限 ESM、`lax` API 与不注入的全局、四道字节闸门），非语音操作的 hook 方言（宿主报文 → `Plan.Body`/`Plan.JSON` 补丁 → `ResultJSON` 按出站形状解回、`StreamDialect` 事件流），`--trust declarative\|sandboxed` 与 `plugin_versions.runtime`，生命周期命令 `update`/`rollback`/`verify`/`logs`/`reload`/`config`，`serve` 的 pid 文件与 `SIGHUP` 热加载（`gateway.SetDialects`），`plugin_audit`/`plugin_logs` 两张表与日志落库，`model dialect ls\|set\|unset`（见 5.17、第 4、6 节） | `internal/plugin` 的 `TestLoadManifestMoejs`、`TestLoadHookPlugin`、`TestRegisterHookDialect`、`TestRegisterRejectsHostDialectPrefix`、`TestRegisterMixedImplementationRejected`、`TestRegisterRollsBackWholePackage`（运行时与钩子、方言登记整包回滚）、`TestSandboxPrepareRequestShapes`、`TestSandboxDecodeResponse`、`TestSandboxDecodeStreamState`、`TestSandboxTimeout`、`TestSandboxGlobals`、`TestSandboxHTTPRequest`、`TestSandboxOutputTooLarge`、`TestSandboxProtoRejected`、`TestSandboxCache`、`TestSandboxLog`、`TestSandboxESMDefaultAndImport`、`TestSandboxImportRejected`、`TestSandboxLaxError`（hook 形状、超时后重建 Runtime、全局白名单、控制面请求的白名单/重定向/响应体上限、返回值与原型键、缓存、日志、ESM 子集）；`internal/gateway` 的 `TestChatDialectPatchesRequestAndRewritesResponse`（补丁报文 + `ResultJSON` 走 `translate` 再按入站编码）、`TestChatDialectStreamsToAnthropic` 与 `TestChatDialectStreamsToChat`（事件流跨帧）、`TestChatDialectWithoutStreamRejected`（发上游前 400）、`TestChatDialectPathOverridesEndpoint` 与 `TestChatDialectRejectsAbsolutePath`（相对路径参与选址、绝对地址拒绝）、`TestChatDialectTextResultRejected`、`TestChatDialectStreamErrorEndsStream`、`TestChatBoundToUnregisteredDialectRejected`、`TestSandboxDialectEndToEnd`（真沙箱跑一条语音请求）；`internal/cli` 的 `TestPluginInstallHookPlugin`（信任按 runtime 推断、`runtime` 入库、路由按默认端点建）、`TestPluginUpdate`、`TestPluginUpdateDryRun`、`TestPluginRollback`、`TestPluginVerify`、`TestPluginLogs`、`TestPluginReloadRequiresServe`、`TestPluginAuditLifecycle`、`TestPluginConfig`、`TestPluginConfigUsageErrors`、`TestPluginLogSink`、`TestFollowPluginLogs`、`TestModelDialectSetListUnset`、`TestModelDialectSetWarnsOnPluginChatDialect`、`TestModelDialectUsageErrors`；`internal/store` 的 `TestPluginAuditAppendAndList` |
+
+M0 到 M18 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkeleton` 用假上游验证：初始化、加账号、`call`、`log tail`、`usage`、`doctor` 全链路走通。协议矩阵由 `internal/gateway/matrix_test.go` 与 `matrix_stream_test.go` 验证：三条入站 × 三条出站共 9 种组合的非流式与流式各跑一遍（出站 gemini 的三条另由下面 gemini 那批用例覆盖），同协议直通的「不改字节」「保留陌生字段」与跨协议的「丢弃陌生字段」单独有用例。思考内容的映射与它的代价由 `internal/translate` 的 `TestGolden` 按 `testdata/in` 与 `testdata/out` 对拍：四条协议两两之间的请求、响应与流式都有用例（gemini 那几对见本段末尾），含带签名的往返、无签名时盖回执签名再回填与请求方向不回填（`anthropic_thinking_request_to_chat_dropped`、`responses_reasoning_request_to_chat_dropped`、`chat_reasoning_response_to_anthropic_replay_signature`、`anthropic_replay_thinking_request_to_chat_reasoning_content`、`anthropic_replay_thinking_request_to_chat_without_tools_dropped`、`anthropic_replay_thinking_request_to_anthropic_dropped` 等）。工具调用的五条规则同样各有用例：`chat_tool_results_to_anthropic_user_message` 与 `responses_tool_results_to_anthropic_user_message` 钉住工具结果折叠进 user 消息，`chat_tool_result_then_user_followup_to_anthropic_merged_user` 与 `responses_tool_result_then_user_followup_to_anthropic_merged_user` 钉住工具结果之后的追问并进同一条 user 消息，`anthropic_parallel_tools_stream_to_chat_dense_index` 钉住 chat 的稠密工具序号，`chat_tool_stream_to_responses_done_events` 与 `responses_output_item_done_stream_to_anthropic` 钉住 responses 的 done 事件与 output 回填、只发 done 的上游，`chat_text_stream_to_responses_message_output`、`chat_text_tool_text_stream_to_responses_output_order` 与 `anthropic_two_text_blocks_stream_to_responses_message_items` 钉住文本 item 的 added 与 done、`completed.response.output` 的正文与顺序，1MB 上限与断流时的空 `output` 由 `TestResponsesStreamEncoderTextCap` 与 `TestResponsesStreamEncoderErrorKeepsTextOutOfOutput` 钉住，`anthropic_builtin_tool_to_chat_dropped` 钉住内置工具丢弃，请求侧的思考配置参数与工具白名单由 `anthropic_thinking_budget_to_chat_reasoning_effort`、`chat_reasoning_effort_to_anthropic_thinking_budget`、`chat_reasoning_object_to_responses_reasoning`、`gemini_thinking_budget_to_anthropic_thinking`、`anthropic_thinking_budget_to_gemini_thinking_config`、`anthropic_thinking_disabled_to_chat_dropped`、`anthropic_thinking_disabled_to_responses_dropped`、`anthropic_thinking_disabled_to_gemini_zero_budget`、`chat_tool_strict_to_responses_kept`、`responses_tool_strict_to_chat_kept`、`anthropic_allowed_tools_to_responses_allowed_tools`、`responses_allowed_tools_to_anthropic_allowed_tools`、`anthropic_allowed_tools_to_chat_auto`、`anthropic_allowed_tools_to_gemini_allowed_function_names`、`gemini_allowed_function_names_to_anthropic_allowed_tools` 钉住（规则见 5.4 的两小节）；思考与工具参数交替时的块开关由 `chat_reasoning_between_tool_args_stream_to_anthropic_reopen_block` 与 `TestAnthropicStreamEncoderKeepsDeltasOnOpenBlocks` 验证，缺 `parameters` 的工具补空 schema 由 `responses_tool_without_parameters_to_anthropic_empty_input_schema` 验证；断流时工具参数不完整的文案与 `ok=0` 由 `internal/gateway` 的 `TestConversionStreamTruncatedToolArgsNote` 与三个编码器的单元用例验证。协议降级到模型的那部分由 `internal/gateway` 的 `TestProbeModel*` 与 `TestForwardUsesModelProtocol` 验证，迁移兼容由 `internal/store` 的 `TestMigration0005*`、`TestMigration0006*`、`TestMigration0007*` 与 `TestMigrationsRunToLatestFromEmptyDB` 验证；厂商路由的解析、探活收紧与模型列表回退由 `internal/store` 的 `TestProvider*` 与 `internal/gateway` 的 `TestForwardUsesProviderRoute`、`TestEndpointFallsBackWithoutProviderRoute`、`TestProbeModelNarrowsCandidatesByProvider`、`TestProbeModelStartsFromDiscoveredProtocol`、`TestSyncModelsUsesProviderModelsPath`、`TestSyncModelsWithoutModelsPath` 验证。厂商写入口与模型列表路径由 `internal/store` 的 `TestCreateProvider*`、`TestSetProvider*`、`TestDeriveModelsPath`、`TestResolveModelsPath`、`TestRouteModelsPathDerivedOnWrite`、`TestStoreWritePathsValidateBaseURL`、`TestMigration0008*` 与 `internal/gateway` 的 `TestSyncModelsAuthFollowsModelsPathRoute`、`TestSyncModelsProviderModelsPathOverride`、`TestSyncModelsWithEndpointOverride`、`TestSyncModelsNoModelsPathAnywhere` 验证；路径与地址的规整由 `internal/store` 的 `TestNormalizePath`、`TestNormalizeBaseURL`、`TestCreateProviderNormalizesPaths`、`TestSetProviderNormalizesPaths` 与 `internal/gateway` 的 `TestJoinEndpoint` 验证；端点取值的两种写法（相对路径与整条地址）由 `internal/store` 的 `TestIsFullAddress`、`TestNormalizeEndpoint`、`TestDeriveModelsPathFullAddress`、`TestCreateProviderStoresFullAddressRoutes`、`TestSetProviderFullAddressRoutesAreIndependent`、`TestStoreWritePathsRejectBadFullAddress` 与 `internal/gateway` 的 `TestForwardUsesFullAddressRoute`、`TestForwardMixesFullAddressAndRelativeRoutes`、`TestSyncModelsFullAddressModelsPath`、`TestSyncModelsWithEndpointFullAddress`、`TestSyncModelsWithEndpointRejectsBadFullAddress` 验证；一次尝试的账与结论一起提交由 `internal/store` 的 `TestRecordAttemptWritesRowAndStateTogether` 验证；直通路径的断流结尾由 `internal/gateway` 的 `TestPassthroughStreamDisconnectKeepsLegalEnding`、`TestPassthroughCRLFTailStartsAtFrameBoundary` 逐协议验证，转换路径的干净截断与 responses 入站的 `response.failed` 由 `TestConversionStreamCleanTruncationIsFailure`、`TestConversionStreamResponsesInboundEndsFailed` 验证，收尾帧按 `type` 或 `event` 名判定（带空格、多行缩进、只写事件名）由 `TestPassthroughEndFrameShapeDoesNotMatter` 验证，完整流不被追加字节由 `TestProtocolMatrixStreaming` 的逐字节断言保证；端点两种写法在命令面上的行为与 `account set --key` 由 `internal/cli` 的 `TestProviderPathsAcceptFullAddress`、`TestProviderPathsRejectBadFullAddress`、`TestModelSyncEndpointFullAddress`、`TestModelSyncEndpointBadValues`、`TestAccountSetRotatesKey`、`TestAccountSetKeyFromStdin`、`TestAccountSetErrors`、`TestAccountSetJSONMasksKey`、`TestAccountUpdateIsSynonymForSet`、`TestAccountTestWithoutModels` 与 `internal/gateway` 的 `TestProbeEmptyModelsUsesFallbackModel`、`TestProbeEmptyModelsKeepsNoteOnFailure` 验证；模型清单接口由 `internal/gateway` 的 `TestModelsListDedupesSortsAndPicksOwner`、`TestModelsListSkipsDisabledKeepsCooling`、`TestModelsListEmpty`、`TestModelByIDHitAndMiss`、`TestModelByIDPathIsCleanedBeforeMatching`、`TestModelByIDDisabledOnlyModelIs404`、`TestModelsRejectNonGet`、`TestModelsEndpointsAreReadOnly`、`TestModelsEndpointsLeaveExistingRoutesAlone` 验证，四条入站路径 405 的 `Allow: POST` 由 `TestInboundRejectsOtherMethodsWithAllowPost` 与 `TestGeminiInboundUnknownPathAndMethod` 验证；错误体按入站协议给形状由 `internal/gateway` 的 `TestInboundErrorShapeWhenAllAccountsFail`、`TestInboundErrorShapeWhenModelMissing`、`TestInboundErrorShapeScrubsSecret`、`TestInboundStreamErrorFrameShapePerProtocol`、`TestInboundStreamErrorFrameScrubsSecretPerProtocol`、`TestReadOnlyAndUnknownPathsKeepUnifiedErrorShape` 按四条入站逐字段核对（形状、`type`/`status`/`code`/`param`、脱敏与没有入站协议的入口不变）。gemini 的映射由 `internal/translate` 的对拍用例 `chat_tools_to_gemini_function_declarations`、`anthropic_image_request_to_gemini_inline_data`、`gemini_tool_call_response_to_chat_tool_calls`、`gemini_tool_call_response_to_anthropic_tool_use`、`gemini_max_tokens_response_to_anthropic`、`gemini_contents_request_to_chat`、`gemini_request_to_chat_image_and_named_tool`、`chat_response_to_gemini_candidate`、`gemini_safety_response_to_chat_end_turn`、`gemini_stream_to_anthropic_text_and_tool`、`anthropic_stream_to_gemini_tool_call` 钉住，边界（孤立工具结果丢弃、非对象 `args` 省略、`promptFeedback.blockReason`、用量读取、非正常 `finishReason` 的 `StopNote`、入站路径解析、两端的流式增量序列）由 `internal/translate` 的 `TestGemini*` 与 `TestEncodeGemini*` 钉住，转发路径（路径里的模型名、`x-goog-api-key`、两种路由写法与占位符共存、模型名转义、不含占位符的路由不变、直通不改请求体、流式端点改写、gemini 入站的非流式与流式、错误体解包、断流收尾、探活）由 `internal/gateway` 的 `TestForwardChatToGemini`、`TestForwardAnthropicToGemini`、`TestGeminiRoutePlaceholderInFullAddress`、`TestGeminiModelNameIsPathEscaped`、`TestRouteWithoutPlaceholderUnchanged`、`TestGeminiOutboundStreamEndpoint`、`TestForwardGeminiInboundToChat`、`TestForwardGeminiInboundStreamToAnthropic`、`TestForwardGeminiOutboundStream`、`TestGeminiPassthroughKeepsBytes`、`TestGeminiInboundStreamToGeminiPassthrough`、`TestGeminiInboundErrorBodyUnwrapped`、`TestGeminiInboundModelNameIsPathUnescaped`、`TestGeminiInboundUnknownModel`、`TestGeminiStreamTruncatedEndsWithErrorAndFinish`、`TestGeminiStopNoteLogged`、`TestProbeGeminiRoute`、`TestModelEndpoint` 与 `internal/store` 的 `TestGeminiRouteKeepsModelPlaceholder` 验证。gemini 的模型列表同步由 `internal/gateway` 的 `TestSyncModelsGeminiShape`、`TestSyncModelsGeminiAuthHeader`、`TestSyncModelsGeminiPaginates`、`TestSyncModelsGeminiPageLimit`、`TestSyncModelsNoNextPageTokenStops`、`TestSyncModelsWithoutGenerationMethodsUnfiltered` 验证（方法过滤、去前缀、两页拼接、超过 10 页报错、游标为空即停、ollama 风格不受影响），种子行与升级路径由 `internal/store` 的 `TestMigration0009SeedsGeminiProvider`、`TestMigration0009UpgradesOldDatabase`、`TestMigration0009KeepsUserDefinedGeminiProvider` 与 `TestProvidersSeededByMigration` 验证。向量化的两条入站与探活由 `internal/gateway` 的 `TestForwardEmbeddingsPassthrough`、`TestEmbeddingsAliasIsResolved`、`TestEmbeddingsWithoutRouteIsRejected`、`TestEmbeddingsRejectsStream`、`TestEmbeddingsRejectsUnknownPath`、`TestEmbeddingsErrorShapeIsOpenAI`、`TestGeminiEmbedContentPassthrough`、`TestProbeEmbeddingsModelSendsEmbeddingsBody`、`TestProbeGeminiEmbeddingOnlyModelUsesEmbedContent` 验证（字节直通、别名、缺路由的 400 与零上游调用、流式拒绝、动作后缀改写、OpenAI 错误体、两条探活路径），路由种子由迁移 `0017` 与 `TestProvidersSeededByMigration` 的 `seedRoutes` 验证。语音的两条直通与探活由 `internal/gateway` 的 `TestForwardSpeechPassthrough`、`TestSpeechRejectsSSEStreamFormat`、`TestSpeechAliasIsResolved`、`TestSpeechWithoutRouteIsRejected`、`TestTranscriptionsRewritesOnlyModelField`、`TestTranscriptionsRejectsNonMultipart`、`TestTranscriptionsMissingFile`、`TestSpeechErrorShapeIsOpenAI`、`TestProbeSpeechWrongShape`、`TestProbeTranscriptionsMissingFile` 验证（字节直通、别名、缺路由的 400 与零上游调用、boundary 重生成、两种应错探活）；两个单价列与语音花费由 `internal/store` 的 `TestPriceTTSAndAudioFields` 与 `TestUsageTTSAndAudioCost` 验证，路由种子由 `TestProvidersSeededByMigration` 的 `seedRoutes`（迁移 `0018`）验证；命令面由 `internal/cli` 的 `TestSpeakUsageErrors` 与 `TestTranscribeUsageErrors` 验证。插件与方言由 `internal/plugin` 的 `TestLoadDir`、`TestRegisterPluginDialect`、`TestSystemDialectsAreComplete`、`TestMiMoSpeechPrepare`、`TestMiMoSpeechDecode`、`TestPrepare`、`TestDecodeJSONPointer` 验证（严格解析、方言登记、内置方言的形状与声明式求值），`internal/gateway` 的 `TestSpeechDialectDrivesRequestAndResponse`、`TestSpeechDialectNotRegistered`、`TestSpeechWithoutDialectBinding`、`TestSpeechChatAdapter` 验证按绑定分发与两种 400，`internal/store` 的 `TestApplyPluginCatalog*`、`TestDeletePluginRemovesCatalog`、`TestBackfillSpeechDialects`、`TestPluginTablesOnLegacyDatabase` 验证目录落库、删除级联、回填与旧库升级，命令面由 `internal/cli` 的 `TestPluginLifecycle`、`TestPluginInstallDryRun`、`TestPluginInstallVersionRules`、`TestPluginInstallRejectsSymlink`、`TestPluginDoctorTampered` 验证。上游是 `httptest` 假服务，M5、M6、M7、M8、M9 与 M10 里涉及真实厂商的那部分需要拿到 key 后手工验收。
 
 已知未做，按已知行为处理：
 
@@ -1204,12 +1597,27 @@ M0 到 M16 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkel
 - 模型列表的响应形状只认三种已知形状（见 5.7）：`{data:[…]}`、`{models:[…]}` 与顶层数组。三者都不匹配时报错并列出这三种形状，包了一层的响应（例如 `{"result":{"data":[…]}}`）同样算不匹配，这类上游仍只能用 `--models` 手填。
 - 两个模型清单接口每次 GET 都重新全表扫描 `accounts`（`ListAccounts` 之后逐行取 `accounts.models`），没有缓存。库只有一条连接，客户端若在每个请求之前拉一次清单，这次读会与转发写 `requests` 的写入排队，高并发时清单请求会拖慢对话请求。第一版不加缓存：缓存要一套失效规则（账号启停、`model probe` 回写 `accounts.models`、用户直接改库），错一次的代价比多一次读高。
 - 向量化只到同协议直通为止（见 5.15）：gemini 的 `:batchEmbedContents` 不做；响应里没有 token 的厂商（gemini 的 `:embedContent` 一个也不报）与价格表里没有 embedding 单价列这两件事叠在一起，向量化的花费一律记 0。
-- 语音本版不做任何转码（见 5.16）：入站 ogg/opus 与 SILK 直接 400（要先把音频转成 wav 或 mp3），TTS 的 `opus` / `aac` / `flac` 输出也 400（上游只给 mp3、wav、pcm16，转换需要外部解码器）。不解析音频容器算时长：直通路径 TTS 按字符、ASR 读上游报的秒数；chat 适配路径按 token 计费，字符与秒数只记录展示。不把 ASR 的 `segments` 拆成字幕文件，`srt` / `vtt` 直接拒。gemini 没有对应的语音入站。
-- chat 适配只做非流式：`stream_format: "sse"` 与 ASR 的 `stream: true` 都 400（把上游音频帧重包成 OpenAI 事件需要另一套编码）；`speed` 与 ASR 的 `prompt` 丢弃（上游没有对应字段，ASR 实测拒绝 text part）；OpenAI 音色名（`alloy` 等）不映射到上游音色名，不在声明列表里就 400 并列出可用的。
+- 语音本版不做任何转码（见 5.16）：入站 ogg/opus 与 SILK 直接 400（要先把音频转成 wav 或 mp3），TTS 的 `opus` / `aac` / `flac` 输出也 400（上游只给 mp3、wav、pcm16，转换需要外部解码器）。不解析音频容器算时长：直通路径 TTS 按字符、ASR 读上游报的秒数；chat 方言路径按 token 计费，字符与秒数只记录展示。不把 ASR 的 `segments` 拆成字幕文件，`srt` / `vtt` 直接拒。gemini 没有对应的语音入站。
+- chat 方言只做非流式（`lax/mimo-chat-speech@1` 与 `lax/mimo-chat-asr@1`）：`stream_format: "sse"` 与 ASR 的 `stream: true` 都 400（把上游音频帧重包成 OpenAI 事件需要另一套编码）；`speed` 与 ASR 的 `prompt` 丢弃（上游没有对应字段，ASR 实测拒绝 text part）；OpenAI 音色名（`alloy` 等）不映射到上游音色名，不在声明列表里就 400 并列出可用的。
 - 语音模型的探活仍是对话形式：声明了 `speech` / `transcription` 的模型靠 `model add` 手写可达性，方言应错探活下一版再做。对这类模型跑 `model probe` 会按对话打，400 会把 `allowed` 改写成 `forbidden`。
 - 语音的探活 `allowed` 只表示端点可达（5.16）：不校验 key 的上游对结构错的请求也回 400，所以不能把这一结论当作凭据有效的证据；验凭据仍是 `account test` 的两段式（5.7）。TTS 探活不传 `voice`，有的厂商会先校它、回 400，结论一样是可达。
 - openai 的 `/v1/models` 不声明端点，`model sync` 因此拿不到「这个模型只能向量化」这一事实：向量化端点得先在厂商上声明（`provider set <厂商> openai-embeddings=/v1/embeddings`），否则 `/v1/embeddings` 恒为 400。对话入站打到只有 `embedding` 能力位的模型时不拦，交给上游报 400：拦它要在每个候选上多查一次目录。
 - 需要固定附加头的上游靠 5.10 的声明接：opencode 的 Go 端点要求带 `x-opencode-session` 才路由，缺了这个头直接回 `400 Request is missing x-opencode-session`（实测）；`provider header set opencode x-opencode-session '{session}'` 之后再打同一个地址，错误变成该 key 没有这个模型的 400，说明路由这一关已经过了。客户端自己带的同名头不算数：转发只透传 5.11 白名单里的头，白名单之外一律丢弃，要加头只能声明。仍然接不了的是**按请求算出来的头**：要求按时间戳、请求体或密钥算一个签名的厂商（签名算法不在声明能表达的范围内），以及需要多步换取会话 token 才能调用的端点。
+- 沙箱没有内存硬上限：goja 不提供堆上限 API，能限的只有四道字节闸门（源码单文件 4 MiB 与整包 8 MiB、hook 返回值 8 MiB、注入音频与流块 8 MiB、`lax.cache` 1 MiB，见 5.17）。故意写坏的插件仍能把进程内存吃高，`moejs` 只适合能审阅、或不需要隔离到进程级的插件。
+- 逐 hook 超时打不断在途的原生调用：`Runtime.Interrupt` 只在 JS 代码里生效，`lax.http.request` 正在等上游响应时，中断要等那次调用自己结束才拿得到；单次控制面请求 15 s、每次 hook 总共 30 s 是它的实际上限，一个 100 ms 的 hook 因此可能占用几秒（见 5.17 与 `lessons/2026-10-31-sandbox-limits.md`）。
+- ESM 只支持静态子集：`import *`、裸模块名与 `node:`、动态 `import()`、`import.meta`、`export *`、`export { … }` 与顶层 `await` 都在加载时报错并带行号；`export default` 要么是带 hook 方法的对象、要么是具名函数，其它形式读不到 hook。
+- 没有 `models` 与 `probe` 两个控制面钩子：模型列表仍由 `model sync` 拉、可达性仍由 `model probe` 判，插件不能用 JS 自己实现上游的模型清单或专用探活（见 5.7、5.16 的探活边界）。
+- 控制面只有 `lax.http.request`：只放行 manifest 白名单里的 https 主机、不跟随重定向、每次 hook 最多 4 次、响应体默认 1 MiB；需要按请求算签名或先换会话 token 的上游仍接不了（与 5.10 同类）。
+- 沙箱里没有媒体通道（`lax.media.*` 调用即报错）：音频进 `ctx.input.audio_base64`、出 `result.body_base64`，受 8 MiB 注入上限约束，更大的音频解不了。
+- 插件系统本版落地声明式插件、内置方言与 `moejs` 沙箱：没有 `trusted-worker`（独立进程，以及文件、进程与环境变量权限都没有），没有 Magpie/OpenCode 导入与 `plugin import`，没有 OAuth 登录，没有插件市场与签名（`plugin_versions.signature_status` 一律 `unverified`，`source` 一律 `dir`）。
+- 声明式方言只在方言的 `upstream_wire` 与入站协议不同、且是 `openai-chat` 时执行 `Prepare` 与 `Decode`（见 5.16）：同协议的语音方言由宿主原样转发，声明里的 `request` 与 `response` 不执行。可声明的组合是 `speech.synthesize@1` / `speech.transcribe@1` × `openai-chat`，插件因此能用声明式映射表达 MiMo 那种 chat 形状；这两个操作的是/否配对由 `internal/plugin` 的配对表判，不用「一条线协议一个操作」推断。
+- 对话操作不能写声明式方言，但可以写 hook 方言：`chat.complete@1` 等操作的 `Input.Body` 是宿主编好的报文，方言可以补字段或从零构建；`Input.Messages` 仍是空的（宿主没填），要读消息只能解析 `ctx.body`。向量化与决策协议同样只能由 hook 方言承载：入站与出站同协议时方言返回的 `ResultJSON` 就是客户端要读的那一条响应体，宿主原样写出（`TestEmbeddingsHookDialect`）；对话入站则统一经 `translate` 转一次。对话、向量化与决策请求仍可引用 `lax/` 宿主方言，走宿主编解码与直通。
+- `Plan.Path` 只在非语音入站的插件方言上参与选址，而且只能改路径：必须以 `/` 开头、不含 `..` 段，主机与凭据只能来自厂商路由（与 `base_url`）。语音路径不看它，地址只按厂商路由走；同一家厂商的两条方言落在同一条线协议上时只建第一条路由，第二条方言的声明式 `request.path` 不生效。
+- `plugin install` 的目录落库是逐家厂商一个事务：一个插件带多家厂商时，第 N 家失败会让前 N-1 家留在库里（刚复制的包目录会删掉），用 `lax plugin rm` 或 `lax provider rm` 清。
+- 删除插件会连带删掉它自己的厂商，并停用指向这些厂商的账号（`last_error` 写明原因）：重新安装之后账号仍然是停用的，要 `account enable` 才回到选号池。
+- 方言绑定有命令可查可删：`model dialect ls` / `set` / `unset` 直接读写 `model_operations`，但 `model capability ls` 仍只列能力位、音色与格式；`plugin rm` 只清它自己的方言绑定（`source='plugin'` 且 ID 带插件前缀）。
+- 回填只认能力位：`BackfillSpeechDialects` 扫 `provider_models` 里声明了 `speech` / `transcription` 的行，不看模型是否真的能用于那个端点；厂商声明了对应的语音路由就绑直通方言，否则一律绑 MiMo 的 chat 方言——不是 MiMo 形状的 chat 上游要靠手工 `--dialect` 改过来。
+- 方言表整表装配：重启或 `plugin reload`（`SIGHUP`）之后生效，运行中的网关不会自己重新扫描插件。热加载只换注册表，不关旧沙箱：在途请求继续用旧方言跑完，旧沙箱实例与它的 `lax.cache` 留到进程退出才释放，反复 reload 会累积这些实例。
 
 之后（不在第一版）：订阅账号登录，隐私遮蔽，配置档案（profiles），价格表内置。
 
@@ -1222,16 +1630,19 @@ internal/config/        路径解析与配置读写
 internal/store/         数据库连接、建表与加列、账号与请求记录的读写
 internal/secret/        凭据加解密
 internal/account/       账号池、冷却、选号
-internal/gateway/       HTTP 入站处理、上游转发、错误映射（`embeddings.go` 放向量化的路径、最少校验与用量读取；`speech.go` 放语音两条协议的路径、multipart 改写、音频响应与用量读取；`speech_adapter.go` 放语音与 chat 方言的互转与能力校验）
+internal/gateway/       HTTP 入站处理、上游转发、错误映射（`embeddings.go` 放向量化的路径、最少校验与用量读取；`speech.go` 放语音两条协议的路径、multipart 改写、音频响应与用量读取；`speech_dialect.go` 按方言绑定定出站，并让方言编请求、解响应；`speech_capability.go` 只做能力位、音色与音频格式的校验）
+internal/plugin/        manifest、方言文件与模型目录的解析与严格校验，声明式映射的执行器，方言注册表，插件目录加载与目录哈希；`sandbox.go` 是 JS 沙箱与 hook 调用（每 hook 一个 Runtime、超时与中断、返回值与错误映射），`sandbox_module.go` 是受限 ESM 的改写与模块加载（4 MiB 单文件 / 8 MiB 总量），`sandbox_api.go` 是注入的 `lax` API、控制面请求、进程内缓存与日志
 internal/translate/     中间表示（ir.go）、四套协议编解码（anthropic.go、chat.go、responses.go、gemini.go；gemini 的入站与出站都在 gemini.go）
 internal/usage/         用量汇总与花费估算
 ```
 
-约束：`translate` 只做结构体到结构体的转换，不读环境、不发请求，便于用对拍用例覆盖；`gateway` 是唯一发上游请求的地方（`account test` 的探活也走 `gateway.Probe`）；`cli` 不直接连数据库，只调 `store` 与 `account`。
+约束：`translate` 只做结构体到结构体的转换，不读环境、不发请求，便于用对拍用例覆盖；`gateway` 是唯一发上游请求的地方（`account test` 的探活也走 `gateway.Probe`）；`cli` 不直接连数据库，只调 `store` 与 `account`；`plugin` 不读数据库、不读宿主配置与环境变量，只读插件包自己的源文件；唯一的网络出口是沙箱给插件的 `lax.http.request`（白名单与上限都在 `plugin` 里判）；它不 import 任何其它内部包，所以它谁都不依赖、只在标准库与 goja 之上，线协议名在它那里是字符串常量，取值与 `gateway` 的 `Protocol*` 一致；依赖方向是 `gateway`、`store`、`cli` → `plugin`。
 
-包之间的依赖：`store` 为协议常量（`translate.ProtocolAnthropic`、`translate.ProtocolChat`、`translate.ProtocolResponses`、`translate.ProtocolGemini`、`translate.ProtocolSpeech`、`translate.ProtocolTranscriptions`）import `internal/translate`，只取常量，不调用编解码；`gateway`、`cli`、`account` 都经 `store` 与 `translate` 拿协议取值，不各自复制一份字符串。
+包之间的依赖：`store` 为协议常量（`translate.ProtocolAnthropic`、`translate.ProtocolChat`、`translate.ProtocolResponses`、`translate.ProtocolGemini`、`translate.ProtocolSpeech`、`translate.ProtocolTranscriptions`）import `internal/translate`，只取常量，不调用编解码；`gateway`、`cli`、`account` 都经 `store` 与 `translate` 拿协议取值，不各自复制一份字符串。`store` 与 `cli` 还 import `internal/plugin`：前者用它的操作名与内置方言 ID 写 `model_operations` 与回填，后者用 `plugin.LoadDir`、`PluginDirHash` 与 `DefaultRegistry` 做安装与自检；`gateway` 用它的 `Dialect` 接口与注册表，不认识任何一家上游的语音形状。
 
 外部依赖：`gorm.io/gorm` 与三个 driver（`github.com/glebarez/sqlite`、`gorm.io/driver/postgres`、`gorm.io/driver/mysql`）。引 ORM 是为了三件事：三后端方言差异（占位符、UPSERT、自增主键、列类型）由它翻译，建表与加列由 `AutoMigrate` 从 model 定义推导，DSN 与连接池按后端分别设。SQLite 选 glebarez 而不是官方的 `gorm.io/driver/sqlite`：后者依赖 `mattn/go-sqlite3`（cgo），交叉编译 `linux/arm64` 需要额外的交叉工具链，`CGO_ENABLED=0` 时还会得到一个能构建但一跑就报 `requires cgo` 的二进制。glebarez 是 modernc 的薄封装（非测试代码 712 行），保持纯 Go。其余全部用标准库，命令行解析用 `flag`，不引入第三方 CLI 框架。
+
+新增 `github.com/dop251/goja`（纯 Go 的 ES 解释器，连带 `dlclark/regexp2`、`go-sourcemap/sourcemap`、`google/pprof` 三个间接依赖，`golang.org/x/text` 跟着升了版本）。加它的理由：标准库没有 JS 引擎，而「给宿主编好的报文补字段」与「按块解上游流」都需要一个能读懂插件的执行器；把这两件事都做成声明式映射，等于在 JSON 里再发明一门表达式语言，最后仍要一个求值器，长度与攻击面都不会更小。不加的代价是只能继续在 Go 里为每个上游写分支，插件只能覆盖语音两条与宿主方言。代价是引入一个解释器与它带来的攻击面：goja 没有堆上限，`Runtime.Interrupt` 打不断在途的原生调用，所以沙箱只靠四道字节闸门与逐 hook 超时圈住（见 5.17），也不承诺把恶意代码隔离到进程级。
 
 ## 9 非目标
 
@@ -1240,10 +1651,11 @@ internal/usage/         用量汇总与花费估算
 - 逆向接口、把订阅网页版包装成 API。
 - 改写其它客户端的配置文件，不论带不带备份。
 - 集群编排：不做多副本、主从、分库分表、自动迁移与服务发现。只支持连接一个已存在的外部数据库，部署形态仍是一个进程。
-- 插件运行时（内置 JS 引擎、任意请求改写与执行第三方插件）：已知需要注入的厂商头用 5.10 的声明式附加头表达。
 - systemone 与对话协议之间的转换：决策请求没有消息序列，也产不出文本，5.14 只做同协议直通。
-- 语音与对话、向量化之间的转换：音频字节与消息序列之间没有可定义的映射，5.16 只做同协议直通。
 - 语音的音频转码与时长解析：不把 mp3 转成 opus，也不算音频时长（5.16 的计费口径按字符与上游报的秒数）。
+- 语音与对话、向量化之间的协议转换：音频字节与消息序列之间没有可定义的中间表示，语音只按绑定走同协议直通或某条 chat 方言，不经过中间表示，也不转成别的对话协议。
+
+插件系统不是非目标，是分阶段目标：本版落地声明式插件、内置方言与 `moejs` 沙箱（见 5.16、5.17、第 8 节）。`trusted-worker`（独立进程，以及文件、进程与环境变量权限）、Magpie/OpenCode 导入、OAuth 登录、插件市场与签名都没有做，但也没有被排除——manifest 与 `plugin_versions` 已经留了 `runtime`、`trust`、`signature_status` 三列，装进来的包一律标 `unverified`（见第 6 节）。这些留给后续阶段。
 
 ## 10 需要外部信息才能定的点
 

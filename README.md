@@ -13,7 +13,7 @@ lax serve                                           # 起网关，127.0.0.1:4567
 lax log tail                                        # 看请求记录
 ```
 
-四条对话线协议能进也能出（第五条 `systemone` 是决策协议，只与自己互通、不参与转换；第六条 `openai-embeddings` 是向量化，第七条 `openai-speech` 与第八条 `openai-transcriptions` 是语音，都只做同协议直通，见下面「向量化」「决策请求」与「语音」）。入站按路径分 anthropic、openai-chat、openai-responses 与 gemini，出站按厂商行上那家厂商的默认协议（探活发现某个模型该走别的协议时，结论记在 `account_models.protocol` 上优先用它），取值同为这四条；入站与出站相同则直通，不同则经中间表示转换，四条入站 × 四条出站共十六种组合，流式与非流式都可用，工具调用包含在内（这四条之外的 `systemone` 与 `openai-embeddings` 只做同协议直通，见「决策请求」与「向量化」）。中间表示、映射规则、选号规则、数据模型、里程碑见 [DESIGN.md](DESIGN.md)。
+四条对话线协议能进也能出（第五条 `systemone` 是决策协议，只与自己互通、不参与转换；第六条 `openai-embeddings` 是向量化，第七条 `openai-speech` 与第八条 `openai-transcriptions` 是语音，出站按模型绑定的方言走同协议直通或 chat 方言，见下面「向量化」「决策请求」「语音」与「插件与方言」）。入站按路径分 anthropic、openai-chat、openai-responses 与 gemini，出站按厂商行上那家厂商的默认协议（探活发现某个模型该走别的协议时，结论记在 `account_models.protocol` 上优先用它），取值同为这四条；入站与出站相同则直通，不同则经中间表示转换，四条入站 × 四条出站共十六种组合，流式与非流式都可用，工具调用包含在内（这四条之外的 `systemone` 与 `openai-embeddings` 只做同协议直通，见「决策请求」与「向量化」）。中间表示、映射规则、选号规则、数据模型、里程碑见 [DESIGN.md](DESIGN.md)。
 
 ## 命令
 
@@ -23,6 +23,7 @@ lax log tail                                        # 看请求记录
 | `serve` | 前台起网关 |
 | `account add\|ls\|set\|rm\|test\|enable\|disable` | 加账号、列账号、换凭据、删账号、探活、启用、停用 |
 | `provider ls\|add\|set\|unset\|rm` | 维护厂商默认地址、默认协议与各协议的路由；`add` 只新建，`set` 只设值，删除走 `unset` |
+| `plugin install\|update\|rollback\|verify\|logs\|reload\|config\|ls\|show\|enable\|disable\|rm\|doctor` | 装本地目录里的插件（声明式或 `moejs` 沙箱）：登记它带来的厂商、模型与方言，升版本、回滚、校验、看日志、热加载、读写配置项、启停与自检；包哈希对不上的插件不加载 |
 | `model ls` | 列出模型、可用账号与状态，可按厂商与账号筛选；`--json` 带每个账号的协议、HTTP 状态、探活时间与错误 |
 | `model show` | 按账号看一个模型的可达性事实：协议、状态、HTTP 状态、探活时间与错误；只读库，不发上游请求 |
 | `model add <模型> --account <账号> [--provider <厂商>] [--protocol <协议>]` | 手写一条「这个账号能用这个模型」，同事务写模型目录与账号可达性；可重复执行，决策模型与不在上游清单里的模型靠它声明 |
@@ -30,7 +31,8 @@ lax log tail                                        # 看请求记录
 | `model probe` | 逐个模型探活，把能用的写进账号，可按厂商与账号筛选；`--protocol` 只探指定的那一条协议 |
 | `model alias set\|unset\|ls` | 模型别名：把客户端写死的模型名指到真实模型名上，只影响请求方向 |
 | `model price set\|unset\|ls` | 模型单价：目录里的厂商级标价与某账号的覆盖价，`usage` 与 `model ls` 都读它 |
-| `model capability add\|set\|unset\|ls` | 模型能力声明：能力位（`speech` / `transcription`）、音色与音频格式；语音端点只打声明过对应能力的模型，`/v1/models` 也输出这些声明 |
+| `model dialect ls\|set\|unset` | 直接读写模型与操作的方言绑定：看哪个模型绑了哪条方言，改绑或删掉一条 |
+| `model capability add\|set\|unset\|ls` | 模型能力声明：能力位（`speech` / `transcription`）、音色、音频格式与 `--dialect` 的按操作方言绑定；语音端点只打声明过对应能力、绑定过方言的模型，`/v1/models` 也输出这些声明 |
 | `usage` | 按账号、模型或日期汇总用量，含输入、输出与缓存读写 token |
 | `log tail` | 最近的请求记录 |
 | `call` | 手工打一条请求，打印选号过程；默认 anthropic 入站，`--protocol` 可切换四种入站，gemini 也支持 `--stream` |
@@ -207,25 +209,30 @@ lax provider set openai openai-embeddings=/v1/embeddings
 
 ## 语音
 
-语音有两条线协议，报文都按 OpenAI 的形状：`openai-speech`（文本转语音，`POST /v1/audio/speech`）与 `openai-transcriptions`（语音转文本，`POST /v1/audio/transcriptions`）。出站有两种：厂商声明了语音路由就同协议直通（只换 `model`，音频或 JSON 字节原样）；厂商只有 chat 路由时，可以用 chat 适配把语音请求编成 chat completions 方言（MiMo 的 `mimo-v2.5-tts` / `mimo-v2.5-asr` 就是这种形状）。
+语音有两条线协议，报文都按 OpenAI 的形状：`openai-speech`（文本转语音，`POST /v1/audio/speech`）与 `openai-transcriptions`（语音转文本，`POST /v1/audio/transcriptions`）。出站形状由模型绑定的**方言**决定：方言的 `upstream_wire` 与入站协议相同就同协议直通（只换 `model`，音频或 JSON 字节原样），是 `openai-chat` 就由方言把语音请求编成 chat completions、再把响应解回音频字节或转写结果。内置方言四条：`lax/openai-speech@1` 与 `lax/openai-transcriptions@1`（直通，宿主原样转发）、`lax/mimo-chat-speech@1` 与 `lax/mimo-chat-asr@1`（MiMo 的 chat 形状）。
 
-**先声明能力，再调接口。** 能力位决定一个模型能不能用于语音端点：没声明的模型（例如一个普通对话模型）在本地就回 400，一条上游调用都不会发。音色与音频格式同样要声明，`/v1/models` 会把它们带出去：
+**先声明能力，再绑方言，再调接口。** 能力位决定一个模型能不能用于语音端点：没声明的模型（例如一个普通对话模型）在本地就回 400，一条上游调用都不会发。音色与音频格式同样要声明，`/v1/models` 会把它们带出去。方言绑定决定上游形状：没有绑定也是 400，文案给出带 `--dialect` 的下一步命令；绑定的方言没注册（插件被停用或删掉）同样 400，且不回落。
 
 ```bash
-# 真正的 OpenAI audio 厂商：声明路由
+# 真正的 OpenAI audio 厂商：声明路由，绑直通方言
 lax provider set openai openai-speech=/v1/audio/speech
 lax provider set openai openai-transcriptions=/v1/audio/transcriptions
 lax model add gpt-4o-mini-tts --account openai1
-lax model capability set gpt-4o-mini-tts --capability speech --voices alloy,nova --audio-formats mp3,wav
+lax model capability set gpt-4o-mini-tts --capability speech --voices alloy,nova --audio-formats mp3,wav \
+    --dialect lax/openai-speech@1
 
-# MiMo：只有 chat 路由，靠能力声明走 chat 适配
+# MiMo：只有 chat 路由，绑 chat 方言
 lax provider add mimo --base-url https://api.xiaomimimo.com \
     --openai /v1/chat/completions --models-path /v1/models --default-protocol openai-chat
 lax account add mimo1 --provider mimo --key -
 lax model capability set mimo-v2.5-tts --provider mimo --capability speech \
-    --voices "mimo_default,冰糖,茉莉,苏打,白桦,Mia,Chloe,Milo,Dean" --audio-formats mp3,wav,pcm16
-lax model capability set mimo-v2.5-asr --provider mimo --capability transcription --audio-formats wav,mp3
+    --voices "mimo_default,冰糖,茉莉,苏打,白桦,Mia,Chloe,Milo,Dean" --audio-formats mp3,wav,pcm16 \
+    --dialect lax/mimo-chat-speech@1
+lax model capability set mimo-v2.5-asr --provider mimo --capability transcription --audio-formats wav,mp3 \
+    --dialect lax/mimo-chat-asr@1
 ```
+
+`lax serve` 启动时会把已有的语音能力声明补成绑定（`store.BackfillSpeechDialects`，幂等）：厂商声明了对应的语音路由就绑直通方言，否则绑 MiMo 的 chat 方言。上面三条 `--dialect` 因此可以省掉；形状不是 MiMo 的 chat 上游才必须手写。
 
 ```python
 from openai import OpenAI
@@ -236,7 +243,7 @@ c.audio.speech.create(model="mimo-v2.5-tts", voice="Mia", input="今天风很大
 print(c.audio.transcriptions.create(model="mimo-v2.5-asr", file=open("hi.mp3", "rb"), language="zh").text)
 ```
 
-chat 适配的映射：
+MiMo 的两条 chat 方言（`lax/mimo-chat-speech@1` 与 `lax/mimo-chat-asr@1`）的映射：
 
 | 入站 | 出站 |
 | --- | --- |
@@ -250,11 +257,80 @@ chat 适配的映射：
 | ASR `prompt`、`temperature` | 丢弃（上游拒绝 text part） |
 | ASR `response_format` | 只影响本地包装：json → `{"text":…}`、text → 纯文本、verbose_json → 带 `task`、`language`、`duration` |
 
-本版不做转码、不做流式：ogg/opus、SILK 输入与 `opus`/`aac`/`flac` 输出都回 400，`stream_format: "sse"` 与 ASR 的 `stream: true` 也回 400，`srt`/`vtt` 与 `auto`/`zh`/`en` 以外的语言同样拒。这些都在本地拒，不会变成一次上游调用。
+本版不做转码、不做流式：ogg/opus、SILK 输入与 `opus`/`aac`/`flac` 输出都回 400，`stream_format: "sse"` 与 ASR 的 `stream: true` 也回 400，`srt`/`vtt` 与 `auto`/`zh`/`en` 以外的语言同样拒。这些都在本地拒，不会变成一次上游调用。能力声明里的 `pcm16` 与入站的 `pcm` 是同一个格式的两种叫法，本地按同一项比较。
 
-计费分两条：直通按字符（`tts_chars`）× `--tts-char` 与音频秒（`audio_seconds`）× `--audio-second`；chat 适配按上游报的 token 计（`in_tokens` / `out_tokens` / 缓存读），`tts_chars` 与 `audio_seconds` 只记录展示、不进花费。`/v1/models` 的条目会带 `capabilities`、`voices` 与 `audio_formats`，不确定能传什么时先查它。
+计费分两条：直通按字符（`tts_chars`）× `--tts-char` 与音频秒（`audio_seconds`）× `--audio-second`；chat 方言按上游报的 token 计（`in_tokens` / `out_tokens` / 缓存读），`tts_chars` 与 `audio_seconds` 只记录展示、不进花费。`/v1/models` 的条目会带 `capabilities`、`voices` 与 `audio_formats`，不确定能传什么时先查它。
 
-语音模型的探活仍按对话请求打，因此声明了能力的模型用 `model add` 手写可达性（`model ls` 显示「待探活」，不影响选号）；对这类模型跑 `model probe` 会因为对话请求返回 400 把 `allowed` 改写成 `forbidden`。直通路由上的应错探活规则见 DESIGN 5.16：`400` / `422` 判可达、`404` 判不存在、`401` 停用账号，而 `400` 只证明端点存在、不证明凭据有效。
+语音模型的探活仍按对话请求打，也没接进方言分发：声明了能力的模型用 `model add` 手写可达性（`model ls` 显示「待探活」，不影响选号）；对这类模型跑 `model probe` 会因为对话请求返回 400 把 `allowed` 改写成 `forbidden`。直通路由上的应错探活规则见 DESIGN 5.16：`400` / `422` 判可达、`404` 判不存在、`401` 停用账号，而 `400` 只证明端点存在、不证明凭据有效。
+
+## 插件与方言
+
+插件是本地目录里的包：`lax.plugin.json` 说明插件 ID、版本、ABI、运行时、权限与它带来的厂商，`dialects.json` 说明这些厂商的上游形状，`models.json` 说明模型与「哪个操作绑哪条方言」。运行时有两种：
+
+- `declarative`：宿主按数据执行映射，插件不跑代码；只能承载语音两条操作。
+- `moejs`：每次 hook 在进程内 JS 沙箱里执行插件代码，可以给对话、向量化与决策请求补报文，并为对话与决策请求解响应、逐块解流。
+
+```bash
+lax plugin install ./my-plugin --dry-run       # 只打印将写入的厂商、路由、模型、方言、别名与权限
+lax plugin install ./my-plugin                 # 解析校验 → 包哈希 → 版本与方言冲突 → 复制到数据目录 → 写厂商目录与绑定
+lax plugin install ./my-js-plugin --trust sandboxed  # 带代码的包；--trust 与 runtime 必须一致
+lax plugin update com.example.echo --source ./echo-v2  # 升到新版本（不给 --yes 只打印计划并退出 1）
+lax plugin rollback com.example.echo --version 1.0.0   # 把活动版本切回装过的旧版本
+lax plugin verify com.example.echo             # 只读校验：哈希、运行时与方言声明，不改库、不开沙箱
+lax plugin doctor                              # 完整自检：包、哈希、沙箱、导出钩子、方言登记与状态
+lax plugin logs com.example.echo --follow      # 插件日志（每个插件保留最近 500 条）
+lax plugin reload                              # 给正在跑的 serve 发 SIGHUP，整表换掉方言注册表
+lax plugin config set com.example.echo region cn   # 读写 manifest 声明的配置项
+lax plugin ls                                  # ID / 版本 / 类型 / 运行时 / 信任 / 状态 / 厂商 / 方言数
+lax plugin show com.example.echo               # manifest 原文、权限、版本、厂商、方言、冲突、最近审计与日志
+lax plugin disable com.example.echo            # 重启或 reload 之后不再加载它的方言
+lax plugin rm com.example.echo --purge         # 删库记录、它带来的厂商与包目录
+lax model dialect ls mimo-v2.5-tts             # 看模型绑了哪条方言
+lax model dialect set mimo-v2.5-tts chat.complete@1 com.example.echo/chat@1
+```
+
+安装流水线是固定的：解析并严格校验 manifest、方言文件、模型目录与三者之间的引用 → 定信任级别 → 拒掉声明式方言承载非语音操作 → 算包目录哈希 → 版本冲突（同一版本不能覆盖）→ 方言冲突（内置方言与其余已装插件一起试登记，`lax/` 前缀不许冒用）→ 复制到 `<数据目录>/plugins/installed/<插件 ID>/<版本>/`（先落 `staging/` 再整目录改名，符号链接一律拒）→ 逐家厂商一个事务写目录（厂商、路由、模型、方言绑定、别名，冲突整包回滚）→ 写 `plugin_versions`（记下安装时的 `runtime`）与 `plugins`。`--dry-run` 停在复制之前，`--no-enable` 只装不用，装第二个版本要 `--yes`。
+
+`--trust` 只有两个取值：`declarative` 与 `sandboxed`。`runtime: "declarative"` 的包只能按声明式装，`runtime: "moejs"` 的包只能按沙箱装；对不上、或写 `trusted-worker`，都是用法错误（退出码 2）。`plugin update` 没有这个参数，按新包的 runtime 重新推断。
+
+插件带来的厂商记在 `providers.plugin_id` 上：删除插件会连带删掉这些厂商的路由、模型目录、方言绑定与别名，并停用指向它们的账号（`last_error` 写明原因，重新安装之后要 `account enable` 才回到选号池）。同名厂商地址不一致、同名路由路径不一致、手写绑定已指向别的方言、别名已指向别的目标，四种冲突都整笔失败并给下一步命令。
+
+对话上游可以只写方言文件、引用宿主方言：`models.json` 里把操作绑到 `lax/openai-chat@1`（另外五条是 `lax/anthropic@1`、`lax/openai-responses@1`、`lax/gemini@1`、`lax/openai-embeddings@1`、`lax/systemone@1`），安装会按线协议建默认路由、按上游名落模型目录，并在客户端名字与上游名字不同时写一条别名，请求仍走宿主编解码。要改上游报文或解一种宿主不认识的响应，就写 hook 方言（`runtime: "moejs"`，`implementation.prepare` 与 `implementation.decode` 都写 `hook`）：宿主编好报文后交给它补字段，响应返回 `ResultJSON`（上游线协议形状），宿主再解成中间表示、按客户端协议编回去。声明式方言绑非语音操作仍会在安装时被拒。
+
+方言决定语音请求的出站形状（见上一节）。绑定也可以手工写：`model capability add|set` 的 `--dialect` 写一条，`model dialect ls|set|unset` 直接读写 `model_operations`：
+
+```bash
+lax model capability add mimo-v2.5-tts --capability speech --dialect lax/mimo-chat-speech@1
+lax model dialect set mimo-v2.5-tts chat.complete@1 com.example.echo/chat@1 --provider mimo
+```
+
+`--dialect` 写 `model_operations`：`speech` → `speech.synthesize@1`，`transcription` → `speech.transcribe@1`，两项能力都声明就各写一条；模型没声明语音能力时是用法错误。`model dialect set` 是覆盖语义，`unset` 删不到时报错，`--provider` 不给时按模型名唯一确定。非语音操作绑到插件方言时 `set` 会提醒「网关会拒绝」，但当前实现里 hook 方言可以承接这些操作（见下面「沙箱里能做什么」）。
+
+### 沙箱里能做什么
+
+`moejs` 插件的每个 hook 拿到的 `ctx`：`abi`、`operation`、`model`、`wire`、`stream`、`dialect`、归一后的 `input`（正文、音色、格式、音频 base64 等）、配置项 `options`、上限 `limits`、宿主编好的 `body`、`decode_response` 的 `response`、`decode_stream` 的 `chunk` 与 `state`。注入的 API 只有这些：
+
+| API | 用途 |
+| --- | --- |
+| `lax.log([level], message)`、`console.log\|info\|warn\|error` | 写日志，落 `plugin_logs` 并打一行到 serve 输出 |
+| `lax.now()`、`lax.randomUUID()` | 时间与 v4 UUID |
+| `lax.base64.encode\|decode`、`lax.sha256`、`lax.hmacSHA256` | 编解码与摘要 |
+| `lax.error(code, message, {retryable?, details?})` | 造带错误码的对象，由插件 `throw` |
+| `lax.http.request({method?, url, headers?, body?, timeout_ms?})` | 控制面请求，见下 |
+| `lax.cache.get(ns, key)` / `set(ns, key, value[, ttl_ms])` / `delete(ns, key)` | 进程内缓存，按插件隔离，单插件 1 MiB |
+| `URL` | 只解析与格式化，不发请求 |
+
+不能做的：
+
+- 没有 `fetch`、`process`、`require`、`fs`、`Bun`、`child_process`、`setTimeout`、`setInterval`；读不到文件、进程、环境变量与凭据原文（凭据由宿主注入请求头，插件看不到 key）。
+- 联网只能走 `lax.http.request`：manifest 要声明 `network.mode = "host-proxy"` 与主机白名单，只放行 https、不跟随重定向，每次 hook 最多 4 次、单次上限 15 s、响应体默认 1 MiB。`lax.media.*` 本版不可用，音频走 `ctx.input.audio_base64` 与 `result.body_base64`。
+- **没有内存硬上限**：goja 不提供堆上限 API，能限的只有四道字节闸门——源码单文件 4 MiB、整包 8 MiB（最多 64 个文件），hook 返回值 8 MiB，注入的音频与流块 8 MiB，`lax.cache` 1 MiB。写坏的插件仍能把进程内存吃高。
+- 逐 hook 超时默认 100 ms（编请求与解流）与 2 s（解响应），上限 2 s / 2 s / 30 s。超时用中断实现，但中断只在 JS 代码里生效：`lax.http.request` 正在等上游响应时不会立刻返回，一个 100 ms 的 hook 可能实际占用几秒。
+- 模块只支持受限 ESM：`export function\|const\|let\|var\|class`、`export default`（带 hook 方法的对象）、`import X from "./a.js"` 与 `import {a as b} from "./a.js"` 这类相对 import。没有 `import *`、裸模块名与 `node:`、动态 `import()`、`export *`、`export { … }`、顶层 `await`；路径必须在包根内、要带扩展名。
+
+`plugin config` 读写 manifest 的 `options`：`set` 按声明的 `type`（`string` / `number` / `boolean`）与 `enum` 校验，`get` 没写过的键回落到 `default`，`unset` 幂等。取值只落库，运行中的网关要 `plugin reload` 才用新值；`secrets` 不走这里。
+
+退出码沿用 0 成功、1 运行失败（含 `plugin doctor` / `plugin verify` 有检查未通过）、2 用法错误；每个子命令都支持 `--json`。
 
 ## 决策请求：lax decide
 
@@ -326,6 +402,8 @@ make check        # go vet + go test + go build
 | `$XDG_CONFIG_HOME/lax/config.json` | 监听地址、数据库路径、后端与连接串 |
 | `$XDG_DATA_HOME/lax/lax.db` | 账号、模型状态、请求记录（只用 SQLite 时） |
 | `$XDG_DATA_HOME/lax/secret.key` | 加密凭据的密钥 |
+| `$XDG_DATA_HOME/lax/lax.pid` | `serve` 运行时写下的进程号（权限 0600，退出时删掉），`plugin reload` 凭它发 `SIGHUP` |
+| `$XDG_DATA_HOME/lax/plugins/` | 已安装的插件包：`installed/<插件 ID>/<版本>/` 不可变，`staging/` 是安装时的临时落点；挂在库文件旁边，随数据目录搬家 |
 
 数据库缺省是 SQLite 单文件。要用 PostgreSQL 或 MySQL，在配置里改两项：
 
@@ -346,4 +424,6 @@ make check        # go vet + go test + go build
 
 ## 已知边界
 
-gemini 的入站与出站都支持非流式与流式，模型列表可同步（`google-gemini` 内置，`GET /v1beta/models` 的清单去掉 `models/` 前缀、按 `nextPageToken` 翻页；只能做向量化的条目现在也进清单，能力位记 `embedding`，以前它们被 `supportedGenerationMethods` 过滤掉了）。gemini 的模型名在 URL 路径里，路由的 `path` 因此可以写 `{model}` 占位符（相对路径与整条地址都行，替换时按路径段转义）；入站 gemini 的错误体是 google 的形状（`error.code` 是 HTTP 状态码、`error.status` 是状态名），四条入站路径各自的形状见 DESIGN 5.2；非正常的 `finishReason`（`SAFETY` 一类）按正常结束转给客户端，原值只进网关日志；gemini 的内置工具（`googleSearch` 等）与思考内容（`thought` 标记、`thinkingConfig`）不搬。转换时搬运文本、图片、思考内容、工具调用与工具结果五类块：思考内容只在响应方向搬运，请求方向不回填——chat 的 `reasoning_content` 与 responses 的 `reasoning` item 是上游自己产生的字段，回填给推理模型会被以 400 拒掉整条请求；响应方向仍照旧搬运。签名只有 anthropic 有落点，没有签名的思考块不写进 anthropic 的请求与响应（不伪造签名，伪造会被上游以 400 拒绝），所以 chat 与 responses 的思考内容转到 anthropic 时丢弃；流式转换下发给 anthropic 客户端的思考块没有签名，客户端若把这些块回填进下一轮请求，上游会报 400。工具结果之后紧跟的追问并进同一条 user 消息，因为 anthropic 不接受两条相邻的 user 消息。思考配置参数（anthropic 的 `thinking`、chat 的 `reasoning_effort`）、`redacted_thinking` 的不透明 `data` 与 responses 的 `encrypted_content` 跨协议不搬，reasoning token 不单独记账（算进输出 token）。音频与文件类内容丢弃；anthropic 的服务端内置工具（`web_search` 等）跨协议时整条丢弃，chat 与 responses 的工具定义只认 function，编回 anthropic 时才原样保留 `type`；`tools[].strict` 不搬运，`is_error` 只有 anthropic 有落点，`allowed_tools` 降级为 `auto`。流式转换下断在工具参数中间时，已下发的参数片段撤不回来，收尾的错误帧会写明「工具调用参数在上游中断，内容不完整」，这一次记失败，程序不伪造闭合的 JSON。跨协议只搬运图片地址，没有其它多模态变换。不改写任何客户端配置文件；需要非标准请求头的上游通过 `provider header` 声明（见 DESIGN 5.10），例如 opencode 的 Go 端点要求 `x-opencode-session`，声明 `{session}` 即可路由，要求按请求计算的签名的上游仍然接不了；冷却时长按单次失败计算；探活调用不计入用量汇总；估算花费需要给模型定价（`model price set` 的 `--in` 与 `--out`，账号只在套餐不同时用 `--account` 覆盖），缓存读写按 `--cache-read` 与 `--cache-write` 折价（未填时回退到输入价，单价单位都是每百万 token）；`usage` 与 `log tail` 里仍分别显示缓存读写的 token。语音只到同协议直通为止：不做音频转码、不解析音频容器算时长（TTS 按入参字符、ASR 按上游报的秒数），变化的模型名也不改写（响应里的 `model` 原样）。
+gemini 的入站与出站都支持非流式与流式，模型列表可同步（`google-gemini` 内置，`GET /v1beta/models` 的清单去掉 `models/` 前缀、按 `nextPageToken` 翻页；只能做向量化的条目现在也进清单，能力位记 `embedding`，以前它们被 `supportedGenerationMethods` 过滤掉了）。gemini 的模型名在 URL 路径里，路由的 `path` 因此可以写 `{model}` 占位符（相对路径与整条地址都行，替换时按路径段转义）；入站 gemini 的错误体是 google 的形状（`error.code` 是 HTTP 状态码、`error.status` 是状态名），四条入站路径各自的形状见 DESIGN 5.2；非正常的 `finishReason`（`SAFETY` 一类）按正常结束转给客户端，原值只进网关日志；gemini 的内置工具（`googleSearch` 等）与思考内容（`thought` 标记、`thinkingConfig`）不搬。转换时搬运文本、图片、思考内容、工具调用与工具结果五类块：思考内容只在响应方向搬运，请求方向不回填——chat 的 `reasoning_content` 与 responses 的 `reasoning` item 是上游自己产生的字段，回填给推理模型会被以 400 拒掉整条请求；响应方向仍照旧搬运。签名只有 anthropic 有落点，没有签名的思考块不写进 anthropic 的请求与响应（不伪造签名，伪造会被上游以 400 拒绝），所以 chat 与 responses 的思考内容转到 anthropic 时丢弃；流式转换下发给 anthropic 客户端的思考块没有签名，客户端若把这些块回填进下一轮请求，上游会报 400。工具结果之后紧跟的追问并进同一条 user 消息，因为 anthropic 不接受两条相邻的 user 消息。思考配置参数（anthropic 的 `thinking`、chat 的 `reasoning_effort`）、`redacted_thinking` 的不透明 `data` 与 responses 的 `encrypted_content` 跨协议不搬，reasoning token 不单独记账（算进输出 token）。音频与文件类内容丢弃；anthropic 的服务端内置工具（`web_search` 等）跨协议时整条丢弃，chat 与 responses 的工具定义只认 function，编回 anthropic 时才原样保留 `type`；`tools[].strict` 不搬运，`is_error` 只有 anthropic 有落点，`allowed_tools` 降级为 `auto`。流式转换下断在工具参数中间时，已下发的参数片段撤不回来，收尾的错误帧会写明「工具调用参数在上游中断，内容不完整」，这一次记失败，程序不伪造闭合的 JSON。跨协议只搬运图片地址，没有其它多模态变换。不改写任何客户端配置文件；需要非标准请求头的上游通过 `provider header` 声明（见 DESIGN 5.10），例如 opencode 的 Go 端点要求 `x-opencode-session`，声明 `{session}` 即可路由，要求按请求计算的签名的上游仍然接不了；冷却时长按单次失败计算；探活调用不计入用量汇总；估算花费需要给模型定价（`model price set` 的 `--in` 与 `--out`，账号只在套餐不同时用 `--account` 覆盖），缓存读写按 `--cache-read` 与 `--cache-write` 折价（未填时回退到输入价，单价单位都是每百万 token）；`usage` 与 `log tail` 里仍分别显示缓存读写的 token。语音不做音频转码、不解析音频容器算时长（直通路径 TTS 按入参字符、ASR 按上游报的秒数，chat 方言按 token 记账），变化的模型名也不改写（响应里的 `model` 原样）；出站形状只由绑定的方言决定，同协议的方言不执行声明式映射，chat 形状的语音方言可以是内置的 Go 实现，也可以是插件用声明式映射或 hook 方言写的（见「插件与方言」）。
+
+插件与方言：本版落地声明式插件、内置方言与 `moejs` 沙箱，仍没有 `trusted-worker`（独立进程，以及文件、进程、环境变量权限）、Magpie/OpenCode 导入与 `plugin import`、OAuth 登录、插件市场与签名（`plugin_versions.signature_status` 一律 `unverified`、`source` 一律 `dir`）。声明式映射只能表达 `const`、`input`、`model`、`option` 四种来源加 `map`、`default`、`omit_if_empty` 三个修饰键，没有表达式、正则、循环与脚本，`input` 白名单只有语音那八项，所以声明式方言只能给语音两条操作写映射；对话、向量化与决策请求可以绑宿主方言（`lax/` 前缀）走 Go 编解码，也可以绑 hook 方言。hook 方言的边界：`Input.Body` 是宿主编好的报文（`Input.Messages` 仍为空，读消息要解析 `ctx.body`）；向量化与决策入站的响应，方言返回的 `ResultJSON` 在入站与出站同协议时原样写回（这两个协议没有中间表示，跨协议改编不支持）；要流式就得实现 `decode_stream`，否则在发上游请求之前 400；`Plan.Path` 只能改相对路径，语音路径不看它。沙箱没有内存硬上限（goja 不提供堆上限 API，只有源码 8 MiB、返回值 8 MiB、注入音频与流块 8 MiB、cache 1 MiB 四道字节闸门）；逐 hook 超时打不断在途的 `lax.http.request`，一个 100 ms 的 hook 可能占用几秒；ESM 只支持静态 `export`、`export default` 与相对 import，没有 `import *`、裸模块、动态 import 与顶层 `await`；联网只走 `lax.http.request` 的白名单 https，没有媒体通道。`plugin install` 逐家厂商一个事务，一个插件带多家厂商时第 N 家失败会让前 N-1 家留在库里（用 `lax plugin rm` 或 `lax provider rm` 清）。`plugin reload`（`SIGHUP`）只整表换方言注册表，不关旧沙箱，反复 reload 会积累旧实例；没有 `models` / `probe` 两个控制面钩子，模型清单与探活仍由 `model sync` / `model probe` 做。
