@@ -6,7 +6,7 @@
 
 | 目录 | 职责 | 边界 |
 | --- | --- | --- |
-| `cmd/switchboard` | 进程入口 | 只调 `cli.Run` |
+| `cmd/lax` | 进程入口 | 只调 `cli.Run` |
 | `internal/cli` | 子命令、参数、输出 | 不直接连数据库、不发上游请求 |
 | `internal/config` | 路径与配置文件 | 不含业务状态 |
 | `internal/store` | SQLite、迁移、读写 | 上游凭据只在 `secret` 解密后进入这里 |
