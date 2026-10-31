@@ -95,8 +95,12 @@ type RequestRecord struct {
 	// 判定由 ReasoningExtra 给。两列都进 requests 的独立列，方便事后按列重算花费。
 	ReasoningTokens      int64
 	ReasoningTokensExtra int64
-	LatencyMS            int64
-	Error                string
+	// TTSChars 是语音合成的入参字符数，AudioSeconds 是语音转写的音频秒数。
+	// 其余协议的这两列恒为 0，与 token 四列互斥：语音端点不报 token。
+	TTSChars     int64
+	AudioSeconds int64
+	LatencyMS    int64
+	Error        string
 }
 
 // Options 是打开数据库的选项。
@@ -503,6 +507,8 @@ func insertRequestTx(tx *gorm.DB, r *RequestRecord) error {
 		CacheWrite:           r.CacheWrite,
 		ReasoningTokens:      r.ReasoningTokens,
 		ReasoningTokensExtra: r.ReasoningTokensExtra,
+		TTSChars:             r.TTSChars,
+		AudioSeconds:         r.AudioSeconds,
 		LatencyMS:            r.LatencyMS,
 		Error:                ptrStr(r.Error),
 	}
@@ -542,6 +548,8 @@ func (s *Store) RecentRequests(limit int) ([]RequestRecord, error) {
 			CacheWrite:           r.CacheWrite,
 			ReasoningTokens:      r.ReasoningTokens,
 			ReasoningTokensExtra: r.ReasoningTokensExtra,
+			TTSChars:             r.TTSChars,
+			AudioSeconds:         r.AudioSeconds,
 			LatencyMS:            r.LatencyMS,
 			Error:                derefStr(r.Error),
 		})
@@ -636,6 +644,9 @@ type UsageRow struct {
 	ReasoningTokens int64
 	CacheRead       int64
 	CacheWrite      int64
+	// TTSChars 与 AudioSeconds 是语音两条协议的合计，其余协议恒为 0。
+	TTSChars     int64
+	AudioSeconds int64
 	// Cost 是这一组的估算花费（单位元）。nil 表示未定价：这一组里所有请求的所有计价项都
 	// 因缺价没算，不知道多少钱。nil 与 0 是两件事：0 是「确实不花钱」（免费或打包价）。
 	Cost *float64
@@ -665,28 +676,36 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 	q := fmt.Sprintf(`SELECT k, COUNT(*), COALESCE(SUM(in_tokens),0), COALESCE(SUM(out_tokens),0),
 		COALESCE(SUM(reasoning_tokens),0),
 		COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_write),0),
+		COALESCE(SUM(tts_chars),0), COALESCE(SUM(audio_seconds),0),
 		CASE WHEN SUM(CASE WHEN c_in IS NOT NULL THEN 1 ELSE 0 END
 		              + CASE WHEN c_cache_read IS NOT NULL THEN 1 ELSE 0 END
 		              + CASE WHEN c_cache_write IS NOT NULL THEN 1 ELSE 0 END
 		              + CASE WHEN c_out IS NOT NULL THEN 1 ELSE 0 END
-		              + CASE WHEN c_reasoning IS NOT NULL THEN 1 ELSE 0 END) = 0
+		              + CASE WHEN c_reasoning IS NOT NULL THEN 1 ELSE 0 END
+		              + CASE WHEN c_tts IS NOT NULL THEN 1 ELSE 0 END
+		              + CASE WHEN c_audio IS NOT NULL THEN 1 ELSE 0 END) = 0
 		     THEN NULL
 		     ELSE SUM(COALESCE(c_in,0) + COALESCE(c_cache_read,0) + COALESCE(c_cache_write,0)
-		              + COALESCE(c_out,0) + COALESCE(c_reasoning,0)) / 1e6
+		              + COALESCE(c_out,0) + COALESCE(c_reasoning,0)
+		              + COALESCE(c_tts,0) + COALESCE(c_audio,0))
 		END
 		FROM (
 			SELECT %s AS k,
 				r.in_tokens AS in_tokens, r.out_tokens AS out_tokens,
 				r.reasoning_tokens AS reasoning_tokens,
 				r.cache_read AS cache_read, r.cache_write AS cache_write,
-				r.in_tokens_uncached * (%s) AS c_in,
-				r.cache_read * (%s) AS c_cache_read,
-				r.cache_write * (%s) AS c_cache_write,
-				r.out_tokens * (%s) AS c_out,
-				r.reasoning_tokens_extra * (%s) AS c_reasoning
+				r.tts_chars AS tts_chars, r.audio_seconds AS audio_seconds,
+				r.in_tokens_uncached * (%s) / 1e6 AS c_in,
+				r.cache_read * (%s) / 1e6 AS c_cache_read,
+				r.cache_write * (%s) / 1e6 AS c_cache_write,
+				r.out_tokens * (%s) / 1e6 AS c_out,
+				r.reasoning_tokens_extra * (%s) / 1e6 AS c_reasoning,
+				r.tts_chars * (%s) / 1e6 AS c_tts,
+				r.audio_seconds * (%s) AS c_audio
 			FROM requests r %s WHERE r.ts >= ?
 		) AS t GROUP BY k ORDER BY 2 DESC`,
-		expr, usagePriceIn, usagePriceCacheRead, usagePriceCacheWrite, usagePriceOut, usagePriceOut, usagePriceJoin)
+		expr, usagePriceIn, usagePriceCacheRead, usagePriceCacheWrite, usagePriceOut, usagePriceOut,
+		usagePriceTTSChar, usagePriceAudioSecond, usagePriceJoin)
 
 	// 走 GORM 的 Raw 而不是底层 *sql.DB：查询里的 ? 占位符要由 dialector 转成 PostgreSQL
 	// 的 $1，直接用 *sql.DB 会把这个问号原样发给 PG。
@@ -701,7 +720,7 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 		var u UsageRow
 		var cost sql.NullFloat64
 		if err := rows.Scan(&u.Key, &u.Requests, &u.InTokens, &u.OutTokens, &u.ReasoningTokens,
-			&u.CacheRead, &u.CacheWrite, &cost); err != nil {
+			&u.CacheRead, &u.CacheWrite, &u.TTSChars, &u.AudioSeconds, &cost); err != nil {
 			return nil, err
 		}
 		if cost.Valid {

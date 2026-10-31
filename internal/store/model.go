@@ -58,6 +58,8 @@ type requestRow struct {
 	CacheWrite           int64   `gorm:"column:cache_write;not null;default:0"`
 	ReasoningTokens      int64   `gorm:"column:reasoning_tokens;not null;default:0"`
 	ReasoningTokensExtra int64   `gorm:"column:reasoning_tokens_extra;not null;default:0"`
+	TTSChars             int64   `gorm:"column:tts_chars;not null;default:0"`
+	AudioSeconds         int64   `gorm:"column:audio_seconds;not null;default:0"`
 	LatencyMS            int64   `gorm:"column:latency_ms;not null;default:0"`
 	Error                *string `gorm:"column:error"`
 }
@@ -113,6 +115,8 @@ type providerModelRow struct {
 	PriceOut        *float64 `gorm:"column:price_out"`
 	PriceCacheRead  *float64 `gorm:"column:price_cache_read"`
 	PriceCacheWrite *float64 `gorm:"column:price_cache_write"`
+	PriceTTSChar    *float64 `gorm:"column:price_tts_char"`
+	PriceAudioSec   *float64 `gorm:"column:price_audio_second"`
 	UpdatedAt       int64    `gorm:"column:updated_at;not null;default:0"`
 }
 
@@ -133,6 +137,8 @@ type accountModelRow struct {
 	PriceOut        *float64 `gorm:"column:price_out"`
 	PriceCacheRead  *float64 `gorm:"column:price_cache_read"`
 	PriceCacheWrite *float64 `gorm:"column:price_cache_write"`
+	PriceTTSChar    *float64 `gorm:"column:price_tts_char"`
+	PriceAudioSec   *float64 `gorm:"column:price_audio_second"`
 }
 
 func (accountModelRow) TableName() string { return "account_models" }
@@ -207,6 +213,8 @@ var seedRoutes = []seedRoute{
 	{"google-gemini", "gemini", "/v1beta/models/{model}:generateContent", "/v1beta/models"},
 	{"openai", "openai-embeddings", "/v1/embeddings", ""},
 	{"ollama", "openai-embeddings", "/v1/embeddings", ""},
+	{"openai", "openai-speech", "/v1/audio/speech", ""},
+	{"openai", "openai-transcriptions", "/v1/audio/transcriptions", ""},
 }
 
 // seed 写入内置厂商与路由。

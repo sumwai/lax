@@ -36,9 +36,9 @@ var providerSubs = []groupItem{
 // `--base-url` 在 add 里是可选的：每条路由与 models_path 都写成整条地址时，它拼不进任何地址，
 // 这一项确实无处可用，给了也只过一遍本机校验、不参与拼地址。
 const (
-	providerAddUsage   = "用法：lax provider add <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--embeddings <路径>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]"
-	providerSetUsage   = "用法：lax provider set <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--embeddings <路径>] [--models-path <路径>] [--default-protocol <协议>] [--note <备注>]"
-	providerUnsetUsage = "用法：lax provider unset <名称> <字段> [<字段>...]\n可用字段：anthropic、openai、responses、gemini、systemone、embeddings、models-path、default-protocol、note"
+	providerAddUsage   = "用法：lax provider add <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--embeddings <路径>] [--speech <路径>] [--transcriptions <路径>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]"
+	providerSetUsage   = "用法：lax provider set <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--embeddings <路径>] [--speech <路径>] [--transcriptions <路径>] [--models-path <路径>] [--default-protocol <协议>] [--note <备注>]"
+	providerUnsetUsage = "用法：lax provider unset <名称> <字段> [<字段>...]\n可用字段：anthropic、openai、responses、gemini、systemone、embeddings、speech、transcriptions、models-path、default-protocol、note"
 )
 
 // providerUnsetField 是一个可以被 `provider unset` 清掉的字段。字段名用 flag 名，
@@ -57,6 +57,8 @@ var providerUnsetFields = []providerUnsetField{
 	{"gemini", "gemini 路由", gateway.ProtocolGemini},
 	{"systemone", "systemone 路由", gateway.ProtocolSystemOne},
 	{"embeddings", "openai-embeddings 路由", gateway.ProtocolEmbeddings},
+	{"speech", "openai-speech 路由", gateway.ProtocolSpeech},
+	{"transcriptions", "openai-transcriptions 路由", gateway.ProtocolTranscriptions},
 	{"models-path", "模型列表覆盖", ""},
 	{"default-protocol", "显式默认协议", ""},
 	{"note", "备注", ""},
@@ -297,12 +299,14 @@ func cmdProviderLs(e *Env, args []string) error {
 
 // providerPathFlags 是五个协议 flag 的当前值。add 用它们声明路由，set 用它们覆盖一条路由的路径。
 type providerPathFlags struct {
-	anthropic  *string
-	openai     *string
-	responses  *string
-	gemini     *string
-	systemone  *string
-	embeddings *string
+	anthropic      *string
+	openai         *string
+	responses      *string
+	gemini         *string
+	systemone      *string
+	embeddings     *string
+	speech         *string
+	transcriptions *string
 }
 
 func newProviderPathFlags(fs *flagSet) providerPathFlags {
@@ -320,6 +324,12 @@ func newProviderPathFlags(fs *flagSet) providerPathFlags {
 		embeddings: fs.String("embeddings", "", "openai-embeddings 向量化协议的路由路径：相对 --base-url 的完整路径，例如 /v1/embeddings；也可以写整条地址（相对路径的斜杠写法由程序规整）。\n"+
 			"向量化只做同协议直通，/v1/embeddings 入站只打声明了这条路由的厂商，例：\n"+
 			"  lax provider set openai openai-embeddings=/v1/embeddings"),
+		speech: fs.String("speech", "", "openai-speech 语音合成的路由路径：相对 --base-url 的完整路径，例如 /v1/audio/speech；也可以写整条地址（相对路径的斜杠写法由程序规整）。\n"+
+			"语音只做同协议直通，/v1/audio/speech 入站只打声明了这条路由的厂商，例：\n"+
+			"  lax provider set openai openai-speech=/v1/audio/speech"),
+		transcriptions: fs.String("transcriptions", "", "openai-transcriptions 语音转写的路由路径：相对 --base-url 的完整路径，例如 /v1/audio/transcriptions；也可以写整条地址（相对路径的斜杠写法由程序规整）。\n"+
+			"语音转写只做同协议直通，入站是 multipart/form-data，例：\n"+
+			"  lax provider set openai openai-transcriptions=/v1/audio/transcriptions"),
 	}
 }
 
@@ -341,6 +351,8 @@ func (p providerPathFlags) pairs(fs *flagSet) []providerPathFlag {
 		{"gemini", gateway.ProtocolGemini, *p.gemini, flagWasSet(fs, "gemini")},
 		{"systemone", gateway.ProtocolSystemOne, *p.systemone, flagWasSet(fs, "systemone")},
 		{"embeddings", gateway.ProtocolEmbeddings, *p.embeddings, flagWasSet(fs, "embeddings")},
+		{"speech", gateway.ProtocolSpeech, *p.speech, flagWasSet(fs, "speech")},
+		{"transcriptions", gateway.ProtocolTranscriptions, *p.transcriptions, flagWasSet(fs, "transcriptions")},
 	}
 }
 
@@ -397,8 +409,12 @@ func protocolFromCLIName(value, flagName, example string) (string, error) {
 		return gateway.ProtocolSystemOne, nil
 	case "embeddings", gateway.ProtocolEmbeddings:
 		return gateway.ProtocolEmbeddings, nil
+	case "speech", gateway.ProtocolSpeech:
+		return gateway.ProtocolSpeech, nil
+	case "transcriptions", gateway.ProtocolTranscriptions:
+		return gateway.ProtocolTranscriptions, nil
 	}
-	return "", usagef("%s %q 不认识，可用 anthropic、openai、responses、gemini、systemone、embeddings（也认线协议全名 openai-chat、openai-responses、openai-embeddings），例如 %s", flagName, value, example)
+	return "", usagef("%s %q 不认识，可用 anthropic、openai、responses、gemini、systemone、embeddings、speech、transcriptions（也认线协议全名 openai-chat、openai-responses、openai-embeddings、openai-speech、openai-transcriptions），例如 %s", flagName, value, example)
 }
 
 // emptyValueError 是「给了参数但值是空」的统一文案，路径参数规整之后为空也算空。

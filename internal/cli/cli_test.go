@@ -57,6 +57,9 @@ func TestWalkingSkeleton(t *testing.T) {
 	if !strings.Contains(out, "配置") || !strings.Contains(out, "下一步") {
 		t.Fatalf("init 输出 = %s", out)
 	}
+	// 默认端口 4567 是固定值：本机别的服务占着它时 doctor 会照实报 fail，
+	// 而这条用例验的是整条链路，不是端口恰好空闲。改成一个由内核分配的端口再往下走。
+	useFreePort(t)
 
 	code, _, errOut = addAccount(t, "ds1", "custom", up.URL, "", "--key", "sk-test", "--models", "m1")
 	if code != 0 {
@@ -131,6 +134,29 @@ func TestWalkingSkeleton(t *testing.T) {
 	}
 	if strings.Contains(out, "fail") {
 		t.Fatalf("doctor 有失败项: %s", out)
+	}
+}
+
+// useFreePort 把沙箱里的监听地址改成 127.0.0.1:0。doctor 的端口检查因此仍走同一条路径，
+// 只是不再要求这台机器的 4567 恰好空着：本机可能有别的服务长期占用它。
+func useFreePort(t *testing.T) {
+	t.Helper()
+	path := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "lax", "config.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读配置: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("解析配置: %v", err)
+	}
+	cfg["addr"] = "127.0.0.1:0"
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("编码配置: %v", err)
+	}
+	if err := os.WriteFile(path, append(out, '\n'), 0o644); err != nil {
+		t.Fatalf("写配置: %v", err)
 	}
 }
 

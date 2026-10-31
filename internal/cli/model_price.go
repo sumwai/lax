@@ -22,12 +22,12 @@ import (
 
 const (
 	modelPriceSetUsage = "用法：lax model price set <模型> [--provider 供应商] [--account 账号] " +
-		"[--in N] [--out N] [--cache-read N] [--cache-write N]"
+		"[--in N] [--out N] [--cache-read N] [--cache-write N] [--tts-char N] [--audio-second N]"
 	modelPriceUnsetUsage = "用法：lax model price unset <模型> [--provider 供应商] [--account 账号] " +
 		"<字段> [<字段>...]"
 	modelPriceLsUsage = "用法：lax model price ls [<模型>] [--provider 供应商] [--account 账号]"
 	modelPriceUsage   = "用法：\n" +
-		"  lax model price set <模型> [--provider 供应商] [--account 账号] [--in N] [--out N] [--cache-read N] [--cache-write N]\n" +
+		"  lax model price set <模型> [--provider 供应商] [--account 账号] [--in N] [--out N] [--cache-read N] [--cache-write N] [--tts-char N] [--audio-second N]\n" +
 		"  lax model price unset <模型> [--provider 供应商] [--account 账号] <字段> [<字段>...]\n" +
 		"  lax model price ls [<模型>] [--provider 供应商] [--account 账号]"
 )
@@ -73,25 +73,29 @@ func cmdModelPrice(e *Env, args []string) error {
 // priceFieldLabels 是四个字段在人读输出里的名字。字段名本身（in / out / cache-read /
 // cache-write）只由 store.PriceFieldNames 给，这里只负责翻译成中文，不另存一份字段清单。
 var priceFieldLabels = map[store.PriceField]string{
-	store.FieldPriceIn:         "输入价",
-	store.FieldPriceOut:        "输出价",
-	store.FieldPriceCacheRead:  "缓存读价",
-	store.FieldPriceCacheWrite: "缓存写价",
+	store.FieldPriceIn:          "输入价",
+	store.FieldPriceOut:         "输出价",
+	store.FieldPriceCacheRead:   "缓存读价",
+	store.FieldPriceCacheWrite:  "缓存写价",
+	store.FieldPriceTTSChar:     "合成价",
+	store.FieldPriceAudioSecond: "转写价",
 }
 
-// priceValues 是一行上的四项单价，nil 表示这一项没填（账号侧即继承目录）。
+// priceValues 是一行上的六项单价，nil 表示这一项没填（账号侧即继承目录）。
 type priceValues struct {
-	in, out, cacheRead, cacheWrite *float64
+	in, out, cacheRead, cacheWrite, ttsChar, audioSec *float64
 }
 
-// providerPriceValues 取目录行上的四项价。
+// providerPriceValues 取目录行上的六项价。
 func providerPriceValues(m store.ProviderModel) priceValues {
-	return priceValues{in: m.PriceIn, out: m.PriceOut, cacheRead: m.PriceCacheRead, cacheWrite: m.PriceCacheWrite}
+	return priceValues{in: m.PriceIn, out: m.PriceOut, cacheRead: m.PriceCacheRead, cacheWrite: m.PriceCacheWrite,
+		ttsChar: m.PriceTTSChar, audioSec: m.PriceAudioSec}
 }
 
-// accountPriceValues 取账号覆盖行上的四项价。
+// accountPriceValues 取账号覆盖行上的六项价。
 func accountPriceValues(m store.AccountModel) priceValues {
-	return priceValues{in: m.PriceIn, out: m.PriceOut, cacheRead: m.PriceCacheRead, cacheWrite: m.PriceCacheWrite}
+	return priceValues{in: m.PriceIn, out: m.PriceOut, cacheRead: m.PriceCacheRead, cacheWrite: m.PriceCacheWrite,
+		ttsChar: m.PriceTTSChar, audioSec: m.PriceAudioSec}
 }
 
 // get 按字段名取那一项，供「清掉了什么 / 本来就没有」的判断用。
@@ -105,6 +109,10 @@ func (v priceValues) get(f store.PriceField) *float64 {
 		return v.cacheRead
 	case store.FieldPriceCacheWrite:
 		return v.cacheWrite
+	case store.FieldPriceTTSChar:
+		return v.ttsChar
+	case store.FieldPriceAudioSecond:
+		return v.audioSec
 	}
 	return nil
 }
@@ -114,6 +122,7 @@ func (v priceValues) count() int {
 	n := 0
 	for _, f := range []store.PriceField{
 		store.FieldPriceIn, store.FieldPriceOut, store.FieldPriceCacheRead, store.FieldPriceCacheWrite,
+		store.FieldPriceTTSChar, store.FieldPriceAudioSecond,
 	} {
 		if v.get(f) != nil {
 			n++
@@ -204,6 +213,8 @@ func priceFieldText(prices store.ModelPrices) string {
 		{store.FieldPriceOut, prices.Out},
 		{store.FieldPriceCacheRead, prices.CacheRead},
 		{store.FieldPriceCacheWrite, prices.CacheWrite},
+		{store.FieldPriceTTSChar, prices.TTSChar},
+		{store.FieldPriceAudioSecond, prices.AudioSec},
 	}
 	parts := make([]string, 0, len(all))
 	for _, item := range all {
@@ -226,6 +237,8 @@ type modelPriceSetJSON struct {
 	PriceOut        *float64 `json:"price_out"`
 	PriceCacheRead  *float64 `json:"price_cache_read"`
 	PriceCacheWrite *float64 `json:"price_cache_write"`
+	PriceTTSChar    *float64 `json:"price_tts_char"`
+	PriceAudioSec   *float64 `json:"price_audio_second"`
 }
 
 // cmdModelPriceSet 写模型单价：给 --account 写该账号的覆盖价，否则写厂商级标价。
@@ -238,6 +251,8 @@ func cmdModelPriceSet(e *Env, args []string) error {
 	out := fs.Float64("out", 0, "输出价，每百万 token")
 	cacheRead := fs.Float64("cache-read", 0, "缓存读价，每百万 token；留空表示回退到输入价")
 	cacheWrite := fs.Float64("cache-write", 0, "缓存写价，每百万 token；留空表示回退到输入价")
+	ttsChar := fs.Float64("tts-char", 0, "语音合成价，每百万字符")
+	audioSecond := fs.Float64("audio-second", 0, "语音转写价，每秒")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -259,9 +274,12 @@ func cmdModelPriceSet(e *Env, args []string) error {
 		Out:        priceFlagValue(fs, "out", out),
 		CacheRead:  priceFlagValue(fs, "cache-read", cacheRead),
 		CacheWrite: priceFlagValue(fs, "cache-write", cacheWrite),
+		TTSChar:    priceFlagValue(fs, "tts-char", ttsChar),
+		AudioSec:   priceFlagValue(fs, "audio-second", audioSecond),
 	}
-	if prices.In == nil && prices.Out == nil && prices.CacheRead == nil && prices.CacheWrite == nil {
-		return usagef("四项单价一项都没给：至少给一项，例如 lax model price set %s --in 0.6 --out 2.2\n%s",
+	if prices.In == nil && prices.Out == nil && prices.CacheRead == nil && prices.CacheWrite == nil &&
+		prices.TTSChar == nil && prices.AudioSec == nil {
+		return usagef("六项单价一项都没给：至少给一项，例如 lax model price set %s --in 0.6 --out 2.2\n%s",
 			model, modelPriceSetUsage)
 	}
 
@@ -299,13 +317,15 @@ func cmdModelPriceSet(e *Env, args []string) error {
 			PriceOut:        prices.Out,
 			PriceCacheRead:  prices.CacheRead,
 			PriceCacheWrite: prices.CacheWrite,
+			PriceTTSChar:    prices.TTSChar,
+			PriceAudioSec:   prices.AudioSec,
 		})
 	}
 	scope := fmt.Sprintf("厂商 %s 的厂商级标价", prov)
 	if account != "" {
 		scope = fmt.Sprintf("账号 %s（%s）的覆盖价", account, dashIfEmpty(prov))
 	}
-	fmt.Fprintf(e.Stdout, "已写入%s：%s %s（每百万 token）\n", scope, model, priceFieldText(prices))
+	fmt.Fprintf(e.Stdout, "已写入%s：%s %s（token 价每百万 token，合成价每百万字符，转写价每秒）\n", scope, model, priceFieldText(prices))
 	fmt.Fprintln(e.Stdout, "下一步：lax model ls")
 	return nil
 }
@@ -529,6 +549,8 @@ type modelPriceEffectiveJSON struct {
 	PriceOut        *float64 `json:"price_out"`
 	PriceCacheRead  *float64 `json:"price_cache_read"`
 	PriceCacheWrite *float64 `json:"price_cache_write"`
+	PriceTTSChar    *float64 `json:"price_tts_char"`
+	PriceAudioSec   *float64 `json:"price_audio_second"`
 }
 
 // modelPriceLsJSON 是 model price ls --json 的一项。Effective 只在给了 --account 时有值。
@@ -539,6 +561,8 @@ type modelPriceLsJSON struct {
 	PriceOut        *float64                 `json:"price_out"`
 	PriceCacheRead  *float64                 `json:"price_cache_read"`
 	PriceCacheWrite *float64                 `json:"price_cache_write"`
+	PriceTTSChar    *float64                 `json:"price_tts_char"`
+	PriceAudioSec   *float64                 `json:"price_audio_second"`
 	Effective       *modelPriceEffectiveJSON `json:"effective,omitempty"`
 }
 
@@ -651,6 +675,7 @@ func cmdModelPriceLs(e *Env, args []string) error {
 			rows[i].account = priceValues{
 				in: info.PriceIn, out: info.PriceOut,
 				cacheRead: info.PriceCacheRead, cacheWrite: info.PriceCacheWrite,
+				ttsChar: info.PriceTTSChar, audioSec: info.PriceAudioSec,
 			}
 		}
 	}
@@ -665,6 +690,8 @@ func cmdModelPriceLs(e *Env, args []string) error {
 				PriceOut:        r.catalog.out,
 				PriceCacheRead:  r.catalog.cacheRead,
 				PriceCacheWrite: r.catalog.cacheWrite,
+				PriceTTSChar:    r.catalog.ttsChar,
+				PriceAudioSec:   r.catalog.audioSec,
 			}
 			if account != "" {
 				item.Effective = &modelPriceEffectiveJSON{
@@ -672,6 +699,8 @@ func cmdModelPriceLs(e *Env, args []string) error {
 					PriceOut:        r.account.out,
 					PriceCacheRead:  r.account.cacheRead,
 					PriceCacheWrite: r.account.cacheWrite,
+					PriceTTSChar:    r.account.ttsChar,
+					PriceAudioSec:   r.account.audioSec,
 				}
 			}
 			out = append(out, item)
@@ -686,9 +715,9 @@ func cmdModelPriceLs(e *Env, args []string) error {
 
 	// 给了 --account 时每个价格格子里并排两段：目录价 | 有效价。两段之间用 |，缓存那一格
 	// 自己还要用 / 分读写，两种斜杠混在一起就分不清哪一段是哪一段。
-	header := []string{"模型", "供应商", "输入价", "输出价", "缓存读 / 缓存写"}
+	header := []string{"模型", "供应商", "输入价", "输出价", "缓存读 / 缓存写", "合成价 / 百万字符", "转写价 / 秒"}
 	if account != "" {
-		header = []string{"模型", "供应商", "输入价（目录 | 有效）", "输出价（目录 | 有效）", "缓存读 / 缓存写（目录 | 有效）"}
+		header = []string{"模型", "供应商", "输入价（目录 | 有效）", "输出价（目录 | 有效）", "缓存读 / 缓存写（目录 | 有效）", "合成价 / 百万字符（目录 | 有效）", "转写价 / 秒（目录 | 有效）"}
 	}
 	table := make([][]string, 0, len(rows))
 	for _, r := range rows {
@@ -698,6 +727,8 @@ func cmdModelPriceLs(e *Env, args []string) error {
 			priceColumnCell(r.catalog.in, r.account.in, account != ""),
 			priceColumnCell(r.catalog.out, r.account.out, account != ""),
 			cacheColumnCell(r.catalog, r.account, account != ""),
+			priceColumnCell(r.catalog.ttsChar, r.account.ttsChar, account != ""),
+			priceColumnCell(r.catalog.audioSec, r.account.audioSec, account != ""),
 		})
 	}
 	fmt.Fprint(e.Stdout, renderTable(header, table))

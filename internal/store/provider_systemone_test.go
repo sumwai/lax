@@ -18,7 +18,7 @@ const systemOnePath = "/v1/systemone"
 // → gemini → systemone → openai-embeddings。错误文案、CLI 的 flag 与默认协议的候选都从这一份清单取，
 // 顺序或成员错了，`--default-protocol` 的提示会跟着错。
 func TestWireProtocolsOrder(t *testing.T) {
-	want := []string{"anthropic", "openai-chat", "openai-responses", "gemini", "systemone", "openai-embeddings"}
+	want := []string{"anthropic", "openai-chat", "openai-responses", "gemini", "systemone", "openai-embeddings", "openai-speech", "openai-transcriptions"}
 	got := store.WireProtocols()
 	if len(got) != len(want) {
 		t.Fatalf("WireProtocols() = %v，期望 %v", got, want)

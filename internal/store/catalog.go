@@ -82,6 +82,9 @@ type ProviderModel struct {
 	PriceOut        *float64
 	PriceCacheRead  *float64
 	PriceCacheWrite *float64
+	// PriceTTSChar 是 TTS 单价（每百万字符），PriceAudioSec 是 ASR 单价（每秒）。
+	PriceTTSChar  *float64
+	PriceAudioSec *float64
 	// UpdatedAt 是这一行最后一次写入的 Unix 秒。迁移回填的行是 0：旧表没有时间可用。
 	UpdatedAt int64
 }
@@ -110,7 +113,10 @@ type AccountModel struct {
 	PriceOut        *float64
 	PriceCacheRead  *float64
 	PriceCacheWrite *float64
-	Status          string
+	// PriceTTSChar 与 PriceAudioSec 是语音两项单价的覆盖值，nil 表示继承目录。
+	PriceTTSChar  *float64
+	PriceAudioSec *float64
+	Status        string
 }
 
 // ModelInfo 是一个账号上一个模型的有效值：能不能用，加上合并了目录与覆盖之后的元数据。
@@ -125,6 +131,8 @@ type ModelInfo struct {
 	PriceOut        *float64
 	PriceCacheRead  *float64
 	PriceCacheWrite *float64
+	PriceTTSChar    *float64
+	PriceAudioSec   *float64
 }
 
 // accessValues 是 access 列的取值白名单，校验与错误文案都读它。
@@ -231,8 +239,8 @@ func normalizeModelNames(names []string) []string {
 // 末尾那句 WHERE 只判断传进来的来源够不够格改写现有行，够格时整行按上面的 COALESCE 更新。
 const providerModelUpsert = `INSERT INTO provider_models
 	(provider, model, source, context_window, max_output, protocols, capabilities,
-	 price_in, price_out, price_cache_read, price_cache_write, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	 price_in, price_out, price_cache_read, price_cache_write, price_tts_char, price_audio_second, updated_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT (provider, model) DO UPDATE SET
 		source = excluded.source,
 		context_window = COALESCE(excluded.context_window, provider_models.context_window),
@@ -243,6 +251,8 @@ const providerModelUpsert = `INSERT INTO provider_models
 		price_out = COALESCE(excluded.price_out, provider_models.price_out),
 		price_cache_read = COALESCE(excluded.price_cache_read, provider_models.price_cache_read),
 		price_cache_write = COALESCE(excluded.price_cache_write, provider_models.price_cache_write),
+		price_tts_char = COALESCE(excluded.price_tts_char, provider_models.price_tts_char),
+		price_audio_second = COALESCE(excluded.price_audio_second, provider_models.price_audio_second),
 		updated_at = excluded.updated_at
 	WHERE CASE excluded.source WHEN 'manual' THEN 2 WHEN 'sync' THEN 1 ELSE 0 END
 	   >= CASE provider_models.source WHEN 'manual' THEN 2 WHEN 'sync' THEN 1 ELSE 0 END`
@@ -295,7 +305,8 @@ func upsertProviderModelTx(tx *gorm.DB, m ProviderModel) error {
 	}
 	return execSQL(tx, providerModelUpsert, m.Provider, m.Model, m.Source,
 		m.ContextWindow, m.MaxOutput, joinList(m.Protocols), joinList(m.Capabilities),
-		m.PriceIn, m.PriceOut, m.PriceCacheRead, m.PriceCacheWrite, m.UpdatedAt)
+		m.PriceIn, m.PriceOut, m.PriceCacheRead, m.PriceCacheWrite, m.PriceTTSChar, m.PriceAudioSec,
+		m.UpdatedAt)
 }
 
 // providerModelInsertOnly 只插新行，已存在的行一个字段都不动。
@@ -529,6 +540,8 @@ func providerModelsFromRows(rows []providerModelRow) []ProviderModel {
 			PriceOut:        r.PriceOut,
 			PriceCacheRead:  r.PriceCacheRead,
 			PriceCacheWrite: r.PriceCacheWrite,
+			PriceTTSChar:    r.PriceTTSChar,
+			PriceAudioSec:   r.PriceAudioSec,
 			UpdatedAt:       r.UpdatedAt,
 		})
 	}
@@ -569,7 +582,8 @@ func (s *Store) providerModel(provider, model string) (ProviderModel, bool, erro
 
 // accountModelSelect 是读可达性行的唯一列清单，几个读入口共用它。
 const accountModelSelect = `SELECT account_id, model, access, http_status, error, checked_at, protocol,
-	context_window, max_output, price_in, price_out, price_cache_read, price_cache_write
+	context_window, max_output, price_in, price_out, price_cache_read, price_cache_write,
+	price_tts_char, price_audio_second
 	FROM account_models`
 
 // AccountModels 返回一个账号的模型行，按模型名升序。
@@ -607,6 +621,8 @@ func scanAccountModels(rows []accountModelRow) []AccountModel {
 			PriceOut:        r.PriceOut,
 			PriceCacheRead:  r.PriceCacheRead,
 			PriceCacheWrite: r.PriceCacheWrite,
+			PriceTTSChar:    r.PriceTTSChar,
+			PriceAudioSec:   r.PriceAudioSec,
 		}
 		m.Status = LegacyStatus(m.Access, m.CheckedAt)
 		out = append(out, m)
@@ -697,6 +713,8 @@ func (s *Store) EffectiveModels(accountID int64) ([]ModelInfo, error) {
 			PriceOut:        firstOfFloat(row.PriceOut, pm.PriceOut),
 			PriceCacheRead:  firstOfFloat(row.PriceCacheRead, pm.PriceCacheRead),
 			PriceCacheWrite: firstOfFloat(row.PriceCacheWrite, pm.PriceCacheWrite),
+			PriceTTSChar:    firstOfFloat(row.PriceTTSChar, pm.PriceTTSChar),
+			PriceAudioSec:   firstOfFloat(row.PriceAudioSec, pm.PriceAudioSec),
 		})
 	}
 	return out, nil
@@ -814,6 +832,8 @@ type AccountModelOverride struct {
 	PriceOut        *float64
 	PriceCacheRead  *float64
 	PriceCacheWrite *float64
+	PriceTTSChar    *float64
+	PriceAudioSec   *float64
 }
 
 // SetAccountModelOverride 写账号侧的覆盖值，nil 就是 NULL（继承目录），不是「不动」。
@@ -828,7 +848,7 @@ func (s *Store) SetAccountModelOverride(accountID int64, model string, o Account
 		Columns: []clause.Column{{Name: "account_id"}, {Name: "model"}},
 		DoUpdates: clause.AssignmentColumns([]string{
 			"context_window", "max_output", "price_in", "price_out",
-			"price_cache_read", "price_cache_write",
+			"price_cache_read", "price_cache_write", "price_tts_char", "price_audio_second",
 		}),
 	}).Create(&accountModelRow{
 		AccountID:       accountID,
@@ -840,6 +860,8 @@ func (s *Store) SetAccountModelOverride(accountID int64, model string, o Account
 		PriceOut:        o.PriceOut,
 		PriceCacheRead:  o.PriceCacheRead,
 		PriceCacheWrite: o.PriceCacheWrite,
+		PriceTTSChar:    o.PriceTTSChar,
+		PriceAudioSec:   o.PriceAudioSec,
 	}).Error
 }
 

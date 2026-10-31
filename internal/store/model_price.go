@@ -40,8 +40,8 @@ var (
 	ErrAccountModelNotRegistered = errors.New("账号没有这个模型的行")
 )
 
-// PriceField 是单价的四个字段名，也就是 `model price set/unset` 的字段参数
-// （`in`、`out`、`cache-read`、`cache-write`）。
+// PriceField 是单价的六个字段名，也就是 `model price set/unset` 的字段参数
+// （`in`、`out`、`cache-read`、`cache-write`、`tts-char`、`audio-second`）。
 //
 // 字段名与列名的对应只在 store 层有一份：cli 把命令行给的名字原样交过来，
 // 不自己拼列名，也不在别处散落裸字符串。
@@ -56,24 +56,31 @@ const (
 	FieldPriceCacheRead PriceField = "cache-read"
 	// FieldPriceCacheWrite 是缓存写价，空表示回退到输入价。
 	FieldPriceCacheWrite PriceField = "cache-write"
+	// FieldPriceTTSChar 是 TTS 单价，每百万字符（见 5.16）。
+	FieldPriceTTSChar PriceField = "tts-char"
+	// FieldPriceAudioSecond 是 ASR 单价，每秒。
+	FieldPriceAudioSecond PriceField = "audio-second"
 )
 
-// allPriceFields 是四个字段的固定顺序。错误文案、帮助与清价格的 SET 都按它排，
+// allPriceFields 是六个字段的固定顺序。错误文案、帮助与清价格的 SET 都按它排，
 // 同一份数据多跑几次结论一致。
 var allPriceFields = []PriceField{
 	FieldPriceIn, FieldPriceOut, FieldPriceCacheRead, FieldPriceCacheWrite,
+	FieldPriceTTSChar, FieldPriceAudioSecond,
 }
 
 // priceColumns 把字段名映射成两张表里同名的列。两张表（provider_models 与 account_models）
 // 的价格列名一致，因此一张表够用。列名只从这里取，不拿用户输入拼 SQL。
 var priceColumns = map[PriceField]string{
-	FieldPriceIn:         "price_in",
-	FieldPriceOut:        "price_out",
-	FieldPriceCacheRead:  "price_cache_read",
-	FieldPriceCacheWrite: "price_cache_write",
+	FieldPriceIn:          "price_in",
+	FieldPriceOut:         "price_out",
+	FieldPriceCacheRead:   "price_cache_read",
+	FieldPriceCacheWrite:  "price_cache_write",
+	FieldPriceTTSChar:     "price_tts_char",
+	FieldPriceAudioSecond: "price_audio_second",
 }
 
-// PriceFieldNames 按固定顺序返回四个字段名，供错误文案与帮助文本用。
+// PriceFieldNames 按固定顺序返回六个字段名，供错误文案与帮助文本用。
 func PriceFieldNames() []string {
 	names := make([]string, 0, len(allPriceFields))
 	for _, f := range allPriceFields {
@@ -129,14 +136,17 @@ type ModelPrices struct {
 	Out        *float64
 	CacheRead  *float64
 	CacheWrite *float64
+	TTSChar    *float64
+	AudioSec   *float64
 }
 
-// empty 表示四项都没给。那样的写入只会刷新 updated_at，调用方该把它当用法错误拦在更外层。
+// empty 表示六项都没给。那样的写入只会刷新 updated_at，调用方该把它当用法错误拦在更外层。
 func (p ModelPrices) empty() bool {
-	return p.In == nil && p.Out == nil && p.CacheRead == nil && p.CacheWrite == nil
+	return p.In == nil && p.Out == nil && p.CacheRead == nil && p.CacheWrite == nil &&
+		p.TTSChar == nil && p.AudioSec == nil
 }
 
-// validate 检查四项的取值：负数只能是写错，0 与小数都合法。
+// validate 检查六项的取值：负数只能是写错，0 与小数都合法。
 func (p ModelPrices) validate(model string) error {
 	for _, f := range allPriceFields {
 		v := p.field(f)
@@ -158,6 +168,10 @@ func (p ModelPrices) field(f PriceField) *float64 {
 		return p.CacheRead
 	case FieldPriceCacheWrite:
 		return p.CacheWrite
+	case FieldPriceTTSChar:
+		return p.TTSChar
+	case FieldPriceAudioSecond:
+		return p.AudioSec
 	}
 	return nil
 }
@@ -188,11 +202,13 @@ func (s *Store) SetProviderModelPrices(provider, model string, prices ModelPrice
 		return tx.Model(&providerModelRow{}).
 			Where("provider = ? AND model = ?", provider, model).
 			Updates(map[string]any{
-				"price_in":          coalescePrice("price_in", prices.In),
-				"price_out":         coalescePrice("price_out", prices.Out),
-				"price_cache_read":  coalescePrice("price_cache_read", prices.CacheRead),
-				"price_cache_write": coalescePrice("price_cache_write", prices.CacheWrite),
-				"updated_at":        time.Now().Unix(),
+				"price_in":           coalescePrice("price_in", prices.In),
+				"price_out":          coalescePrice("price_out", prices.Out),
+				"price_cache_read":   coalescePrice("price_cache_read", prices.CacheRead),
+				"price_cache_write":  coalescePrice("price_cache_write", prices.CacheWrite),
+				"price_tts_char":     coalescePrice("price_tts_char", prices.TTSChar),
+				"price_audio_second": coalescePrice("price_audio_second", prices.AudioSec),
+				"updated_at":         time.Now().Unix(),
 			}).Error
 	})
 }
@@ -235,10 +251,12 @@ func (s *Store) SetAccountModelPrices(account, model string, prices ModelPrices)
 		return tx.Model(&accountModelRow{}).
 			Where("account_id = ? AND model = ?", accountID, model).
 			Updates(map[string]any{
-				"price_in":          coalescePrice("price_in", prices.In),
-				"price_out":         coalescePrice("price_out", prices.Out),
-				"price_cache_read":  coalescePrice("price_cache_read", prices.CacheRead),
-				"price_cache_write": coalescePrice("price_cache_write", prices.CacheWrite),
+				"price_in":           coalescePrice("price_in", prices.In),
+				"price_out":          coalescePrice("price_out", prices.Out),
+				"price_cache_read":   coalescePrice("price_cache_read", prices.CacheRead),
+				"price_cache_write":  coalescePrice("price_cache_write", prices.CacheWrite),
+				"price_tts_char":     coalescePrice("price_tts_char", prices.TTSChar),
+				"price_audio_second": coalescePrice("price_audio_second", prices.AudioSec),
 			}).Error
 	})
 }
@@ -368,6 +386,10 @@ const (
 	usagePriceOut        = "COALESCE(am.price_out, pm.price_out)"
 	usagePriceCacheRead  = "COALESCE(am.price_cache_read, pm.price_cache_read, " + usagePriceIn + ")"
 	usagePriceCacheWrite = "COALESCE(am.price_cache_write, pm.price_cache_write, " + usagePriceIn + ")"
+	// 语音的两项单价与 token 四项同一套归属，只是单位不同：TTS 按每百万字符、ASR 按每秒。
+	// 没有回退链：字符价与秒价跟输入 token 价不是同一件事，拿输入价回退会算出一个假数。
+	usagePriceTTSChar     = "COALESCE(am.price_tts_char, pm.price_tts_char)"
+	usagePriceAudioSecond = "COALESCE(am.price_audio_second, pm.price_audio_second)"
 )
 
 // usagePriceJoin 给请求行挂上算单价要用的两张表。

@@ -36,6 +36,12 @@ const (
 	// ProtocolEmbeddings 是第六条线协议：只做同协议直通，没有流式，也不进中间表示。
 	// 向量化报文只有输入与向量结果，没有对话消息序列，与任何对话协议都换不过去。
 	ProtocolEmbeddings = translate.ProtocolEmbeddings
+	// ProtocolSpeech 是第七条线协议（文本转语音）：入站是 JSON、响应是音频字节，
+	// 只做同协议直通。
+	ProtocolSpeech = translate.ProtocolSpeech
+	// ProtocolTranscriptions 是第八条线协议（语音转文本）：入站是 multipart/form-data、
+	// 响应是 JSON 或 SSE，同样只做同协议直通。
+	ProtocolTranscriptions = translate.ProtocolTranscriptions
 
 	// InboundAnthropic 保留给旧调用方，等价于 ProtocolAnthropic。
 	InboundAnthropic = translate.ProtocolAnthropic
@@ -100,7 +106,7 @@ func New(o Options) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
-	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses", systemOnePath, embeddingsPath} {
+	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses", systemOnePath, embeddingsPath, speechPath, transcriptionsPath} {
 		mux.HandleFunc(path, s.handleInbound)
 	}
 	// gemini 的模型名在路径里（/v1beta/models/{model}:generateContent），模型名的长度与内容都
@@ -181,6 +187,10 @@ type attempt struct {
 	// 这条协议的客户端直接读上游自己的错误形状（例如一条 422 的 detail 数组），
 	// 包成我们的 detail 对象反而会让它读不懂：它读的是上游自己那一层 detail。
 	upstreamBody []byte
+	// ttsChars 与 audioSeconds 是语音两条协议的计量：TTS 的字符数在入站时数好，
+	// ASR 的秒数从响应体读出。其余协议两者恒为 0。
+	ttsChars     int64
+	audioSeconds int64
 	// transport 表示这一次没有拿到任何 HTTP 响应：连接没建立、请求没发出去、响应体没读完。
 	// status 对这类失败仍记 502（表示「网关没能拿到上游响应」），冷却却按连接层那一档算
 	// （2 秒起，上限同样是 30 分钟）：这类失败多半来自本机网络或中转抖动，按上游 5xx 的十秒
@@ -218,6 +228,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	var pathModel string
 	var pathStream bool
 	var embedding bool
+	voice := inbound == ProtocolSpeech || inbound == ProtocolTranscriptions
 	switch {
 	case inbound == ProtocolGemini:
 		model, action, ok := translate.GeminiPathAction(r.URL.EscapedPath())
@@ -248,6 +259,10 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	if inbound == ProtocolSystemOne {
 		limit = systemOneMaxBody
 	}
+	if inbound == ProtocolSpeech || inbound == ProtocolTranscriptions {
+		// 语音的请求体上限跟对话一样是 32 MiB：音频文件按 OpenAI 自己的上限是 25 MB。
+		limit = speechMaxBody
+	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
 	if err != nil {
 		writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", "读取请求体失败: "+err.Error())
@@ -261,6 +276,8 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req *translate.Request
+	// speechChars 是 TTS 的计费字符数：入站时数好，不靠响应体（这条端点不报 token）。
+	var speechChars int64
 	switch {
 	case inbound == ProtocolSystemOne:
 		// systemone 没有编解码器，也不进中间表示：它没有对话消息序列，转不成 IR。
@@ -293,6 +310,22 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", "gemini 向量化: "+err.Error())
 			return
 		}
+	case inbound == ProtocolSpeech:
+		// 语音两条协议也没有编解码器：报文不是对话消息序列。本机只做选号与拒绝空请求所需的事。
+		parsed, err2 := decodeSpeechRequest(raw)
+		if err2 != nil {
+			writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", "语音合成: "+err2.Error())
+			return
+		}
+		req = &translate.Request{Model: parsed.Model, Stream: parsed.Stream}
+		speechChars = parsed.Chars
+	case inbound == ProtocolTranscriptions:
+		model, err2 := decodeTranscriptionsRequest(raw, r.Header.Get("Content-Type"))
+		if err2 != nil {
+			writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", "语音转写: "+err2.Error())
+			return
+		}
+		req = &translate.Request{Model: model}
 	default:
 		req, err = translate.DecodeRequest(inbound, raw)
 		if err != nil {
@@ -366,7 +399,8 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		// 向量化是例外：它只能同协议直通，协议由厂商声明的那一条向量化路由决定，
 		// 不按模型的有效协议猜——对话协议的有效协议与向量化的线协议不是同一回事。
 		var outbound string
-		if embedding {
+		switch {
+		case embedding:
 			var msg string
 			outbound, msg = s.embeddingOutbound(cand, inbound)
 			if outbound == "" {
@@ -377,7 +411,18 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 				s.logf("账号 %s：%s", cand.Name, msg)
 				continue
 			}
-		} else {
+		case voice:
+			// 语音与向量化同理：协议是路由事实而不是模型事实，一条模型是 TTS 还是 ASR
+			// 由入站路径决定，不按模型的有效出站协议猜。
+			var msg string
+			outbound, msg = s.speechOutbound(cand, inbound)
+			if outbound == "" {
+				interopRejected = msg
+				lastErr = msg
+				s.logf("账号 %s：%s", cand.Name, msg)
+				continue
+			}
+		default:
 			var err error
 			outbound, err = s.store.EffectiveProtocol(cand.ID, req.Model)
 			if err != nil {
@@ -437,6 +482,8 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			// 只能按上游上报的数字判。
 			ReasoningTokens:      res.reasoning,
 			ReasoningTokensExtra: store.ReasoningExtra(res.total, res.inTok, res.outTok, res.reasoning),
+			TTSChars:             speechChars,
+			AudioSeconds:         res.audioSeconds,
 			LatencyMS:            latency.Milliseconds(),
 			Error:                res.message,
 		}
@@ -612,6 +659,11 @@ func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store
 		return res
 	}
 
+	if outbound == ProtocolSpeech || outbound == ProtocolTranscriptions {
+		// 语音的响应要么是音频字节、要么是 JSON 或 SSE，都不走 jsonSuccess/streamSuccess：
+		// 那两个按对话协议解析用量与帧，读一条音频只会得到零值或报错。
+		return s.speechSuccess(w, resp, outbound, raw)
+	}
 	if req.Stream {
 		return s.streamSuccess(ctx, w, resp, inbound, outbound, req, string(key))
 	}
@@ -647,7 +699,20 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, in
 	}
 
 	var body []byte
+	// contentType 默认 JSON；语音转写要改成带新 boundary 的 multipart。
+	contentType := "application/json"
 	switch {
+	case outbound == ProtocolTranscriptions && inboundHeaders != nil:
+		// 语音转写换 model 那个 part：不能走 patchModel（请求体不是 JSON），
+		// 也不能直接发 raw（model 还是客户端的名字，别名没解析）。
+		// 探活没有客户端请求（inboundHeaders 为 nil），正文已经是带着自己的 boundary 的探测
+		// 报文，下面那一支原样发。
+		body, contentType, err = rewriteTranscriptionsBody(raw, inboundHeaders.Get("Content-Type"), req.Model)
+	case outbound == ProtocolTranscriptions:
+		body = raw
+	case outbound == ProtocolSpeech:
+		// 语音合成是 JSON，与其余直通协议一样只换 model。
+		body, err = patchModel(raw, req.Model)
 	case inbound != outbound:
 		body, err = translate.EncodeRequest(outbound, req, req.Model)
 	case outbound == ProtocolGemini:
@@ -666,7 +731,7 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, in
 	if err != nil {
 		return nil, err
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Content-Type", contentType)
 	if req.Stream {
 		httpReq.Header.Set("Accept", "text/event-stream")
 	}

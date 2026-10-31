@@ -22,6 +22,12 @@ const (
 	// ProtocolEmbeddings 是向量化的线协议（OpenAI 的 /v1/embeddings 报文）。
 	// 它没有消息序列，编解码器也不认它：网关只做同协议直通，translate 只用这个常量。
 	ProtocolEmbeddings = "openai-embeddings"
+	// ProtocolSpeech 是文本转语音的线协议（OpenAI 的 /v1/audio/speech 报文）。
+	// 入站是 JSON、响应是音频字节，编解码器不认它：同样只做同协议直通。
+	ProtocolSpeech = "openai-speech"
+	// ProtocolTranscriptions 是语音转文本的线协议（OpenAI 的 /v1/audio/transcriptions 报文）。
+	// 入站是 multipart/form-data、响应是 JSON 或 SSE，只做同协议直通。
+	ProtocolTranscriptions = "openai-transcriptions"
 )
 
 // 结束原因统一成 anthropic 的四种说法，各协议编码时再翻回自己的词。

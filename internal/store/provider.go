@@ -188,21 +188,22 @@ func (s *Store) ProviderProtocols(provider string) ([]string, error) {
 	return out, nil
 }
 
-// IsWireProtocol 判断一个取值是不是线协议。六个值都认：三条入站对话协议加 gemini，再加上
-// systemone 与 openai-embeddings。gemini 入站有两条路径、两个方向的流式都支持，
-// systemone 的入站与出站是同一个 POST /v1/systemone，向量化的入站与出站分别是
-// /v1/embeddings 与厂商路由声明的向量化路径；它们同样是线上的协议取值，
-// 账号的 --protocol、厂商路由与默认协议、探活候选都用这一个判定：cli 不另写一份名单，两处名单迟早会对不上。
+// IsWireProtocol 判断一个取值是不是线协议。八个值都认：三条入站对话协议加 gemini，再加上
+// systemone、openai-embeddings、openai-speech 与 openai-transcriptions。gemini 入站有两条路径、两个方向的流式都支持，
+// systemone 的入站与出站是同一个 POST /v1/systemone，向量化与语音的入站与出站各是自己的协议路径；
+// 它们同样是线上的协议取值，账号的 --protocol、厂商路由与默认协议、探活候选都用这一个判定：
+// cli 不另写一份名单，两处名单迟早会对不上。
 func IsWireProtocol(protocol string) bool {
 	switch protocol {
 	case translate.ProtocolAnthropic, translate.ProtocolChat, translate.ProtocolResponses,
-		translate.ProtocolGemini, translate.ProtocolSystemOne, translate.ProtocolEmbeddings:
+		translate.ProtocolGemini, translate.ProtocolSystemOne, translate.ProtocolEmbeddings,
+		translate.ProtocolSpeech, translate.ProtocolTranscriptions:
 		return true
 	}
 	return false
 }
 
-// WireProtocols 是全部线协议，按文档里列的顺序（入站三条在前，gemini、systemone 与向量化在后）。
+// WireProtocols 是全部线协议，按文档里列的顺序（入站三条在前，gemini、systemone、向量化与两条语音在后）。
 // 错误文案只从这一份清单拼，不另写一串字面量。
 func WireProtocols() []string {
 	return []string{
@@ -212,6 +213,8 @@ func WireProtocols() []string {
 		translate.ProtocolGemini,
 		translate.ProtocolSystemOne,
 		translate.ProtocolEmbeddings,
+		translate.ProtocolSpeech,
+		translate.ProtocolTranscriptions,
 	}
 }
 

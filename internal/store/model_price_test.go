@@ -291,7 +291,7 @@ func TestClearModelPricesValidatesFields(t *testing.T) {
 // TestParsePriceField 钉住字段名的白名单只有一份：命令行写法与 store 常量一一对应。
 func TestParsePriceField(t *testing.T) {
 	// PriceFieldNames 的顺序是固定的，帮助文本与错误文案都按它排。
-	want := []string{"in", "out", "cache-read", "cache-write"}
+	want := []string{"in", "out", "cache-read", "cache-write", "tts-char", "audio-second"}
 	got := store.PriceFieldNames()
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("字段名 = %v，期望 %v", got, want)

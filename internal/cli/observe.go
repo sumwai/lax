@@ -61,6 +61,8 @@ func cmdUsage(e *Env, args []string) error {
 				"reasoning_tokens": r.ReasoningTokens,
 				"cache_read":       r.CacheRead,
 				"cache_write":      r.CacheWrite,
+				"tts_chars":        r.TTSChars,
+				"audio_seconds":    r.AudioSeconds,
 				"cost":             r.Cost,
 			})
 		}
@@ -75,6 +77,7 @@ func cmdUsage(e *Env, args []string) error {
 	headerName := map[string]string{"account": "账号", "model": "模型", "day": "日期"}[*by]
 	table := make([][]string, 0, len(rows))
 	var totalReq, totalIn, totalOut, totalReasoning, totalCacheRead, totalCacheWrite int64
+	var totalTTSChars, totalAudioSeconds int64
 	var totalCost float64
 	priced := 0
 	unpriced := 0
@@ -87,6 +90,8 @@ func cmdUsage(e *Env, args []string) error {
 			fmt.Sprintf("%d", r.ReasoningTokens),
 			fmt.Sprintf("%d", r.CacheRead),
 			fmt.Sprintf("%d", r.CacheWrite),
+			fmt.Sprintf("%d", r.TTSChars),
+			fmt.Sprintf("%d", r.AudioSeconds),
 			usage.YuanOrUnpriced(r.Cost),
 		})
 		totalReq += r.Requests
@@ -95,6 +100,8 @@ func cmdUsage(e *Env, args []string) error {
 		totalReasoning += r.ReasoningTokens
 		totalCacheRead += r.CacheRead
 		totalCacheWrite += r.CacheWrite
+		totalTTSChars += r.TTSChars
+		totalAudioSeconds += r.AudioSeconds
 		// Cost 为 nil 表示这一组未定价（缺价），合计里不当 0 累加。
 		if r.Cost != nil {
 			totalCost += *r.Cost
@@ -115,10 +122,12 @@ func cmdUsage(e *Env, args []string) error {
 		fmt.Sprintf("%d", totalReasoning),
 		fmt.Sprintf("%d", totalCacheRead),
 		fmt.Sprintf("%d", totalCacheWrite),
+		fmt.Sprintf("%d", totalTTSChars),
+		fmt.Sprintf("%d", totalAudioSeconds),
 		totalCell,
 	})
 	fmt.Fprint(e.Stdout, renderTable(
-		[]string{headerName, "请求", "输入 token", "输出 token", "思考 token", "缓存读 token", "缓存写 token", "估算花费"}, table))
+		[]string{headerName, "请求", "输入 token", "输出 token", "思考 token", "缓存读 token", "缓存写 token", "合成字符", "音频秒", "估算花费"}, table))
 	if priced == 0 {
 		fmt.Fprintln(e.Stdout, "花费未定价：这些请求用到的模型没有单价，用 lax model price set <模型> --in N --out N 补上（缓存单价可选，未填时回退输入价）")
 	} else if unpriced > 0 {
@@ -265,6 +274,8 @@ func printRecords(e *Env, records []store.RequestRecord, names map[int64]string)
 				"reasoning_tokens": r.ReasoningTokens,
 				"cache_read":       r.CacheRead,
 				"cache_write":      r.CacheWrite,
+				"tts_chars":        r.TTSChars,
+				"audio_seconds":    r.AudioSeconds,
 				"latency_ms":       r.LatencyMS,
 				"error":            r.Error,
 			})
@@ -298,12 +309,14 @@ func printRecords(e *Env, records []store.RequestRecord, names map[int64]string)
 			fmt.Sprintf("%d", r.ReasoningTokens),
 			fmt.Sprintf("%d", r.CacheRead),
 			fmt.Sprintf("%d", r.CacheWrite),
+			fmt.Sprintf("%d", r.TTSChars),
+			fmt.Sprintf("%d", r.AudioSeconds),
 			fmt.Sprintf("%dms", r.LatencyMS),
 			truncate(r.Error, 30),
 		})
 	}
 	fmt.Fprint(e.Stdout, renderTable(
-		[]string{"时间", "协议", "模型", "账号", "状态", "输入", "输出", "思考", "缓存读", "缓存写", "耗时", "错误"}, rows))
+		[]string{"时间", "协议", "模型", "账号", "状态", "输入", "输出", "思考", "缓存读", "缓存写", "合成字符", "音频秒", "耗时", "错误"}, rows))
 	return nil
 }
 

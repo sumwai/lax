@@ -42,6 +42,9 @@ var seedRoutes = []struct {
 	// 0017 只给这两家种向量化路由。
 	{"openai", "https://api.openai.com", "openai-embeddings", "/v1/embeddings", "", 17},
 	{"ollama", "http://127.0.0.1:11434", "openai-embeddings", "/v1/embeddings", "", 17},
+	// 0018 给 openai 种两条语音路由（TTS 与 ASR）。
+	{"openai", "https://api.openai.com", "openai-speech", "/v1/audio/speech", "", 18},
+	{"openai", "https://api.openai.com", "openai-transcriptions", "/v1/audio/transcriptions", "", 18},
 }
 
 // seedRoutesBefore 给出某一次迁移之前就已经在库里的路由，用来搭「停在那个版本」的老库：

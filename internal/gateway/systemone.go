@@ -41,6 +41,13 @@ func inboundProtocol(path string) (string, bool) {
 		// 向量化同样不进 translate 的协议分发：它没有编解码器，只做同协议直通。
 		return ProtocolEmbeddings, true
 	}
+	// 语音两条路径同理：报文不是对话消息序列，translate 的协议分发不认它们。
+	if path == speechPath {
+		return ProtocolSpeech, true
+	}
+	if path == transcriptionsPath {
+		return ProtocolTranscriptions, true
+	}
 	return translate.PathProtocol(path)
 }
 
@@ -60,6 +67,10 @@ func inboundPath(protocol string) string {
 		return systemOnePath
 	case ProtocolEmbeddings:
 		return embeddingsPath
+	case ProtocolSpeech:
+		return speechPath
+	case ProtocolTranscriptions:
+		return transcriptionsPath
 	}
 	return ""
 }
@@ -80,6 +91,10 @@ func protocolInteropError(inbound, outbound, model string) string {
 	}
 	if inbound == ProtocolEmbeddings || outbound == ProtocolEmbeddings {
 		return embeddingsInteropMessage(inbound, outbound, model)
+	}
+	if inbound == ProtocolSpeech || outbound == ProtocolSpeech ||
+		inbound == ProtocolTranscriptions || outbound == ProtocolTranscriptions {
+		return speechInteropMessage(inbound, outbound, model)
 	}
 	if inbound != ProtocolSystemOne && outbound != ProtocolSystemOne {
 		return ""

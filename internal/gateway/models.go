@@ -347,19 +347,21 @@ var capabilityOrder = []string{capabilityChat, capabilityEmbedding}
 // 只认表里列出的写法，未识别的不计：端点名各家写法不同，猜一个相近的名字等于给探活安排一条
 // 这家未必声明过的路径，不如留空、由厂商路由决定。
 var endpointProtocols = map[string]string{
-	"/messages":         ProtocolAnthropic,
-	"/chat/completions": ProtocolChat,
-	"/responses":        ProtocolResponses,
-	"/systemone":        ProtocolSystemOne,
-	"/embeddings":       ProtocolEmbeddings,
-	"/generateContent":  ProtocolGemini,
-	"generateContent":   ProtocolGemini,
+	"/messages":             ProtocolAnthropic,
+	"/chat/completions":     ProtocolChat,
+	"/responses":            ProtocolResponses,
+	"/systemone":            ProtocolSystemOne,
+	"/embeddings":           ProtocolEmbeddings,
+	"/audio/speech":         ProtocolSpeech,
+	"/audio/transcriptions": ProtocolTranscriptions,
+	"/generateContent":      ProtocolGemini,
+	"generateContent":       ProtocolGemini,
 }
 
 // wireProtocolOrder 是协议集合落库与排候选的固定顺序：同一份上游数据多跑几次
 // 得到同一串，与上游列出端点的先后无关。不固定顺序的话，同一份清单两次同步能存出两串不同的值，
 // 对比数据库时看不出到底改了什么。向量化排在最后：它是唯一不会成为对话默认协议的线协议。
-var wireProtocolOrder = []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini, ProtocolSystemOne, ProtocolEmbeddings}
+var wireProtocolOrder = []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini, ProtocolSystemOne, ProtocolEmbeddings, ProtocolSpeech, ProtocolTranscriptions}
 
 // endpointProtocol 查端点名对应的线协议。表里没有的写法返回 false，调用方直接不计这个取值。
 func endpointProtocol(name string) (string, bool) {
@@ -1016,6 +1018,9 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 	ir := &translate.Request{Model: model}
 	var raw []byte
 	var err error
+	// probeContentType 非空时覆盖 buildRequest 给的 Content-Type：语音转写的探活报文是
+	// multipart，默认的 application/json 只会让上游回一个「unexpected content type」。
+	var probeContentType string
 	// embedding 决定这次探活打哪个动作：向量化协议打 embeddings，gemini 的 embedding 模型打
 	// :embedContent。它就是 buildRequest 用来改写路径的那一个开关。
 	embedding := protocol == ProtocolEmbeddings ||
@@ -1027,6 +1032,13 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 		raw, err = systemOneProbeBody(model)
 	case protocol == ProtocolEmbeddings:
 		raw, err = embeddingsProbeBody(model)
+	case protocol == ProtocolSpeech:
+		// 语音合成发一条结构错的请求：input 是 null。探活不要真实合成（那要花字符费），
+		// 只让上游在参数校验上回一句，按错误码判路由与凭据（见 speechProbeVerdict）。
+		raw, err = speechProbeBody(model)
+	case protocol == ProtocolTranscriptions:
+		// 语音转写同理：multipart 里只有 model、没有 file。
+		raw, probeContentType, err = transcriptionsProbeBody(model)
 	case embedding:
 		raw, err = geminiEmbedProbeBody()
 	default:
@@ -1048,6 +1060,9 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 		res.setUndecided()
 		res.Message = "构造探活请求失败: " + err.Error()
 		return att
+	}
+	if probeContentType != "" {
+		upReq.Header.Set("Content-Type", probeContentType)
 	}
 
 	// 连接层失败（一条 HTTP 响应都没拿到）在同一个协议内重试：DNS、连接被拒、TLS 握手失败与
@@ -1090,6 +1105,32 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 	defer resp.Body.Close()
 
 	res.HTTPStatus = resp.StatusCode
+	// 语音两条协议的判定与对话相反：探测报文是故意写错的，400/422 正是预期，只证明
+	// 路由存在、请求到了业务层；凭据有效与否这一条判定不出（见 speechProbeVerdict）。
+	if protocol == ProtocolSpeech || protocol == ProtocolTranscriptions {
+		msg := ""
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			msg = scrubSecret(readErrorBody(resp.Body), key)
+		}
+		res.Message = msg
+		if resp.StatusCode == http.StatusUnauthorized {
+			// 与对话探活一致：凭据问题不是这个模型的结论，可达性留空，旧词表记 auth
+			// 让 probeOrder 停用账号并停下。
+			res.Access = ""
+			res.Status = store.ModelAuthFailed
+			return att
+		}
+		access, note, ok := speechProbeVerdict(resp.StatusCode, msg)
+		if ok {
+			res.setAccess(access)
+		} else {
+			res.setUndecided()
+		}
+		if note != "" {
+			res.Message = note
+		}
+		return att
+	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 		att.usage = readProbeUsage(protocol, body)
