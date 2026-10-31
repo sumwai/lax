@@ -280,7 +280,9 @@ func responsesAddInputItem(req *Request, item responsesInputItem) error {
 			role = RoleUser
 		}
 		switch role {
-		case RoleSystem:
+		case RoleSystem, RoleDeveloper:
+			// OpenAI 把 system 这一层改叫 developer（o 系列与 codex 默认发这个），
+			// Responses 里它同样只有 instructions 一个落点，与 system 一起折进去。
 			text := responsesContentText(item.Content)
 			if text != "" {
 				req.System = append(req.System, Block{Kind: BlockText, Text: text})

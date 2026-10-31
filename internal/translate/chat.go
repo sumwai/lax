@@ -41,10 +41,12 @@ func DecodeChatRequest(raw []byte) (*Request, error) {
 	}
 
 	for i, m := range in.Messages {
-		switch strings.ToLower(m.Role) {
-		case "system", "developer":
+		switch Role(strings.ToLower(m.Role)) {
+		case RoleSystem, RoleDeveloper:
+			// developer 是 OpenAI 对 system 那一层的另一种叫法（o 系列与 codex 默认发这个），
+			// 两者都只有顶层 system 一个落点。
 			out.System = append(out.System, chatTextBlocks(m.Content)...)
-		case "", "user":
+		case "", RoleUser:
 			blocks, err := chatUserBlocks(m.Content)
 			if err != nil {
 				return nil, fmt.Errorf("第 %d 条消息: %w", i+1, err)
@@ -52,7 +54,7 @@ func DecodeChatRequest(raw []byte) (*Request, error) {
 			if len(blocks) > 0 {
 				out.Messages = append(out.Messages, Message{Role: RoleUser, Blocks: blocks})
 			}
-		case "assistant":
+		case RoleAssistant:
 			blocks, err := chatAssistantBlocks(m)
 			if err != nil {
 				return nil, fmt.Errorf("第 %d 条消息: %w", i+1, err)
@@ -60,7 +62,7 @@ func DecodeChatRequest(raw []byte) (*Request, error) {
 			if len(blocks) > 0 {
 				out.Messages = append(out.Messages, Message{Role: RoleAssistant, Blocks: blocks})
 			}
-		case "tool":
+		case RoleTool:
 			out.Messages = append(out.Messages, Message{
 				Role: RoleTool,
 				Blocks: []Block{{

@@ -1,0 +1,14 @@
+{
+  "max_tokens": 64,
+  "messages": [
+    {
+      "content": "底层说明\n系统级约束：只回答时间",
+      "role": "system"
+    },
+    {
+      "content": "现在几点",
+      "role": "user"
+    }
+  ],
+  "model": "deepseek-flash"
+}

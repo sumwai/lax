@@ -1,0 +1,15 @@
+{
+  "from": "openai-responses",
+  "to": "openai-chat",
+  "kind": "request",
+  "model": "deepseek-flash",
+  "body": {
+    "model": "deepseek-flash",
+    "max_output_tokens": 64,
+    "instructions": "底层说明",
+    "input": [
+      {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "系统级约束：只回答时间"}]},
+      {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "现在几点"}]}
+    ]
+  }
+}

@@ -300,6 +300,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 - 对话中间的 system 消息：anthropic 入站允许 `role=system` 的对话中间消息，按位置保留成中间表示的 `RoleSystem` 消息。Claude Code 的 mid-conv system 就发这个形状，模型名不在它的能力表里时默认开启，因此指向任何非 Anthropic 模型名的会话都会走进这条默认，拒收会让整个客户端停在 `400 anthropic: 不支持的消息角色 "system"` 上（见 `LESSONS.md`）。编回 anthropic 原样写 `role=system`（上游认不认看同一个 beta，`anthropic-beta` 走 5.11 白名单）；编成 openai-chat 写一条 `role=system` 消息；openai-responses 与 gemini 只有顶层的 `instructions` 与 `systemInstruction`，分别折进去，落到这两条协议时这条消息失去原来的位置。块只留文本，与顶层 `system` 的处理一致，其它块丢弃。
 
 - 工具结果进 anthropic：`RoleTool` 消息折叠成一条 `role=user` 消息里的 `tool_result` 块，同一个 assistant 消息之后的多条结果按原顺序并进同一条 user 消息。anthropic 没有 `role=tool`，chat 与 responses 解出来的工具结果原样写过去会被上游以 400 拒绝。
+- 入站的 `developer` 角色：OpenAI 把 system 那一层改叫 developer，o 系列与 codex 默认发这个。它不是一个独立的层：chat 入站一直把它当 `system` 收，responses 入站折进 `instructions`（与 `system` 按出现顺序拼接）。中间表示里没有 developer 这个角色，编出去只能是 `system` 消息、`instructions` 或 `systemInstruction`，因此它和对话中间的 `system` 消息一样会在跨到这两条协议时失去位置。
 - 连续的 user 侧内容并成一条：工具结果之后紧跟的追问（普通 user 消息）也并进同一条 user 消息，块顺序是 `tool_result` 在前、普通文本与图片按原顺序跟在后面。anthropic 不接受两条相邻的 user 消息，分成两条写过去同样会被 400 拒绝。
 - 工具序号进 chat：流式的 `tool_calls[].index` 由编码器自己从 0 连续编号，不沿用上游块号。上游 anthropic 有文本块时首个工具是 1、并行工具是 1 与 2；按稠密下标建数组的客户端会撞上空位。
 - 流式工具调用的收尾进 responses：编码器缓存每个工具 item 的名称与参数，收尾前补 `response.function_call_arguments.done` 与 `response.output_item.done`，并把完整的 `function_call` 回填进 `response.completed.response.output`。只发 added 与 delta 的流会让客户端拿不到收尾；`output` 按 `output_index` 列工具 item、思考 item 与文本 item。

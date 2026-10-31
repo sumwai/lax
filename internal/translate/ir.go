@@ -36,6 +36,9 @@ const (
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
 	RoleTool      Role = "tool"
+	// RoleDeveloper 是 OpenAI 对 system 那一层的另一种叫法（o 系列与 codex 默认发这个）。
+	// 中间表示里不保留它：解码时与 RoleSystem 同等处理，编码时永远不写 developer。
+	RoleDeveloper Role = "developer"
 )
 
 // replaySignaturePrefix 标记本网关自己盖的思考签名（DESIGN 5.4）。chat 与 responses 没
