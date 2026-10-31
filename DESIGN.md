@@ -285,6 +285,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | 概念 | anthropic | openai-chat | openai-responses |
 | --- | --- | --- | --- |
 | system | 顶层 `system` 字段 | 首条 `role=system` 消息 | 顶层 `instructions` |
+| 对话中间的 system 消息 | `role=system` 消息 | `role=system` 消息 | 折进 `instructions`，位置丢失 |
 | tool_use | assistant 消息里的 `tool_use` 块 | `tool_calls[]` | `function_call` item |
 | tool_result | user 消息里的 `tool_result` 块 | 独立 `role=tool` 消息 | `function_call_output` item |
 | 思考内容 | assistant 消息里的 `thinking` 块（带 `signature`）与 `redacted_thinking` 块（带 opaque `data`） | assistant 消息的 `reasoning_content`（少数实现把同一段正文写在 `reasoning`） | output 里的 `reasoning` item，正文在 `content` 或 `summary` 的文本里 |
@@ -294,7 +295,9 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 
 结束原因在中间表示里只留四种：`end_turn`、`max_tokens`、`tool_use`、`stop_sequence`；编码时再翻回各协议自己的说法。
 
-上面那张表是从概念找坐标，反方向编出去还有六条不在这张表里的规则：
+上面那张表是从概念找坐标，反方向编出去还有这些不在这张表里的规则：
+
+- 对话中间的 system 消息：anthropic 入站允许 `role=system` 的对话中间消息，按位置保留成中间表示的 `RoleSystem` 消息。Claude Code 的 mid-conv system 就发这个形状，模型名不在它的能力表里时默认开启，因此指向任何非 Anthropic 模型名的会话都会走进这条默认，拒收会让整个客户端停在 `400 anthropic: 不支持的消息角色 "system"` 上（见 `LESSONS.md`）。编回 anthropic 原样写 `role=system`（上游认不认看同一个 beta，`anthropic-beta` 走 5.11 白名单）；编成 openai-chat 写一条 `role=system` 消息；openai-responses 与 gemini 只有顶层的 `instructions` 与 `systemInstruction`，分别折进去，落到这两条协议时这条消息失去原来的位置。块只留文本，与顶层 `system` 的处理一致，其它块丢弃。
 
 - 工具结果进 anthropic：`RoleTool` 消息折叠成一条 `role=user` 消息里的 `tool_result` 块，同一个 assistant 消息之后的多条结果按原顺序并进同一条 user 消息。anthropic 没有 `role=tool`，chat 与 responses 解出来的工具结果原样写过去会被上游以 400 拒绝。
 - 连续的 user 侧内容并成一条：工具结果之后紧跟的追问（普通 user 消息）也并进同一条 user 消息，块顺序是 `tool_result` 在前、普通文本与图片按原顺序跟在后面。anthropic 不接受两条相邻的 user 消息，分成两条写过去同样会被 400 拒绝。

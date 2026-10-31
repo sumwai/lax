@@ -1,0 +1,22 @@
+{
+  "max_tokens": 64,
+  "messages": [
+    {
+      "content": "顶层指令",
+      "role": "system"
+    },
+    {
+      "content": "先问一句",
+      "role": "user"
+    },
+    {
+      "content": "中途提醒",
+      "role": "system"
+    },
+    {
+      "content": "继续",
+      "role": "user"
+    }
+  ],
+  "model": "up-model"
+}

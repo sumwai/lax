@@ -1,0 +1,19 @@
+{
+  "from": "anthropic",
+  "to": "openai-chat",
+  "kind": "request",
+  "model": "up-model",
+  "body": {
+    "model": "deepseek-flash",
+    "max_tokens": 64,
+    "system": "顶层指令",
+    "messages": [
+      {"role": "user", "content": "先问一句"},
+      {"role": "system", "content": [
+        {"type": "text", "text": "中途提醒"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}}
+      ]},
+      {"role": "user", "content": "继续"}
+    ]
+  }
+}

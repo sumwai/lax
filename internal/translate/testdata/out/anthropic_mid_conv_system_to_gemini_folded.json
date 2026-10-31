@@ -1,0 +1,25 @@
+{
+  "contents": [
+    {
+      "parts": [
+        {
+          "text": "先问一句"
+        },
+        {
+          "text": "继续"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "generationConfig": {
+    "maxOutputTokens": 64
+  },
+  "systemInstruction": {
+    "parts": [
+      {
+        "text": "顶层指令\n中途提醒"
+      }
+    ]
+  }
+}

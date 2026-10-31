@@ -626,6 +626,17 @@ func anthropicSystemBlocks(raw json.RawMessage) []Block {
 
 func anthropicMessage(m AnthropicMessage) (Message, error) {
 	role := Role(m.Role)
+	// 对话中间允许 role=system：Claude Code 的 mid-conv system 就发这个形状，
+	// 模型名不在它的能力表里时默认开启（见 LESSONS）。与顶层 system 一致，只留文本块。
+	if role == RoleSystem {
+		msg := Message{Role: RoleSystem}
+		for _, b := range m.Content.All() {
+			if b.Type == "text" && b.Text != "" {
+				msg.Blocks = append(msg.Blocks, Block{Kind: BlockText, Text: b.Text})
+			}
+		}
+		return msg, nil
+	}
 	if role != RoleUser && role != RoleAssistant {
 		return Message{}, fmt.Errorf("不支持的消息角色 %q", m.Role)
 	}

@@ -1,0 +1,16 @@
+{
+  "from": "anthropic",
+  "to": "gemini",
+  "kind": "request",
+  "model": "gemini-2.5-flash",
+  "body": {
+    "model": "deepseek-flash",
+    "max_tokens": 64,
+    "system": "顶层指令",
+    "messages": [
+      {"role": "user", "content": "先问一句"},
+      {"role": "system", "content": [{"type": "text", "text": "中途提醒"}]},
+      {"role": "user", "content": "继续"}
+    ]
+  }
+}
