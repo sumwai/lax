@@ -162,9 +162,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"accounts": len(accounts),
 		"enabled":  enabled,
 		"models":   len(models),
-		"inbound":  []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini, ProtocolSystemOne, ProtocolEmbeddings},
-		"outbound": []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini, ProtocolSystemOne, ProtocolEmbeddings},
-		"passthru": "同协议直通，跨协议经中间表示转换（向量化与 systemone 只做同协议直通）",
+		// 协议清单只从 store.WireProtocols 取：新加一条线协议时这里自动跟上，
+		// 不让一份手写清单变成第二个事实来源。
+		"inbound":  store.WireProtocols(),
+		"outbound": store.WireProtocols(),
+		"passthru": "同协议直通，跨协议经中间表示转换（向量化、systemone 与语音只做同协议直通）",
 	})
 }
 
