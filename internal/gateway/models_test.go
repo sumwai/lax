@@ -149,23 +149,27 @@ func TestSyncModelsEmptyListIsError(t *testing.T) {
 	}
 }
 
-// TestProbeModelStatuses 钉住探活结论的两栏：Access 是正文（写 store.SetAccountModelAccess
-// 的那个取值），Status 是旧词表，两栏必须一起对——只对一栏就会出现「结论一个可用、写回另一个」。
+// TestProbeModelStatuses 钉住探活结论的三栏：Access 是正文（写 store.SetAccountModelAccess
+// 的那个取值），Status 是旧词表，Undecided 表示这次没拿到足以改可达性的判定。三栏必须一起对——
+// 只对一栏就会出现「结论一个可用、写回另一个」。
 func TestProbeModelStatuses(t *testing.T) {
 	cases := []struct {
-		name       string
-		httpStatus int
-		body       string
-		wantAccess string
-		want       string
+		name          string
+		httpStatus    int
+		body          string
+		wantAccess    string
+		want          string
+		wantUndecided bool
 	}{
-		{"可用", http.StatusOK, `{"id":"msg_1","type":"message","content":[{"type":"text","text":"p"}],"usage":{"input_tokens":1,"output_tokens":1}}`, store.AccessAllowed, store.ModelUsable},
-		{"无权", http.StatusForbidden, `{"error":{"message":"MODEL_NOT_IN_PLAN"}}`, store.AccessForbidden, store.ModelForbidden},
-		{"不存在", http.StatusNotFound, `{"error":{"message":"no such model"}}`, store.AccessMissing, store.ModelNotFound},
-		{"四百且提到模型", http.StatusBadRequest, `{"error":{"message":"model not found"}}`, store.AccessMissing, store.ModelNotFound},
-		{"四百但无关模型", http.StatusBadRequest, `{"error":{"message":"max_tokens 太小"}}`, store.AccessError, store.ModelError},
-		{"四百但只是没有可用上游", http.StatusBadRequest, `{"error":{"message":"No available providers match the 'only' filter: fireworks"}}`, store.AccessError, store.ModelError},
-		{"上游故障", http.StatusInternalServerError, `{"error":{"message":"上游挂了"}}`, store.AccessError, store.ModelError},
+		{"可用", http.StatusOK, `{"id":"msg_1","type":"message","content":[{"type":"text","text":"p"}],"usage":{"input_tokens":1,"output_tokens":1}}`, store.AccessAllowed, store.ModelUsable, false},
+		{"无权", http.StatusForbidden, `{"error":{"message":"MODEL_NOT_IN_PLAN"}}`, store.AccessForbidden, store.ModelForbidden, false},
+		{"不存在", http.StatusNotFound, `{"error":{"message":"no such model"}}`, store.AccessMissing, store.ModelNotFound, false},
+		{"四百且提到模型", http.StatusBadRequest, `{"error":{"message":"model not found"}}`, store.AccessMissing, store.ModelNotFound, false},
+		// 下面三行不是模型层面的结论：可达性留空、Undecided 置真，调用方保留上一行结论；
+		// 旧词表那一栏仍记 error 供尚未改完的调用方显示。
+		{"四百但无关模型", http.StatusBadRequest, `{"error":{"message":"max_tokens 太小"}}`, "", store.ModelError, true},
+		{"四百但只是没有可用上游", http.StatusBadRequest, `{"error":{"message":"No available providers match the 'only' filter: fireworks"}}`, "", store.ModelError, true},
+		{"上游故障", http.StatusInternalServerError, `{"error":{"message":"上游挂了"}}`, "", store.ModelError, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -189,6 +193,9 @@ func TestProbeModelStatuses(t *testing.T) {
 			}
 			if res.Status != c.want {
 				t.Fatalf("状态 = %q，期望 %q（HTTP %d）", res.Status, c.want, c.httpStatus)
+			}
+			if res.Undecided != c.wantUndecided {
+				t.Fatalf("Undecided = %v，期望 %v（HTTP %d，可达性 %q）", res.Undecided, c.wantUndecided, c.httpStatus, res.Access)
 			}
 			if res.Model != "m1" {
 				t.Fatalf("模型 = %q", res.Model)
@@ -463,21 +470,31 @@ func TestProbeModelRecordsFailedRequest(t *testing.T) {
 		if err != nil {
 			t.Fatalf("读请求记录: %v", err)
 		}
-		if len(recs) != 1 {
-			t.Fatalf("应写 1 行请求记录，实际 %d 行", len(recs))
+		if len(recs) != 3 {
+			t.Fatalf("应写 3 行请求记录（连接层失败重试两次 + 判定行），实际 %d 行", len(recs))
 		}
-		rec := recs[0]
-		if rec.HTTPStatus != 0 || rec.OK {
-			t.Fatalf("网络错误时状态应记 0 且不 ok，实际 %d/%v", rec.HTTPStatus, rec.OK)
+		retries, verdict := 0, 0
+		for _, rec := range recs {
+			if rec.HTTPStatus != 0 || rec.OK {
+				t.Fatalf("网络错误时状态应记 0 且不 ok，实际 %d/%v", rec.HTTPStatus, rec.OK)
+			}
+			if rec.InTokens != 0 || rec.OutTokens != 0 {
+				t.Fatalf("网络错误时 token 应记 0，实际 %d/%d", rec.InTokens, rec.OutTokens)
+			}
+			if rec.Error == "" {
+				t.Fatal("网络错误也应记下摘要")
+			}
+			if strings.Contains(rec.Error, "sk-test") {
+				t.Fatalf("错误摘要泄露了凭据: %s", rec.Error)
+			}
+			if strings.HasPrefix(rec.Error, probeTransportRetryNoteTest) {
+				retries++
+				continue
+			}
+			verdict++
 		}
-		if rec.InTokens != 0 || rec.OutTokens != 0 {
-			t.Fatalf("网络错误时 token 应记 0，实际 %d/%d", rec.InTokens, rec.OutTokens)
-		}
-		if rec.Error == "" {
-			t.Fatal("网络错误也应记下摘要")
-		}
-		if strings.Contains(rec.Error, "sk-test") {
-			t.Fatalf("错误摘要泄漏了凭据: %s", rec.Error)
+		if retries != 2 || verdict != 1 {
+			t.Fatalf("请求记录 = %+v，期望 2 行连接层重试加 1 行判定", recs)
 		}
 	})
 }

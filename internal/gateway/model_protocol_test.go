@@ -57,12 +57,17 @@ func (r *callRecorder) all() []upstreamCall {
 // 这一行不是这次探活的判定，只能按它区分。
 const probeRetryNoteTest = "换协议前的尝试"
 
-// probeVerdict 从探活写下的记录里挑出判定行：错误摘要不带换协议前缀的那一行。
+// probeTransportRetryNoteTest 是 gateway 写在「连接层失败重试」那几行错误摘要里的前缀。
+// 与换协议前那几次一样，它也不是判定行。
+const probeTransportRetryNoteTest = "连接层失败重试，未作结论"
+
+// probeVerdict 从探活写下的记录里挑出判定行：错误摘要不带两种「未作结论」前缀的那一行。
 // RecentRequests 按时间倒序返回，判定行未必是第一条，所以整表找。
 func probeVerdict(t *testing.T, recs []store.RequestRecord) store.RequestRecord {
 	t.Helper()
 	for _, r := range recs {
-		if !strings.Contains(r.Error, probeRetryNoteTest) {
+		if !strings.Contains(r.Error, probeRetryNoteTest) &&
+			!strings.Contains(r.Error, probeTransportRetryNoteTest) {
 			return r
 		}
 	}

@@ -679,18 +679,24 @@ func readModelList(r io.Reader) ([]string, bool) {
 
 // ModelProbe 是单个模型在一次探活里的结论。
 //
-// Access 是结论的正文：`allowed` / `forbidden` / `missing` / `error`（取值定义在 store.Access*），
+// Access 是结论的正文：`allowed` / `forbidden` / `missing`（取值定义在 store.Access*），
 // 调用方拿它写 store.SetAccountModelAccess。**401 不是模型层面的结论**：凭据被拒时这一栏留空，
 // 表示「这一次不要写可达性」；否则一次全局凭据失效会把每个模型都标成 forbidden，
-// 换回凭据后那份清单仍全部不可用。
+// 换回凭据后那份清单仍全部不可用。连接层失败、429/5xx、其它 400 与本地编码或构造失败同样留空
+// （见 Undecided）：这些不是模型层面的结论，写成 error 会把一次 TLS 超时变成「模型不可用」。
+//
+// Undecided 表示这次没拿到足以改可达性的 HTTP 判定（连接层失败、429/5xx、
+// 其它 400、本地编码或构造失败）。调用方不写 access，保留上一行结论。
 //
 // Status 是迁移 0015 之前的状态词表，由 Access 推出，只为尚未改完的 internal/cli 保留：
-// 两栏永远同时有值或同时为空，读哪一栏都不会看到半个结论。
+// Access 非空时两栏一起有值；Access 留空时 `auth` 表示凭据被拒、`error` 表示没得出判定，
+// 旧词表那边因此仍能显示一行，不会被当成可用。
 //
 // Protocol 是这次实际用到的协议：发现成功时是发现到的那个，其余情况下是厂商默认协议。
 type ModelProbe struct {
 	Model      string
 	Access     string
+	Undecided  bool
 	Status     string
 	Protocol   string
 	HTTPStatus int
@@ -706,11 +712,30 @@ func (res *ModelProbe) setAccess(access string) {
 	res.Status = store.LegacyStatus(access, 1)
 }
 
-// probeAttempt 是一次协议尝试的完整结果：结论加记账需要的开始时间与用量。
+// setUndecided 记下「这次没拿到足以改可达性的判定」：可达性留空（调用方不写，保留上一行结论），
+// 旧词表那一栏仍记 error 供尚未改完的调用方显示，Undecided 置真让调用方知道这一行不是结论。
+func (res *ModelProbe) setUndecided() {
+	res.Access = ""
+	res.Undecided = true
+	res.Status = store.ModelError
+}
+
+// probeTry 是一次连接层失败的上游调用：开始时间、耗时与那次调用的错误摘要。
+// 连接层失败会重试，这几次调用各自要留一行账，用 probeTransportRetryNote 与判定行区分开。
+// status 恒为 0：一条 HTTP 响应都没拿到，没有状态码可记。
+type probeTry struct {
+	start   time.Time
+	latency time.Duration
+	status  int
+	message string
+}
+
+// probeAttempt 是一次协议尝试的完整结果：结论加记账需要的开始时间、用量与连接层重试。
 type probeAttempt struct {
-	res   ModelProbe
-	start time.Time
-	usage probeUsage
+	res     ModelProbe
+	start   time.Time
+	usage   probeUsage
+	retries []probeTry
 }
 
 // defaultProbeProtocols 是探活候选的兜底顺序：账号没有厂商行（或该厂商一个路由都没声明）
@@ -735,8 +760,10 @@ func isWireProtocol(p string) bool {
 //     白打的一次 404；
 //  2. 目录里这个模型声明支持的协议（provider_models.protocols）紧接着：上游自己说了它支持哪些协议
 //     （commandcode 的 supported_endpoints、gemini 的 supportedGenerationMethods），先按它打就少打几次
-//     错协议的请求。范围仍是第 4 步那批候选，声明了这家没有路由的协议时不打——那等于去撞一条
-//     没声明过的路径，只能换回 404；与第 1 步冲突时第 1 步优先；
+//     错协议的请求。声明不在第 4 步的候选范围之内也打：模型级的声明本身就是这条路径存在的证据
+//     （systemone 的路径固定，gateway.Endpoint 也能按协议给出后缀），不必厂商在 provider_routes
+//     里再声明一条同名路由。这个位置上的失败不构成结论（循环本来就在非 primary 位置继续试），
+//     只有 2xx 才算数；与第 1 步冲突时第 1 步优先；
 //  3. 厂商的有效默认协议紧接其后，它既是对厂商配置的验证，也是 401 判定与全失败结论的依据；
 //  4. 其余按 resolver 给的顺序：Options.RouteProtocols 注入时用它，否则用该厂商在
 //     provider_routes 里声明过的协议（按协议名排序），都没有则三种全试。
@@ -782,12 +809,9 @@ func (s *Server) routeProtocolOrder(a store.Account, model string, override []st
 		candidates = defaultProbeProtocols
 	}
 
-	// 目录里声明的协议排在厂商默认协议之前，但只在这次候选范围之内：candidates 就是这次要试的
-	// 全部协议，不在其中的没有可用的上游路径，去撞它等于把一次探活浪费在一个 404 上。
+	// 目录里声明的协议排在厂商默认协议之前，且不再要求它在 candidates 之内：声明本身就是这条路径
+	// 存在的证据（见函数注释第 2 步）。排在它前面的只有已发现的协议，后面的失败本来就不作结论。
 	for _, p := range s.declaredProtocols(a, model) {
-		if !slices.Contains(candidates, p) {
-			continue
-		}
 		if err := add(p, fmt.Sprintf("厂商 %s 的模型目录", a.Provider)); err != nil {
 			return nil, err
 		}
@@ -869,27 +893,9 @@ func (s *Server) ProbeModel(ctx context.Context, a store.Account, model string) 
 // ProbeModelWithProtocols 探活一个模型。candidates 顶替 resolver 给的中间一串协议（nil 表示
 // 用 resolver，也就是该厂商声明过的那些），厂商默认协议与已发现的协议仍由 routeProtocolOrder 排好。
 //
-// 先用厂商默认协议试一次：2xx 就是结论；401 是凭据问题，不换协议，停用账号并停下；
-// 只有可能只是路径不对时才换下一个候选（见 retryOtherProtocol）。
-// 换协议后的第一次 2xx 即结论，把该协议写进 account_models.protocol，剩下的候选不再试。
-// 换协议后的失败都不是结论：那里的 401 只能说明这个协议不认这套凭据头（anthropic 用
-// x-api-key，另两家用 Bearer），其它失败也只是这条路不通，所以接着试下一个候选；
-// 全部试完仍失败时，结论取厂商默认协议那一次。
-//
-// 每次上游调用都在 requests 里记一行，换协议前的中间尝试也记（见 recordProbeAttempts）：
-// 一次 403 触发三次调用就应当是三行，账实一致比行数好看重要。
-//
-// 结论的写法：可达性放在 ModelProbe.Access（`allowed` / `forbidden` / `missing` / `error`），
-// 由调用方写进 store.SetAccountModelAccess；401 不是模型层面的结论，那一栏留空。
-// 协议发现成功时这里自己写 store.SetAccountModelProtocol（账号级覆盖）。
+// 循环本身见 probeOrder；这里只排候选、把向量化挤到最后，并认出厂商默认协议那一次的位置。
 func (s *Server) ProbeModelWithProtocols(ctx context.Context, a store.Account, model string,
 	candidates []string) (ModelProbe, error) {
-
-	key, err := secret.Decrypt(s.key, a.KeyCipher)
-	if err != nil {
-		return ModelProbe{Model: model, Protocol: a.Protocol}, err
-	}
-	secretValue := string(key)
 
 	order, err := s.routeProtocolOrder(a, model, candidates)
 	if err != nil {
@@ -915,6 +921,50 @@ func (s *Server) ProbeModelWithProtocols(ctx context.Context, a store.Account, m
 			break
 		}
 	}
+
+	return s.probeOrder(ctx, a, model, order, primaryIdx)
+}
+
+// ProbeModelProtocol 只按指定协议探活一个模型，候选就是这一条。
+//
+// `model probe --protocol` 用它只验一条路：不读已发现协议、不读目录声明、不取厂商默认协议，
+// 所以没有多协议顺序，也没有「换协议之后那几次不作数」这一回事——打到的就是这一条，
+// 401 照样是凭据被拒、停用账号。protocol 不是线协议时是用法错误，不发上游请求，
+// 带出的结论标 Undecided，调用方不拿它写可达性。
+// 判定与 ProbeModelWithProtocols 是同一套（同一个 probeOrder），只打一条路时不另写一份。
+func (s *Server) ProbeModelProtocol(ctx context.Context, a store.Account, model, protocol string) (ModelProbe, error) {
+	if !isWireProtocol(protocol) {
+		msg := fmt.Sprintf("探活协议 %q 不是线协议，可用 %s", protocol, strings.Join(store.WireProtocols(), "、"))
+		return ModelProbe{Model: model, Access: "", Undecided: true, Message: msg}, errors.New(msg)
+	}
+	return s.probeOrder(ctx, a, model, []string{protocol}, 0)
+}
+
+// probeOrder 按给定的候选顺序探活一个模型，两个入口共用这一个循环。primaryIdx 是厂商默认协议
+// （或单协议探活唯一那一条）在 order 里的位置，401 判定与全失败时的结论都取它。
+//
+// 先用厂商默认协议试一次：2xx 就是结论；401 是凭据问题，不换协议，停用账号并停下；
+// 只有可能只是路径不对时才换下一个候选（见 retryOtherProtocol）。
+// 换协议后的第一次 2xx 即结论，把该协议写进 account_models.protocol，剩下的候选不再试。
+// 换协议后的失败都不是结论：那里的 401 只能说明这个协议不认这套凭据头（anthropic 用
+// x-api-key，另两家用 Bearer），其它失败也只是这条路不通，所以接着试下一个候选；
+// 全部试完仍失败时，结论取厂商默认协议那一次。
+//
+// 每次上游调用都在 requests 里记一行，换协议前的中间尝试与连接层失败的重试也记
+// （见 recordProbeAttempts）：一次 403 触发三次调用就应当是三行，账实一致比行数好看重要。
+//
+// 结论的写法：可达性放在 ModelProbe.Access（`allowed` / `forbidden` / `missing`），
+// 由调用方写进 store.SetAccountModelAccess；401、连接层失败、429/5xx 等不构成结论的情况
+// 那一栏留空，后者另有 Undecided（见 ModelProbe）。
+// 协议发现成功时这里自己写 store.SetAccountModelProtocol（账号级覆盖）。
+func (s *Server) probeOrder(ctx context.Context, a store.Account, model string,
+	order []string, primaryIdx int) (ModelProbe, error) {
+
+	key, err := secret.Decrypt(s.key, a.KeyCipher)
+	if err != nil {
+		return ModelProbe{Model: model, Protocol: a.Protocol}, err
+	}
+	secretValue := string(key)
 
 	var attempts []probeAttempt
 	var storeErr error
@@ -988,24 +1038,54 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 		raw, err = translate.EncodeRequest(protocol, ir, model)
 	}
 	if err != nil {
-		res.setAccess(store.AccessError)
+		res.setUndecided()
 		res.Message = "按协议 " + protocol + " 编码探活请求失败: " + err.Error()
 		return att
 	}
 	// 模型同步与探活没有客户端请求可依，入站头传 nil：客户端头透传只作用于转发路径。
 	upReq, err := s.buildRequest(ctx, a, protocol, protocol, nil, raw, ir, key, "", embedding)
 	if err != nil {
-		res.setAccess(store.AccessError)
+		res.setUndecided()
 		res.Message = "构造探活请求失败: " + err.Error()
 		return att
 	}
 
-	resp, err := s.client.Do(upReq)
-	res.Latency = s.now().Sub(att.start)
-	if err != nil {
-		res.setAccess(store.AccessError)
-		res.Message = scrubSecret("上游请求失败: "+err.Error(), key)
-		return att
+	// 连接层失败（一条 HTTP 响应都没拿到）在同一个协议内重试：DNS、连接被拒、TLS 握手失败与
+	// 读超时多半是本机网络或中转抖动，按判定规则这类失败不改可达性，白丢一次调用只会让一个
+	// 已确认可用的模型看起来「没结论」。重试之间不退避（单个模型的调用超时已经是 60 秒），
+	// 每次重试前先看 ctx：已取消就停。请求体只构造一次，重试用 GetBody 重放；
+	// GetBody 为 nil 时没有可重放的 body，不重试。
+	var resp *http.Response
+	for try := 0; ; try++ {
+		tryStart := att.start
+		resp, err = s.client.Do(upReq)
+		latency := s.now().Sub(tryStart)
+		if err == nil {
+			res.Latency = latency
+			break
+		}
+		tryMsg := scrubSecret("上游请求失败: "+err.Error(), key)
+		if try >= probeTransportRetries || upReq.GetBody == nil || ctx.Err() != nil {
+			res.Latency = latency
+			res.setUndecided()
+			res.Message = tryMsg
+			return att
+		}
+		body, bodyErr := upReq.GetBody()
+		if bodyErr != nil {
+			// 连重放 body 都失败：不再往下试，按这一次失败落成没得出判定。
+			res.Latency = latency
+			res.setUndecided()
+			res.Message = tryMsg
+			return att
+		}
+		// 这一次调用要重试：它自己留一行账（见 recordProbeAttempts），不计入这次尝试的判定。
+		att.retries = append(att.retries, probeTry{start: tryStart, latency: latency, message: tryMsg})
+		next := upReq.Clone(ctx)
+		next.Body = body
+		upReq = next
+		// 判定行的 ts 取真正给出结论那次调用的开始时间，不取重试之前的。
+		att.start = s.now()
 	}
 	defer resp.Body.Close()
 
@@ -1037,7 +1117,9 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 		// 否则「no available providers match ...」这种会误判成模型名不存在。
 		res.setAccess(store.AccessMissing)
 	default:
-		res.setAccess(store.AccessError)
+		// 其余（其它 400、402、405、429、5xx）都不是模型层面的结论：可达性留空，调用方保留上一行；
+		// 旧词表那一栏仍记 error 供显示，Undecided 置真。
+		res.setUndecided()
 	}
 	return att
 }
@@ -1082,20 +1164,56 @@ func readProbeUsage(protocol string, body []byte) probeUsage {
 // 每一行都要能看出「这不是这次探活的结论」。
 const probeRetryNote = "换协议前的尝试，未作结论"
 
+// probeTransportRetryNote 是连接层失败重试那几行请求记录的错误摘要前缀。它们与判定行在同一列上，
+// 只能靠前缀区分：这一行调用没拿到任何 HTTP 响应，因此也不是这次探活的结论。
+const probeTransportRetryNote = "连接层失败重试，未作结论"
+
+// probeTransportRetries 是同一个协议内连接层失败最多再试几次（共 probeTransportRetries+1 次调用）。
+// 不换协议：偶发失败多半出在本机网络或中转上，换一条路径只会多花调用。
+const probeTransportRetries = 2
+
 // recordProbeAttempts 把这次探活的每一次上游调用各记一行 requests（verdict 是得出判定的那次）。
 // 探活是真实计费的调用，打了几次就记几行，中间的重试也记：45 个 403 模型打 135 次却只留
 // 45 行的话，用量与花费都对不上。入站与出站都取那次实际用的协议；只有 2xx 那次才 ok。
+// 连接层失败的重试每行先写、判定行后写：重试行没有状态码、没有用量，错误摘要以
+// probeTransportRetryNote 开头。
 // 没有开始时间的尝试不写（正常路径下 probeOnce 入口就取了时间）。记账失败只写日志，
 // 不改变探活结论。
 func (s *Server) recordProbeAttempts(a store.Account, model string, attempts []probeAttempt, verdict int) {
 	for i, att := range attempts {
-		if att.start.IsZero() {
-			s.logf("账号 %s 的模型 %s 有一次探活调用没有开始时间，跳过记账", a.Name, model)
-			continue
-		}
 		protocol := att.res.Protocol
 		if protocol == "" {
 			protocol = a.Protocol
+		}
+		// 连接层失败的那几次各留一行账：它们与判定行同源（入站、出站、模型与账号）。
+		for _, try := range att.retries {
+			if try.start.IsZero() {
+				s.logf("账号 %s 的模型 %s 有一次探活重试没有开始时间，跳过记账", a.Name, model)
+				continue
+			}
+			msg := probeTransportRetryNote
+			if try.message != "" {
+				msg += "：" + try.message
+			}
+			rec := &store.RequestRecord{
+				TS:             try.start.Unix(),
+				Inbound:        protocol,
+				Outbound:       protocol,
+				ModelRequested: model,
+				ModelUsed:      model,
+				AccountID:      a.ID,
+				HTTPStatus:     try.status,
+				OK:             false,
+				LatencyMS:      try.latency.Milliseconds(),
+				Error:          msg,
+			}
+			if err := s.store.InsertRequest(rec); err != nil {
+				s.logf("写探活重试请求记录失败: %v", err)
+			}
+		}
+		if att.start.IsZero() {
+			s.logf("账号 %s 的模型 %s 有一次探活调用没有开始时间，跳过记账", a.Name, model)
+			continue
 		}
 		msg := att.res.Message
 		if i != verdict {
