@@ -27,7 +27,7 @@ import (
 // Provider 只存名字：转发用的地址、默认协议与路由都按它在 providers / provider_routes 里查。
 type accountRow struct {
 	ID            int64   `gorm:"column:id;primaryKey;autoIncrement"`
-	Name          string  `gorm:"column:name;not null;uniqueIndex"`
+	Name          string  `gorm:"column:name;size:191;not null;uniqueIndex"`
 	Provider      string  `gorm:"column:provider;not null"`
 	KeyCipher     []byte  `gorm:"column:key_cipher;not null"`
 	Priority      int     `gorm:"column:priority;not null;default:100"`
@@ -66,7 +66,7 @@ func (requestRow) TableName() string { return "requests" }
 
 // providerRow 是 providers 表的一行。行里没有凭据，只有地址与路径。
 type providerRow struct {
-	Name            string `gorm:"column:name;primaryKey"`
+	Name            string `gorm:"column:name;size:191;primaryKey"`
 	BaseURL         string `gorm:"column:base_url;not null"`
 	Note            string `gorm:"column:note;not null;default:''"`
 	DefaultProtocol string `gorm:"column:default_protocol;not null;default:''"`
@@ -77,8 +77,8 @@ func (providerRow) TableName() string { return "providers" }
 
 // providerRouteRow 是一行厂商路由：某个线协议落在哪个地址上。
 type providerRouteRow struct {
-	Provider   string `gorm:"column:provider;primaryKey"`
-	Protocol   string `gorm:"column:protocol;primaryKey"`
+	Provider   string `gorm:"column:provider;size:191;primaryKey"`
+	Protocol   string `gorm:"column:protocol;size:191;primaryKey"`
 	Path       string `gorm:"column:path;not null"`
 	ModelsPath string `gorm:"column:models_path;not null;default:''"`
 }
@@ -90,9 +90,9 @@ func (providerRouteRow) TableName() string { return "provider_routes" }
 // ProviderRow 只用来让 AutoMigrate 建出 ON DELETE CASCADE：GORM 的外键必须挂在关系字段上，
 // 没有它就不会生成约束。这个字段不参与读写，除非显式 Preload。
 type providerHeaderRow struct {
-	Provider string `gorm:"column:provider;primaryKey"`
-	Protocol string `gorm:"column:protocol;primaryKey"`
-	Name     string `gorm:"column:name;primaryKey"`
+	Provider string `gorm:"column:provider;size:191;primaryKey"`
+	Protocol string `gorm:"column:protocol;size:191;primaryKey"`
+	Name     string `gorm:"column:name;size:191;primaryKey"`
 	Value    string `gorm:"column:value;not null"`
 
 	ProviderRow *providerRow `gorm:"foreignKey:Provider;references:Name;constraint:OnDelete:CASCADE"`
@@ -102,8 +102,8 @@ func (providerHeaderRow) TableName() string { return "provider_headers" }
 
 // providerModelRow 是模型目录的一行，按厂商共享。
 type providerModelRow struct {
-	Provider        string   `gorm:"column:provider;primaryKey"`
-	Model           string   `gorm:"column:model;primaryKey"`
+	Provider        string   `gorm:"column:provider;size:191;primaryKey"`
+	Model           string   `gorm:"column:model;size:191;primaryKey"`
 	Source          string   `gorm:"column:source;not null"`
 	ContextWindow   *int64   `gorm:"column:context_window"`
 	MaxOutput       *int64   `gorm:"column:max_output"`
@@ -121,7 +121,7 @@ func (providerModelRow) TableName() string { return "provider_models" }
 // accountModelRow 是一个账号在一个模型上的可达性与覆盖值。
 type accountModelRow struct {
 	AccountID       int64    `gorm:"column:account_id;primaryKey"`
-	Model           string   `gorm:"column:model;primaryKey"`
+	Model           string   `gorm:"column:model;size:191;primaryKey"`
 	Access          string   `gorm:"column:access;not null"`
 	HTTPStatus      int      `gorm:"column:http_status;not null;default:0"`
 	Error           string   `gorm:"column:error;not null;default:''"`
@@ -139,7 +139,7 @@ func (accountModelRow) TableName() string { return "account_models" }
 
 // modelAliasRow 是一行别名映射。
 type modelAliasRow struct {
-	Alias     string `gorm:"column:alias;primaryKey"`
+	Alias     string `gorm:"column:alias;size:191;primaryKey"`
 	Target    string `gorm:"column:target;not null"`
 	CreatedAt int64  `gorm:"column:created_at;not null"`
 }

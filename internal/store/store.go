@@ -685,10 +685,12 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 				r.out_tokens * (%s) AS c_out,
 				r.reasoning_tokens_extra * (%s) AS c_reasoning
 			FROM requests r %s WHERE r.ts >= ?
-		) GROUP BY k ORDER BY 2 DESC`,
+		) AS t GROUP BY k ORDER BY 2 DESC`,
 		expr, usagePriceIn, usagePriceCacheRead, usagePriceCacheWrite, usagePriceOut, usagePriceOut, usagePriceJoin)
 
-	rows, err := s.db.Query(q, since)
+	// 走 GORM 的 Raw 而不是底层 *sql.DB：查询里的 ? 占位符要由 dialector 转成 PostgreSQL
+	// 的 $1，直接用 *sql.DB 会把这个问号原样发给 PG。
+	rows, err := s.gorm.Raw(q, since).Rows()
 	if err != nil {
 		return nil, err
 	}

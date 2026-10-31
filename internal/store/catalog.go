@@ -304,11 +304,17 @@ func upsertProviderModelTx(tx *gorm.DB, m ProviderModel) error {
 // 后者按来源等级判断，manual 会把这行改成 manual，而 manual 是最强的一档，此后 sync 再也写不进去，
 // 上游给的上下文长度与协议集合就永远停在第一次同步的值上。名字只说明「这个名字存在」，
 // 已有的模型事实不归它改。
-const providerModelInsertOnly = `INSERT INTO provider_models
-	(provider, model, source, context_window, max_output, protocols, capabilities,
-	 price_in, price_out, price_cache_read, price_cache_write, updated_at)
-	VALUES (?, ?, ?, NULL, NULL, '', '', NULL, NULL, NULL, NULL, ?)
-	ON CONFLICT (provider, model) DO NOTHING`
+//
+// 冲突时跳过交给 clause.OnConflict{DoNothing: true}：MySQL 会把它翻成
+// `ON DUPLICATE KEY UPDATE <主键>=<主键>`，与 `INSERT OR IGNORE` 同义。
+func insertProviderModelTx(tx *gorm.DB, provider, model, source string, now int64) error {
+	return tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&providerModelRow{
+		Provider:  provider,
+		Model:     model,
+		Source:    source,
+		UpdatedAt: now,
+	}).Error
+}
 
 // ProviderModelProtocols 返回目录里这一行声明支持的协议（provider_models.protocols），
 // 行不存在时返回空。探活只读这一列，用它把上游自己声明的协议排在候选前面。
@@ -323,7 +329,7 @@ func (s *Store) ProviderModelProtocols(provider, model string) ([]string, error)
 // declareModelsTx 把一组名字落成「这个账号声明了这些模型」：目录里补 source='manual' 的行，
 // 可达性表里把该账号的这些名字标成 allowed。`account add --models` 用它。
 // 厂商名为空时什么都不写（见 CreateAccount 的说明）；目录里已有的行不会被这份手填清单改写事实
-// （只插新行，见 providerModelInsertOnly）。
+// （只插新行，见 insertProviderModelTx）。
 func declareModelsTx(tx *gorm.DB, accountID int64, provider string, models []string) error {
 	names := normalizeModelNames(models)
 	if len(names) == 0 || provider == "" {
@@ -332,7 +338,7 @@ func declareModelsTx(tx *gorm.DB, accountID int64, provider string, models []str
 	for _, name := range names {
 		// 目录里没有的名字补一行 manual；已有的行一个字段都不动：名字只说明「这个名字存在」，
 		// 长度、价格与协议集合得由同步或探活写，手填清单不该把它们冲成空。
-		if err := execSQL(tx, providerModelInsertOnly, provider, name, SourceManual, time.Now().Unix()); err != nil {
+		if err := insertProviderModelTx(tx, provider, name, SourceManual, time.Now().Unix()); err != nil {
 			return err
 		}
 		if err := tx.Clauses(clause.OnConflict{
@@ -942,8 +948,8 @@ func (s *Store) ReplaceModels(accountID int64, models []string) (int, error) {
 	err = s.withTx(func(tx *gorm.DB) error {
 		for _, name := range names {
 			// 目录里没有的名字补一行 manual，已有的行一个字段都不动（含 source）：
-			// 同步写进来的元数据归同步刷新，一次清单不该把它降级成手填行（见 providerModelInsertOnly）。
-			if err := execSQL(tx, providerModelInsertOnly, provider, name, SourceManual, time.Now().Unix()); err != nil {
+			// 同步写进来的元数据归同步刷新，一次清单不该把它降级成手填行（见 insertProviderModelTx）。
+			if err := insertProviderModelTx(tx, provider, name, SourceManual, time.Now().Unix()); err != nil {
 				return err
 			}
 			// 先看这一行在不在，只为数清新增了几个名字。

@@ -868,7 +868,9 @@ TypeSafe 的 System One（Jev）不是对话：输入一个 `state` 加一组带
 
 查询层已全部改成 GORM 链式调用：单表读写、条件查询、复合主键 UPSERT、简单 JOIN 都用 `Create`、`Where`、`Updates` 与 `clause.OnConflict`，占位符、UPSERT 语法、自增主键与列类型差异都由 GORM 翻译，调用方一律写 `?` 占位符。
 
-唯一保留原始 SQL 的是 `store.Usage` 的嵌套聚合（五个 `COALESCE` 聚合加条件求和）：链式写法只会把它拆成 `.Select()` 的一段字符串，可读性反而下降。它的两处方言残留单独处理：按天分组的日期函数在 `store.dateExpr` 里按后端分支（SQLite 的 `date(…,'unixepoch','localtime')`、PostgreSQL 的 `to_char(to_timestamp(…) AT TIME ZONE …)`、MySQL 的 `DATE(FROM_UNIXTIME(…))`），布尔相加改成三方言通用的 `CASE WHEN … THEN 1 ELSE 0 END`。
+唯一保留原始 SQL 的是 `store.Usage` 的嵌套聚合（五个 `COALESCE` 聚合加条件求和）：链式写法只会把它拆成 `.Select()` 的一段字符串，可读性反而下降。它的两处方言残留单独处理：按天分组的日期函数在 `store.dateExpr` 里按后端分支（SQLite 的 `date(…,'unixepoch','localtime')`、PostgreSQL 的 `to_char(to_timestamp(…) AT TIME ZONE …)`、MySQL 的 `DATE(FROM_UNIXTIME(…))`），布尔相加改成三方言通用的 `CASE WHEN … THEN 1 ELSE 0 END`，派生表带 `AS t`（PostgreSQL 与 MySQL 都要求子查询有别名，SQLite 不要求）。
+
+三个后端都跑过 `internal/store/backend_integration_test.go`：种子、账号增删读、复合主键 UPSERT、协议与价格覆盖、厂商增删与外键级联、请求记录、三种维度汇总、别名覆盖与删除。用例默认不编译（要 `-tags integration`），要连库时给 `LAX_TEST_POSTGRES_DSN` 与 `LAX_TEST_MYSQL_DSN`；不给就只跑 SQLite，`make check` 不受影响。用例结束时会 DROP 自己建的表，DSN 必须指向一次性库。
 
 | `driver` | 包 | 说明 |
 | --- | --- | --- |

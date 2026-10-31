@@ -284,7 +284,7 @@ make check        # go vet + go test + go build
 
 `driver` 取 `sqlite`、`postgres` 或 `mysql`；`dsn` 非空时用它连库，此时 `db` 被忽略。只有 SQLite 的 `dsn` 由程序拼。表结构与建表走 `AutoMigrate`，不需要手工建库；旧版单文件库（18 个 `.sql` 迁移那个时代的库）在首次打开时自动搬迁，原文件留一份 `.bak`。
 
-三个后端共用同一套代码：表结构由 Go 结构体推导，查询走 GORM 的链式调用，方言差异（占位符、UPSERT 语法、自增主键、列类型、日期函数）由 GORM 与 `store.dateExpr` 处理。SQLite 用 `github.com/glebarez/sqlite`（纯 Go，不需要 cgo）；PostgreSQL 与 MySQL 分别用 `gorm.io/driver/postgres` 与 `gorm.io/driver/mysql`。
+三个后端共用同一套代码：表结构由 Go 结构体推导，查询走 GORM 的链式调用，方言差异（占位符、UPSERT 语法、自增主键、列类型、日期函数）由 GORM 与 `store.dateExpr` 处理。SQLite 用 `github.com/glebarez/sqlite`（纯 Go，不需要 cgo）；PostgreSQL 与 MySQL 分别用 `gorm.io/driver/postgres` 与 `gorm.io/driver/mysql`。三个后端都过了集成用例 `internal/store/backend_integration_test.go`（`go test -tags integration`，靠 `LAX_TEST_POSTGRES_DSN` 与 `LAX_TEST_MYSQL_DSN` 开启，不给就只跑 SQLite）。
 
 凭据用 AES-256-GCM 加密后入库。这防的是备份文件与日志泄漏，不防同一台机器上以同一用户身份运行的程序。
 
