@@ -655,11 +655,16 @@ func probeStageLabel(stage string) string {
 // modelSubs 是 model 一组的子命令清单。
 var modelSubs = []groupItem{
 	{"ls", "列出网关可提供的模型、账号状态与目录里的元数据"},
+	{"show", "按账号看一个模型的可达性事实"},
+	{"add", "手写一条账号能用的模型（同事务写目录与可达性）"},
 	{"sync", "从上游拉取模型列表，名字进模型目录并把这个账号标成可用"},
 	{"probe", "逐个模型探活（对话模型发一条 max_tokens=1 的请求，决策模型发一条最小决策请求），把可达性写进账号"},
 	{"alias", "维护模型别名：客户端写死的模型名指到真实模型名上（set / unset / ls）"},
 	{"price", "模型单价：目录里的厂商级标价与某账号的覆盖价（set / unset / ls）"},
 }
+
+// modelSubCommands 是「可用子命令」那条错误文案里的清单，与 modelSubs 同序。
+const modelSubCommands = "ls | show | add | sync | probe | alias | price"
 
 // cmdModel 是 model 这一组子命令的入口。
 func cmdModel(e *Env, args []string) error {
@@ -668,11 +673,15 @@ func cmdModel(e *Env, args []string) error {
 		return nil
 	}
 	if len(args) == 0 {
-		return usagef("需要子命令：ls | sync | probe | alias | price\n用 lax model --help 查看子命令")
+		return usagef("需要子命令：%s\n用 lax model --help 查看子命令", modelSubCommands)
 	}
 	switch args[0] {
 	case "ls":
 		return cmdModelLs(e, args[1:])
+	case "show":
+		return cmdModelShow(e, args[1:])
+	case "add":
+		return cmdModelAdd(e, args[1:])
 	case "sync":
 		return cmdModelSync(e, args[1:])
 	case "probe":
@@ -682,7 +691,7 @@ func cmdModel(e *Env, args []string) error {
 	case "price":
 		return cmdModelPrice(e, args[1:])
 	default:
-		return usagef("未知子命令 %q，可用：ls | sync | probe | alias | price\n用 lax model --help 查看子命令", args[0])
+		return usagef("未知子命令 %q，可用：%s\n用 lax model --help 查看子命令", args[0], modelSubCommands)
 	}
 }
 
@@ -791,10 +800,12 @@ func cmdModelLs(e *Env, args []string) error {
 				order = append(order, r.Model)
 			}
 			ent.accounts = append(ent.accounts, modelAccountJSON{
-				Name:      acc.Name,
-				Status:    info.Access,
-				Protocol:  info.Protocol,
-				checkedAt: r.CheckedAt,
+				Name:       acc.Name,
+				Status:     info.Access,
+				Protocol:   info.Protocol,
+				HTTPStatus: r.HTTPStatus,
+				CheckedAt:  r.CheckedAt,
+				Error:      r.Error,
 			})
 		}
 	}
@@ -818,7 +829,7 @@ func cmdModelLs(e *Env, args []string) error {
 	}
 
 	if len(order) == 0 {
-		fmt.Fprintln(e.Stdout, "还没有模型信息：先 lax model sync 拉上游模型列表，再 lax model probe 逐个探活；也可以用 lax account add --models 手填")
+		fmt.Fprintln(e.Stdout, "还没有模型信息：先 lax model sync 拉上游模型列表，再 lax model probe 逐个探活；也可以用 lax model add <模型> --account <账号> --protocol <协议> 手写一条（决策模型只能这样声明）")
 		return nil
 	}
 
@@ -827,7 +838,7 @@ func cmdModelLs(e *Env, args []string) error {
 		ent := byModel[m]
 		names := make([]string, 0, len(ent.accounts))
 		for _, ae := range ent.accounts {
-			names = append(names, fmt.Sprintf("%s(%s)", ae.Name, modelAccessText(ae.Status, ae.checkedAt)))
+			names = append(names, fmt.Sprintf("%s(%s)", ae.Name, modelAccessText(ae.Status, ae.CheckedAt)))
 		}
 		price := "未定价"
 		if ent.priceIn != nil || ent.priceOut != nil {
@@ -850,13 +861,17 @@ func cmdModelLs(e *Env, args []string) error {
 // modelAccountJSON 是 model ls --json 里某个模型下的一个账号。
 // Status 取 account_models.access（allowed / forbidden / missing / error），
 // Protocol 是该账号在这个模型上的有效出站协议。
+// HTTPStatus、CheckedAt 与 Error 是同一行上的探活事实：脚本靠这三列判断「可用」是手写进来
+// 还是真打过一条上游请求，不必再跑一次 model show。
 type modelAccountJSON struct {
 	Name     string `json:"name"`
 	Status   string `json:"status"`
 	Protocol string `json:"protocol"`
-	// checkedAt 只用在人读输出上：allowed 且从没探过的行要写「待探活」而不是「可用」。
-	// 探活时间不是这一列要回答的事，不进 --json。
-	checkedAt int64 `json:"-"`
+	// HTTPStatus 为 0 表示没探过（同步、手写与未判定的行就是这一档）。
+	HTTPStatus int `json:"http_status"`
+	// CheckedAt 是探活时间的 Unix 秒，0 表示没探过。
+	CheckedAt int64  `json:"checked_at"`
+	Error     string `json:"error"`
 }
 
 // modelAccessText 把可达性换成人话。「可用」只给探过的 allowed 行：刚同步进来或手填的
@@ -922,6 +937,8 @@ func modelProtocolCell(entries []modelAccountJSON) string {
 
 // modelStatusText 把探活结果换成人话。取值来自网关（ModelProbe.Status），
 // 与 account_models.access 是两套词表，这里两套都认。
+// 空串表示这次没拿到足以改可达性的判定（连接层失败、429/5xx、其它 400、本地编码或构造失败），
+// 写成「未判定」而不是「失败」：可达性保持上一行结论，这一行不是结论。
 // 注意 ModelForbidden / ModelError 与 AccessForbidden / AccessError 是同一个字符串，
 // 一个 case 列一处就够，别再加一遍重复的 case。
 func modelStatusText(status string) string {
@@ -938,6 +955,8 @@ func modelStatusText(status string) string {
 		return "凭据被拒"
 	case store.ModelError:
 		return "失败"
+	case "":
+		return "未判定"
 	default:
 		return status
 	}
@@ -1032,19 +1051,32 @@ func cmdModelSync(e *Env, args []string) error {
 	return nil
 }
 
+// modelProbeUsage 是 model probe 的用法行，--protocol 的空值与不识协议时都打出来。
+const modelProbeUsage = "用法：lax model probe [--provider 厂商] [--account 账号] [--sync] [--model 模型] [--protocol 协议] [--limit N] [--concurrency N] [--max-age 时长] [--refresh]"
+
 // cmdModelProbe 逐个模型探活。按 --provider / --account 选账号，不给就全选。
+// --protocol 把候选收窄到一条：只验一条路时不读已发现协议、不读目录声明、不取厂商默认协议。
 func cmdModelProbe(e *Env, args []string) error {
 	fs := newFlagSet(e, "model probe", "逐个模型探活，把可用模型写进账号")
 	provider := fs.String("provider", "", "只处理这个厂商的账号")
 	accountName := fs.String("account", "", "只处理这个账号")
 	syncFirst := fs.Bool("sync", false, "探活前先拉一次上游模型列表")
 	only := fs.String("model", "", "只探这一个模型")
+	protocolFlag := fs.String("protocol", "", "只探这一条协议")
 	limit := fs.Int("limit", 0, "每个账号最多探多少个待探模型，0 表示全部")
 	concurrency := fs.Int("concurrency", 4, "并发数")
 	maxAge := fs.Duration("max-age", 24*time.Hour, "已探过的结论新鲜多久，超期重探；0 与 --refresh 等价")
 	refresh := fs.Bool("refresh", false, "忽略新鲜度，全部重探")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	if flagWasSet(fs, "protocol") && strings.TrimSpace(*protocolFlag) == "" {
+		return usagef("--protocol 传了空值：要么写一条线协议（例如 systemone），要么整个去掉；去掉时按已发现协议、目录声明与厂商默认协议排候选\n%s", modelProbeUsage)
+	}
+	protocol, err := protocolFromCLIName(*protocolFlag, "--protocol", "lax model probe --account ts --model typesafe/jev --protocol systemone")
+	if err != nil {
+		return usagef("%v\n%s", err, modelProbeUsage)
 	}
 
 	a, err := openApp(e, true)
@@ -1148,7 +1180,7 @@ func cmdModelProbe(e *Env, args []string) error {
 			results, err = func() ([]gateway.ModelProbe, error) {
 				// 出错返回也要收尾，否则「model probe: …」会接在进度行尾巴上。
 				defer progress.finish()
-				return probeModels(ctx, gs, a.st, acc, targets, *concurrency, func(done int, model string) {
+				return probeModels(ctx, gs, a.st, acc, targets, protocol, *concurrency, func(done int, model string) {
 					progress.update(acc.Name, done, len(targets), model)
 				})
 			}()
@@ -1158,14 +1190,20 @@ func cmdModelProbe(e *Env, args []string) error {
 		}
 
 		for _, res := range results {
-			hits = append(hits, hit{
+			hit := hit{
 				Account:    acc.Name,
 				Model:      res.Model,
 				Status:     res.Status,
 				HTTPStatus: res.HTTPStatus,
 				LatencyMS:  res.Latency.Milliseconds(),
 				Message:    res.Message,
-			})
+			}
+			if res.Undecided {
+				// 没拿到足以改可达性的 HTTP 判定：这一行不是结论，status 留空，
+				// 人读输出写「未判定」，库里那一行保持原值。
+				hit.Status = ""
+			}
+			hits = append(hits, hit)
 		}
 		totalProbed += len(results)
 		totalSkipped += skipped
@@ -1184,18 +1222,22 @@ func cmdModelProbe(e *Env, args []string) error {
 		if err != nil {
 			return err
 		}
-		access := make(map[string]string, len(after))
 		reachable := 0
 		for _, r := range after {
-			access[r.Model] = r.Access
 			if r.Access == store.AccessAllowed {
 				reachable++
 			}
 		}
-		// 本轮各结论的计数取自库里刚写的可达性，不认网关的状态词表：词表换了这几列也不跟着变。
+		// 本轮各结论的计数取自这一轮的探活结果，不读库里那一行：未判定的那几行没写库，
+		// 库里留着的是上一轮的结论，拿上一轮的值计数会把「没结论」算成「可用 / 失败」。
 		counts := map[string]int{}
+		undecided := 0
 		for _, res := range results {
-			counts[access[res.Model]]++
+			if res.Undecided {
+				undecided++
+				continue
+			}
+			counts[res.Access]++
 		}
 		if reachable == 0 {
 			// 零可用不再意味着「清单原样不动」：可达性已经按这一轮的结论写进 account_models，
@@ -1208,9 +1250,14 @@ func cmdModelProbe(e *Env, args []string) error {
 		}
 		reachableByAccount[acc.Name] = reachable
 		if !e.JSON {
-			fmt.Fprintf(e.Stdout, "%s：本次探活 %d 个，跳过 %d 个，可用 %d，无权 %d，不存在 %d，失败 %d；可达 %d 个\n",
+			summary := fmt.Sprintf("%s：本次探活 %d 个，跳过 %d 个，可用 %d，无权 %d，不存在 %d，失败 %d",
 				acc.Name, len(results), skipped, counts[store.AccessAllowed], counts[store.AccessForbidden],
-				counts[store.AccessMissing], counts[store.AccessError], reachable)
+				counts[store.AccessMissing], counts[store.AccessError])
+			// 「未判定」只在这一轮真出现过时追加：没有未判定的输出形状一个字不变。
+			if undecided > 0 {
+				summary += fmt.Sprintf("，未判定 %d", undecided)
+			}
+			fmt.Fprintf(e.Stdout, "%s；可达 %d 个\n", summary, reachable)
 		}
 	}
 
@@ -1325,10 +1372,12 @@ func mergeProbeError(model string, res gateway.ModelProbe, err error) gateway.Mo
 }
 
 // probeModels 用固定大小的 worker pool 并发探活一个账号的模型。
+// protocol 非空时只探这一条协议（candidates 就是这一条），空串时按已发现协议、目录声明与
+// 厂商默认协议排候选。
 // onDone 非空时每探完一个模型调用一次，参数是已完成数与刚完成的模型名；
 // 调用来自任意 worker goroutine，实现要自己保证并发安全。
 func probeModels(ctx context.Context, gs *gateway.Server, st *store.Store,
-	acc store.Account, targets []string, concurrency int,
+	acc store.Account, targets []string, protocol string, concurrency int,
 	onDone func(done int, model string)) ([]gateway.ModelProbe, error) {
 
 	workers := concurrency
@@ -1354,11 +1403,25 @@ func probeModels(ctx context.Context, gs *gateway.Server, st *store.Store,
 			defer func() { <-sem }()
 			pctx, pcancel := context.WithTimeout(ctx, 60*time.Second)
 			defer pcancel()
-			res, err := gs.ProbeModel(pctx, acc, model)
+			var res gateway.ModelProbe
+			var err error
+			if protocol != "" {
+				res, err = gs.ProbeModelProtocol(pctx, acc, model, protocol)
+			} else {
+				res, err = gs.ProbeModel(pctx, acc, model)
+			}
 			if err != nil {
 				res = mergeProbeError(model, res, err)
 			}
 			results[i] = res
+			// 未判定的一行不是结论：不写库，保留上一行的 access、http_status、error 与 checked_at，
+			// 一次 TLS 超时不会把一个已确认的 allowed 抹成 error 而让选号选不到号。
+			if res.Undecided {
+				if onDone != nil {
+					onDone(int(done.Add(1)), model)
+				}
+				return
+			}
 			// 每个 goroutine 只写自己那一行，底层连接串行，不共享事务。
 			writeErrs[i] = st.SetModelStatus(acc.ID, model, res.Status, res.HTTPStatus, res.Message)
 			if onDone != nil {

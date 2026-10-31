@@ -432,10 +432,45 @@ func TestDecideModelNotFound(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("退出码 = %d，期望 1（运行失败）", code)
 	}
-	for _, want := range []string{"不在任何启用账号的模型列表里", "--models typesafe/jev", "lax model probe"} {
+	for _, want := range []string{"不在任何启用账号的模型列表里", "lax account add", "lax model add typesafe/jev --account", "--protocol systemone", "lax model probe"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 		}
+	}
+}
+
+// TestDecideMissingModelPointsToModelAdd 钉住「有账号但没有这个模型」时的下一步：
+// 手写一条可达性走 model add（同时写目录与账号级协议），不再让人重跑 account add --models；
+// 只启用一个账号时命令里直接写出账号名，照着拄就行。
+func TestDecideMissingModelPointsToModelAdd(t *testing.T) {
+	sandbox(t)
+	up := newRecorderUpstream(t, map[string]fakeResponse{
+		"POST /v1/chat/completions": {status: 200, body: chatCompletionOK},
+	})
+	mustInit(t)
+	if code, _, stderr := addAccount(t, "ds1", "custom", up.srv.URL, "", "--key", "sk-test"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	code, out, stderr := run(t, "decide", "--model", "foo", "--state", "x", "--noul", "n=Is this present?")
+	if code != 1 {
+		t.Fatalf("退出码 = %d，期望 1（运行失败）", code)
+	}
+	if out != "" {
+		t.Fatalf("失败时不该写 stdout: %s", out)
+	}
+	for _, want := range []string{
+		"不在任何启用账号的模型列表里",
+		"lax model add foo --account ds1 --protocol systemone",
+		"lax model probe --account ds1 --model foo --protocol systemone",
+	} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
+		}
+	}
+	// 本地就能判掉的配置问题，一条上游请求都不发。
+	if calls := up.all(); len(calls) != 0 {
+		t.Fatalf("不该有上游调用: %+v", calls)
 	}
 }
 

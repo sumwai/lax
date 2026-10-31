@@ -348,7 +348,8 @@ func pickDecideTarget(st *store.Store, model string) (decideTarget, error) {
 	candidates := account.Candidates(accounts, resolved, now, "")
 	if len(candidates) == 0 {
 		if len(account.Providers(accounts, resolved)) == 0 {
-			return decideTarget{}, fmt.Errorf("模型 %s 不在任何启用账号的模型列表里：决策请求按模型名选号，名字对不上就一个账号也选不出来；用 lax model ls 看现有清单，用 lax account add <名称> --provider <厂商> --key <key> --models %s 手工声明这个模型（决策模型不在上游清单里，只能手填），再 lax model probe --account <账号> 探活", resolved, resolved)
+			return decideTarget{}, fmt.Errorf("模型 %s 不在任何启用账号的模型列表里：决策请求按模型名选号，名字对不上就一个账号也选不出来；用 lax model ls 看现有清单，然后依次运行 %s（model add 一个事务写模型目录与账号可达性，决策模型不在上游清单里，只能手写声明；probe 带 --protocol 时只验这一条路，不去试其它协议）",
+				resolved, strings.Join(declareModelNextSteps(accounts, resolved), "，再 "))
 		}
 		return decideTarget{}, fmt.Errorf("模型 %s 的账号都在冷却或被停用：这一次选不出账号；用 lax account ls 看状态，冷却几十秒后重试，被停用的用 lax account enable <账号> 启用", resolved)
 	}
@@ -378,12 +379,44 @@ func pickDecideTarget(st *store.Store, model string) (decideTarget, error) {
 			return decideTarget{}, err
 		}
 		if !containsProtocol(declared, gateway.ProtocolSystemOne) {
-			return decideTarget{}, fmt.Errorf("模型 %s 算不出有效出站协议：厂商 %s 没声明 systemone 路由，模型上也没有探出协议；先运行 lax provider set %s --systemone /v1/systemone 声明这条路由，再 lax model probe --account %s 把这个模型探出来", resolved, provider, provider, candidates[0].Name)
+			return decideTarget{}, fmt.Errorf("模型 %s 算不出有效出站协议：厂商 %s 没声明 systemone 路由，模型上也没有探出协议；先运行 lax model add %s --account %s --protocol systemone 把这个模型声明成 systemone（同时写模型目录与账号级协议，不依赖厂商路由），或者运行 lax provider set %s --systemone /v1/systemone 声明这条路由，再 lax model probe --account %s 把这个模型探出来",
+				resolved, provider, resolved, candidates[0].Name, provider, candidates[0].Name)
 		}
-		return decideTarget{}, fmt.Errorf("模型 %s 算不出有效出站协议：厂商 %s 声明了 systemone 路由，但默认协议是空的（回退顺序只认 openai-chat → openai-responses → anthropic，见 DESIGN 5.8）；运行 lax provider set %s --default-protocol systemone 把默认协议补上，或 lax model probe --account %s 把这个模型的协议探出来", resolved, provider, provider, candidates[0].Name)
+		return decideTarget{}, fmt.Errorf("模型 %s 算不出有效出站协议：厂商 %s 声明了 systemone 路由，但默认协议是空的（回退顺序只认 openai-chat → openai-responses → anthropic，见 DESIGN 5.8）；先运行 lax model add %s --account %s --protocol systemone 把这个模型的协议定下来，或者运行 lax provider set %s --default-protocol systemone 把默认协议补上，或 lax model probe --account %s 把这个模型的协议探出来",
+			resolved, provider, resolved, candidates[0].Name, provider, candidates[0].Name)
 	}
 	return decideTarget{}, fmt.Errorf("模型 %s 以 %s 协议出站，不是 systemone：decide 只发 POST %s 的决策请求，出站协议跟着账号与厂商路由走（见 DESIGN 5.13），这条协议不参与转换；要给这家厂商声明一条 systemone 路由就运行 lax provider set %s --systemone /v1/systemone 再 lax model probe --account %s，要发对话请求就改用 lax call \"提示词\" --model %s，也可以换一个走 systemone 的模型（lax model ls 看清单）",
 		resolved, firstProtocol, systemOnePath, candidates[0].Provider, candidates[0].Name, resolved)
+}
+
+// declareModelNextSteps 为「这个模型还没有任何账号声明」这条错误拼出按顺序敲的下一步：
+// 有启用账号时直接写出 model add 的账号名（只启用一个就写启用那一个，多个写占位并指向 account ls），
+// 一个启用账号都没有时先给 account add 再给 model add。最后一条是只验这一条路的 probe：
+// 带 --protocol 时候选就是那一条，不会先去打厂商默认协议。
+func declareModelNextSteps(accounts []store.Account, model string) []string {
+	enabled := make([]string, 0, len(accounts))
+	for _, acc := range accounts {
+		if acc.Enabled {
+			enabled = append(enabled, acc.Name)
+		}
+	}
+
+	steps := make([]string, 0, 3)
+	accountCell := "<账号>"
+	switch len(enabled) {
+	case 0:
+		// 没有启用账号时 model add 无从写起：可达性落在账号上。
+		steps = append(steps, "lax account add <账号> --provider <厂商> --key <key>")
+	case 1:
+		accountCell = enabled[0]
+	default:
+		accountCell = "<账号>（用 lax account ls 选一个）"
+	}
+	steps = append(steps,
+		fmt.Sprintf("lax model add %s --account %s --protocol systemone", model, accountCell),
+		fmt.Sprintf("lax model probe --account %s --model %s --protocol systemone", accountCell, model),
+	)
+	return steps
 }
 
 // systemOneOnlyModel 判断这个模型的候选账号是否全部以 systemone 出站。call 发的是对话请求，
