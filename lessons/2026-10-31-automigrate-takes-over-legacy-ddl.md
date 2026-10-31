@@ -66,5 +66,5 @@ zero, gemini seed preserved when the user already defined that provider).
 
 ## Fix
 
-`fix in progress` — the commits that introduce `internal/store/model.go`, `internal/store/legacy.go`
-and the rewritten migration tests.
+`54702cf` — `internal/store/model.go` (schema definition and seed), `internal/store/legacy.go`
+(legacy migration), and the rewritten migration tests.
