@@ -1,0 +1,19 @@
+{
+  "models": [
+    {
+      "model": "hook-tts",
+      "upstream_id": "hook-tts-v1",
+      "operations": {
+        "speech.synthesize@1": {
+          "dialect": "com.example.hook/speech@1",
+          "capabilities": {
+            "supported": true,
+            "streaming": false,
+            "formats": ["mp3"],
+            "voices": ["alloy"]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "schema": "lax.dialect/v1",
+  "dialects": [
+    {
+      "id": "com.example.chatvoice/speech@1",
+      "operation": "speech.synthesize@1",
+      "display_name": "ChatVoice TTS over chat completions",
+      "upstream_wire": "openai-chat",
+      "transport": {"request": "json", "response": "json", "streaming": "none"},
+      "implementation": {"prepare": "declarative", "decode": "declarative"},
+      "request": {
+        "method": "POST",
+        "path": "/v1/chat/completions",
+        "body": {
+          "model": {"model": "upstream_id"},
+          "messages": [
+            {"role": "assistant", "content": {"input": "text"}}
+          ],
+          "audio": {
+            "format": {"input": "format", "map": {"mp3": "mp3", "wav": "wav", "pcm": "pcm16"}},
+            "voice": {"input": "voice", "omit_if_empty": true}
+          }
+        }
+      },
+      "response": {
+        "mode": "json_pointer",
+        "pointer": "/choices/0/message/audio/data",
+        "encoding": "base64",
+        "mime": {"input": "format", "map": {"mp3": "audio/mpeg", "wav": "audio/wav", "pcm": "audio/pcm"}},
+        "usage": {
+          "input_tokens": "/usage/prompt_tokens",
+          "output_tokens": "/usage/completion_tokens",
+          "cached_input_tokens": "/usage/prompt_tokens_details/cached_tokens",
+          "total_tokens": "/usage/total_tokens"
+        }
+      }
+    }
+  ]
+}

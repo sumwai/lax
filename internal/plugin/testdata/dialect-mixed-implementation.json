@@ -1,0 +1,22 @@
+{
+  "schema": "lax.dialect/v1",
+  "dialects": [
+    {
+      "id": "com.example.acme/speech@1",
+      "operation": "speech.synthesize@1",
+      "upstream_wire": "openai-speech",
+      "transport": {"request": "json", "response": "json", "streaming": "none"},
+      "implementation": {"prepare": "declarative", "decode": "hook"},
+      "request": {
+        "method": "POST",
+        "path": "/v1/audio/speech",
+        "body": {"input": {"input": "text"}}
+      },
+      "response": {
+        "mode": "json_pointer",
+        "pointer": "/audio",
+        "encoding": "base64"
+      }
+    }
+  ]
+}

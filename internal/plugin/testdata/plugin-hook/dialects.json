@@ -1,0 +1,13 @@
+{
+  "schema": "lax.dialect/v1",
+  "dialects": [
+    {
+      "id": "com.example.hook/speech@1",
+      "operation": "speech.synthesize@1",
+      "display_name": "Hook TTS",
+      "upstream_wire": "openai-speech",
+      "transport": {"request": "json", "response": "binary", "streaming": "none"},
+      "implementation": {"prepare": "hook", "decode": "hook"}
+    }
+  ]
+}

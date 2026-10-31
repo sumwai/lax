@@ -1,0 +1,12 @@
+{
+  "schema": "lax.dialect/v1",
+  "dialects": [
+    {
+      "id": "com.example.mimo/mimo-chat-asr@1",
+      "operation": "speech.transcribe@1",
+      "upstream_wire": "anthropic",
+      "transport": {"request": "json", "response": "json", "streaming": "none"},
+      "implementation": {"prepare": "hook", "decode": "hook"}
+    }
+  ]
+}

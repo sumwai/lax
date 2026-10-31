@@ -1,0 +1,13 @@
+{
+  "models": [
+    {
+      "model": "acme/acme-tts",
+      "upstream_id": "acme-tts-v1",
+      "operations": {
+        "speech.translate@1": {
+          "dialect": "com.example.acme/speech@1"
+        }
+      }
+    }
+  ]
+}

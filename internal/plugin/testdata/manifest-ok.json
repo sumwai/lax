@@ -1,0 +1,65 @@
+{
+  "schema": "lax.plugin/v1",
+  "id": "com.example.river",
+  "name": "River",
+  "version": "1.0.0",
+  "kind": "provider",
+  "runtime": "declarative",
+  "abi": "lax.plugin/v1",
+  "requires": [
+    "operation:chat.complete@1",
+    "operation:speech.synthesize@1",
+    "runtime:declarative",
+    "permission:network"
+  ],
+  "permissions": {
+    "network": {
+      "mode": "host-proxy",
+      "schemes": ["https"],
+      "hosts": ["api.river.ai", "cdn.river.ai"],
+      "redirects": "same-host",
+      "max_control_calls": 4,
+      "max_control_body_bytes": 1048576
+    },
+    "secrets": {
+      "plugin": [],
+      "account": ["api_key"],
+      "mode": "host-inject"
+    },
+    "filesystem": "none",
+    "process": "none",
+    "env": "none",
+    "media": {
+      "read_bytes": 67108864,
+      "write_bytes": 67108864
+    }
+  },
+  "providers": [
+    {
+      "id": "river",
+      "name": "River",
+      "base_url": "https://api.river.ai/v1",
+      "catalog": "./models.json",
+      "dialects": "./dialects.json"
+    }
+  ],
+  "options": {
+    "region": {
+      "type": "string",
+      "enum": ["SGP", "RU"],
+      "default": "SGP"
+    },
+    "timeout": {
+      "type": "number",
+      "default": 30
+    },
+    "verbose": {
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "extensions": {
+    "x-homepage": "https://river.ai",
+    "x-notes": {"reviewed": [1, 2, 3]}
+  }
+}

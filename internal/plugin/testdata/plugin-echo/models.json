@@ -1,0 +1,19 @@
+{
+  "models": [
+    {
+      "model": "echo-tts",
+      "upstream_id": "echo-tts",
+      "operations": {
+        "speech.synthesize@1": {
+          "dialect": "com.example.echo/speech@1",
+          "capabilities": {
+            "supported": true,
+            "streaming": false,
+            "formats": ["mp3", "wav", "pcm"],
+            "voices": ["alloy", "verse"]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "models": [
+    {
+      "model": "acme/acme-chat",
+      "upstream_id": "acme-chat-2026",
+      "operations": {
+        "chat.complete@1": {
+          "dialect": "com.example.acme/openai-chat@1",
+          "capabilities": {
+            "supported": true,
+            "streaming": true,
+            "tools": false,
+            "vision": "unknown"
+          }
+        }
+      }
+    },
+    {
+      "model": "acme/acme-tts",
+      "upstream_id": "acme-tts-v1",
+      "operations": {
+        "speech.synthesize@1": {
+          "dialect": "com.example.acme/speech@1",
+          "capabilities": {
+            "supported": true,
+            "streaming": false,
+            "formats": ["mp3", "wav"],
+            "voices": []
+          }
+        },
+        "speech.transcribe@1": {
+          "dialect": "com.example.acme/transcribe@1",
+          "capabilities": {
+            "supported": false
+          }
+        }
+      }
+    }
+  ]
+}

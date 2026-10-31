@@ -1,0 +1,23 @@
+{
+  "schema": "lax.plugin/v1",
+  "id": "com.example.wild",
+  "name": "Wild",
+  "version": "1.0.0",
+  "kind": "provider",
+  "runtime": "declarative",
+  "abi": "lax.plugin/v1",
+  "permissions": {
+    "network": {
+      "mode": "host-proxy",
+      "schemes": ["https"],
+      "hosts": ["api.example.com", "*"],
+      "redirects": "none"
+    },
+    "filesystem": "none",
+    "process": "none",
+    "env": "none"
+  },
+  "providers": [
+    {"id": "wild", "base_url": "https://api.example.com"}
+  ]
+}

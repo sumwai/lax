@@ -1,0 +1,14 @@
+{
+  "schema": "lax.catalog/v1",
+  "models": [
+    {
+      "model": "acme/acme-tts",
+      "upstream_id": "acme-tts-v1",
+      "operations": {
+        "speech.synthesize@1": {
+          "dialect": "com.example.acme/speech@1"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "schema": "lax.plugin/v1",
+  "id": "com.example.hookchat",
+  "name": "Hook Chat",
+  "version": "1.0.0",
+  "kind": "provider",
+  "runtime": "moejs",
+  "entry": "./index.js",
+  "abi": "lax.plugin/v1",
+  "requires": ["operation:chat.complete@1", "runtime:moejs"],
+  "permissions": {
+    "network": {"mode": "none", "schemes": [], "hosts": [], "redirects": "none"},
+    "secrets": {"plugin": [], "account": ["api_key"], "mode": "host-inject"},
+    "filesystem": "none",
+    "process": "none",
+    "env": "none"
+  },
+  "providers": [
+    {
+      "id": "hookchat",
+      "name": "Hook Chat",
+      "base_url": "https://api.hookchat.test",
+      "catalog": "./models.json",
+      "dialects": "./dialects.json"
+    }
+  ]
+}

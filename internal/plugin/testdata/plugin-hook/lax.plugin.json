@@ -1,0 +1,27 @@
+{
+  "schema": "lax.plugin/v1",
+  "id": "com.example.hook",
+  "name": "Hook TTS",
+  "version": "1.0.0",
+  "kind": "provider",
+  "runtime": "moejs",
+  "entry": "./index.js",
+  "abi": "lax.plugin/v1",
+  "requires": ["operation:speech.synthesize@1", "runtime:moejs"],
+  "permissions": {
+    "network": {"mode": "none", "schemes": [], "hosts": [], "redirects": "none"},
+    "secrets": {"plugin": [], "account": ["api_key"], "mode": "host-inject"},
+    "filesystem": "none",
+    "process": "none",
+    "env": "none"
+  },
+  "providers": [
+    {
+      "id": "hooktts",
+      "name": "Hook TTS",
+      "base_url": "https://api.hook.test",
+      "catalog": "./models.json",
+      "dialects": "./dialects.json"
+    }
+  ]
+}

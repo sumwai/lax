@@ -1,0 +1,26 @@
+{
+  "schema": "lax.plugin/v1",
+  "id": "com.example.echo",
+  "name": "Echo",
+  "version": "1.0.0",
+  "kind": "provider",
+  "runtime": "declarative",
+  "abi": "lax.plugin/v1",
+  "requires": ["operation:speech.synthesize@1"],
+  "permissions": {
+    "network": {"mode": "none", "schemes": [], "hosts": [], "redirects": "none"},
+    "secrets": {"plugin": [], "account": ["api_key"], "mode": "host-inject"},
+    "filesystem": "none",
+    "process": "none",
+    "env": "none"
+  },
+  "providers": [
+    {
+      "id": "echo",
+      "name": "Echo",
+      "base_url": "https://api.echo.test",
+      "catalog": "./models.json",
+      "dialects": "./dialects.json"
+    }
+  ]
+}

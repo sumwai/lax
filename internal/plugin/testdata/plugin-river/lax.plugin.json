@@ -1,0 +1,25 @@
+{
+  "schema": "lax.plugin/v1",
+  "id": "com.example.river",
+  "name": "River",
+  "version": "1.0.0",
+  "kind": "provider",
+  "runtime": "declarative",
+  "abi": "lax.plugin/v1",
+  "requires": ["operation:chat.complete@1"],
+  "permissions": {
+    "network": {"mode": "none", "schemes": [], "hosts": [], "redirects": "none"},
+    "secrets": {"plugin": [], "account": ["api_key"], "mode": "host-inject"},
+    "filesystem": "none",
+    "process": "none",
+    "env": "none"
+  },
+  "providers": [
+    {
+      "id": "river",
+      "name": "River",
+      "base_url": "https://api.river.test",
+      "catalog": "./models.json"
+    }
+  ]
+}

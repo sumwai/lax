@@ -1,0 +1,22 @@
+{
+  "models": [
+    {
+      "model": "acme/acme-tts",
+      "upstream_id": "acme-tts-v1",
+      "operations": {
+        "speech.synthesize@1": {
+          "dialect": "com.example.acme/speech@1"
+        }
+      }
+    },
+    {
+      "model": "acme/acme-tts",
+      "upstream_id": "acme-tts-v2",
+      "operations": {
+        "speech.synthesize@1": {
+          "dialect": "com.example.acme/speech-v2@1"
+        }
+      }
+    }
+  ]
+}

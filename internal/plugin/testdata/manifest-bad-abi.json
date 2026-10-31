@@ -1,0 +1,17 @@
+{
+  "schema": "lax.plugin/v1",
+  "id": "com.example.river",
+  "name": "River",
+  "version": "1.0.0",
+  "kind": "provider",
+  "runtime": "declarative",
+  "abi": "lax.plugin/v2",
+  "permissions": {
+    "filesystem": "none",
+    "process": "none",
+    "env": "none"
+  },
+  "providers": [
+    {"id": "river", "base_url": "https://api.river.ai/v1"}
+  ]
+}

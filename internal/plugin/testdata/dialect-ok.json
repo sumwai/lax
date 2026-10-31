@@ -1,0 +1,45 @@
+{
+  "schema": "lax.dialect/v1",
+  "dialects": [
+    {
+      "id": "com.example.acme/speech@1",
+      "operation": "speech.synthesize@1",
+      "display_name": "Acme TTS",
+      "upstream_wire": "openai-speech",
+      "transport": {"request": "json", "response": "binary", "streaming": "bytes"},
+      "implementation": {"prepare": "declarative", "decode": "declarative"},
+      "limits": {"max_input_chars": 4096, "max_response_bytes": 33554432},
+      "request": {
+        "method": "POST",
+        "path": "/v1/audio/speech",
+        "headers": {"x-source": "lax"},
+        "body": {
+          "model": {"model": "upstream_id"},
+          "input": {"input": "text"},
+          "voice": {"input": "voice", "default": "alloy"},
+          "response_format": {"input": "format", "default": "mp3"},
+          "speed": {"input": "speed", "omit_if_empty": true},
+          "instructions": {"input": "instructions", "omit_if_empty": true},
+          "meta": {
+            "chars": {"input": "chars"},
+            "region": {"option": "region", "default": "SGP"}
+          }
+        }
+      },
+      "response": {
+        "mode": "passthrough",
+        "mime": {"input": "format", "map": {"mp3": "audio/mpeg", "wav": "audio/wav"}}
+      }
+    },
+    {
+      "id": "com.example.acme/openai-chat@1",
+      "operation": "chat.complete@1",
+      "display_name": "Acme chat",
+      "upstream_wire": "openai-chat",
+      "transport": {"request": "json", "response": "json", "streaming": "sse"},
+      "implementation": {"prepare": "hook", "decode": "hook"},
+      "defaults": {"temperature": 0.7},
+      "limits": {"max_input_bytes": 8388608, "max_response_bytes": 67108864}
+    }
+  ]
+}

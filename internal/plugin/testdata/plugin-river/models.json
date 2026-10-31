@@ -1,0 +1,18 @@
+{
+  "models": [
+    {
+      "model": "river-fast",
+      "upstream_id": "deepseek-v4.1-flash",
+      "operations": {
+        "chat.complete@1": {
+          "dialect": "lax/openai-chat@1",
+          "capabilities": {
+            "supported": true,
+            "streaming": true,
+            "tools": true
+          }
+        }
+      }
+    }
+  ]
+}

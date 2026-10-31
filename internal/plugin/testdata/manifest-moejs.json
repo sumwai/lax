@@ -1,0 +1,19 @@
+{
+  "schema": "lax.plugin/v1",
+  "id": "com.example.mimo",
+  "name": "Xiaomi MiMo",
+  "version": "1.0.0",
+  "kind": "provider",
+  "runtime": "moejs",
+  "entry": "./index.js",
+  "abi": "lax.plugin/v1",
+  "requires": ["operation:speech.synthesize@1"],
+  "permissions": {
+    "filesystem": "none",
+    "process": "none",
+    "env": "none"
+  },
+  "providers": [
+    {"id": "mimo", "base_url": "https://mimo.example.com"}
+  ]
+}

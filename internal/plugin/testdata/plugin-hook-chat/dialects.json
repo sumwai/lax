@@ -1,0 +1,13 @@
+{
+  "schema": "lax.dialect/v1",
+  "dialects": [
+    {
+      "id": "com.example.hookchat/chat@1",
+      "operation": "chat.complete@1",
+      "display_name": "Hook chat over OpenAI",
+      "upstream_wire": "openai-chat",
+      "transport": {"request": "json", "response": "json", "streaming": "sse"},
+      "implementation": {"prepare": "hook", "decode": "hook"}
+    }
+  ]
+}

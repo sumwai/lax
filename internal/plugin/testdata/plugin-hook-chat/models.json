@@ -1,0 +1,14 @@
+{
+  "models": [
+    {
+      "model": "hook-chat",
+      "upstream_id": "hook-chat-v1",
+      "operations": {
+        "chat.complete@1": {
+          "dialect": "com.example.hookchat/chat@1",
+          "capabilities": {"supported": true, "streaming": true, "tools": true}
+        }
+      }
+    }
+  ]
+}

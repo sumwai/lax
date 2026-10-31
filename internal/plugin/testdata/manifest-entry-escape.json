@@ -1,0 +1,18 @@
+{
+  "schema": "lax.plugin/v1",
+  "id": "com.example.escape",
+  "name": "Escape",
+  "version": "1.0.0",
+  "kind": "provider",
+  "runtime": "moejs",
+  "entry": "../../etc/evil.js",
+  "abi": "lax.plugin/v1",
+  "permissions": {
+    "filesystem": "none",
+    "process": "none",
+    "env": "none"
+  },
+  "providers": [
+    {"id": "escape", "base_url": "https://api.example.com"}
+  ]
+}

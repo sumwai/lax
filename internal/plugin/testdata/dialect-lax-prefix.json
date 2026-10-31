@@ -1,0 +1,12 @@
+{
+  "schema": "lax.dialect/v1",
+  "dialects": [
+    {
+      "id": "lax/mimo-chat-speech@1",
+      "operation": "speech.synthesize@1",
+      "upstream_wire": "openai-speech",
+      "transport": {"request": "json", "response": "binary", "streaming": "none"},
+      "implementation": {"prepare": "hook", "decode": "hook"}
+    }
+  ]
+}

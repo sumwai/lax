@@ -1,0 +1,26 @@
+{
+  "schema": "lax.plugin/v1",
+  "id": "com.example.chatvoice",
+  "name": "ChatVoice",
+  "version": "1.0.0",
+  "kind": "provider",
+  "runtime": "declarative",
+  "abi": "lax.plugin/v1",
+  "requires": ["operation:speech.synthesize@1"],
+  "permissions": {
+    "network": {"mode": "none", "schemes": [], "hosts": [], "redirects": "none"},
+    "secrets": {"plugin": [], "account": ["api_key"], "mode": "host-inject"},
+    "filesystem": "none",
+    "process": "none",
+    "env": "none"
+  },
+  "providers": [
+    {
+      "id": "chatvoice",
+      "name": "ChatVoice",
+      "base_url": "https://api.chatvoice.test",
+      "catalog": "./models.json",
+      "dialects": "./dialects.json"
+    }
+  ]
+}

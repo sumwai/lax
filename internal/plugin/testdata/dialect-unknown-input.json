@@ -1,0 +1,20 @@
+{
+  "schema": "lax.dialect/v1",
+  "dialects": [
+    {
+      "id": "com.example.acme/chat@1",
+      "operation": "chat.complete@1",
+      "upstream_wire": "openai-chat",
+      "transport": {"request": "json", "response": "json", "streaming": "sse"},
+      "implementation": {"prepare": "declarative", "decode": "hook"},
+      "request": {
+        "method": "POST",
+        "path": "/chat/completions",
+        "body": {
+          "model": {"model": "upstream_id"},
+          "messages": {"input": "messages"}
+        }
+      }
+    }
+  ]
+}
