@@ -22,3 +22,4 @@ commit in the row so a later reader can tell whether the note still applies.
 | 2026-10-31 | A transport failure must not decide whether a model is reachable | [lessons/2026-10-31-probe-transport-is-not-a-verdict.md](lessons/2026-10-31-probe-transport-is-not-a-verdict.md) | fixed in f1f3c37 |
 | 2026-10-31 | A model-level protocol declaration outranks the provider route list | [lessons/2026-10-31-declared-protocol-filtered-by-routes.md](lessons/2026-10-31-declared-protocol-filtered-by-routes.md) | fixed in f1f3c37 |
 | 2026-10-31 | AutoMigrate cannot take over a schema written by hand-rolled DDL | [lessons/2026-10-31-automigrate-takes-over-legacy-ddl.md](lessons/2026-10-31-automigrate-takes-over-legacy-ddl.md) | fixed in 54702cf |
+| 2026-10-31 | A deliberately malformed probe request proves reachability, not credentials | [lessons/2026-10-31-malformed-probe-proves-reachability.md](lessons/2026-10-31-malformed-probe-proves-reachability.md) | fixed in 4cf6959 |
