@@ -68,16 +68,20 @@ const (
 )
 
 // ProviderModel 是目录里的一行：某个厂商的一个模型有哪些事实。
-// Protocols 与 Capabilities 在库里是逗号分隔的字符串，读出来已经拆好。
+// Protocols、Capabilities、Voices 与 AudioFormats 在库里是逗号分隔的字符串，读出来已经拆好。
 // 四个价格是厂商级默认价（每百万 token），空表示没填。
 type ProviderModel struct {
-	Provider        string
-	Model           string
-	Source          string
-	ContextWindow   *int64
-	MaxOutput       *int64
-	Protocols       []string
-	Capabilities    []string
+	Provider      string
+	Model         string
+	Source        string
+	ContextWindow *int64
+	MaxOutput     *int64
+	Protocols     []string
+	Capabilities  []string
+	// Voices 是这个模型可用的音色名（语音合成模型才有值）。
+	Voices []string
+	// AudioFormats 是上游接受的音频容器，例如 mp3、wav、pcm16。
+	AudioFormats    []string
 	PriceIn         *float64
 	PriceOut        *float64
 	PriceCacheRead  *float64
@@ -238,15 +242,17 @@ func normalizeModelNames(names []string) []string {
 // 保留库里已有的值，否则一次只带名字的同步会把探活补上的元数据抹掉。
 // 末尾那句 WHERE 只判断传进来的来源够不够格改写现有行，够格时整行按上面的 COALESCE 更新。
 const providerModelUpsert = `INSERT INTO provider_models
-	(provider, model, source, context_window, max_output, protocols, capabilities,
+	(provider, model, source, context_window, max_output, protocols, capabilities, voices, audio_formats,
 	 price_in, price_out, price_cache_read, price_cache_write, price_tts_char, price_audio_second, updated_at)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT (provider, model) DO UPDATE SET
 		source = excluded.source,
 		context_window = COALESCE(excluded.context_window, provider_models.context_window),
 		max_output = COALESCE(excluded.max_output, provider_models.max_output),
 		protocols = CASE WHEN excluded.protocols <> '' THEN excluded.protocols ELSE provider_models.protocols END,
 		capabilities = CASE WHEN excluded.capabilities <> '' THEN excluded.capabilities ELSE provider_models.capabilities END,
+		voices = CASE WHEN excluded.voices <> '' THEN excluded.voices ELSE provider_models.voices END,
+		audio_formats = CASE WHEN excluded.audio_formats <> '' THEN excluded.audio_formats ELSE provider_models.audio_formats END,
 		price_in = COALESCE(excluded.price_in, provider_models.price_in),
 		price_out = COALESCE(excluded.price_out, provider_models.price_out),
 		price_cache_read = COALESCE(excluded.price_cache_read, provider_models.price_cache_read),
@@ -305,6 +311,7 @@ func upsertProviderModelTx(tx *gorm.DB, m ProviderModel) error {
 	}
 	return execSQL(tx, providerModelUpsert, m.Provider, m.Model, m.Source,
 		m.ContextWindow, m.MaxOutput, joinList(m.Protocols), joinList(m.Capabilities),
+		joinList(m.Voices), joinList(m.AudioFormats),
 		m.PriceIn, m.PriceOut, m.PriceCacheRead, m.PriceCacheWrite, m.PriceTTSChar, m.PriceAudioSec,
 		m.UpdatedAt)
 }
@@ -536,6 +543,8 @@ func providerModelsFromRows(rows []providerModelRow) []ProviderModel {
 			MaxOutput:       r.MaxOutput,
 			Protocols:       splitList(r.Protocols),
 			Capabilities:    splitList(r.Capabilities),
+			Voices:          splitList(r.Voices),
+			AudioFormats:    splitList(r.AudioFormats),
 			PriceIn:         r.PriceIn,
 			PriceOut:        r.PriceOut,
 			PriceCacheRead:  r.PriceCacheRead,

@@ -22,11 +22,19 @@ const (
 
 // ModelEntry 是清单里的一项。`created` 固定 0：这里是本机账号池的清单，
 // 没有上游的创建时间可用，编一个时间戳只会让客户端误以为它有意义。
+//
+// Capabilities、Voices 与 AudioFormats 来自目录里的能力声明（见 store.CapabilityValues）：
+// 客户端靠它们判断这个模型能不能用在语音端点上、能传哪些音色与音频格式。
+// 三项用 omitempty：没有声明的模型（绝大多数对话模型）与以前一个字节都不差，
+// 声明过的模型才多出这三个字段。
 type ModelEntry struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	OwnedBy string `json:"owned_by"`
+	ID           string   `json:"id"`
+	Object       string   `json:"object"`
+	Created      int64    `json:"created"`
+	OwnedBy      string   `json:"owned_by"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	Voices       []string `json:"voices,omitempty"`
+	AudioFormats []string `json:"audio_formats,omitempty"`
 }
 
 // modelListBody 是 `GET /v1/models` 的响应体。空清单要给 `"data":[]` 而不是 `null`
@@ -43,6 +51,8 @@ type modelCatalog struct {
 	entries []ModelEntry
 	// owners 是「真实名字 → 提供一个它的厂商名」，同名被多家支持时取厂商名字典序第一个。
 	owners map[string]string
+	// facts 是「真实名字 → 目录里的能力声明」，供清单输出能力、音色与音频格式。
+	facts map[string]modelFacts
 	// aliasTargets 是解得出真实名字的别名（别名 → 真实名字），不管那个真名眼下有没有
 	// 账号能用。清单只用得上目标在 owners 里的那些，404 文案要说清目标是谁。
 	aliasTargets map[string]string
@@ -98,6 +108,28 @@ func (s *Server) modelCatalog() (*modelCatalog, error) {
 		entries = append(entries, ModelEntry{ID: name, Object: modelObject, Created: 0, OwnedBy: owners[name]})
 	}
 
+	// 能力声明在目录里，按 (厂商, 模型) 读：清单里的名字最多几十个，一次一条小查询
+	// 换掉一条「清单与能力必须对齐」的规则。读不到目录行时能力三项都是空集合。
+	facts := make(map[string]modelFacts, len(names))
+	for _, name := range names {
+		pm, ok, err := s.store.ProviderModel(owners[name], name)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			facts[name] = modelFacts{
+				capabilities: pm.Capabilities,
+				voices:       pm.Voices,
+				formats:      pm.AudioFormats,
+			}
+		}
+	}
+	for i := range entries {
+		entries[i].Capabilities = facts[entries[i].ID].capabilities
+		entries[i].Voices = facts[entries[i].ID].voices
+		entries[i].AudioFormats = facts[entries[i].ID].formats
+	}
+
 	aliases, err := s.store.ModelAliases()
 	if err != nil {
 		return nil, err
@@ -105,6 +137,7 @@ func (s *Server) modelCatalog() (*modelCatalog, error) {
 	c := &modelCatalog{
 		entries:       entries,
 		owners:        owners,
+		facts:         facts,
 		aliasTargets:  make(map[string]string, len(aliases)),
 		brokenAliases: map[string]error{},
 	}
@@ -139,7 +172,11 @@ func (c *modelCatalog) all() []ModelEntry {
 		if !ok {
 			continue
 		}
-		entries = append(entries, ModelEntry{ID: alias, Object: modelObject, Created: 0, OwnedBy: owner})
+		f := c.facts[target]
+		entries = append(entries, ModelEntry{
+			ID: alias, Object: modelObject, Created: 0, OwnedBy: owner,
+			Capabilities: f.capabilities, Voices: f.voices, AudioFormats: f.formats,
+		})
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].ID < entries[j].ID })
 	return entries
@@ -161,7 +198,11 @@ func (c *modelCatalog) find(id string) (ModelEntry, bool) {
 	if !ok {
 		return ModelEntry{}, false
 	}
-	return ModelEntry{ID: id, Object: modelObject, Created: 0, OwnedBy: owner}, true
+	f := c.facts[target]
+	return ModelEntry{
+		ID: id, Object: modelObject, Created: 0, OwnedBy: owner,
+		Capabilities: f.capabilities, Voices: f.voices, AudioFormats: f.formats,
+	}, true
 }
 
 // notFoundMessage 是 `GET /v1/models/{id}` 的 404 文案。别名要把目标写出来：只说「清单里没有 X」
@@ -179,6 +220,13 @@ func (c *modelCatalog) notFoundMessage(id string) string {
 	}
 	return fmt.Sprintf("清单里没有模型 %s（停用账号不计，冷却中的账号仍然计入）；"+
 		"用 lax model ls 看现有清单，或先运行 model probe", id)
+}
+
+// modelFacts 是清单要展示的目录事实：能力位、音色与音频格式。
+type modelFacts struct {
+	capabilities []string
+	voices       []string
+	formats      []string
 }
 
 // handleModelList 是 `GET /v1/models`：列出账号池里现在能用的模型名，含别名。

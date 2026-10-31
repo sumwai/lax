@@ -33,19 +33,29 @@ const (
 	speechMaxBody = 32 << 20
 )
 
-// speechRequest 是 TTS 入站的解析结果：模型名用于选号，字符数用于计费。
-// 字符数在入站时就数好，响应体不必留着解析（这条端点也不报 token）。
+// speechRequest 是 TTS 入站的解析结果：模型名用于选号与能力校验，字符数用于记账，
+// 其余字段供 chat 适配器拼上游请求。
 type speechRequest struct {
-	Model  string
-	Chars  int64
+	Model string
+	Chars int64
+	// Stream 表示客户端要 SSE 事件流（stream_format: sse）。本版不做事件转换，
+	// 解析时直接拒绝。
 	Stream bool
+	// Input 是要合成的正文：input 是数组时按换行拼接。
+	Input string
+	// Instructions 是 OpenAI 的风格指令，适配时进 chat 的 user message。
+	Instructions string
+	Voice        string
+	// Format 是客户端要的音频容器（mp3 / wav / pcm），ResponseFormat 同值，
+	// 供适配器据此挑上游格式与写 Content-Type。
+	Format string
 }
 
-// decodeSpeechRequest 做最少校验，返回选号要用的模型名与计费的字符数。
+// decodeSpeechRequest 做入站校验并解析出适配要用的字段。
 //
-// 只判三件事：model 是非空字符串、input 存在且是字符串或非空字符串数组、stream_format
-// 给了的话必须是已知取值之一。voice 交给上游：各家认的音色名不一样，本机维护一份名单只会
-// 让新音色被本地拒掉。
+// 校验的是本机真能表达的几件事：model 非空、input 非空、response_format 是基础三种之一、
+// stream_format 不是 sse。音频格式不在这里转码（本版不做转码），
+// 所以 opus/aac/flac 直接拒，而不是静默换一个格式让客户端解错码。
 func decodeSpeechRequest(raw []byte) (*speechRequest, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
@@ -71,7 +81,7 @@ func decodeSpeechRequest(raw []byte) (*speechRequest, error) {
 	if !ok || isJSONNull(input) {
 		return nil, errors.New("缺少 input 字段：要合成的文本写在 input 里，可以是一个字符串，也可以是字符串数组")
 	}
-	chars, err := speechInputChars(input)
+	text, chars, err := speechInput(input)
 	if err != nil {
 		return nil, err
 	}
@@ -79,30 +89,71 @@ func decodeSpeechRequest(raw []byte) (*speechRequest, error) {
 		return nil, errors.New("input 是空的：没有文本就没有可合成的内容，空 input 通常来自变量没填上")
 	}
 
-	stream := false
-	if rawFormat, ok := fields["stream_format"]; ok && !isJSONNull(rawFormat) {
-		var format string
-		if err := json.Unmarshal(rawFormat, &format); err != nil {
-			return nil, errors.New("stream_format 必须是字符串：这条字段选响应形态，写对象或数组都读不出形态")
-		}
-		switch format {
-		case "", "audio", "sse":
-		default:
-			return nil, fmt.Errorf("stream_format 是 %q，只认 audio 或 sse："+
-				"要逐帧返回就写 sse，要一段完整音频就写 audio 或干脆不写", format)
-		}
-		stream = format == "sse"
+	voice, err := optionalString(fields, "voice")
+	if err != nil {
+		return nil, err
+	}
+	instructions, err := optionalString(fields, "instructions")
+	if err != nil {
+		return nil, err
 	}
 
-	return &speechRequest{Model: model, Chars: chars, Stream: stream}, nil
+	// OpenAI 的 response_format 默认 mp3。本版只支持上游原样能给的三种，
+	// opus/aac/flac 需要转码，等转码落地再放开。
+	format, err := optionalString(fields, "response_format")
+	if err != nil {
+		return nil, err
+	}
+	switch format {
+	case "", "mp3", "wav", "pcm":
+		if format == "" {
+			format = "mp3"
+		}
+	case "opus", "aac", "flac":
+		return nil, fmt.Errorf("response_format %q 需要把上游音频转码，本版不做转码："+
+			"改成 mp3、wav 或 pcm 再发", format)
+	default:
+		return nil, fmt.Errorf("response_format 是 %q，可用的是 mp3、wav、pcm", format)
+	}
+
+	streamFormat, err := optionalString(fields, "stream_format")
+	if err != nil {
+		return nil, err
+	}
+	switch streamFormat {
+	case "", "audio":
+	case "sse":
+		return nil, errors.New("stream_format: sse 需要把上游音频重新包成 OpenAI 的 SSE 事件，本版不做：" +
+			"去掉 stream_format 拿完整音频，或写 audio")
+	default:
+		return nil, fmt.Errorf("stream_format 是 %q，只认 audio 或 sse", streamFormat)
+	}
+
+	return &speechRequest{
+		Model: model, Chars: chars, Input: text, Instructions: instructions,
+		Voice: voice, Format: format,
+	}, nil
 }
 
-// speechInputChars 数 input 的字符数：字符串按 rune 数，字符串数组按各元素之和。
-// 校验与计数在同一次解析里做，调用方拿到非零值就说明 input 合法。
-func speechInputChars(input json.RawMessage) (int64, error) {
+// optionalString 读一个可选的字符串字段：缺失与 null 都返回空串，类型不对则报错。
+func optionalString(fields map[string]json.RawMessage, name string) (string, error) {
+	raw, ok := fields[name]
+	if !ok || isJSONNull(raw) {
+		return "", nil
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", fmt.Errorf("%s 必须是字符串：写对象或数组都读不出来", name)
+	}
+	return value, nil
+}
+
+// speechInput 把 input 取成一段正文并数出字符数：字符串原样，字符串数组按换行拼接。
+// 校验与计数在同一次解析里做，调用方拿到非零字符数就说明 input 合法。
+func speechInput(input json.RawMessage) (string, int64, error) {
 	var text string
 	if err := json.Unmarshal(input, &text); err == nil {
-		return int64(utf8.RuneCountInString(text)), nil
+		return text, int64(utf8.RuneCountInString(text)), nil
 	}
 	var parts []string
 	if err := json.Unmarshal(input, &parts); err == nil {
@@ -110,9 +161,9 @@ func speechInputChars(input json.RawMessage) (int64, error) {
 		for _, part := range parts {
 			total += int64(utf8.RuneCountInString(part))
 		}
-		return total, nil
+		return strings.Join(parts, "\n"), total, nil
 	}
-	return 0, errors.New("input 必须是字符串或字符串数组：数字、对象与布尔值都合不出文本，" +
+	return "", 0, errors.New("input 必须是字符串或字符串数组：数字、对象与布尔值都合不出文本，" +
 		"`\"input\": 123` 这类写法在上游也只会换回 400")
 }
 
@@ -121,24 +172,143 @@ func speechInputChars(input json.RawMessage) (int64, error) {
 //
 // 判三件事：Content-Type 是 multipart/form-data 且带 boundary、有 model part、有非空的 file part。
 // 其余字段（language、prompt、response_format、temperature、stream 一类）原样转发。
-func decodeTranscriptionsRequest(raw []byte, contentType string) (string, error) {
+// transcriptionsRequest 是 ASR 入站的解析结果：模型名用于选号与能力校验，
+// 音频字节与语言供 chat 适配器拼上游请求，Format 是客户端要的响应形状。
+type transcriptionsRequest struct {
+	Model    string
+	Language string
+	// Format 是 response_format 的取值：json、text 或 verbose_json。
+	Format string
+	// Container 是入站音频识别出的容器：wav 或 mp3（本版不做转码，别的直接拒）。
+	Container string
+	Audio     []byte
+}
+
+// decodeTranscriptionsRequest 做入站校验并取回音频字节。
+//
+// 本版不做转码，所以入站只收 wav 与 mp3：ogg/opus（Telegram）与 SILK（微信）
+// 需要先解码再发，文案里说清楚，而不是静默送给上游换回一个 400。
+// 流式转写本版不做：客户端要 SSE 时直接拒。
+func decodeTranscriptionsRequest(raw []byte, contentType string) (*transcriptionsRequest, error) {
 	boundary, err := multipartBoundary(contentType)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	model, hasFile, err := scanTranscriptionsParts(raw, boundary)
-	if err != nil {
-		return "", err
+
+	out := &transcriptionsRequest{Format: "json"}
+	reader := multipart.NewReader(bytes.NewReader(raw), boundary)
+	stream := false
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("读取 multipart 失败: %v", err)
+		}
+		switch part.FormName() {
+		case "model":
+			value, err := io.ReadAll(io.LimitReader(part, 4096))
+			if err != nil {
+				return nil, fmt.Errorf("读取 model 字段失败: %v", err)
+			}
+			if out.Model == "" {
+				out.Model = string(value)
+			}
+		case "file":
+			data, err := io.ReadAll(io.LimitReader(part, speechMaxBody))
+			if err != nil {
+				return nil, fmt.Errorf("读取 file 字段失败: %v", err)
+			}
+			if out.Audio == nil {
+				out.Audio = data
+			}
+		case "language":
+			value, err := io.ReadAll(io.LimitReader(part, 4096))
+			if err != nil {
+				return nil, fmt.Errorf("读取 language 字段失败: %v", err)
+			}
+			if out.Language == "" {
+				out.Language = strings.TrimSpace(string(value))
+			}
+		case "response_format":
+			value, err := io.ReadAll(io.LimitReader(part, 4096))
+			if err != nil {
+				return nil, fmt.Errorf("读取 response_format 字段失败: %v", err)
+			}
+			if format := strings.TrimSpace(string(value)); format != "" {
+				out.Format = format
+			}
+		case "stream":
+			value, err := io.ReadAll(io.LimitReader(part, 4096))
+			if err == nil && strings.TrimSpace(string(value)) == "true" {
+				stream = true
+			}
+		}
+		_ = part.Close()
 	}
-	if strings.TrimSpace(model) == "" {
-		return "", errors.New("缺少 model 字段：语音转写请求按模型名选号，" +
+
+	if strings.TrimSpace(out.Model) == "" {
+		return nil, errors.New("缺少 model 字段：语音转写请求按模型名选号，" +
 			"multipart 里要有一个名为 model 的表单字段")
 	}
-	if !hasFile {
-		return "", errors.New("缺少 file 字段：要转写的音频写在名为 file 的文件字段里，" +
+	if len(out.Audio) == 0 {
+		return nil, errors.New("缺少 file 字段：要转写的音频写在名为 file 的文件字段里，" +
 			"只写 model 不发音频的话上游只会换回 400")
 	}
-	return model, nil
+	if stream {
+		return nil, errors.New("stream: true 需要把上游的逐字输出重包成 OpenAI 的 SSE 事件，本版不做：" +
+			"去掉 stream 拿一次完整结果")
+	}
+
+	out.Container = detectAudioContainer(out.Audio)
+	switch out.Container {
+	case "wav", "mp3":
+	case "ogg":
+		return nil, errors.New("入站音频是 ogg/opus（Telegram 语音常用），要转成 wav 或 mp3 才能交给上游：" +
+			"本版不做转码，先在客户端转成 wav/mp3 再发")
+	case "silk":
+		return nil, errors.New("入站音频是 SILK（微信语音常用），要解码成 wav 或 mp3 才能交给上游：" +
+			"本版不做转码、也不内置 SILK 解码器，先在客户端转成 wav/mp3 再发")
+	default:
+		return nil, errors.New("file 不是可识别的音频：只认 wav（RIFF/WAVE 头）与 mp3（ID3 或帧同步头）")
+	}
+
+	switch out.Format {
+	case "json", "text", "verbose_json":
+	case "srt", "vtt":
+		return nil, fmt.Errorf("response_format %q 需要时间轴，上游不返回分段信息："+
+			"改用 json、text 或 verbose_json，字幕文件在本地从文本生成", out.Format)
+	default:
+		return nil, fmt.Errorf("response_format 是 %q，可用的是 json、text、verbose_json", out.Format)
+	}
+
+	switch out.Language {
+	case "", "auto", "zh", "en":
+	default:
+		return nil, fmt.Errorf("language %q 不受上游支持：只认 auto、zh、en，"+
+			"其它语言先去掉这个字段让上游自动判断", out.Language)
+	}
+
+	return out, nil
+}
+
+// detectAudioContainer 按文件头认容器。只认本版真能送上游的两种，
+// 另两种（ogg、silk）单独认出来是为了给一句能照着做的错误文案。
+func detectAudioContainer(data []byte) string {
+	switch {
+	case len(data) >= 12 && string(data[0:4]) == "RIFF" && string(data[8:12]) == "WAVE":
+		return "wav"
+	case len(data) >= 3 && string(data[0:3]) == "ID3":
+		return "mp3"
+	case len(data) >= 2 && data[0] == 0xFF && data[1]&0xE0 == 0xE0:
+		return "mp3"
+	case len(data) >= 4 && string(data[0:4]) == "OggS":
+		return "ogg"
+	case bytes.HasPrefix(data, []byte("\x02#!SILK")) || bytes.HasPrefix(data, []byte("#!SILK")):
+		return "silk"
+	}
+	return ""
 }
 
 // multipartBoundary 从 Content-Type 里取 boundary，并确认媒体类型就是 multipart/form-data。
@@ -161,42 +331,6 @@ func multipartBoundary(contentType string) (string, error) {
 			"没有它上游分不出各个 part 的边界")
 	}
 	return boundary, nil
-}
-
-// scanTranscriptionsParts 遍历一遍 multipart，取 model 字段的值并记下有没有非空的 file part。
-//
-// 只读到判定的部分就停：file 一般排在 model 后面，整段音频读完只为确认它非空是白读的，
-// 读一个字节就够。遍历顺序不影响结论（model 在 file 之后也能取到）。
-func scanTranscriptionsParts(raw []byte, boundary string) (model string, hasFile bool, err error) {
-	reader := multipart.NewReader(bytes.NewReader(raw), boundary)
-	for {
-		part, err := reader.NextPart()
-		if err == io.EOF {
-			return model, hasFile, nil
-		}
-		if err != nil {
-			return "", false, fmt.Errorf("读取 multipart 失败: %v", err)
-		}
-		switch part.FormName() {
-		case "model":
-			value, err := io.ReadAll(io.LimitReader(part, 4096))
-			if err != nil {
-				return "", false, fmt.Errorf("读取 model 字段失败: %v", err)
-			}
-			if model == "" {
-				model = string(value)
-			}
-		case "file":
-			var one [1]byte
-			if n, _ := io.ReadFull(part, one[:]); n > 0 {
-				hasFile = true
-			}
-		}
-		_ = part.Close()
-		if model != "" && hasFile {
-			return model, true, nil
-		}
-	}
 }
 
 // rewriteTranscriptionsBody 重写 multipart：只换 model 那个 part 的值，其余 part 的头部与
@@ -308,20 +442,50 @@ func SpeechPath() string { return speechPath }
 // TranscriptionsPath 返回 ASR 的入站路径。
 func TranscriptionsPath() string { return transcriptionsPath }
 
-// speechOutbound 给语音请求选协议：入站是哪一条，出站就是哪一条。协议在这里是路由事实：
-// 厂商声明了这条路由才转发，不按模型的有效出站协议猜——一条模型是 TTS 还是 ASR
-// 由入站路径决定，与向量化同理（见 5.16）。返回空串时第二个值是给客户端的文案。
-func (s *Server) speechOutbound(a store.Account, inbound string) (string, string) {
+// speechOutbound 给语音请求选协议。三种情况，按优先级：
+//
+//  1. 厂商声明了这条语音路由：同协议直通（真正的 OpenAI audio 端点）；
+//  2. 没声明语音路由、但模型声明了对应能力、且有效协议是 openai-chat：走 chat 适配
+//     （MiMo 那种「语音做成 chat 方言」的上游）；
+//  3. 其余情况不相通，返回给客户端的文案。
+//
+// 能力声明必须先有：它回答的是「这个模型能不能用于这个端点」，与路由是否存在是两件事。
+func (s *Server) speechOutbound(a store.Account, inbound, model string) (string, string) {
+	capability := store.CapabilitySpeech
+	if inbound == ProtocolTranscriptions {
+		capability = store.CapabilityTranscription
+	}
+	pm, ok, err := s.store.ProviderModel(a.Provider, model)
+	if err != nil {
+		s.logf("读厂商 %s 的模型 %s 能力声明失败: %v", a.Provider, model, err)
+		return "", fmt.Sprintf("账号 %s：读厂商 %s 的能力声明失败（%v），先运行 lax doctor 检查数据库",
+			a.Name, a.Provider, err)
+	}
+	if !ok || !store.HasCapability(pm, capability) {
+		return "", fmt.Sprintf("账号 %s 的厂商 %s 没有声明模型 %s 的 %s 能力："+
+			"用 lax model capability add %s --capability %s 声明后重试",
+			a.Name, a.Provider, model, capability, model, capability)
+	}
+
 	route, ok, err := s.store.LookupProviderRoute(a.Provider, inbound)
 	if err != nil {
 		s.logf("读厂商 %s 的 %s 路由失败: %v", a.Provider, inbound, err)
 		return "", fmt.Sprintf("账号 %s：读厂商 %s 的 %s 路由失败（%v），先运行 lax doctor 检查数据库",
 			a.Name, a.Provider, inbound, err)
 	}
-	if !ok || strings.TrimSpace(route.Path) == "" {
-		return "", speechNoRouteMessage(a.Provider, inbound)
+	if ok && strings.TrimSpace(route.Path) != "" {
+		return inbound, ""
 	}
-	return inbound, ""
+
+	proto, err := s.store.EffectiveProtocol(a.ID, model)
+	if err != nil {
+		s.logf("读账号 %s 模型 %s 的有效协议失败: %v", a.Name, model, err)
+		return "", fmt.Sprintf("账号 %s：读有效出站协议失败（%v），先运行 lax doctor 检查数据库", a.Name, err)
+	}
+	if proto == ProtocolChat {
+		return ProtocolChat, ""
+	}
+	return "", speechNoRouteMessage(a.Provider, inbound) + fmt.Sprintf("（模型 %s 的有效出站协议是 %s，只支持经 openai-chat 适配）", model, proto)
 }
 
 // speechNoRouteMessage 说明这家厂商没有声明语音要用的那条路由，并给出下一步命令。

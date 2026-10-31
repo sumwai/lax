@@ -111,6 +111,8 @@ type providerModelRow struct {
 	MaxOutput       *int64   `gorm:"column:max_output"`
 	Protocols       string   `gorm:"column:protocols;not null;default:''"`
 	Capabilities    string   `gorm:"column:capabilities;not null;default:''"`
+	Voices          string   `gorm:"column:voices;not null;default:''"`
+	AudioFormats    string   `gorm:"column:audio_formats;not null;default:''"`
 	PriceIn         *float64 `gorm:"column:price_in"`
 	PriceOut        *float64 `gorm:"column:price_out"`
 	PriceCacheRead  *float64 `gorm:"column:price_cache_read"`

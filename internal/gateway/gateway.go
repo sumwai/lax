@@ -280,6 +280,9 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	var req *translate.Request
 	// speechChars 是 TTS 的计费字符数：入站时数好，不靠响应体（这条端点不报 token）。
 	var speechChars int64
+	// ttsReq / asrReq 留着给能力校验与 chat 适配器用（同一份解析结果，不重复解）。
+	var ttsReq *speechRequest
+	var asrReq *transcriptionsRequest
 	switch {
 	case inbound == ProtocolSystemOne:
 		// systemone 没有编解码器，也不进中间表示：它没有对话消息序列，转不成 IR。
@@ -319,15 +322,17 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", "语音合成: "+err2.Error())
 			return
 		}
-		req = &translate.Request{Model: parsed.Model, Stream: parsed.Stream}
+		req = &translate.Request{Model: parsed.Model}
 		speechChars = parsed.Chars
+		ttsReq = parsed
 	case inbound == ProtocolTranscriptions:
-		model, err2 := decodeTranscriptionsRequest(raw, r.Header.Get("Content-Type"))
+		parsed, err2 := decodeTranscriptionsRequest(raw, r.Header.Get("Content-Type"))
 		if err2 != nil {
 			writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", "语音转写: "+err2.Error())
 			return
 		}
-		req = &translate.Request{Model: model}
+		req = &translate.Request{Model: parsed.Model}
+		asrReq = parsed
 	default:
 		req, err = translate.DecodeRequest(inbound, raw)
 		if err != nil {
@@ -366,6 +371,16 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeInboundError(w, inbound, http.StatusInternalServerError, "api_error", "读取账号失败: "+err.Error())
 		return
+	}
+
+	// 语音入站先查能力声明：没有声明的模型（例如一个普通对话模型）在这里就被拒，
+	// 不发上游请求。这一步在选号之前：它回答的是「这个端点能不能用这个模型」，
+	// 与账号冷却、优先权无关。
+	if inbound == ProtocolSpeech || inbound == ProtocolTranscriptions {
+		if err := s.checkSpeechInbound(inbound, accounts, req.Model, ttsReq, asrReq); err != nil {
+			writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
 	}
 	candidates := account.Candidates(accounts, req.Model, s.now(), session)
 	if len(candidates) == 0 {
@@ -414,10 +429,10 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 		case voice:
-			// 语音与向量化同理：协议是路由事实而不是模型事实，一条模型是 TTS 还是 ASR
-			// 由入站路径决定，不按模型的有效出站协议猜。
+			// 语音与向量化不同：它有两种出站。厂商声明了语音路由就直通，
+			// 没声明但模型声明了能力且走 chat 的就经适配器（见 speechOutbound）。
 			var msg string
-			outbound, msg = s.speechOutbound(cand, inbound)
+			outbound, msg = s.speechOutbound(cand, inbound, req.Model)
 			if outbound == "" {
 				interopRejected = msg
 				lastErr = msg
@@ -661,6 +676,10 @@ func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store
 		return res
 	}
 
+	if speechNeedsChatAdapter(inbound, outbound) {
+		// 语音入站 + chat 出站：把 chat completion 解成音频字节或转写结果。
+		return s.chatSpeechSuccess(w, resp, inbound, raw, inboundHeaders.Get("Content-Type"))
+	}
 	if outbound == ProtocolSpeech || outbound == ProtocolTranscriptions {
 		// 语音的响应要么是音频字节、要么是 JSON 或 SSE，都不走 jsonSuccess/streamSuccess：
 		// 那两个按对话协议解析用量与帧，读一条音频只会得到零值或报错。
@@ -712,6 +731,10 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, in
 		body, contentType, err = rewriteTranscriptionsBody(raw, inboundHeaders.Get("Content-Type"), req.Model)
 	case outbound == ProtocolTranscriptions:
 		body = raw
+	case speechNeedsChatAdapter(inbound, outbound):
+		// 语音入站 + chat 出站：上游把语音做成 chat 方言，请求要重新编。
+		// 能力校验已经在上游调用之前做过（见 checkSpeechInbound）。
+		body, err = s.encodeSpeechAsChat(inbound, raw, req.Model, inboundHeaders.Get("Content-Type"))
 	case outbound == ProtocolSpeech:
 		// 语音合成是 JSON，与其余直通协议一样只换 model。
 		body, err = patchModel(raw, req.Model)

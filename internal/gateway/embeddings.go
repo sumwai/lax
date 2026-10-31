@@ -158,9 +158,9 @@ func (s *Server) geminiEmbeddingOnly(a store.Account, model string) bool {
 	var embed, chat bool
 	for _, capability := range catalog.Capabilities {
 		switch capability {
-		case capabilityEmbedding:
+		case store.CapabilityEmbedding:
 			embed = true
-		case capabilityChat:
+		case store.CapabilityChat:
 			chat = true
 		}
 	}

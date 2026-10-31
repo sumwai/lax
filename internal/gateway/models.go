@@ -332,13 +332,9 @@ const (
 	batchEmbedMethod      = "batchEmbedContents"
 )
 
-// 能力位取值与它们的固定顺序：chat 在前，embedding 在后。
-const (
-	capabilityChat      = "chat"
-	capabilityEmbedding = "embedding"
-)
-
-var capabilityOrder = []string{capabilityChat, capabilityEmbedding}
+// 能力位取值与它们的固定顺序统一在 store：声明写入、/v1/models 输出与探活都读同一份，
+// gateway 不另存一份名单。
+var capabilityOrder = store.CapabilityValues()
 
 // endpointProtocols 是「上游清单里声明的端点名 → 线协议」的映射，放在 gateway 而不是 translate：
 // 它服务的是模型同步与探活这两件上游侧的事（同步时写进目录、探活时据此排候选），
@@ -472,7 +468,8 @@ func modelEntries(entries []json.RawMessage) []listModel {
 //
 //   - supportedGenerationMethods 里的 generateContent 是 chat，embedContent 与
 //     batchEmbedContents 是 embedding；
-//   - supported_endpoints 里的 /chat/completions 是 chat，/embeddings 是 embedding。
+//   - supported_endpoints 里的 /chat/completions 是 chat，/embeddings 是 embedding，
+//     /audio/speech 是 speech，/audio/transcriptions 是 transcription。
 //
 // 两个键都没有时返回 nil：上游没说它能干什么，能力位就留空，不硬塞 chat。
 func entryCapabilities(entry json.RawMessage) []string {
@@ -481,9 +478,9 @@ func entryCapabilities(entry json.RawMessage) []string {
 		for _, method := range methods {
 			switch method {
 			case generateContentMethod:
-				set[capabilityChat] = true
+				set[store.CapabilityChat] = true
 			case embedContentMethod, batchEmbedMethod:
-				set[capabilityEmbedding] = true
+				set[store.CapabilityEmbedding] = true
 			}
 		}
 	}
@@ -491,14 +488,18 @@ func entryCapabilities(entry json.RawMessage) []string {
 		for _, endpoint := range endpoints {
 			switch endpoint {
 			case "/chat/completions":
-				set[capabilityChat] = true
+				set[store.CapabilityChat] = true
 			case "/embeddings":
-				set[capabilityEmbedding] = true
+				set[store.CapabilityEmbedding] = true
+			case "/audio/speech":
+				set[store.CapabilitySpeech] = true
+			case "/audio/transcriptions":
+				set[store.CapabilityTranscription] = true
 			}
 		}
 	}
 	var out []string
-	for _, capability := range capabilityOrder {
+	for _, capability := range store.CapabilityValues() {
 		if set[capability] {
 			out = append(out, capability)
 		}

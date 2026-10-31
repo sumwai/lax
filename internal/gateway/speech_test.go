@@ -3,6 +3,8 @@ package gateway_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -31,7 +33,17 @@ func voiceProvider(t *testing.T, f *fixture, baseURL string, models []string) st
 	}, routes); err != nil {
 		t.Fatalf("建厂商 voice: %v", err)
 	}
-	return f.createAccount(t, "voice1", "voice", "sk-voice-secret", models, 100)
+	acc := f.createAccount(t, "voice1", "voice", "sk-voice-secret", models, 100)
+	// 语音入站只打声明过能力的模型（见 5.16）：测试里的模型都得声明，
+	// 否则会在选号之前就以 400 退回来。
+	for _, model := range models {
+		if _, err := f.st.AddProviderModelCapability("voice", model, store.CapabilityPatch{
+			Capabilities: []string{store.CapabilitySpeech, store.CapabilityTranscription},
+		}); err != nil {
+			t.Fatalf("声明 %s 的能力: %v", model, err)
+		}
+	}
+	return acc
 }
 
 // captureVoiceUpstream 记下最近一次请求的路径、Content-Type 与请求体，
@@ -90,26 +102,20 @@ func TestForwardSpeechPassthrough(t *testing.T) {
 	}
 }
 
-// TestSpeechStreamFormatPassthrough 钉住 stream_format: sse 也走直通：上游回 SSE 帧时
-// Content-Type 与字节都原样，网关不按对话协议的帧格式去解它。
-func TestSpeechStreamFormatPassthrough(t *testing.T) {
+// TestSpeechRejectsSSEStreamFormat 钉住本版不支持 stream_format: sse：
+// 把上游 chat 的音频分片重新包成 OpenAI 事件需要另一套编码，等有客户端要再做。
+func TestSpeechRejectsSSEStreamFormat(t *testing.T) {
 	f := newFixture(t)
-	sse := []byte("data: {\"type\":\"speech.audio.delta\",\"audio\":\"AAAA\"}\n\n")
-	up, seen := captureVoiceUpstream(t, "text/event-stream", sse)
-	voiceProvider(t, f, up.URL, []string{"tts-1"})
+	voiceProvider(t, f, "http://127.0.0.1:1", []string{"tts-1"})
 	srv := f.server(t)
 
 	status, body := postPath(t, srv, "/v1/audio/speech",
 		`{"model":"tts-1","input":"hi","voice":"alloy","stream_format":"sse"}`)
-	if status != http.StatusOK {
-		t.Fatalf("状态 = %d，响应 = %s", status, body)
+	if status != http.StatusBadRequest {
+		t.Fatalf("状态 = %d，期望 400，响应 = %s", status, body)
 	}
-	if body != string(sse) {
-		t.Fatalf("SSE 字节被改写过：%q", body)
-	}
-	_, contentType, _ := seen()
-	if contentType != "application/json" {
-		t.Fatalf("上游 Content-Type = %q", contentType)
+	if !strings.Contains(body, "sse") {
+		t.Fatalf("文案没说清 sse 不支持：%s", body)
 	}
 }
 
@@ -133,8 +139,8 @@ func TestSpeechAliasIsResolved(t *testing.T) {
 	}
 }
 
-// TestSpeechWithoutRouteIsRejected 钉住缺路由时的 400 与零上游调用：
-// 厂商没有声明 openai-speech 路由时，请求不进选号。
+// TestSpeechWithoutRouteIsRejected 钉住「既没语音路由、也不能适配」时的 400 与零上游调用：
+// 厂商只声明了 anthropic 路由，有效协议不是 openai-chat，语音请求进不了选号。
 func TestSpeechWithoutRouteIsRejected(t *testing.T) {
 	f := newFixture(t)
 	calls := 0
@@ -143,19 +149,25 @@ func TestSpeechWithoutRouteIsRejected(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(up.Close)
-	if err := f.st.AddProvider(store.Provider{Name: "chatonly", BaseURL: up.URL, DefaultProtocol: gateway.ProtocolChat},
-		[]store.ProviderRoute{{Protocol: gateway.ProtocolChat, Path: "/v1/chat/completions"}}); err != nil {
+	if err := f.st.AddProvider(store.Provider{Name: "claudeonly", BaseURL: up.URL, DefaultProtocol: gateway.ProtocolAnthropic},
+		[]store.ProviderRoute{{Protocol: gateway.ProtocolAnthropic, Path: "/v1/messages"}}); err != nil {
 		t.Fatalf("建厂商: %v", err)
 	}
-	f.createAccount(t, "chat1", "chatonly", "sk-chat", []string{"tts-1"}, 100)
+	f.createAccount(t, "claude1", "claudeonly", "sk-claude", []string{"tts-1"}, 100)
+	// 声明能力但厂商没声明语音路由、有效协议也不是 chat：这一用例要验的是「缺路由」而不是「缺能力」。
+	if _, err := f.st.AddProviderModelCapability("claudeonly", "tts-1", store.CapabilityPatch{
+		Capabilities: []string{store.CapabilitySpeech},
+	}); err != nil {
+		t.Fatalf("声明能力: %v", err)
+	}
 	srv := f.server(t)
 
 	status, body := postPath(t, srv, "/v1/audio/speech", `{"model":"tts-1","input":"hi"}`)
 	if status != http.StatusBadRequest {
 		t.Fatalf("状态 = %d，期望 400，响应 = %s", status, body)
 	}
-	if !strings.Contains(body, "openai-speech") {
-		t.Fatalf("文案没给出下一步：%s", body)
+	if !strings.Contains(body, "openai-chat") {
+		t.Fatalf("文案没说清只能经 chat 适配：%s", body)
 	}
 	if calls != 0 {
 		t.Fatalf("上游收到 %d 次调用，期望 0", calls)
@@ -382,5 +394,282 @@ func TestProbeTranscriptionsMissingFile(t *testing.T) {
 	}
 	if !strings.Contains(gotBody, "whisper-1") {
 		t.Fatalf("探活报文里没有模型名：%s", gotBody)
+	}
+}
+
+// chatAdapterProvider 建一家只有 chat 路由的厂商，并给模型声明语音能力：
+// 模拟 MiMo 那种「语音做成 chat 方言」的上游。
+func chatAdapterProvider(t *testing.T, f *fixture, baseURL, model string,
+	capabilities, voices, formats []string) store.Account {
+	t.Helper()
+	if err := f.st.AddProvider(store.Provider{
+		Name: "mimo", BaseURL: baseURL, DefaultProtocol: gateway.ProtocolChat,
+	}, []store.ProviderRoute{{Protocol: gateway.ProtocolChat, Path: "/v1/chat/completions"}}); err != nil {
+		t.Fatalf("建厂商 mimo: %v", err)
+	}
+	acc := f.createAccount(t, "mimo1", "mimo", "sk-mimo", []string{model}, 100)
+	if _, err := f.st.AddProviderModelCapability("mimo", model, store.CapabilityPatch{
+		Capabilities: capabilities, Voices: voices, AudioFormats: formats,
+	}); err != nil {
+		t.Fatalf("声明能力: %v", err)
+	}
+	return acc
+}
+
+// TestSpeechChatAdapter 钉住 TTS 的 chat 适配：入站是 OpenAI audio 形状，
+// 出站是聊天的 messages + audio 对象，响应里的 base64 音频解成字节给客户端。
+func TestSpeechChatAdapter(t *testing.T) {
+	f := newFixture(t)
+	audio := []byte("ID3-fake-audio")
+	chatBody := `{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"","audio":{"data":"` +
+		base64.StdEncoding.EncodeToString(audio) + `"}},"finish_reason":"stop"}],` +
+		`"usage":{"prompt_tokens":125,"completion_tokens":7,"total_tokens":132,` +
+		`"prompt_tokens_details":{"cached_tokens":121}}}`
+	up, seen := captureVoiceUpstream(t, "application/json", []byte(chatBody))
+	chatAdapterProvider(t, f, up.URL, "mimo-v2.5-tts",
+		[]string{store.CapabilitySpeech}, []string{"Mia", "Chloe"}, []string{"mp3", "wav", "pcm16"})
+	srv := f.server(t)
+
+	status, body := postPath(t, srv, "/v1/audio/speech",
+		`{"model":"mimo-v2.5-tts","input":"你好世界","voice":"Mia","response_format":"mp3"}`)
+	if status != http.StatusOK {
+		t.Fatalf("状态 = %d，响应 = %s", status, body)
+	}
+	if body != string(audio) {
+		t.Fatalf("音频字节 = %q，期望 %q", body, audio)
+	}
+
+	path, contentType, got := seen()
+	if path != "/v1/chat/completions" {
+		t.Fatalf("上游路径 = %q", path)
+	}
+	if contentType != "application/json" {
+		t.Fatalf("上游 Content-Type = %q", contentType)
+	}
+	var sent struct {
+		Model    string `json:"model"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+		Audio struct {
+			Format string `json:"format"`
+			Voice  string `json:"voice"`
+		} `json:"audio"`
+	}
+	if err := json.Unmarshal(got, &sent); err != nil {
+		t.Fatalf("上游请求体不是 JSON: %v，%s", err, got)
+	}
+	if sent.Model != "mimo-v2.5-tts" {
+		t.Fatalf("上游模型名 = %q", sent.Model)
+	}
+	if len(sent.Messages) != 1 || sent.Messages[0].Role != "assistant" || sent.Messages[0].Content != "你好世界" {
+		t.Fatalf("messages = %+v，期望只有一条 assistant 带正文", sent.Messages)
+	}
+	if sent.Audio.Format != "mp3" || sent.Audio.Voice != "Mia" {
+		t.Fatalf("audio = %+v", sent.Audio)
+	}
+
+	recs := waitRequests(t, f.st, 1)
+	rec := recs[0]
+	if rec.Inbound != gateway.ProtocolSpeech || rec.Outbound != gateway.ProtocolChat {
+		t.Fatalf("协议对 = %s→%s，期望 openai-speech→openai-chat", rec.Inbound, rec.Outbound)
+	}
+	if rec.TTSChars != int64(len([]rune("你好世界"))) {
+		t.Fatalf("tts_chars = %d，期望 4", rec.TTSChars)
+	}
+	if rec.InTokens != 125 || rec.OutTokens != 7 || rec.CacheRead != 121 {
+		t.Fatalf("用量 = in %d / out %d / cache %d，期望 125 / 7 / 121", rec.InTokens, rec.OutTokens, rec.CacheRead)
+	}
+}
+
+// TestSpeechChatAdapterInstructions 钉住 instructions 映射到 user 消息（风格指令），
+// 正文仍放在 assistant 消息里——MiMo 的示例就是这个形状。
+func TestSpeechChatAdapterInstructions(t *testing.T) {
+	f := newFixture(t)
+	chatBody := `{"choices":[{"message":{"audio":{"data":"` +
+		base64.StdEncoding.EncodeToString([]byte("wav-bytes")) + `"}}}]}`
+	up, seen := captureVoiceUpstream(t, "application/json", []byte(chatBody))
+	chatAdapterProvider(t, f, up.URL, "mimo-v2.5-tts",
+		[]string{store.CapabilitySpeech}, nil, nil)
+	srv := f.server(t)
+
+	status, body := postPath(t, srv, "/v1/audio/speech",
+		`{"model":"mimo-v2.5-tts","input":"Hello","instructions":"Speak slowly","response_format":"wav"}`)
+	if status != http.StatusOK {
+		t.Fatalf("状态 = %d，响应 = %s", status, body)
+	}
+	_, _, got := seen()
+	var sent struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+		Audio struct {
+			Format string `json:"format"`
+		} `json:"audio"`
+	}
+	if err := json.Unmarshal(got, &sent); err != nil {
+		t.Fatalf("解析上游请求体: %v", err)
+	}
+	if len(sent.Messages) != 2 || sent.Messages[0].Role != "user" || sent.Messages[0].Content != "Speak slowly" {
+		t.Fatalf("messages = %+v，期望 user 风格指令 + assistant 正文", sent.Messages)
+	}
+	if sent.Messages[1].Role != "assistant" || sent.Messages[1].Content != "Hello" {
+		t.Fatalf("assistant 消息 = %+v", sent.Messages[1])
+	}
+	if sent.Audio.Format != "wav" {
+		t.Fatalf("audio.format = %q，期望 wav", sent.Audio.Format)
+	}
+}
+
+// TestSpeechWithoutCapabilityRejected 钉住第 1 条要求：没有声明 speech 能力的模型，
+// 语音请求在本地就被拒，一条上游调用都不发。
+func TestSpeechWithoutCapabilityRejected(t *testing.T) {
+	f := newFixture(t)
+	calls := 0
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(up.Close)
+	if err := f.st.AddProvider(store.Provider{Name: "plain", BaseURL: up.URL, DefaultProtocol: gateway.ProtocolChat},
+		[]store.ProviderRoute{{Protocol: gateway.ProtocolChat, Path: "/v1/chat/completions"}}); err != nil {
+		t.Fatalf("建厂商: %v", err)
+	}
+	f.createAccount(t, "plain1", "plain", "sk-plain", []string{"deepseek-v4.1-flash"}, 100)
+	srv := f.server(t)
+
+	status, body := postPath(t, srv, "/v1/audio/speech",
+		`{"model":"deepseek-v4.1-flash","input":"你好","voice":"alloy"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("状态 = %d，期望 400，响应 = %s", status, body)
+	}
+	if !strings.Contains(body, "没有声明 speech 能力") {
+		t.Fatalf("文案没说清缺能力：%s", body)
+	}
+	if calls != 0 {
+		t.Fatalf("上游收到 %d 次调用，期望 0", calls)
+	}
+}
+
+// TestSpeechVoiceRejected 钉住音色白名单：声明了音色之后，未声明的取值在本地被拒。
+func TestSpeechVoiceRejected(t *testing.T) {
+	f := newFixture(t)
+	up, _ := captureVoiceUpstream(t, "application/json", []byte(`{}`))
+	chatAdapterProvider(t, f, up.URL, "mimo-v2.5-tts",
+		[]string{store.CapabilitySpeech}, []string{"Mia", "Chloe"}, nil)
+	srv := f.server(t)
+
+	status, body := postPath(t, srv, "/v1/audio/speech",
+		`{"model":"mimo-v2.5-tts","input":"hi","voice":"alloy"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("状态 = %d，期望 400，响应 = %s", status, body)
+	}
+	if !strings.Contains(body, "Mia") || !strings.Contains(body, "Chloe") {
+		t.Fatalf("文案没列出可用音色：%s", body)
+	}
+}
+
+// TestTranscriptionsChatAdapter 钉住 ASR 的 chat 适配：multipart 音频编成
+// input_audio 的 data URL，响应里的正文包成 {"text":…}，秒数与 token 入账。
+func TestTranscriptionsChatAdapter(t *testing.T) {
+	f := newFixture(t)
+	chatBody := `{"choices":[{"message":{"content":"你好"}}],` +
+		`"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"seconds":3}}`
+	up, seen := captureVoiceUpstream(t, "application/json", []byte(chatBody))
+	chatAdapterProvider(t, f, up.URL, "mimo-v2.5-asr",
+		[]string{store.CapabilityTranscription}, nil, []string{"wav", "mp3"})
+	srv := f.server(t)
+
+	wav := append([]byte("RIFF$\x00\x00\x00WAVEfmt "), bytes.Repeat([]byte{0}, 16)...)
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	_ = w.WriteField("model", "mimo-v2.5-asr")
+	_ = w.WriteField("language", "zh")
+	part, _ := w.CreateFormFile("file", "a.wav")
+	_, _ = part.Write(wav)
+	_ = w.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/audio/transcriptions", w.FormDataContentType(), &buf)
+	if err != nil {
+		t.Fatalf("请求网关: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("状态 = %d，响应 = %s", resp.StatusCode, body)
+	}
+	if string(body) != `{"text":"你好"}` {
+		t.Fatalf("响应 = %s，期望 {\"text\":\"你好\"}", body)
+	}
+
+	_, _, got := seen()
+	var sent struct {
+		Messages []struct {
+			Content []struct {
+				Type       string `json:"type"`
+				InputAudio struct {
+					Data string `json:"data"`
+				} `json:"input_audio"`
+			} `json:"content"`
+		} `json:"messages"`
+		ASROptions struct {
+			Language string `json:"language"`
+		} `json:"asr_options"`
+	}
+	if err := json.Unmarshal(got, &sent); err != nil {
+		t.Fatalf("解析上游请求体: %v", err)
+	}
+	if len(sent.Messages) != 1 || len(sent.Messages[0].Content) != 1 {
+		t.Fatalf("上游 messages = %+v，期望只有一条 input_audio", sent.Messages)
+	}
+	part0 := sent.Messages[0].Content[0]
+	if part0.Type != "input_audio" || !strings.HasPrefix(part0.InputAudio.Data, "data:audio/wav;base64,") {
+		t.Fatalf("input_audio = %+v", part0)
+	}
+	if sent.ASROptions.Language != "zh" {
+		t.Fatalf("asr_options.language = %q", sent.ASROptions.Language)
+	}
+
+	recs := waitRequests(t, f.st, 1)
+	rec := recs[0]
+	if rec.Inbound != gateway.ProtocolTranscriptions || rec.Outbound != gateway.ProtocolChat {
+		t.Fatalf("协议对 = %s→%s", rec.Inbound, rec.Outbound)
+	}
+	if rec.AudioSeconds != 3 {
+		t.Fatalf("audio_seconds = %d，期望 3", rec.AudioSeconds)
+	}
+	if rec.InTokens != 10 || rec.OutTokens != 2 {
+		t.Fatalf("用量 = in %d / out %d", rec.InTokens, rec.OutTokens)
+	}
+}
+
+// TestTranscriptionsRejectsOGG 钉住本版不转码：ogg/opus 在入站就被拒，文案说清怎么绕开。
+func TestTranscriptionsRejectsOGG(t *testing.T) {
+	f := newFixture(t)
+	up, _ := captureVoiceUpstream(t, "application/json", []byte(`{}`))
+	chatAdapterProvider(t, f, up.URL, "mimo-v2.5-asr",
+		[]string{store.CapabilityTranscription}, nil, []string{"wav", "mp3"})
+	srv := f.server(t)
+
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	_ = w.WriteField("model", "mimo-v2.5-asr")
+	part, _ := w.CreateFormFile("file", "voice.ogg")
+	_, _ = part.Write([]byte("OggS\x00\x02"))
+	_ = w.Close()
+
+	resp, err := http.Post(srv.URL+"/v1/audio/transcriptions", w.FormDataContentType(), &buf)
+	if err != nil {
+		t.Fatalf("请求网关: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("状态 = %d，期望 400，响应 = %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "转码") {
+		t.Fatalf("文案没提转码：%s", body)
 	}
 }

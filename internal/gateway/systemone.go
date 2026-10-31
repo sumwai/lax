@@ -94,6 +94,12 @@ func protocolInteropError(inbound, outbound, model string) string {
 	}
 	if inbound == ProtocolSpeech || outbound == ProtocolSpeech ||
 		inbound == ProtocolTranscriptions || outbound == ProtocolTranscriptions {
+		// 语音入站 → chat 出站是唯一允许的跨协议组合：上游把语音做成 chat 方言，
+		// 由适配层双向翻译（见 speech_adapter.go）。别的方向一概不通：chat 入站不会
+		// 变成一个「要音频」的请求，语音入站也不会转到 anthropic 或 responses。
+		if (inbound == ProtocolSpeech || inbound == ProtocolTranscriptions) && outbound == ProtocolChat {
+			return ""
+		}
 		return speechInteropMessage(inbound, outbound, model)
 	}
 	if inbound != ProtocolSystemOne && outbound != ProtocolSystemOne {
