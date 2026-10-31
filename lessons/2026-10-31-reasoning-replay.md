@@ -2,9 +2,8 @@
 
 Found: 2026-10-31, from a reported failure where Claude Code on `deepseek-flash` answered a tool
 call and then got `400 The reasoning_content in the thinking mode must be passed back to the API`.
-Fix: `fix(translate)` that stamps a replay signature on thinking blocks coming from chat and
-responses upstreams and writes those blocks back as `reasoning_content` when the request carries
-tools.
+Fix: `992f421`, which stamps a replay signature on thinking blocks coming from chat and responses
+upstreams and writes those blocks back as `reasoning_content` when the request carries tools.
 
 ## Symptom
 
