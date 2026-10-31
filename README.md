@@ -236,21 +236,6 @@ make check        # go vet + go test + go build
 
 只需要 Go 工具链，生成的 `lax` 是单文件，不依赖外部服务。
 
-## 文档站
-
-```bash
-make docs         # 本地预览，127.0.0.1:3000，改文件自动刷新
-make docs-build   # 生产构建，顺带跑一次类型检查
-```
-
-站点用 Fumadocs（Next.js）渲染，代码在 `docs-site/`。内容可以放在仓库里，也可以单独成仓：构建前 `docs-site/scripts/fetch-content.mjs` 按 `DOCS_CONTENT_DIR` 或 `DOCS_CONTENT_REPO` 把内容同步进 `docs-site/content/docs`，两个变量都不设时沿用现有目录。内容面向使用者：安装、快速开始、厂商与路由、账号、模型、网关与协议、客户端接入、用量与日志、命令行参考、常见问题。
-
-`DESIGN.md`、`LESSONS.md` 与 `lessons/` 是仓库内部的开发文档，不进站点。
-
-需要 Node.js 与 npm，首次 `make docs` 会装依赖。`make check` 不包含文档站，Go 工具链仍可单独跑通。
-
-部署方式（Docker 镜像、systemd、反向代理）与内容分仓的环境变量、更新触发方式见 [`docs-site/README.md`](docs-site/README.md)。
-
 ## 数据在哪
 
 | 路径 | 内容 |
