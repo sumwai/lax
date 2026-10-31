@@ -203,28 +203,41 @@ func cmdTranscribe(e *Env, args []string) error {
 
 // postVoice 在本进程起一个临时网关并打一条语音请求，返回上游响应。
 // 网关日志关掉：每个命令自己已经把这次请求的事实印出来了，失败时靠 lax log tail 查。
+//
+// 收尾（取消 ctx、等 Serve 返回、关数据库）都挂在响应体的 Close 上：请求记录是在
+// 响应写完之后才落库的，读完响应体就把数据库关掉会让这一次的账漏记。
 func postVoice(e *Env, path string, body []byte, contentType string) (*http.Response, error) {
 	a, err := openApp(e, true)
 	if err != nil {
 		return nil, err
 	}
-	defer a.Close()
 
 	gs, err := gateway.New(gateway.Options{Store: a.st, Key: a.key, Logf: func(string, ...any) {}})
 	if err != nil {
+		a.Close()
 		return nil, err
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		a.Close()
 		return nil, err
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() { _ = gs.Serve(ctx, ln) }()
+	done := make(chan struct{})
+	go func() {
+		serveErr := gs.Serve(ctx, ln)
+		close(done)
+		if serveErr != nil {
+			_ = serveErr
+		}
+	}()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+ln.Addr().String()+path, bytes.NewReader(body))
 	if err != nil {
 		cancel()
+		<-done
+		a.Close()
 		return nil, err
 	}
 	req.Header.Set("Content-Type", contentType)
@@ -232,22 +245,32 @@ func postVoice(e *Env, path string, body []byte, contentType string) (*http.Resp
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		cancel()
+		<-done
+		a.Close()
 		return nil, fmt.Errorf("连本进程的网关失败：%v；网关起不来时先运行 lax doctor 看端口与数据库", err)
 	}
-	// 临时网关的生命周期跟响应走：读完响应体之后才能关，否则会提前切断流。
-	resp.Body = &cancelOnClose{ReadCloser: resp.Body, cancel: cancel}
+	// 临时网关与数据库的生命周期跟响应体走：Serve 的 Shutdown 会等正在处理的请求结束，
+	// 那之后这一次的 requests 行已经落库。
+	resp.Body = &voiceCloser{
+		ReadCloser: resp.Body,
+		cleanup: func() {
+			cancel()
+			<-done
+			a.Close()
+		},
+	}
 	return resp, nil
 }
 
-// cancelOnClose 在响应体关闭时取消临时网关的 context。
-type cancelOnClose struct {
+// voiceCloser 在响应体关闭时收尾：取消临时网关、等它退出、关闭数据库。
+type voiceCloser struct {
 	io.ReadCloser
-	cancel context.CancelFunc
+	cleanup func()
 }
 
-func (c *cancelOnClose) Close() error {
+func (c *voiceCloser) Close() error {
 	err := c.ReadCloser.Close()
-	c.cancel()
+	c.cleanup()
 	return err
 }
 
