@@ -51,12 +51,9 @@ func printModelPriceHelp(w io.Writer) {
 
 // cmdModelPrice 是 model price 这一组子命令的入口。
 func cmdModelPrice(e *Env, args []string) error {
-	if isHelpRequest(args) {
+	if isHelpRequest(args) || len(args) == 0 {
 		printModelPriceHelp(e.Stdout)
 		return nil
-	}
-	if len(args) == 0 {
-		return usagef("需要子命令：set | unset | ls\n用 lax model price --help 查看用法")
 	}
 	switch args[0] {
 	case "set":

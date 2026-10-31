@@ -115,11 +115,18 @@ func TestPluginConfig(t *testing.T) {
 func TestPluginConfigUsageErrors(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
+
+	// 不带子命令与 --help 等价：帮助写 stdout、退出码 0。
+	if code, out, stderr := run(t, "plugin", "config"); code != 0 {
+		t.Fatalf("不带子命令的退出码 = %d，期望 0；stderr = %s", code, stderr)
+	} else if !strings.Contains(out, "unset") {
+		t.Fatalf("不带子命令应打出子命令清单: %s", out)
+	}
+
 	for _, c := range []struct {
 		args []string
 		want string
 	}{
-		{[]string{"plugin", "config"}, "get | set | unset"},
 		{[]string{"plugin", "config", "get"}, "用法："},
 		{[]string{"plugin", "config", "set", "x"}, "用法："},
 		{[]string{"plugin", "config", "set", "x", "k"}, "--stdin"},

@@ -133,15 +133,17 @@ func TestModelAliasUsageErrors(t *testing.T) {
 		}
 	}
 
-	// 缺子命令与未知子命令同样退出码 2，提示指向组级帮助（与其它组一致，不重复打用法行）。
-	for _, args := range [][]string{{"model", "alias"}, {"model", "alias", "nope"}} {
-		code, out, stderr := run(t, args...)
-		if code != 2 || out != "" {
-			t.Fatalf("%v 的退出码 = %d，stdout = %q", args, code, out)
-		}
-		if !strings.Contains(stderr, "lax model alias --help") {
-			t.Fatalf("%v 的提示应指向组级帮助: %s", args, stderr)
-		}
+	// 不带子命令与 --help 等价：帮助写 stdout、退出码 0；未知子命令仍是用法错误，
+	// 提示指向组级帮助。
+	if code, out, stderr := run(t, "model", "alias"); code != 0 {
+		t.Fatalf("不带子命令的退出码 = %d，期望 0；stderr = %s", code, stderr)
+	} else if !strings.Contains(out, "lax model alias set") {
+		t.Fatalf("不带子命令应打出组级帮助: %s", out)
+	}
+	if code, out, stderr := run(t, "model", "alias", "nope"); code != 2 || out != "" {
+		t.Fatalf("未知子命令的退出码 = %d，stdout = %q", code, out)
+	} else if !strings.Contains(stderr, "lax model alias --help") {
+		t.Fatalf("未知子命令的提示应指向组级帮助: %s", stderr)
 	}
 
 	// 一条别名都没写成：上面的用例都不该动库。

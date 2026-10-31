@@ -165,12 +165,9 @@ var logSubs = []groupItem{
 }
 
 func cmdLog(e *Env, args []string) error {
-	if isHelpRequest(args) {
+	if isHelpRequest(args) || len(args) == 0 {
 		printGroupHelp(e.Stdout, "log", "查看请求记录", logSubs)
 		return nil
-	}
-	if len(args) == 0 {
-		return usagef("需要子命令：tail\n用 lax log --help 查看子命令")
 	}
 	if args[0] != "tail" {
 		return usagef("未知子命令 %q，可用：tail\n用 lax log --help 查看子命令", args[0])

@@ -23,12 +23,19 @@ func dialectFixture(t *testing.T) {
 func TestModelDialectUsageErrors(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
+
+	// 不带子命令与 --help 等价：帮助写 stdout、退出码 0。
+	if code, out, stderr := run(t, "model", "dialect"); code != 0 {
+		t.Fatalf("不带子命令的退出码 = %d，期望 0；stderr = %s", code, stderr)
+	} else if !strings.Contains(out, "unset") {
+		t.Fatalf("不带子命令应打出子命令清单: %s", out)
+	}
+
 	cases := []struct {
 		name string
 		args []string
 		want string
 	}{
-		{"没有子命令", []string{"model", "dialect"}, "ls | set | unset"},
 		{"set 参数不够", []string{"model", "dialect", "set", "m1"}, "用法："},
 		{"未知操作", []string{"model", "dialect", "set", "m1", "chat.frobnicate@1", "lax/openai-chat@1"}, "不是宿主认识的操作"},
 		{"unset 参数不够", []string{"model", "dialect", "unset", "m1"}, "用法："},

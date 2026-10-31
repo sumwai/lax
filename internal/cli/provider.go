@@ -66,12 +66,9 @@ var providerUnsetFields = []providerUnsetField{
 
 // cmdProvider 是 provider 这一组子命令的入口。
 func cmdProvider(e *Env, args []string) error {
-	if isHelpRequest(args) {
+	if isHelpRequest(args) || len(args) == 0 {
 		printGroupHelp(e.Stdout, "provider", "厂商与路由", providerSubs)
 		return nil
-	}
-	if len(args) == 0 {
-		return usagef("需要子命令：ls | add | set | unset | rm | header\n用 lax provider --help 查看子命令")
 	}
 	switch args[0] {
 	case "ls":

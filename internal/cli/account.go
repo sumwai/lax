@@ -32,12 +32,10 @@ var accountSubs = []groupItem{
 }
 
 func cmdAccount(e *Env, args []string) error {
-	if isHelpRequest(args) {
+	// 不给子命令与 --help 等价：要列子命令的人不该再敲一次 --help。
+	if isHelpRequest(args) || len(args) == 0 {
 		printGroupHelp(e.Stdout, "account", "管理上游账号", accountSubs)
 		return nil
-	}
-	if len(args) == 0 {
-		return usagef("需要子命令：add | ls | set | rm | test | enable | disable\n用 lax account --help 查看子命令")
 	}
 	switch args[0] {
 	case "add":
@@ -674,12 +672,9 @@ const modelSubCommands = "ls | show | add | sync | probe | alias | price | capab
 
 // cmdModel 是 model 这一组子命令的入口。
 func cmdModel(e *Env, args []string) error {
-	if isHelpRequest(args) {
+	if isHelpRequest(args) || len(args) == 0 {
 		printGroupHelp(e.Stdout, "model", "模型同步、探活、别名、单价与手工试打", modelSubs)
 		return nil
-	}
-	if len(args) == 0 {
-		return usagef("需要子命令：%s\n用 lax model --help 查看子命令", modelSubCommands)
 	}
 	switch args[0] {
 	case "ls":

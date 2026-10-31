@@ -23,16 +23,13 @@ const (
 )
 
 func cmdPluginConfig(e *Env, args []string) error {
-	if isHelpRequest(args) {
+	if isHelpRequest(args) || len(args) == 0 {
 		printGroupHelp(e.Stdout, "plugin config", "插件配置项：manifest 里声明的 options", []groupItem{
 			{"get", "读取配置项，没写过的显示 manifest 的默认值"},
 			{"set", "写一个配置项"},
 			{"unset", "删掉一个配置项，回到默认值"},
 		})
 		return nil
-	}
-	if len(args) == 0 {
-		return usagef("需要子命令：get | set | unset\n用 lax plugin config --help 查看子命令")
 	}
 	switch args[0] {
 	case "get":

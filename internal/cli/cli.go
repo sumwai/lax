@@ -65,8 +65,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return exitUsage
 	}
 	if len(rest) == 0 {
-		printUsage(stderr)
-		return exitUsage
+		// 不带子命令与 --help 等价：打印帮助算成功，退出码 0，与 --help 一致。
+		printUsage(stdout)
+		return exitOK
 	}
 
 	cmd, ok := commandTable[rest[0]]
@@ -142,7 +143,9 @@ func isHelpRequest(args []string) bool {
 }
 
 // printGroupHelp 把组的用途与子命令清单打到 stdout：这是用户要看的结果，不是错误。
-// 名字列宽按最长的那几个（capability、transcribe、transcriptions 一类）留到 11 列。
+// 组子命令不带参数时也走这里（与 --help 同一个分支），所以退出码 0、内容进 stdout；
+// 只留一条「未知子命令」算用法错误。名字列宽按最长的那几个（capability、transcribe、
+// transcriptions 一类）留到 11 列。
 func printGroupHelp(w io.Writer, name, purpose string, items []groupItem) {
 	fmt.Fprintf(w, "%s %s — %s\n\n用法：\n  %s %s <子命令> [参数]\n\n子命令：\n", appName, name, purpose, appName, name)
 	for _, it := range items {

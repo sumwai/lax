@@ -41,7 +41,7 @@ lax log tail                                        # 看请求记录
 | `log tail` | 最近的请求记录 |
 | `doctor` | 自检配置、目录、密钥、端口、数据库 |
 
-每个命令都支持 `--json`，结果走 stdout，错误走 stderr。退出码：0 成功、1 运行失败、2 用法错误。
+每个命令都支持 `--json`，结果走 stdout，错误走 stderr。不带子命令等同 `--help`：`lax`、`lax model`、`lax plugin` 这类组都打印帮助到 stdout、退出码 0。退出码：0 成功、1 运行失败、2 用法错误。
 
 ## 入站协议
 

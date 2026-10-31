@@ -29,12 +29,9 @@ var dialectSubs = []groupItem{
 }
 
 func cmdModelDialect(e *Env, args []string) error {
-	if isHelpRequest(args) {
+	if isHelpRequest(args) || len(args) == 0 {
 		printGroupHelp(e.Stdout, "model dialect", "方言绑定：模型的上游形状由哪条方言描述", dialectSubs)
 		return nil
-	}
-	if len(args) == 0 {
-		return usagef("需要子命令：ls | set | unset\n用 lax model dialect --help 查看子命令")
 	}
 	switch args[0] {
 	case "ls":

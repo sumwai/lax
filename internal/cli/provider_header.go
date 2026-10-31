@@ -100,12 +100,9 @@ func printProviderHeaderHelp(w io.Writer) {
 
 // cmdProviderHeader 是 provider header 这一组子命令的入口。
 func cmdProviderHeader(e *Env, args []string) error {
-	if isHelpRequest(args) {
+	if isHelpRequest(args) || len(args) == 0 {
 		printProviderHeaderHelp(e.Stdout)
 		return nil
-	}
-	if len(args) == 0 {
-		return usagef("需要子命令：set | unset | ls\n用 lax provider header --help 查看用法")
 	}
 	switch args[0] {
 	case "set":

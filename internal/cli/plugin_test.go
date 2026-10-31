@@ -163,15 +163,13 @@ func mustPluginLs(t *testing.T, out string) []pluginLsRow {
 func TestPluginUsageErrors(t *testing.T) {
 	sandbox(t)
 
+	// 不带子命令与 --help 等价：列子命令、退出码 0；下面的用法错误从真给了一个子命令开始。
 	code, out, stderr := run(t, "plugin")
-	if code != 2 {
-		t.Fatalf("缺子命令的退出码 = %d，期望 2；stderr = %s", code, stderr)
+	if code != 0 {
+		t.Fatalf("缺子命令的退出码 = %d，期望 0（与 --help 一致）；stderr = %s", code, stderr)
 	}
-	if out != "" {
-		t.Fatalf("用法错误不该写 stdout: %s", out)
-	}
-	if !strings.Contains(stderr, "install") {
-		t.Fatalf("stderr 应列出可用子命令: %s", stderr)
+	if !strings.Contains(out, "install") {
+		t.Fatalf("stdout 应列出可用子命令: %s", out)
 	}
 
 	code, out, stderr = run(t, "plugin", "install")

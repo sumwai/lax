@@ -78,12 +78,9 @@ func printModelAliasHelp(w io.Writer) {
 
 // cmdModelAlias 是 model alias 这一组子命令的入口。
 func cmdModelAlias(e *Env, args []string) error {
-	if isHelpRequest(args) {
+	if isHelpRequest(args) || len(args) == 0 {
 		printModelAliasHelp(e.Stdout)
 		return nil
-	}
-	if len(args) == 0 {
-		return usagef("需要子命令：set | unset | ls\n用 lax model alias --help 查看用法")
 	}
 	switch args[0] {
 	case "set":

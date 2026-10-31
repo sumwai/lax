@@ -80,12 +80,9 @@ const (
 
 // cmdPlugin 是 plugin 这一组子命令的入口。
 func cmdPlugin(e *Env, args []string) error {
-	if isHelpRequest(args) {
+	if isHelpRequest(args) || len(args) == 0 {
 		printGroupHelp(e.Stdout, "plugin", "插件：安装、升级、回滚、校验、日志、启停、卸载与自检", pluginSubs)
 		return nil
-	}
-	if len(args) == 0 {
-		return usagef("需要子命令：install | update | rollback | verify | logs | reload | config | ls | show | enable | disable | rm | doctor\n用 lax plugin --help 查看子命令")
 	}
 	switch args[0] {
 	case "install":

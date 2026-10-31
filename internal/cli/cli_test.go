@@ -252,15 +252,55 @@ func TestManualRequestCommandsLiveUnderModel(t *testing.T) {
 	}
 }
 
+// TestGroupWithoutSubcommandPrintsHelp 钉住「不带子命令等于 --help」：组子命令、嵌套组与
+// 一级入口都算，帮助写 stdout、退出码 0。原本这里报「需要子命令」并退 2，但要列子命令的
+// 人得再敲一次 --help，多一步。
+func TestGroupWithoutSubcommandPrintsHelp(t *testing.T) {
+	sandbox(t)
+
+	cases := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"一级入口", nil, "子命令："},
+		{"account", []string{"account"}, "add"},
+		{"model", []string{"model"}, "sync"},
+		{"provider", []string{"provider"}, "header"},
+		{"provider header", []string{"provider", "header"}, "{env:NAME}"},
+		{"plugin", []string{"plugin"}, "install"},
+		{"plugin config", []string{"plugin", "config"}, "unset"},
+		{"log", []string{"log"}, "tail"},
+		{"model alias", []string{"model", "alias"}, "unset"},
+		{"model price", []string{"model", "price"}, "cache-read"},
+		{"model capability", []string{"model", "capability"}, "add"},
+		{"model dialect", []string{"model", "dialect"}, "set"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			code, out, errOut := run(t, c.args...)
+			if code != 0 {
+				t.Fatalf("退出码 = %d，期望 0；stderr = %s", code, errOut)
+			}
+			if !strings.Contains(out, c.want) {
+				t.Fatalf("stdout 应含 %q:\n%s", c.want, out)
+			}
+			if errOut != "" {
+				t.Fatalf("帮助不该写 stderr: %s", errOut)
+			}
+		})
+	}
+}
+
 func TestUsageErrorExitCode(t *testing.T) {
 	sandbox(t)
 
-	code, _, errOut := run(t, "account")
-	if code != 2 {
-		t.Fatalf("缺少子命令的退出码 = %d，期望 2", code)
+	code, out, errOut := run(t, "account")
+	if code != 0 {
+		t.Fatalf("不带子命令的退出码 = %d，期望 0（与 --help 一致）；stderr = %s", code, errOut)
 	}
-	if !strings.Contains(errOut, "add") {
-		t.Fatalf("stderr 应列出可用子命令: %s", errOut)
+	if !strings.Contains(out, "add") {
+		t.Fatalf("stdout 应列出可用子命令: %s", out)
 	}
 
 	code, _, _ = run(t, "nope")

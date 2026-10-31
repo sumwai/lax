@@ -37,12 +37,9 @@ var capabilitySubs = []groupItem{
 }
 
 func cmdModelCapability(e *Env, args []string) error {
-	if isHelpRequest(args) {
+	if isHelpRequest(args) || len(args) == 0 {
 		printGroupHelp(e.Stdout, "model capability", "模型能力声明：入站端点能不能用这个模型、能用哪些音色", capabilitySubs)
 		return nil
-	}
-	if len(args) == 0 {
-		return usagef("需要子命令：add | set | unset | ls\n用 lax model capability --help 查看子命令")
 	}
 	switch args[0] {
 	case "add":
