@@ -265,7 +265,7 @@ func (s *Server) probeMinimalCall(ctx context.Context, a store.Account, listNote
 	secretValue := string(key)
 	// 入站与出站都取这个派生协议：探活检验的是凭据与账号整体可用性。附加头由 buildRequest 叠上；
 	// 探活没有客户端请求，入站头传 nil（客户端头透传只作用于转发路径，DESIGN 5.11）。
-	upReq, err := s.buildRequest(ctx, a, a.Protocol, a.Protocol, nil, raw, ir, secretValue, "")
+	upReq, err := s.buildRequest(ctx, a, a.Protocol, a.Protocol, nil, raw, ir, secretValue, "", false)
 	if err != nil {
 		return step, err
 	}

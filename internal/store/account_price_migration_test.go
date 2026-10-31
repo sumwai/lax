@@ -50,8 +50,8 @@ func TestMigration0016MovesAccountPricesToOverride(t *testing.T) {
 	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("读 user_version: %v", err)
 	}
-	if version != 16 {
-		t.Fatalf("user_version = %d，期望 16", version)
+	if version != 17 {
+		t.Fatalf("user_version = %d，期望 17", version)
 	}
 	assertLatestVersion(t, st)
 	assertAccountHasNoPriceColumns(t, st)
@@ -130,8 +130,8 @@ func TestMigration0016MovesAccountPricesToOverride(t *testing.T) {
 	if err := again.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("再读 user_version: %v", err)
 	}
-	if version != 16 {
-		t.Fatalf("重开之后 user_version = %d，期望 16", version)
+	if version != 17 {
+		t.Fatalf("重开之后 user_version = %d，期望 17", version)
 	}
 	if info := oneInfo(t, again, 1, "m1"); info.PriceIn == nil || *info.PriceIn != 2 {
 		t.Fatalf("重开之后 m1 的输入价 = %v，期望仍是 2", info.PriceIn)

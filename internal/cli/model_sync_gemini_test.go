@@ -111,8 +111,8 @@ func TestSeedGeminiProviderSyncsModels(t *testing.T) {
 		Added   int    `json:"added"`
 	}
 	mustJSON(t, out, &synced)
-	if len(synced) != 1 || synced[0].Account != "gem" || synced[0].Models != 2 || synced[0].Added != 2 {
-		t.Fatalf("model sync = %+v，期望拉到 2 个模型、新增 2 个", synced)
+	if len(synced) != 1 || synced[0].Account != "gem" || synced[0].Models != 3 || synced[0].Added != 3 {
+		t.Fatalf("model sync = %+v，期望拉到 3 个模型、新增 3 个（含向量化那条）", synced)
 	}
 
 	paths, queries, googKey, bearer := up.calls()
@@ -139,7 +139,7 @@ func TestSeedGeminiProviderSyncsModels(t *testing.T) {
 		}
 	}
 
-	// 4. 落库的模型名是裸名：models/ 前缀去掉，只能做 embedding 的那条被方法过滤掉。
+	// 4. 落库的模型名是裸名：models/ 前缀去掉；只能做 embedding 的那条也进清单（DESIGN 5.15）。
 	code, out, stderr = run(t, "model", "ls", "--account", "gem", "--json")
 	if code != 0 {
 		t.Fatalf("model ls 退出码 = %d，stderr = %s", code, stderr)
@@ -153,7 +153,8 @@ func TestSeedGeminiProviderSyncsModels(t *testing.T) {
 			t.Fatalf("模型 %s 的账号 = %+v", row.Model, row.Accounts)
 		}
 	}
-	if got, want := strings.Join(names, ","), "gemini-2.5-flash,gemini-2.5-pro"; got != want {
-		t.Fatalf("model ls 的模型 = %q，期望 %q（去前缀、按方法过滤、排序）", got, want)
+	if got, want := strings.Join(names, ","),
+		"gemini-2.5-flash,gemini-2.5-pro,text-embedding-004"; got != want {
+		t.Fatalf("model ls 的模型 = %q，期望 %q（去前缀、排序，含 embedding）", got, want)
 	}
 }

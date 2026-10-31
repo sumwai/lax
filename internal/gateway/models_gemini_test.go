@@ -47,8 +47,9 @@ func syncGemini(t *testing.T, pages []geminiPage, secretValue string) (
 }
 
 // TestSyncModelsGeminiShape 钉住 gemini 的清单形状：`{models:[{name:"models/…"}]}` 复用第二种形状，
-// 另加两条后处理——只留 supportedGenerationMethods 含 generateContent 的条目、名字去掉一个
-// `models/` 前缀。地址与凭据头按种子的 gemini 路由走：`/v1beta/models` 加 `x-goog-api-key`。
+// 另加一条后处理：名字去掉一个 `models/` 前缀。向量化条目不再被丢出清单（DESIGN 5.15），
+// 它们进目录、能力位记成 embedding；没写 supportedGenerationMethods 的条目同样保留，能力位留空。
+// 地址与凭据头按种子的 gemini 路由走：`/v1beta/models` 加 `x-goog-api-key`。
 func TestSyncModelsGeminiShape(t *testing.T) {
 	body := `{"models":[
 		{"name":"models/gemini-2.5-pro","supportedGenerationMethods":["generateContent","countTokens"]},
@@ -62,10 +63,10 @@ func TestSyncModelsGeminiShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("同步模型: %v", err)
 	}
-	// 只留 generateContent：embedding 两条不要；没写 supportedGenerationMethods 的条目同样落选
-	// （上游没说它支持生成，宁少不错）。名字都是裸名，不带 models/ 前缀。
-	if got, want := strings.Join(models, ","), "gemini-2.5-flash,gemini-2.5-pro"; got != want {
-		t.Fatalf("模型 = %q，期望 %q（按方法过滤、去前缀）", got, want)
+	// 五条全进清单，名字都是裸名；embedding 与没声明的条目只是没有 generateContent 而已。
+	if got, want := strings.Join(models, ","),
+		"embedding-001,gemini-1.5-pro,gemini-2.5-flash,gemini-2.5-pro,text-embedding-004"; got != want {
+		t.Fatalf("模型 = %q，期望 %q（去前缀、不再按方法过滤）", got, want)
 	}
 	if len(queries) != 1 {
 		t.Fatalf("没有 nextPageToken 时只该请求一次，实际 %d 次: %v", len(queries), queries)
@@ -122,7 +123,8 @@ func TestSyncModelsGeminiPaginates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("同步模型: %v", err)
 	}
-	if got, want := strings.Join(models, ","), "gemini-2.5-flash,gemini-2.5-pro"; got != want {
+	if got, want := strings.Join(models, ","),
+		"gemini-2.5-flash,gemini-2.5-pro,text-embedding-004"; got != want {
 		t.Fatalf("模型 = %q，期望 %q（两页合并、去重、排序）", got, want)
 	}
 	if len(queries) != 2 {

@@ -121,9 +121,17 @@ func TestSyncModelsMetadataByShape(t *testing.T) {
 		if got := strings.Join(row.Protocols, ","); got != gateway.ProtocolGemini {
 			t.Fatalf("协议 = %q，期望 gemini（generateContent，countTokens 不算）", got)
 		}
-		// 没有 generateContent 的条目按方法过滤掉，不会因为带了长度就进目录。
-		if _, ok := catalog["text-embedding-004"]; ok {
-			t.Fatalf("embedding 条目不该进目录：%+v", catalog)
+		// 没有 generateContent 的条目不再被过滤：它进目录，能力位记成 embedding（DESIGN 5.15）。
+		embed, ok := catalog["text-embedding-004"]
+		if !ok {
+			t.Fatalf("embedding 条目应当进目录：%+v", catalog)
+		}
+		mustInt64(t, "上下文长度（inputTokenLimit）", embed.ContextWindow, ptr(2048))
+		if got := strings.Join(embed.Capabilities, ","); got != "embedding" {
+			t.Fatalf("能力位 = %q，期望 embedding", got)
+		}
+		if len(embed.Protocols) != 0 {
+			t.Fatalf("协议 = %v，期望留空（embedContent 是接口动作，不是线协议）", embed.Protocols)
 		}
 	})
 
@@ -159,7 +167,17 @@ func TestSyncModelsMetadataMissing(t *testing.T) {
 			t.Fatalf("%s 的长度类元数据 = %v / %v，期望留空", name, row.ContextWindow, row.MaxOutput)
 		}
 		if len(row.Protocols) != 0 || len(row.Capabilities) != 0 {
-			t.Fatalf("%s 的协议/能力位 = %v / %v，期望留空", name, row.Protocols, row.Capabilities)
+			if name != "zero" {
+				t.Fatalf("%s 的协议/能力位 = %v / %v，期望留空", name, row.Protocols, row.Capabilities)
+			}
+			// zero 声明了 supported_endpoints:["/embeddings"]：端点名认得出就折成向量化的
+			// 协议与能力位，长度类仍然留空（见 DESIGN 5.15）。
+			if got := strings.Join(row.Protocols, ","); got != gateway.ProtocolEmbeddings {
+				t.Fatalf("zero 的协议 = %q，期望 %q", got, gateway.ProtocolEmbeddings)
+			}
+			if got := strings.Join(row.Capabilities, ","); got != "embedding" {
+				t.Fatalf("zero 的能力位 = %q，期望 embedding", got)
+			}
 		}
 		if row.Source != store.SourceSync {
 			t.Fatalf("%s 的来源 = %q，期望 sync", name, row.Source)

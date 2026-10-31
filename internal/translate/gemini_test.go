@@ -47,12 +47,14 @@ func TestGeminiPathTarget(t *testing.T) {
 			t.Fatalf("GeminiPathTarget(%q) = %q,%v,%v，期望 %q,%v,%v",
 				c.path, model, stream, ok, c.model, c.stream, c.ok)
 		}
-		// PathProtocol 与它同一个口径：两条路都得说 gemini。
+		// PathProtocol 与它差一条：向量化动作也算 gemini 入站（DESIGN 5.15）。
 		got, ok := PathProtocol(c.path)
-		if c.ok && (!ok || got != ProtocolGemini) {
+		embedPath := strings.HasSuffix(c.path, ":embedContent")
+		wantProtocol := c.ok || embedPath
+		if wantProtocol && (!ok || got != ProtocolGemini) {
 			t.Fatalf("PathProtocol(%q) = %q,%v，期望 gemini", c.path, got, ok)
 		}
-		if !c.ok && ok {
+		if !wantProtocol && ok {
 			t.Fatalf("PathProtocol(%q) 不该认成任何协议", c.path)
 		}
 	}

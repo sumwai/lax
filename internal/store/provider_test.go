@@ -39,6 +39,9 @@ var seedRoutes = []struct {
 	// 0009 种的 gemini 厂商：模型列表在 /v1beta/models，转发路径把模型名放在路径里（占位符原样落库）。
 	{"google-gemini", "https://generativelanguage.googleapis.com", "gemini",
 		"/v1beta/models/{model}:generateContent", "/v1beta/models", 9},
+	// 0017 只给这两家种向量化路由（DESIGN 5.15）。
+	{"openai", "https://api.openai.com", "openai-embeddings", "/v1/embeddings", "", 17},
+	{"ollama", "http://127.0.0.1:11434", "openai-embeddings", "/v1/embeddings", "", 17},
 }
 
 // seedRoutesBefore 给出某一次迁移之前就已经在库里的路由，用来搭「停在那个版本」的老库：

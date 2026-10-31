@@ -31,6 +31,8 @@ const (
 	// ProtocolSystemOne 是第五条线协议：一个 state 加一组 questions，不出文本、没有流式。
 	// 它只与自己互通，也不进中间表示（DESIGN 5.14）。
 	ProtocolSystemOne = translate.ProtocolSystemOne
+	// ProtocolEmbeddings 是第六条线协议：向量化，只做同协议直通，没有流式（DESIGN 5.15）。
+	ProtocolEmbeddings = translate.ProtocolEmbeddings
 
 	// InboundAnthropic 保留给旧调用方，等价于 ProtocolAnthropic。
 	InboundAnthropic = translate.ProtocolAnthropic
@@ -92,7 +94,7 @@ func New(o Options) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
-	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses", systemOnePath} {
+	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses", systemOnePath, embeddingsPath} {
 		mux.HandleFunc(path, s.handleInbound)
 	}
 	// gemini 的模型名在路径里（/v1beta/models/{model}:generateContent），按前缀注册，
@@ -148,9 +150,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"accounts": len(accounts),
 		"enabled":  enabled,
 		"models":   len(models),
-		"inbound":  []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini, ProtocolSystemOne},
-		"outbound": []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini, ProtocolSystemOne},
-		"passthru": "同协议直通，跨协议经中间表示转换",
+		"inbound":  []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini, ProtocolSystemOne, ProtocolEmbeddings},
+		"outbound": []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini, ProtocolSystemOne, ProtocolEmbeddings},
+		"passthru": "同协议直通，跨协议经中间表示转换（向量化与 systemone 只做同协议直通）",
 	})
 }
 
@@ -200,15 +202,22 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// gemini 的报文里没有模型名（它在路径上），流式也由路径后缀表示而非请求体里的 stream
 	// 字段：两个值都按路径注入（DESIGN 5.9）。用 EscapedPath 取值，模型名里的 %2F 因此仍是
 	// 一个路径段，PathUnescape 能还原成 org/gemini。
+	// 路径后缀是 :embedContent 时这条请求是向量化而不是对话（DESIGN 5.15）：动作决定往下走哪条
+	// 分支，模型名与是否对话仍按路径注入。
 	var pathModel string
 	var pathStream bool
-	if inbound == ProtocolGemini {
-		model, stream, ok := translate.GeminiPathTarget(r.URL.EscapedPath())
+	var embedding bool
+	switch {
+	case inbound == ProtocolGemini:
+		model, action, ok := translate.GeminiPathAction(r.URL.EscapedPath())
 		if !ok {
 			writeError(w, http.StatusNotFound, "not_found_error", "未知路径 "+r.URL.Path)
 			return
 		}
-		pathModel, pathStream = model, stream
+		pathModel, pathStream = model, action == translate.GeminiActionStream
+		embedding = action == translate.GeminiActionEmbed
+	case inbound == ProtocolEmbeddings:
+		embedding = true
 	}
 	if r.Method != http.MethodPost {
 		// 405 带上 `Allow: POST`，与两个只读清单接口的 `Allow: GET` 对称：
@@ -239,14 +248,29 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req *translate.Request
-	if inbound == ProtocolSystemOne {
+	switch {
+	case inbound == ProtocolSystemOne:
 		// 这条协议的编解码器不存在（它不进中间表示），最少校验也只在本机做那三条（DESIGN 5.14）。
 		req, err = decodeSystemOneRequest(raw)
 		if err != nil {
 			writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", "systemone: "+err.Error())
 			return
 		}
-	} else {
+	case inbound == ProtocolEmbeddings:
+		// 向量化也没有编码器（DESIGN 5.15），最少校验与 systemone 同一个形状。
+		req, err = decodeEmbeddingsRequest(raw)
+		if err != nil {
+			writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", "向量化: "+err.Error())
+			return
+		}
+	case embedding:
+		// gemini 的 :embedContent 读的是 content，不是对话的 contents，因此不并到下面那一支。
+		req, err = decodeGeminiEmbedRequest(raw)
+		if err != nil {
+			writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", "gemini 向量化: "+err.Error())
+			return
+		}
+	default:
 		req, err = translate.DecodeRequest(inbound, raw)
 		if err != nil {
 			writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", inbound+": "+err.Error())
@@ -314,22 +338,38 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		// 有效出站协议只有一处算：账号覆盖 → 目录里这个模型支持的协议 → 厂商的有效默认协议
 		// （store.EffectiveProtocol，见 DESIGN 5.13）。账号行不再存协议，cand.Protocol 只是厂商默认
 		// 协议的展示值；有效价格与上下文长度同理只从 store.EffectiveModels 取，网关不重算优先级。
-		outbound, err := s.store.EffectiveProtocol(cand.ID, req.Model)
-		if err != nil {
-			// 读库失败不猜协议：猜出来的协议会打到这家没声明的路径上，报错比打错地址好。
-			s.logf("读账号 %s 模型 %s 的有效协议失败: %v", cand.Name, req.Model, err)
-			lastErr = fmt.Sprintf("账号 %s：读有效出站协议失败（%v），先运行 lax doctor 检查数据库",
-				cand.Name, err)
-			onlyInterop = false
-			continue
-		}
-		if outbound == "" {
-			// 算不出协议说明配置缺一条路由，不是这个账号这一次打不通：不落冷却，
-			// 只换下一个候选继续试（别的账号可能配好了），文案给下一步命令。
-			lastErr = s.noProtocolMessage(cand, req.Model)
-			s.logf("账号 %s 的模型 %s 算不出有效出站协议", cand.Name, req.Model)
-			onlyInterop = false
-			continue
+		// 向量化是例外：它的协议由厂商声明的那条路由决定，不按模型的有效协议猜（DESIGN 5.15）。
+		var outbound string
+		if embedding {
+			var msg string
+			outbound, msg = s.embeddingOutbound(cand, inbound)
+			if outbound == "" {
+				// 厂商没声明路由：这不是这个账号这一次打不通（不落冷却、不写请求记录），
+				// 也换不了号解决，与协议不相通一样记下来当 400。
+				interopRejected = msg
+				lastErr = msg
+				s.logf("账号 %s：%s", cand.Name, msg)
+				continue
+			}
+		} else {
+			var err error
+			outbound, err = s.store.EffectiveProtocol(cand.ID, req.Model)
+			if err != nil {
+				// 读库失败不猜协议：猜出来的协议会打到这家没声明的路径上，报错比打错地址好。
+				s.logf("读账号 %s 模型 %s 的有效协议失败: %v", cand.Name, req.Model, err)
+				lastErr = fmt.Sprintf("账号 %s：读有效出站协议失败（%v），先运行 lax doctor 检查数据库",
+					cand.Name, err)
+				onlyInterop = false
+				continue
+			}
+			if outbound == "" {
+				// 算不出协议说明配置缺一条路由，不是这个账号这一次打不通：不落冷却，
+				// 只换下一个候选继续试（别的账号可能配好了），文案给下一步命令。
+				lastErr = s.noProtocolMessage(cand, req.Model)
+				s.logf("账号 %s 的模型 %s 算不出有效出站协议", cand.Name, req.Model)
+				onlyInterop = false
+				continue
+			}
 		}
 
 		if msg := protocolInteropError(inbound, outbound, req.Model); msg != "" {
@@ -342,7 +382,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		onlyInterop = false
 
 		attemptStart := s.now()
-		res := s.tryUpstream(r.Context(), w, cand, outbound, inbound, r.Header, raw, req, session)
+		res := s.tryUpstream(r.Context(), w, cand, outbound, inbound, r.Header, raw, req, session, embedding)
 		latency := s.now().Sub(attemptStart)
 
 		// 两列正好分工（DESIGN 5.12）：model_requested 记客户端给的名字（可能是别名），
@@ -505,14 +545,15 @@ func sessionFromBody(raw []byte) string {
 }
 
 func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store.Account, outbound string,
-	inbound string, inboundHeaders http.Header, raw []byte, req *translate.Request, session string) attempt {
+	inbound string, inboundHeaders http.Header, raw []byte, req *translate.Request, session string,
+	embedding bool) attempt {
 
 	key, err := secret.Decrypt(s.key, a.KeyCipher)
 	if err != nil {
 		return attempt{status: http.StatusInternalServerError, message: "解密账号凭据失败"}
 	}
 
-	upReq, err := s.buildRequest(ctx, a, outbound, inbound, inboundHeaders, raw, req, string(key), session)
+	upReq, err := s.buildRequest(ctx, a, outbound, inbound, inboundHeaders, raw, req, string(key), session, embedding)
 	if err != nil {
 		// 本地构造请求失败（编码、拼地址），请求根本没发出去：与网络无关，不走连接层档，
 		// 仍按 502 的 5xx 档冷却。
@@ -556,7 +597,7 @@ func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store
 // session 是本次请求的会话键（必要时是空串），供附加头的 {session} 用；模型名取 req.Model。
 func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, inbound string,
 	inboundHeaders http.Header, raw []byte,
-	req *translate.Request, key, session string) (*http.Request, error) {
+	req *translate.Request, key, session string, embedding bool) (*http.Request, error) {
 
 	// 路由的 path 里可以有 {model} 占位符（gemini 的模型名在路径里，见 DESIGN 5.9）：
 	// 先拼好地址再替换，替换后才是真正要访问的 URL。gemini 的流式另走
@@ -569,6 +610,11 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, in
 	endpoint := modelEndpoint(upstream, req.Model)
 	if outbound == ProtocolGemini && req.Stream {
 		endpoint = geminiStreamEndpoint(endpoint)
+	}
+	if embedding && outbound == ProtocolGemini {
+		// gemini 的向量化是另一个接口动作（:embedContent），路由里存的是对话那个后缀，
+		// 这里只换后缀、不动查询串与模型名（DESIGN 5.15）。
+		endpoint = geminiEmbedEndpoint(endpoint)
 	}
 
 	var body []byte
@@ -651,6 +697,9 @@ func (s *Server) jsonSuccess(w http.ResponseWriter, resp *http.Response,
 		case outbound == ProtocolSystemOne:
 			// 决策协议没有编解码器（它不进中间表示），用量两个字段直读；响应体不改写。
 			res.inTok, res.outTok = systemOneUsage(body)
+		case outbound == ProtocolEmbeddings:
+			// 向量化同样没有编解码器，用量只有一个 prompt_tokens（DESIGN 5.15）。
+			res.inTok = embeddingsUsage(body)
 		default:
 			if parsed, err := translate.DecodeResponse(outbound, body, req.Model); err == nil {
 				res.inTok, res.outTok = parsed.Usage.In, parsed.Usage.Out
@@ -1122,6 +1171,9 @@ func Endpoint(base, protocol string) string {
 		suffix = "/messages"
 	case ProtocolResponses:
 		suffix = "/responses"
+	case ProtocolEmbeddings:
+		// 向量化没有厂商路由时猜 /v1/embeddings：与 OpenAI 的路径一致，ollama 的兼容层同样认它。
+		suffix = "/embeddings"
 	case ProtocolSystemOne:
 		// 决策协议的出站路径与入站路径同名（DESIGN 5.14）；漏了这一格，猜出来的会是对话路径。
 		suffix = "/systemone"
@@ -1411,7 +1463,8 @@ func writeError(w http.ResponseWriter, status int, kind, message string) {
 // message 由调用方给：上游原话在 tryUpstream 里已经过 scrubSecret（DESIGN 5.6）。
 func writeInboundError(w http.ResponseWriter, inbound string, status int, kind, message string) {
 	switch inbound {
-	case ProtocolChat, ProtocolResponses:
+	case ProtocolChat, ProtocolResponses, ProtocolEmbeddings:
+		// 向量化是 OpenAI 的报文，错误体也是那一套（DESIGN 5.15）。
 		writeJSON(w, status, map[string]any{"error": map[string]any{
 			"message": message,
 			"type":    openAIErrorType(kind),

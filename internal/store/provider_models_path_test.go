@@ -114,6 +114,7 @@ func TestMigration0008UpgradesOldDatabase(t *testing.T) {
 		t.Fatalf("数路由行: %v", err)
 	}
 	if nRoutes != len(seedRoutes)+1 {
+		// seedRoutes 已含 0017 的两条向量化路由；这里多出来的一条是测试自己建的 myco。
 		t.Fatalf("升级后的路由数 = %d，期望 %d", nRoutes, len(seedRoutes)+1)
 	}
 }

@@ -21,7 +21,7 @@ func TestEndpointProtocolMapping(t *testing.T) {
 		{"gemini 端点带斜杠", "/generateContent", ProtocolGemini, true},
 		{"gemini 端点不带斜杠", "generateContent", ProtocolGemini, true},
 		{"只认表里列出的写法，大小写不猜", "/Messages", "", false},
-		{"embedding 端点不是协议", "/embeddings", "", false},
+		{"向量化端点折成 openai-embeddings", "/embeddings", ProtocolEmbeddings, true},
 		{"空串不计", "", "", false},
 	}
 	for _, c := range cases {

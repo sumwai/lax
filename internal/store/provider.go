@@ -44,7 +44,7 @@ var defaultProtocolOrder = []string{
 // （DESIGN 5.8）。systemone 排在最后，是因为决策协议不该在厂商同时声明 chat 与 systemone 时
 // 被选成默认：对话客户端打到决策端点上只会拿到 400。
 var modelProtocolOrder = append(append([]string{}, defaultProtocolOrder...),
-	translate.ProtocolGemini, translate.ProtocolSystemOne)
+	translate.ProtocolEmbeddings, translate.ProtocolGemini, translate.ProtocolSystemOne)
 
 // Provider 是一行厂商。行里只有默认地址、默认协议、模型列表覆盖与备注，
 // 协议的路径细节都在 ProviderRoute 上。账号行只存厂商名，地址与默认协议都从这里读
@@ -180,20 +180,21 @@ func (s *Store) ProviderProtocols(provider string) ([]string, error) {
 	return out, nil
 }
 
-// IsWireProtocol 判断一个取值是不是线协议。五个值都认：三条入站对话协议加 gemini，再加上
-// systemone。gemini 入站有两条路径、两个方向的流式都支持（DESIGN 5.9），systemone 的入站与
-// 出站是同一个 POST /v1/systemone（DESIGN 5.14）；它们同样是线上的协议取值，账号的 --protocol、
-// 厂商路由与默认协议、探活候选都用这一个判定：cli 不另写一份名单，两处名单迟早会对不上。
+// IsWireProtocol 判断一个取值是不是线协议。六个值都认：三条入站对话协议加 gemini，再加上
+// systemone 与 openai-embeddings。gemini 入站有两条路径、两个方向的流式都支持（DESIGN 5.9），
+// systemone 的入站与出站是同一个 POST /v1/systemone（DESIGN 5.14），向量化的入站与出站分别是
+// /v1/embeddings 与厂商路由声明的向量化路径（DESIGN 5.15）；它们同样是线上的协议取值，
+// 账号的 --protocol、厂商路由与默认协议、探活候选都用这一个判定：cli 不另写一份名单，两处名单迟早会对不上。
 func IsWireProtocol(protocol string) bool {
 	switch protocol {
 	case translate.ProtocolAnthropic, translate.ProtocolChat, translate.ProtocolResponses,
-		translate.ProtocolGemini, translate.ProtocolSystemOne:
+		translate.ProtocolGemini, translate.ProtocolSystemOne, translate.ProtocolEmbeddings:
 		return true
 	}
 	return false
 }
 
-// WireProtocols 是全部线协议，按文档里列的顺序（入站三条在前，gemini 与 systemone 在后）。
+// WireProtocols 是全部线协议，按文档里列的顺序（入站三条在前，gemini、systemone 与向量化在后）。
 // 错误文案只从这一份清单拼，不另写一串字面量。
 func WireProtocols() []string {
 	return []string{
@@ -202,6 +203,7 @@ func WireProtocols() []string {
 		translate.ProtocolResponses,
 		translate.ProtocolGemini,
 		translate.ProtocolSystemOne,
+		translate.ProtocolEmbeddings,
 	}
 }
 
@@ -682,6 +684,8 @@ func protocolFlagName(protocol string) string {
 		return "gemini"
 	case translate.ProtocolSystemOne:
 		return "systemone"
+	case translate.ProtocolEmbeddings:
+		return "embeddings"
 	}
 	return protocol
 }

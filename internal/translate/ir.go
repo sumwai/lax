@@ -18,6 +18,9 @@ const (
 	ProtocolResponses = "openai-responses"
 	ProtocolGemini    = "gemini"
 	ProtocolSystemOne = "systemone"
+	// ProtocolEmbeddings 是向量化的线协议（OpenAI 的 /v1/embeddings 报文，见 5.15）。
+	// 它没有消息序列，编解码器也不认它：网关只做同协议直通，translate 只用这个常量。
+	ProtocolEmbeddings = "openai-embeddings"
 )
 
 // 结束原因统一成 anthropic 的四种说法，各协议编码时再翻回自己的词。
@@ -456,7 +459,9 @@ func PathProtocol(path string) (string, bool) {
 	case "/v1/responses":
 		return ProtocolResponses, true
 	}
-	if _, _, ok := GeminiPathTarget(path); ok {
+	if _, _, ok := GeminiPathAction(path); ok {
+		// 三个动作都算 gemini：向量化的 :embedContent 也落在这条入站协议上（DESIGN 5.15），
+		// 它不进中间表示，但报文确实走 gemini 的形状。
 		return ProtocolGemini, true
 	}
 	return "", false

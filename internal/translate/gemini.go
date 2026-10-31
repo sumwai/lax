@@ -29,33 +29,64 @@ const (
 	GeminiInboundPathPrefix = "/v1beta/models/"
 	geminiGenerateAction    = ":generateContent"
 	geminiStreamAction      = ":streamGenerateContent"
+	geminiEmbedAction       = ":embedContent"
 )
+
+// GeminiAction 是 gemini 入站路径末尾的接口动作。前两个是对话（DESIGN 5.9），
+// embedContent 是向量化（DESIGN 5.15）：它与对话不互通，也不经中间表示。
+// 动作名就是上游路径里的后缀，拼写与上游一致。
+type GeminiAction string
+
+const (
+	GeminiActionGenerate GeminiAction = "generateContent"
+	GeminiActionStream   GeminiAction = "streamGenerateContent"
+	GeminiActionEmbed    GeminiAction = "embedContent"
+)
+
+// GeminiActionSuffix 把动作折回路径后缀，供拼接出站地址时替换用。
+func GeminiActionSuffix(action GeminiAction) string { return ":" + string(action) }
 
 // GeminiPathTarget 从 gemini 的入站路径里取出模型名与是否流式。
 // 模型名是前缀与动作后缀之间的那一段，按 url.PathUnescape 还原（`org%2Fgemini` 落成
-// `org/gemini`，不会被拆成两段路径）；后缀不是这两个动作、或模型名为空时返回 ok=false。
+// `org/gemini`，不会被拆成两段路径）；后缀不是生成类动作（generateContent 与
+// streamGenerateContent）、或模型名为空时返回 ok=false。向量化动作不算在这里：
+// 它自己去 GeminiPathAction 取，取到之后就不是一条对话请求了。
 // 转义串本身不合法时按原文返回：这样的名字匹配不上任何账号，404 比 400 更贴近事实。
 func GeminiPathTarget(path string) (model string, stream, ok bool) {
+	model, action, ok := GeminiPathAction(path)
+	if !ok || action == GeminiActionEmbed {
+		return "", false, false
+	}
+	return model, action == GeminiActionStream, true
+}
+
+// GeminiPathAction 同上，但把三种动作都认全：调用方拿到的 action 决定这条请求是对话还是
+// 向量化，对话里再按 stream 与否分两种（DESIGN 5.9、5.15）。
+func GeminiPathAction(path string) (model string, action GeminiAction, ok bool) {
 	rest, found := strings.CutPrefix(path, GeminiInboundPathPrefix)
 	if !found {
-		return "", false, false
+		return "", "", false
 	}
 	switch {
 	case strings.HasSuffix(rest, geminiStreamAction):
 		rest = strings.TrimSuffix(rest, geminiStreamAction)
-		stream = true
+		action = GeminiActionStream
 	case strings.HasSuffix(rest, geminiGenerateAction):
 		rest = strings.TrimSuffix(rest, geminiGenerateAction)
+		action = GeminiActionGenerate
+	case strings.HasSuffix(rest, geminiEmbedAction):
+		rest = strings.TrimSuffix(rest, geminiEmbedAction)
+		action = GeminiActionEmbed
 	default:
-		return "", false, false
+		return "", "", false
 	}
 	if unescaped, err := url.PathUnescape(rest); err == nil {
 		rest = unescaped
 	}
 	if strings.TrimSpace(rest) == "" {
-		return "", false, false
+		return "", "", false
 	}
-	return rest, stream, true
+	return rest, action, true
 }
 
 // GeminiRequest 是 POST {base}/v1beta/models/{model}:generateContent 的请求体。

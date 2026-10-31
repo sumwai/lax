@@ -195,8 +195,9 @@ func (s *Server) SyncModelsWithEndpoint(ctx context.Context, a store.Account, en
 	return names, nil
 }
 
-// catalogModels 把清单折成目录行：来源一律 `sync`，四列元数据里 capabilities 留空
-// （`supported_parameters` 的形状各家不同，等有消费者再解析，见 DESIGN 5.13）。
+// catalogModels 把清单折成目录行：来源一律 `sync`。能力位只写上游真的声明过的那两类
+// （chat / embedding，见 entryCapabilities）；supported_parameters 这类形状各家不同的字段仍不解析
+// （见 DESIGN 5.13）。
 func catalogModels(models []listModel) []store.ProviderModel {
 	rows := make([]store.ProviderModel, 0, len(models))
 	for _, model := range models {
@@ -206,6 +207,7 @@ func catalogModels(models []listModel) []store.ProviderModel {
 			ContextWindow: model.contextWindow,
 			MaxOutput:     model.maxOutput,
 			Protocols:     model.protocols,
+			Capabilities:  model.capabilities,
 		})
 	}
 	return rows
@@ -309,11 +311,27 @@ type listModel struct {
 	maxOutput     *int64
 	// protocols 是这条条目声明的线协议集合，按 wireProtocolOrder 的固定顺序排列。
 	protocols []string
+	// capabilities 是条目声明过的能力位（chat / embedding），按 capabilityOrder 排列。
+	// 空集合是「上游没说」，不表示不支持（DESIGN 5.13）。
+	capabilities []string
 }
 
-// generateContentMethod 是 gemini 清单里「这个模型能做生成」的方法名。它同时决定两件事：
-// 清单过滤（见 modelEntries）与协议折算（只有它折成 gemini 协议，countTokens 与 embedContent 不算）。
-const generateContentMethod = "generateContent"
+// generateContentMethod 是 gemini 清单里「这个模型能做生成」的方法名，它折成 gemini 协议。
+// 与它并列的 embedContent / batchEmbedContents 折成能力位 embedding（见 entryCapabilities）：
+// 它们不是线协议，而是这个模型能干什么（DESIGN 5.15）。
+const (
+	generateContentMethod = "generateContent"
+	embedContentMethod    = "embedContent"
+	batchEmbedMethod      = "batchEmbedContents"
+)
+
+// 能力位取值与它们的固定顺序（DESIGN 5.13）：chat 在前，embedding 在后。
+const (
+	capabilityChat      = "chat"
+	capabilityEmbedding = "embedding"
+)
+
+var capabilityOrder = []string{capabilityChat, capabilityEmbedding}
 
 // endpointProtocols 是「上游清单里声明的端点名 → 线协议」的映射，放在 gateway 而不是 translate：
 // 它服务的是模型同步与探活这两件上游侧的事（同步时写进目录、探活时据此排候选），
@@ -326,13 +344,14 @@ var endpointProtocols = map[string]string{
 	"/chat/completions": ProtocolChat,
 	"/responses":        ProtocolResponses,
 	"/systemone":        ProtocolSystemOne,
+	"/embeddings":       ProtocolEmbeddings,
 	"/generateContent":  ProtocolGemini,
 	"generateContent":   ProtocolGemini,
 }
 
 // wireProtocolOrder 是协议集合落库与排候选的固定顺序（见 DESIGN 5.13）：同一份上游数据多跑几次
-// 得到同一串，与上游列出端点的先后无关。
-var wireProtocolOrder = []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini, ProtocolSystemOne}
+// 得到同一串，与上游列出端点的先后无关。向量化排在最后：它是唯一不会成为对话默认协议的线协议。
+var wireProtocolOrder = []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini, ProtocolSystemOne, ProtocolEmbeddings}
 
 // endpointProtocol 查端点名对应的线协议。表里没有的写法返回 false，调用方直接不计这个取值。
 func endpointProtocol(name string) (string, bool) {
@@ -409,21 +428,17 @@ func nextPageToken(top map[string]json.RawMessage) string {
 // modelEntries 从条目列表里折出清单：名字加元数据，按名字排序去重。缺名字的条目
 // （一个字段都没有、或全是空白）跳过；同名的条目只留第一次出现的那一条，后面的元数据不合并。
 //
-// 响应里真的出现 supportedGenerationMethods 字段时（gemini）按它过滤：只保留该方法列表里含
-// generateContent 的条目，embedding 一类没有这个方法的条目不进清单。没出现这个字段的响应
-// （ollama 的 `/api/tags` 这类）不过滤，否则没有方法列表的上游会被过滤成空列表。
+// 不再按 supportedGenerationMethods 过滤：以前 embedding 一类没有 generateContent 的条目
+// 整条不进清单，于是向量化模型连目录都进不去，也就无法选号。现在它们照旧进目录，
+// 只是能力位记成 embedding（见 DESIGN 5.15），能不能用由可达性与路由判定说。
 //
 // 去前缀与形状无关：凡是以 `models/` 开头的名字都去一个前缀。名字里带前缀的不只 gemini，
 // 而路由的 `{model}` 占位符在请求时只放回裸名，库里存带前缀的名字会让上游收到
 // `models/models/…`（见 DESIGN 5.7）。
 func modelEntries(entries []json.RawMessage) []listModel {
-	filterMethods := hasGenerationMethods(entries)
 	seen := map[string]bool{}
 	var models []listModel
 	for _, entry := range entries {
-		if filterMethods && !supportsGenerateContent(entry) {
-			continue
-		}
 		name := modelEntryName(entry)
 		if name == "" || seen[name] {
 			continue
@@ -434,26 +449,54 @@ func modelEntries(entries []json.RawMessage) []listModel {
 			contextWindow: entryContextWindow(entry),
 			maxOutput:     entryMaxOutput(entry),
 			protocols:     entryProtocols(entry),
+			capabilities:  entryCapabilities(entry),
 		})
 	}
 	sort.Slice(models, func(i, j int) bool { return models[i].name < models[j].name })
 	return models
 }
 
-// hasGenerationMethods 判断这批条目里有没有 supportedGenerationMethods 字段：有就说明这是
-// 「带方法列表」的形状（gemini），按它过滤；一个都没有时（ollama 风格的 `{models:[{name}]}`）
-// 不过滤，否则一个字段都没有的上游会被过滤成空列表。
-func hasGenerationMethods(entries []json.RawMessage) bool {
-	for _, entry := range entries {
-		if _, ok := generationMethods(entry); ok {
-			return true
+// entryCapabilities 把条目声明过的能力位折成 chat / embedding，按 capabilityOrder 排好去重。
+// 两个来源、三种写法（见 DESIGN 5.7 的元数据来源）：
+//
+//   - supportedGenerationMethods 里的 generateContent 是 chat，embedContent 与
+//     batchEmbedContents 是 embedding；
+//   - supported_endpoints 里的 /chat/completions 是 chat，/embeddings 是 embedding。
+//
+// 两个键都没有时返回 nil：上游没说它能干什么，能力位就留空，不硬塞 chat。
+func entryCapabilities(entry json.RawMessage) []string {
+	set := map[string]bool{}
+	if methods, ok := generationMethods(entry); ok {
+		for _, method := range methods {
+			switch method {
+			case generateContentMethod:
+				set[capabilityChat] = true
+			case embedContentMethod, batchEmbedMethod:
+				set[capabilityEmbedding] = true
+			}
 		}
 	}
-	return false
+	if endpoints, ok := entryEndpoints(entry); ok {
+		for _, endpoint := range endpoints {
+			switch endpoint {
+			case "/chat/completions":
+				set[capabilityChat] = true
+			case "/embeddings":
+				set[capabilityEmbedding] = true
+			}
+		}
+	}
+	var out []string
+	for _, capability := range capabilityOrder {
+		if set[capability] {
+			out = append(out, capability)
+		}
+	}
+	return out
 }
 
 // generationMethods 取条目的 supportedGenerationMethods，第二个返回值是字段在不在。
-// 字段在但解不成字符串数组时返回空列表与 true：那种条目没有可用的方法列表，过滤时落选。
+// 字段在但解不成字符串数组时返回空列表与 true：那种条目没有可用的方法列表。
 func generationMethods(entry json.RawMessage) ([]string, bool) {
 	obj := entryObject(entry)
 	value, ok := obj["supportedGenerationMethods"]
@@ -465,11 +508,16 @@ func generationMethods(entry json.RawMessage) ([]string, bool) {
 	return methods, true
 }
 
-// supportsGenerateContent 判断条目的方法列表里有没有 generateContent。没有这个字段的条目
-// 在过滤生效时同样落选：上游既没说它支持生成，就不进清单，宁少不错。
-func supportsGenerateContent(entry json.RawMessage) bool {
-	methods, _ := generationMethods(entry)
-	return slices.Contains(methods, generateContentMethod)
+// entryEndpoints 取条目的 supported_endpoints，第二个返回值是字段在不在。
+func entryEndpoints(entry json.RawMessage) ([]string, bool) {
+	obj := entryObject(entry)
+	value, ok := obj["supported_endpoints"]
+	if !ok {
+		return nil, false
+	}
+	var endpoints []string
+	_ = json.Unmarshal(value, &endpoints)
+	return endpoints, true
 }
 
 // entryContextWindow 取条目的上下文长度：commandcode 与 openrouter 写在 `context_length`，
@@ -775,11 +823,18 @@ func (s *Server) providerProtocols(a store.Account, model string) ([]string, err
 // 404 是路径不存在，405 是方法不允许，403 有的网关就是按路径拒（commandcode 对非 /messages
 // 的 claude-* 就返回 403）；400 只在错误文本指向端点、路径或「不支持该协议」时才算。
 // 401 是凭据问题，与协议无关，不在此列。
-func retryOtherProtocol(res ModelProbe) bool {
+//
+// hasEmbeddings 表示候选里还有向量化那一项：厂商同时声明了 openai-embeddings 路由时，一个
+// 400 也可能是「这个模型不是对话模型」——那种情况下直接判 error 会把一个能用向量化的模型
+// 标成失败（DESIGN 5.15）。有向量化候选时所有 400 都值得再试一次。
+func retryOtherProtocol(res ModelProbe, hasEmbeddings bool) bool {
 	switch res.HTTPStatus {
 	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusForbidden:
 		return true
 	case http.StatusBadRequest:
+		if hasEmbeddings {
+			return true
+		}
 		lower := strings.ToLower(res.Message)
 		for _, hint := range []string{
 			"endpoint", "path", "route", "not supported", "unsupported", "does not support",
@@ -831,6 +886,14 @@ func (s *Server) ProbeModelWithProtocols(ctx context.Context, a store.Account, m
 		return res, err
 	}
 
+	if idx := slices.Index(order, ProtocolEmbeddings); idx >= 0 && idx != len(order)-1 {
+		// 向量化排在最后：它只在对话候选都不成时才值得试，垫在中间会让每个模型探活都多打一次。
+		// 排序只影响候选顺序，不影响已发现协议与目录声明那两步的优先级（DESIGN 5.15）。
+		rest := append([]string{}, order[idx+1:]...)
+		order = append(order[:idx:idx], rest...)
+		order = append(order, ProtocolEmbeddings)
+	}
+
 	// 厂商默认协议那一次是「按厂商配置打」的真相：401 判定与全失败时的结论都取它。
 	// 它不一定排在第一位（已发现的协议会排在前面），所以按下标记下来。
 	primaryIdx := 0
@@ -867,7 +930,7 @@ func (s *Server) ProbeModelWithProtocols(ctx context.Context, a store.Account, m
 			return att.res, storeErr
 		}
 
-		if i == primaryIdx && !retryOtherProtocol(att.res) {
+		if i == primaryIdx && !retryOtherProtocol(att.res, slices.Contains(order, ProtocolEmbeddings)) {
 			// 厂商默认协议那次的明确结论（模型不存在、5xx、网络错误）与协议无关，不必再花调用。
 			s.recordProbeAttempts(a, model, attempts, i)
 			return att.res, nil
@@ -891,11 +954,20 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 	ir := &translate.Request{Model: model}
 	var raw []byte
 	var err error
-	if protocol == ProtocolSystemOne {
+	// embedding 决定这次探活打哪个动作：向量化协议打 embeddings，gemini 的 embedding 模型打
+	// :embedContent。它就是 buildRequest 用来改写路径的那一个开关（DESIGN 5.15）。
+	embedding := protocol == ProtocolEmbeddings ||
+		(protocol == ProtocolGemini && s.geminiEmbeddingOnly(a, model))
+	switch {
+	case protocol == ProtocolSystemOne:
 		// 决策模型的探活不是 max_tokens=1 的对话请求：决策端点不认 messages，发了只会换回 404，
 		// 把「模型可用」误判成「模型不存在」（DESIGN 5.14 的「探活」）。
 		raw, err = systemOneProbeBody(model)
-	} else {
+	case protocol == ProtocolEmbeddings:
+		raw, err = embeddingsProbeBody(model)
+	case embedding:
+		raw, err = geminiEmbedProbeBody()
+	default:
 		ir.MaxTokens = 1
 		ir.Messages = []translate.Message{{
 			Role:   translate.RoleUser,
@@ -909,7 +981,7 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 		return att
 	}
 	// 模型同步没有客户端请求可依，入站头传 nil：客户端头透传只作用于转发路径（DESIGN 5.11）。
-	upReq, err := s.buildRequest(ctx, a, protocol, protocol, nil, raw, ir, key, "")
+	upReq, err := s.buildRequest(ctx, a, protocol, protocol, nil, raw, ir, key, "", embedding)
 	if err != nil {
 		res.setAccess(store.AccessError)
 		res.Message = "构造探活请求失败: " + err.Error()
@@ -977,6 +1049,10 @@ func readProbeUsage(protocol string, body []byte) probeUsage {
 		// 没有缓存与思考两项（DESIGN 5.14）。
 		in, out := systemOneUsage(body)
 		return probeUsage{in: in, out: out}
+	}
+	if protocol == ProtocolEmbeddings {
+		// 向量化同样没有 scanner：只有一个 prompt_tokens，输出恒为 0（DESIGN 5.15）。
+		return probeUsage{in: embeddingsUsage(body)}
 	}
 	scanner, err := translate.NewUsageScanner(protocol)
 	if err != nil {

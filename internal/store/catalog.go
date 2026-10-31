@@ -355,6 +355,12 @@ func (s *Store) ProviderModels(provider string) ([]ProviderModel, error) {
 	return out, rows.Err()
 }
 
+// ProviderModel 是 providerModel 的导出版本：网关探活要看这个模型的能力位才知道打对话还是打向量化
+// （DESIGN 5.15）。读不到行不是错误，第二个返回值为假。
+func (s *Store) ProviderModel(provider, model string) (ProviderModel, bool, error) {
+	return s.providerModel(provider, model)
+}
+
 // providerModel 读目录里的一行。第二个返回值是「有没有这一行」，调用方据此决定要不要回退，
 // 因此没有这一行不算错误。
 func (s *Store) providerModel(provider, model string) (ProviderModel, bool, error) {

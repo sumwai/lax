@@ -36,9 +36,9 @@ var providerSubs = []groupItem{
 // `--base-url` 在 add 里是可选的：三条路由与 models_path 都是整条地址时它拼不进任何地址，
 // 写它只是为了过校验（见 DESIGN 5.8）。
 const (
-	providerAddUsage   = "用法：lax provider add <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]"
-	providerSetUsage   = "用法：lax provider set <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--models-path <路径>] [--default-protocol <协议>] [--note <备注>]"
-	providerUnsetUsage = "用法：lax provider unset <名称> <字段> [<字段>...]\n可用字段：anthropic、openai、responses、gemini、systemone、models-path、default-protocol、note"
+	providerAddUsage   = "用法：lax provider add <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--embeddings <路径>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]"
+	providerSetUsage   = "用法：lax provider set <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--embeddings <路径>] [--models-path <路径>] [--default-protocol <协议>] [--note <备注>]"
+	providerUnsetUsage = "用法：lax provider unset <名称> <字段> [<字段>...]\n可用字段：anthropic、openai、responses、gemini、systemone、embeddings、models-path、default-protocol、note"
 )
 
 // providerUnsetField 是一个可以被 `provider unset` 清掉的字段。字段名用 flag 名，
@@ -56,6 +56,7 @@ var providerUnsetFields = []providerUnsetField{
 	{"responses", "openai-responses 路由", gateway.ProtocolResponses},
 	{"gemini", "gemini 路由", gateway.ProtocolGemini},
 	{"systemone", "systemone 路由", gateway.ProtocolSystemOne},
+	{"embeddings", "openai-embeddings 路由", gateway.ProtocolEmbeddings},
 	{"models-path", "模型列表覆盖", ""},
 	{"default-protocol", "显式默认协议", ""},
 	{"note", "备注", ""},
@@ -296,11 +297,12 @@ func cmdProviderLs(e *Env, args []string) error {
 
 // providerPathFlags 是五个协议 flag 的当前值。add 用它们声明路由，set 用它们覆盖一条路由的路径。
 type providerPathFlags struct {
-	anthropic *string
-	openai    *string
-	responses *string
-	gemini    *string
-	systemone *string
+	anthropic  *string
+	openai     *string
+	responses  *string
+	gemini     *string
+	systemone  *string
+	embeddings *string
 }
 
 func newProviderPathFlags(fs *flagSet) providerPathFlags {
@@ -315,6 +317,9 @@ func newProviderPathFlags(fs *flagSet) providerPathFlags {
 			"这条协议一个 state 加一组问题、不出文本，lax decide 用它，例：\n"+
 			"  lax provider add typesafe --base-url https://api.typesafe.ai --systemone /v1/systemone\n"+
 			"  只声明 systemone 这一条时再加 --default-protocol systemone（固定回退顺序只认 openai-chat → openai-responses → anthropic）"),
+		embeddings: fs.String("embeddings", "", "openai-embeddings 向量化协议的路由路径：相对 --base-url 的完整路径，例如 /v1/embeddings；也可以写整条地址（相对路径的斜杠写法由程序规整）。\n"+
+			"向量化只做同协议直通，/v1/embeddings 入站只打声明了这条路由的厂商，例：\n"+
+			"  lax provider set openai openai-embeddings=/v1/embeddings"),
 	}
 }
 
@@ -335,6 +340,7 @@ func (p providerPathFlags) pairs(fs *flagSet) []providerPathFlag {
 		{"responses", gateway.ProtocolResponses, *p.responses, flagWasSet(fs, "responses")},
 		{"gemini", gateway.ProtocolGemini, *p.gemini, flagWasSet(fs, "gemini")},
 		{"systemone", gateway.ProtocolSystemOne, *p.systemone, flagWasSet(fs, "systemone")},
+		{"embeddings", gateway.ProtocolEmbeddings, *p.embeddings, flagWasSet(fs, "embeddings")},
 	}
 }
 
@@ -388,8 +394,10 @@ func protocolFromCLIName(value, flagName, example string) (string, error) {
 		return gateway.ProtocolGemini, nil
 	case gateway.ProtocolSystemOne:
 		return gateway.ProtocolSystemOne, nil
+	case "embeddings", gateway.ProtocolEmbeddings:
+		return gateway.ProtocolEmbeddings, nil
 	}
-	return "", usagef("%s %q 不认识，可用 anthropic、openai、responses、gemini、systemone（也认线协议全名 openai-chat、openai-responses），例如 %s", flagName, value, example)
+	return "", usagef("%s %q 不认识，可用 anthropic、openai、responses、gemini、systemone、embeddings（也认线协议全名 openai-chat、openai-responses、openai-embeddings），例如 %s", flagName, value, example)
 }
 
 // emptyValueError 是「给了参数但值是空」的统一文案，路径参数规整之后为空也算空。

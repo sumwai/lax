@@ -36,6 +36,10 @@ func inboundProtocol(path string) (string, bool) {
 	if path == systemOnePath {
 		return ProtocolSystemOne, true
 	}
+	if path == embeddingsPath {
+		// 向量化也不进 translate 的协议分发：它没有编解码器，只做同协议直通（DESIGN 5.15）。
+		return ProtocolEmbeddings, true
+	}
 	return translate.PathProtocol(path)
 }
 
@@ -53,6 +57,8 @@ func inboundPath(protocol string) string {
 		return geminiGeneratePath
 	case ProtocolSystemOne:
 		return systemOnePath
+	case ProtocolEmbeddings:
+		return embeddingsPath
 	}
 	return ""
 }
@@ -60,14 +66,18 @@ func inboundPath(protocol string) string {
 // protocolInteropError 判断入站协议与这次算出的有效出站协议能不能互通，返回 400 的文案；
 // 空串表示可以转发。判定只有这一处，两个方向共用它（DESIGN 5.14 的「协议互通」）：
 //
-//   - 入站是 systemone、有效出站协议是另外四种：这条协议只与自己互通；
-//   - 入站是那四条、有效出站协议是 systemone：同样不相通。
+//   - 入站是 systemone、有效出站协议是另外四条：这条协议只与自己互通；
+//   - 入站是那四条、有效出站协议是 systemone：同样不相通；
+//   - 向量化与对话也不相通：向量化模型不产出文本，对话模型也不产出向量（DESIGN 5.15）。
 //
-// 不试图经中间表示转换：决策请求没有对话消息序列，转换规则无从定义，硬转只会把一条决策
-// 请求发成一条错协议的请求（DESIGN 5.4 的中间表示服务的是其余四条）。
+// 不试图经中间表示转换：决策与向量化请求都没有对话消息序列，转换规则无从定义，硬转只会
+// 把一条请求发成一条错协议的请求（DESIGN 5.4 的中间表示服务的是其余四条）。
 func protocolInteropError(inbound, outbound, model string) string {
 	if inbound == outbound {
 		return ""
+	}
+	if inbound == ProtocolEmbeddings || outbound == ProtocolEmbeddings {
+		return embeddingsInteropMessage(inbound, outbound, model)
 	}
 	if inbound != ProtocolSystemOne && outbound != ProtocolSystemOne {
 		return ""
