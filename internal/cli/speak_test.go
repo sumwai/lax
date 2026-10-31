@@ -29,7 +29,7 @@ func TestSpeakUsageErrors(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			code, stdout, stderr := run(t, append([]string{"speak"}, c.args...)...)
+			code, stdout, stderr := run(t, append([]string{"model", "speak"}, c.args...)...)
 			if code != 2 {
 				t.Fatalf("退出码 = %d，期望 2（用法错误）；stderr = %s", code, stderr)
 			}
@@ -60,7 +60,7 @@ func TestTranscribeUsageErrors(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			code, _, stderr := run(t, append([]string{"transcribe"}, c.args...)...)
+			code, _, stderr := run(t, append([]string{"model", "transcribe"}, c.args...)...)
 			if code != 2 && code != 1 {
 				t.Fatalf("退出码 = %d，期望 2（用法错误）或 1（读文件失败）；stderr = %s", code, stderr)
 			}
@@ -96,7 +96,7 @@ func TestSpeakJSONWritesOut(t *testing.T) {
 	}
 
 	out := filepath.Join(t.TempDir(), "out.wav")
-	code, stdout, stderr := run(t, "speak", "--model", "mimo-v2.5-tts", "--text", "hi", "--voice", "Mia",
+	code, stdout, stderr := run(t, "model", "speak", "--model", "mimo-v2.5-tts", "--text", "hi", "--voice", "Mia",
 		"--format", "wav", "--out", out, "--json")
 	if code != 0 {
 		t.Fatalf("speak 退出码 = %d，stderr = %s", code, stderr)

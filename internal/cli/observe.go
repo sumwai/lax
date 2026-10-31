@@ -332,7 +332,7 @@ func modelCell(requested, used string) string {
 }
 
 func cmdCall(e *Env, args []string) error {
-	fs := newFlagSet(e, "call", "手工打一条请求，打印选号过程")
+	fs := newFlagSet(e, "model call", "手工发一条请求，打印选号过程")
 	model := fs.String("model", "", "模型名，留空取第一个账号的第一个模型")
 	protocol := fs.String("protocol", "anthropic", "入站协议：anthropic | chat | responses | gemini，gemini 的模型名走路径")
 	stream := fs.Bool("stream", false, "流式请求")
@@ -348,13 +348,13 @@ func cmdCall(e *Env, args []string) error {
 		// 没有提示词可发。这是「这个命令接不了它」，不是用法写歪了，
 		// 所以走运行失败（退出码 1）并直接指向真正该用的命令。
 		if strings.TrimSpace(*protocol) == gateway.ProtocolSystemOne {
-			return fmt.Errorf("systemone 不是对话协议：一条决策请求由一个 state 加一组问题组成，没有提示词可发，call 发不了它；改用 lax decide --model <模型> --state <文本或 JSON> --noul <名>=<问句>（见 lax decide --help）")
+			return fmt.Errorf("systemone 不是对话协议：一条决策请求由一个 state 加一组问题组成，没有提示词可发，model call 发不了它；改用 lax model decide --model <模型> --state <文本或 JSON> --noul <名>=<问句>（见 lax model decide --help）")
 		}
 		return usagef("不支持的入站协议 %q，可用 anthropic、chat、responses、gemini", *protocol)
 	}
 	prompt := strings.Join(fs.Args(), " ")
 	if prompt == "" {
-		return usagef(`用法：lax call "提示词" [--model 模型] [--protocol 协议] [--stream] [--debug] [--json]
+		return usagef(`用法：lax model call "提示词" [--model 模型] [--protocol 协议] [--stream] [--debug] [--json]
 可用协议：anthropic、chat、responses、gemini`)
 	}
 
@@ -386,7 +386,7 @@ func cmdCall(e *Env, args []string) error {
 	if only, err := systemOneOnlyModel(a.st, usedModel); err != nil {
 		return err
 	} else if only {
-		return fmt.Errorf("模型 %s 的有效出站协议是 systemone：这条协议一个 state 加一组问题、不出文本，没有提示词可以发给它，所以 call 发不了；改用 lax decide --model %s --state <文本或 JSON> --noul <名>=<问句>，或换一个走对话协议的模型（lax model ls 看清单）", usedModel, usedModel)
+		return fmt.Errorf("模型 %s 的有效出站协议是 systemone：这条协议一个 state 加一组问题、不出文本，没有提示词可以发给它，所以 model call 发不了；改用 lax model decide --model %s --state <文本或 JSON> --noul <名>=<问句>，或换一个走对话协议的模型（lax model ls 看清单）", usedModel, usedModel)
 	}
 
 	logf := func(string, ...any) {}

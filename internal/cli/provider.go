@@ -318,7 +318,7 @@ func newProviderPathFlags(fs *flagSet) providerPathFlags {
 			"{model} 是占位符，原样落库，发请求时才换成模型名（按路径段转义），例：\n"+
 			"  lax provider add google-gemini --base-url https://generativelanguage.googleapis.com --gemini /v1beta/models/{model}:generateContent --default-protocol gemini"),
 		systemone: fs.String("systemone", "", "systemone 决策协议的路由路径：相对 --base-url 的完整路径，例如 /v1/systemone；也可以写整条地址（相对路径的斜杠写法由程序规整）。\n"+
-			"这条协议一个 state 加一组问题、不出文本，lax decide 用它，例：\n"+
+			"这条协议一个 state 加一组问题、不出文本，lax model decide 用它，例：\n"+
 			"  lax provider add typesafe --base-url https://api.typesafe.ai --systemone /v1/systemone\n"+
 			"  只声明 systemone 这一条时再加 --default-protocol systemone（固定回退顺序只认 openai-chat → openai-responses → anthropic）"),
 		embeddings: fs.String("embeddings", "", "openai-embeddings 向量化协议的路由路径：相对 --base-url 的完整路径，例如 /v1/embeddings；也可以写整条地址（相对路径的斜杠写法由程序规整）。\n"+

@@ -400,7 +400,7 @@ func TestProviderPathWritesAreNormalized(t *testing.T) {
 	if got := routeMap(mustProviderLs(t)["mine"])["openai-chat"]; got.Path != "/v2/chat/completions" {
 		t.Fatalf("provider set 后的 openai 路由 = %+v，期望 /v2/chat/completions", got)
 	}
-	if code, _, stderr := run(t, "call", "hi", "--model", "m1"); code != 0 {
+	if code, _, stderr := run(t, "model", "call", "hi", "--model", "m1"); code != 0 {
 		t.Fatalf("call 退出码 = %d，stderr = %s", code, stderr)
 	}
 	calls = up.all()
@@ -1571,7 +1571,7 @@ func TestProviderRmForceDisablesAccounts(t *testing.T) {
 	if code, _, stderr := run(t, "account", "enable", "ds1"); code != 0 {
 		t.Fatalf("account enable 退出码 = %d，stderr = %s", code, stderr)
 	}
-	code, out, stderr = run(t, "call", "hi", "--model", "m1")
+	code, out, stderr = run(t, "model", "call", "hi", "--model", "m1")
 	if code != 0 {
 		t.Fatalf("重建厂商后 call 的退出码 = %d，stderr = %s", code, stderr)
 	}
@@ -1977,7 +1977,7 @@ func TestProviderPathsAcceptFullAddress(t *testing.T) {
 	if code, _, stderr := addAccount(t, "split1", "split", "", "", "--key", "sk-test", "--models", "m1"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if code, _, stderr := run(t, "call", "hi", "--model", "m1"); code != 0 {
+	if code, _, stderr := run(t, "model", "call", "hi", "--model", "m1"); code != 0 {
 		t.Fatalf("call 退出码 = %d，stderr = %s", code, stderr)
 	}
 	call := other.mustSingleCall(t)
@@ -2187,7 +2187,7 @@ func TestProviderAddWithoutBaseURL(t *testing.T) {
 	}
 
 	// 转发：chat 账户打到第二台的整条地址，第一台一条请求都不收。
-	code, callOut, stderr := run(t, "call", "hi", "--model", "m1")
+	code, callOut, stderr := run(t, "model", "call", "hi", "--model", "m1")
 	if code != 0 {
 		t.Fatalf("call 退出码 = %d，stderr = %s", code, stderr)
 	}
@@ -2319,7 +2319,7 @@ func TestProviderSetKeepsBaseURLCoverage(t *testing.T) {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 	anthropicUp.reset()
-	if code, _, stderr := run(t, "call", "hi", "--model", "m1"); code != 0 {
+	if code, _, stderr := run(t, "model", "call", "hi", "--model", "m1"); code != 0 {
 		t.Fatalf("call 退出码 = %d，stderr = %s", code, stderr)
 	}
 	call := anthropicUp.mustSingleCall(t)

@@ -33,12 +33,12 @@ lax log tail                                        # 看请求记录
 | `model price set\|unset\|ls` | 模型单价：目录里的厂商级标价与某账号的覆盖价，`usage` 与 `model ls` 都读它 |
 | `model dialect ls\|set\|unset` | 直接读写模型与操作的方言绑定：看哪个模型绑了哪条方言，改绑或删掉一条 |
 | `model capability add\|set\|unset\|ls` | 模型能力声明：能力位（`speech` / `transcription`）、音色、音频格式与 `--dialect` 的按操作方言绑定；语音端点只打声明过对应能力、绑定过方言的模型，`/v1/models` 也输出这些声明 |
+| `model call` | 手工发一条对话请求，打印选号过程；默认 anthropic 入站，`--protocol` 可切换四种入站，gemini 也支持 `--stream` |
+| `model decide` | 手工发一条 systemone 决策请求（`--state` 加一组问题），打印每个问题的答案与概率；`--json` 给脚本用 |
+| `model speak` | 手工发一条语音合成请求：`--model` 加 `--text`，音频写标准输出或 `--out <文件>`，`--voice` 与 `--format` 可选 |
+| `model transcribe` | 手工发一条语音转写请求：`<音频文件或 ->` 加 `--model`，`--language`、`--prompt` 与 `--format` 可选，响应体原样输出 |
 | `usage` | 按账号、模型或日期汇总用量，含输入、输出与缓存读写 token |
 | `log tail` | 最近的请求记录 |
-| `call` | 手工打一条请求，打印选号过程；默认 anthropic 入站，`--protocol` 可切换四种入站，gemini 也支持 `--stream` |
-| `decide` | 发一条 systemone 决策请求（`--state` 加一组问题），打印每个问题的答案与概率；`--json` 给脚本用 |
-| `speak` | 发一条语音合成请求：`--model` 加 `--text`，音频写标准输出或 `--out <文件>`，`--voice` 与 `--format` 可选 |
-| `transcribe` | 发一条语音转写请求：`<音频文件或 ->` 加 `--model`，`--language`、`--prompt` 与 `--format` 可选，响应体原样输出 |
 | `doctor` | 自检配置、目录、密钥、端口、数据库 |
 
 每个命令都支持 `--json`，结果走 stdout，错误走 stderr。退出码：0 成功、1 运行失败、2 用法错误。
@@ -332,9 +332,9 @@ lax model dialect set mimo-v2.5-tts chat.complete@1 com.example.echo/chat@1 --pr
 
 退出码沿用 0 成功、1 运行失败（含 `plugin doctor` / `plugin verify` 有检查未通过）、2 用法错误；每个子命令都支持 `--json`。
 
-## 决策请求：lax decide
+## 决策请求：lax model decide
 
-systemone 是第五条线协议，不是对话：一条请求由一个 `state` 加一组带名字的问题组成，回的是每个问题的答案与概率（是非题给概率，选择题与打分题给置信度），不产文本。这类模型的入站与出站都是 `POST /v1/systemone`，只与自己互通，也不参与跨协议转换，所以发对话的 `call` 对它一律拒绝（退出码 1，文案指向 `decide`）。厂商一侧多了一条 `--systemone` 路由：
+systemone 是第五条线协议，不是对话：一条请求由一个 `state` 加一组带名字的问题组成，回的是每个问题的答案与概率（是非题给概率，选择题与打分题给置信度），不产文本。这类模型的入站与出站都是 `POST /v1/systemone`，只与自己互通，也不参与跨协议转换，所以发对话的 `model call` 对它一律拒绝（退出码 1，文案指向 `model decide`）。厂商一侧多了一条 `--systemone` 路由：
 
 ```bash
 lax provider add typesafe --base-url https://api.typesafe.ai \
@@ -346,10 +346,10 @@ lax model probe --account ts --model typesafe/jev --protocol systemone   # 只�
 
 `model add` 一次写两张表：模型目录（来源 `manual`，协议集合加上 `systemone`）与账号可达性（`allowed`，账号级协议 `systemone`）。可重复执行，同名再写一次结果相同；从 `forbidden` / `missing` / `error` 翻回 `allowed` 时清掉旧的 HTTP 状态、错误与探活时间，下一轮照常重探。不给 `--account` 无法写可达性，只给模型名是用法错误。只声明 systemone 一条路由时要同时给 `--default-protocol systemone`：固定回退顺序只认 `openai-chat` → `openai-responses` → `anthropic`，不给的话这家厂商算不出默认协议。删这条路由是 `provider unset typesafe systemone`（删掉的正好是默认协议时会被拒绝，先把默认协议改成别的）。
 
-探活按模型声明的协议优先：`model add --protocol systemone` 写下的账号级协议会排在候选最前面，所以 `model probe --account ts` 不会先去打 anthropic 与 openai-chat；`--protocol` 则把候选收窄到这一条。连接层失败（连不上、TLS 超时）会先重试两次，重试完仍失败时不改可达性、保留上一次的 `allowed`；只有 `403`、`404` 与明说模型不存在的 `400` 才改可达性。`model show typesafe/jev` 能直接看到协议、HTTP 状态、探活时间与错误，不用再查库。`decide` 遇到模型不在任何账号清单里时，下一步文案也会指向 `lax model add` 而不是重新建账号。
+探活按模型声明的协议优先：`model add --protocol systemone` 写下的账号级协议会排在候选最前面，所以 `model probe --account ts` 不会先去打 anthropic 与 openai-chat；`--protocol` 则把候选收窄到这一条。连接层失败（连不上、TLS 超时）会先重试两次，重试完仍失败时不改可达性、保留上一次的 `allowed`；只有 `403`、`404` 与明说模型不存在的 `400` 才改可达性。`model show typesafe/jev` 能直接看到协议、HTTP 状态、探活时间与错误，不用再查库。`model decide` 遇到模型不在任何账号清单里时，下一步文案也会指向 `lax model add` 而不是重新建账号。
 
 ```bash
-lax decide --model typesafe/jev --state "客户说：这个月的账单被扣了两次" \
+lax model decide --model typesafe/jev --state "客户说：这个月的账单被扣了两次" \
     --noul "present=Is this text present?" \
     --choice "mood=这是哪一类问题?" --choice "mood:billing=账单与付款,other" \
     --score "anger=有多生气?" --score "anger:calm,mild,angry"

@@ -24,10 +24,10 @@ import (
 // cli 不自己拼上游地址、不碰凭据。
 
 const (
-	speakUsage = "用法：lax speak --model <模型> --text <文本> [--voice <音色>] [--format mp3|opus|aac|flac|wav|pcm] [--out <文件>] [--json]\n" +
+	speakUsage = "用法：lax model speak --model <模型> --text <文本> [--voice <音色>] [--format mp3|opus|aac|flac|wav|pcm] [--out <文件>] [--json]\n" +
 		"  音频默认写到标准输出（可重定向进播放器）；给了 --out 就写文件\n" +
 		"  --json 只输出元信息，音频必须配 --out（JSON 与二进制不混在一起）"
-	transcribeUsage = "用法：lax transcribe <音频文件或 -> --model <模型> [--language <代码>] [--prompt <文本>] [--format json|text|verbose_json|srt|vtt]\n" +
+	transcribeUsage = "用法：lax model transcribe <音频文件或 -> --model <模型> [--language <代码>] [--prompt <文本>] [--format json|text|verbose_json|srt|vtt]\n" +
 		"  文件参数给 - 时从标准输入读；响应体原样写到标准输出"
 )
 
@@ -37,7 +37,7 @@ var speakFormats = map[string]bool{
 }
 
 func cmdSpeak(e *Env, args []string) error {
-	fs := newFlagSet(e, "speak", "发一条语音合成请求（POST /v1/audio/speech），音频写标准输出或文件")
+	fs := newFlagSet(e, "model speak", "发一条语音合成请求（POST /v1/audio/speech），音频写标准输出或文件")
 	model := fs.String("model", "", "模型名：有效出站协议必须是 openai-speech")
 	text := fs.String("text", "", "要合成的文本")
 	voice := fs.String("voice", "alloy", "音色：交给上游判，不认的音色由上游报 400")
@@ -124,7 +124,7 @@ func cmdSpeak(e *Env, args []string) error {
 }
 
 func cmdTranscribe(e *Env, args []string) error {
-	fs := newFlagSet(e, "transcribe", "发一条语音转写请求（POST /v1/audio/transcriptions），响应体原样输出")
+	fs := newFlagSet(e, "model transcribe", "发一条语音转写请求（POST /v1/audio/transcriptions），响应体原样输出")
 	model := fs.String("model", "", "模型名：有效出站协议必须是 openai-transcriptions")
 	language := fs.String("language", "", "音频语言的 ISO-639-1 代码，例如 zh、en；不给就交给上游自动判断")
 	prompt := fs.String("prompt", "", "提示词：给上游一点上下文（专有名词、标点风格）")

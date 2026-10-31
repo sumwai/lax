@@ -431,7 +431,7 @@ func TestAccountSetRotatesKey(t *testing.T) {
 	}
 
 	// 新 key 能真的用上：假上游只接受 Bearer sk-test，调通就说明换的是它。
-	code, out, stderr = run(t, "call", "hi", "--model", "m1")
+	code, out, stderr = run(t, "model", "call", "hi", "--model", "m1")
 	if code != 0 {
 		t.Fatalf("call 退出码 = %d，stderr = %s", code, stderr)
 	}
@@ -465,7 +465,7 @@ func TestAccountSetKeyFromStdin(t *testing.T) {
 		t.Fatalf("account set --key - 退出码 = %d，stderr = %s", code, stderr)
 	}
 	// 首尾空白被去掉、新 key 生效：假上游只认 Bearer sk-test。
-	if code, out, stderr := run(t, "call", "hi", "--model", "m1"); code != 0 {
+	if code, out, stderr := run(t, "model", "call", "hi", "--model", "m1"); code != 0 {
 		t.Fatalf("call 退出码 = %d，stderr = %s", code, stderr)
 	} else if !strings.Contains(out, "pong") {
 		t.Fatalf("call 输出 = %s", out)
@@ -553,7 +553,7 @@ func TestAccountUpdateIsSynonymForSet(t *testing.T) {
 	} else if !strings.Contains(out, "已更新 ds1（custom）的凭据") {
 		t.Fatalf("account update 的输出 = %s，期望与 set 同一段文案", out)
 	}
-	if code, _, stderr := run(t, "call", "hi", "--model", "m1"); code != 0 {
+	if code, _, stderr := run(t, "model", "call", "hi", "--model", "m1"); code != 0 {
 		t.Fatalf("call 退出码 = %d，stderr = %s", code, stderr)
 	}
 

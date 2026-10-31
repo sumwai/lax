@@ -21,7 +21,7 @@ func TestCallEachInboundProtocol(t *testing.T) {
 	}
 
 	for _, protocol := range []string{"anthropic", "chat", "responses"} {
-		code, out, stderr := run(t, "call", "hi", "--model", "m1", "--protocol", protocol)
+		code, out, stderr := run(t, "model", "call", "hi", "--model", "m1", "--protocol", protocol)
 		if code != 0 {
 			t.Fatalf("call --protocol %s 退出码 = %d，stderr = %s", protocol, code, stderr)
 		}
@@ -30,7 +30,7 @@ func TestCallEachInboundProtocol(t *testing.T) {
 		}
 	}
 
-	code, _, stderr := run(t, "call", "hi", "--model", "m1", "--protocol", "nope")
+	code, _, stderr := run(t, "model", "call", "hi", "--model", "m1", "--protocol", "nope")
 	if code != 2 {
 		t.Fatalf("未知协议退出码 = %d，期望 2（用法错误）", code)
 	}
@@ -57,7 +57,7 @@ func TestCallJSONShapeFollowsInboundProtocol(t *testing.T) {
 		"responses": `"object":"response"`,
 	}
 	for protocol, marker := range cases {
-		code, out, stderr := run(t, "call", "hi", "--model", "m1", "--protocol", protocol, "--json")
+		code, out, stderr := run(t, "model", "call", "hi", "--model", "m1", "--protocol", protocol, "--json")
 		if code != 0 {
 			t.Fatalf("call --protocol %s --json 退出码 = %d，stderr = %s", protocol, code, stderr)
 		}
@@ -76,7 +76,7 @@ func TestCallNoModelsHint(t *testing.T) {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	code, out, stderr := run(t, "call", "hi")
+	code, out, stderr := run(t, "model", "call", "hi")
 	if code != 2 {
 		t.Fatalf("没有可用模型时 call 退出码 = %d，期望 2（用法错误）", code)
 	}
@@ -111,7 +111,7 @@ func TestCallGeminiInbound(t *testing.T) {
 		t.Fatalf("account add 失败: %s", stderr)
 	}
 
-	code, out, stderr := run(t, "call", "hi", "--model", "m1", "--protocol", "gemini")
+	code, out, stderr := run(t, "model", "call", "hi", "--model", "m1", "--protocol", "gemini")
 	if code != 0 {
 		t.Fatalf("call --protocol gemini 退出码 = %d，stderr = %s", code, stderr)
 	}
@@ -124,7 +124,7 @@ func TestCallGeminiInbound(t *testing.T) {
 	}
 
 	// --json 打的是入站协议的报文，gemini 的就是 candidates。
-	code, out, stderr = run(t, "call", "hi", "--model", "m1", "--protocol", "gemini", "--json")
+	code, out, stderr = run(t, "model", "call", "hi", "--model", "m1", "--protocol", "gemini", "--json")
 	if code != 0 {
 		t.Fatalf("call --protocol gemini --json 退出码 = %d，stderr = %s", code, stderr)
 	}
@@ -151,7 +151,7 @@ func TestCallGeminiInboundStream(t *testing.T) {
 		t.Fatalf("account add 失败: %s", stderr)
 	}
 
-	code, out, stderr := run(t, "call", "hi", "--model", "m1", "--protocol", "gemini", "--stream")
+	code, out, stderr := run(t, "model", "call", "hi", "--model", "m1", "--protocol", "gemini", "--stream")
 	if code != 0 {
 		t.Fatalf("call --protocol gemini --stream 退出码 = %d，stderr = %s", code, stderr)
 	}
@@ -177,7 +177,7 @@ func TestCallGeminiInboundStreamJSON(t *testing.T) {
 		t.Fatalf("account add 失败: %s", stderr)
 	}
 
-	code, out, stderr := run(t, "call", "hi", "--model", "m1", "--protocol", "gemini", "--stream", "--json")
+	code, out, stderr := run(t, "model", "call", "hi", "--model", "m1", "--protocol", "gemini", "--stream", "--json")
 	if code != 0 {
 		t.Fatalf("退出码 = %d，stderr = %s", code, stderr)
 	}

@@ -142,10 +142,11 @@ func isHelpRequest(args []string) bool {
 }
 
 // printGroupHelp 把组的用途与子命令清单打到 stdout：这是用户要看的结果，不是错误。
+// 名字列宽按最长的那几个（capability、transcribe、transcriptions 一类）留到 11 列。
 func printGroupHelp(w io.Writer, name, purpose string, items []groupItem) {
 	fmt.Fprintf(w, "%s %s — %s\n\n用法：\n  %s %s <子命令> [参数]\n\n子命令：\n", appName, name, purpose, appName, name)
 	for _, it := range items {
-		fmt.Fprintf(w, "  %-9s %s\n", it.name, it.summary)
+		fmt.Fprintf(w, "  %-11s %s\n", it.name, it.summary)
 	}
 	fmt.Fprintf(w, "\n查看某个子命令的参数：%s %s <子命令> --help\n", appName, name)
 }

@@ -663,15 +663,19 @@ var modelSubs = []groupItem{
 	{"price", "模型单价：目录里的厂商级标价与某账号的覆盖价（set / unset / ls）"},
 	{"capability", "模型能力声明：能力位、音色与音频格式（add / set / unset / ls）"},
 	{"dialect", "方言绑定：模型的上游形状由哪条方言描述（ls / set / unset）"},
+	{"call", "手工发一条对话请求，打印选号过程（anthropic / openai-chat / openai-responses / gemini 入站）"},
+	{"decide", "手工发一条 systemone 决策请求，打印每个问题的答案与概率"},
+	{"speak", "手工发一条语音合成请求，音频写标准输出或文件"},
+	{"transcribe", "手工发一条语音转写请求，响应体原样输出"},
 }
 
 // modelSubCommands 是「可用子命令」那条错误文案里的清单，与 modelSubs 同序。
-const modelSubCommands = "ls | show | add | sync | probe | alias | price | capability | dialect"
+const modelSubCommands = "ls | show | add | sync | probe | alias | price | capability | dialect | call | decide | speak | transcribe"
 
 // cmdModel 是 model 这一组子命令的入口。
 func cmdModel(e *Env, args []string) error {
 	if isHelpRequest(args) {
-		printGroupHelp(e.Stdout, "model", "模型同步、探活、别名与单价", modelSubs)
+		printGroupHelp(e.Stdout, "model", "模型同步、探活、别名、单价与手工试打", modelSubs)
 		return nil
 	}
 	if len(args) == 0 {
@@ -696,6 +700,14 @@ func cmdModel(e *Env, args []string) error {
 		return cmdModelCapability(e, args[1:])
 	case "dialect":
 		return cmdModelDialect(e, args[1:])
+	case "call":
+		return cmdCall(e, args[1:])
+	case "decide":
+		return cmdDecide(e, args[1:])
+	case "speak":
+		return cmdSpeak(e, args[1:])
+	case "transcribe":
+		return cmdTranscribe(e, args[1:])
 	default:
 		return usagef("未知子命令 %q，可用：%s\n用 lax model --help 查看子命令", args[0], modelSubCommands)
 	}

@@ -13,7 +13,7 @@ handshake timeout`. No HTTP response had been received for those rows: the failu
 connection, not an upstream statement about the model.
 
 The consequence was worse than one bad row. `store.AllowedModels` only returns `access='allowed'`,
-so a single timeout removed the model from the candidate set. `lax decide` then reported that the
+so a single timeout removed the model from the candidate set. `lax model decide` then reported that the
 model was in no account's list, which reads like a configuration problem rather than a network
 hiccup.
 

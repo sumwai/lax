@@ -93,7 +93,7 @@ func TestWalkingSkeleton(t *testing.T) {
 		t.Fatalf("model ls = %+v", models)
 	}
 
-	code, out, errOut = run(t, "call", "hi", "--model", "m1")
+	code, out, errOut = run(t, "model", "call", "hi", "--model", "m1")
 	if code != 0 {
 		t.Fatalf("call 退出码 = %d，stderr = %s", code, errOut)
 	}
@@ -186,7 +186,7 @@ func TestAccountAddReadsKeyFromStdin(t *testing.T) {
 	}
 
 	// 假上游只接受 Bearer sk-test，能调通就说明首尾空白被去掉、凭据可用。
-	code, out, errOut := run(t, "call", "hi", "--model", "m1")
+	code, out, errOut := run(t, "model", "call", "hi", "--model", "m1")
 	if code != 0 {
 		t.Fatalf("call 退出码 = %d，stderr = %s", code, errOut)
 	}
@@ -220,6 +220,35 @@ func TestAccountEnableDisable(t *testing.T) {
 	code, out, _ = run(t, "account", "ls", "--json")
 	if code != 0 || !strings.Contains(out, `"enabled": true`) || !strings.Contains(out, `"status": "正常"`) {
 		t.Fatalf("启用后状态不对: %s", out)
+	}
+}
+
+// TestManualRequestCommandsLiveUnderModel 钉住四条手工请求命令的位置：它们在 model 一组里，
+// 不是一级子命令。文档与帮助都按这个位置写，分发器与帮助对不上时没人会注意到。
+func TestManualRequestCommandsLiveUnderModel(t *testing.T) {
+	sandbox(t)
+
+	for _, name := range []string{"call", "decide", "speak", "transcribe"} {
+		code, out, errOut := run(t, name)
+		if code != 2 {
+			t.Fatalf("一级子命令 %s 的退出码 = %d，期望 2（已移进 model 一组）", name, code)
+		}
+		if !strings.Contains(errOut, "未知子命令") {
+			t.Fatalf("一级子命令 %s 应报未知子命令: %s", name, errOut)
+		}
+		if out != "" {
+			t.Fatalf("一级子命令 %s 不该写 stdout: %s", name, out)
+		}
+	}
+
+	code, out, errOut := run(t, "model", "--help")
+	if code != 0 {
+		t.Fatalf("model --help 退出码 = %d，stderr = %s", code, errOut)
+	}
+	for _, want := range []string{"call", "decide", "speak", "transcribe"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("model --help 的子命令清单缺 %q:\n%s", want, out)
+		}
 	}
 }
 

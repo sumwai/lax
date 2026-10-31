@@ -26,7 +26,7 @@ const systemOnePath = "/v1/systemone"
 
 // decideUsage 是所有用法错误都会打出来的那一行：参数形状、三种拼问题的写法与整块 JSON 的写法。
 // 用法错误只说「参数错误」等于让人去猜语法（见 AGENTS.md）。
-const decideUsage = "用法：lax decide --model <模型> --state <文本或 JSON> " +
+const decideUsage = "用法：lax model decide --model <模型> --state <文本或 JSON> " +
 	"[--noul <名>=<问句>] [--choice <名>=<问句> --choice <名>:<选项>[,<选项>...]] " +
 	"[--score <名>=<问句> --score <名>:<级别>[,<级别>...]] [--questions <整块 JSON>] [--json]\n" +
 	"  --questions 与 --noul/--choice/--score 二选一：前者给整块 questions 对象，后者按问题逐条拼"
@@ -385,7 +385,7 @@ func pickDecideTarget(st *store.Store, model string) (decideTarget, error) {
 		return decideTarget{}, fmt.Errorf("模型 %s 算不出有效出站协议：厂商 %s 声明了 systemone 路由，但默认协议是空的（回退顺序只认 openai-chat → openai-responses → anthropic，见 DESIGN 5.8）；先运行 lax model add %s --account %s --protocol systemone 把这个模型的协议定下来，或者运行 lax provider set %s --default-protocol systemone 把默认协议补上，或 lax model probe --account %s 把这个模型的协议探出来",
 			resolved, provider, resolved, candidates[0].Name, provider, candidates[0].Name)
 	}
-	return decideTarget{}, fmt.Errorf("模型 %s 以 %s 协议出站，不是 systemone：decide 只发 POST %s 的决策请求，出站协议跟着账号与厂商路由走（见 DESIGN 5.13），这条协议不参与转换；要给这家厂商声明一条 systemone 路由就运行 lax provider set %s --systemone /v1/systemone 再 lax model probe --account %s，要发对话请求就改用 lax call \"提示词\" --model %s，也可以换一个走 systemone 的模型（lax model ls 看清单）",
+	return decideTarget{}, fmt.Errorf("模型 %s 以 %s 协议出站，不是 systemone：model decide 只发 POST %s 的决策请求，出站协议跟着账号与厂商路由走（见 DESIGN 5.13），这条协议不参与转换；要给这家厂商声明一条 systemone 路由就运行 lax provider set %s --systemone /v1/systemone 再 lax model probe --account %s，要发对话请求就改用 lax model call \"提示词\" --model %s，也可以换一个走 systemone 的模型（lax model ls 看清单）",
 		resolved, firstProtocol, systemOnePath, candidates[0].Provider, candidates[0].Name, resolved)
 }
 
@@ -537,7 +537,7 @@ func rawCell(raw json.RawMessage) string {
 // cmdDecide 是 systemone 决策请求的入口：把 state 与问题组发给本进程，打印每个问题的答案与概率。
 // 起网关的方式与 call 一致（起一个只监听回环地址的临时网关），不另写一套连接方式。
 func cmdDecide(e *Env, args []string) error {
-	fs := newFlagSet(e, "decide", "发一条 systemone 决策请求：一个 state 加一组问题，打印每个问题的答案与概率")
+	fs := newFlagSet(e, "model decide", "发一条 systemone 决策请求：一个 state 加一组问题，打印每个问题的答案与概率")
 	model := fs.String("model", "", "模型名：有效出站协议必须是 systemone（别名先按 model alias 解析）")
 	state := fs.String("state", "", "决策要看的材料：纯文本按字符串发；首字符是 {、[ 或 \" 时按 JSON 解析")
 	questionsJSON := fs.String("questions", "", "整块 questions 对象（JSON）：给了它就不再拼问题，与 --noul/--choice/--score 互斥")
