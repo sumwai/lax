@@ -19,3 +19,5 @@ commit in the row so a later reader can tell whether the note still applies.
 | 2026-10-31 | Clients send `role: "system"` turns mid-conversation, and unknown model names enable them | [lessons/2026-10-31-mid-conversation-system.md](lessons/2026-10-31-mid-conversation-system.md) | fixed in 43eb3a2 |
 | 2026-10-31 | Reasoning upstreams require their own CoT back when the request carries tools | [lessons/2026-10-31-reasoning-replay.md](lessons/2026-10-31-reasoning-replay.md) | fixed in 992f421 |
 | 2026-10-31 | A client hanging up looks exactly like a cancelled upstream read | [lessons/2026-10-31-client-hangup-looks-like-upstream-cancel.md](lessons/2026-10-31-client-hangup-looks-like-upstream-cancel.md) | fixed in d77792e |
+| 2026-10-31 | A transport failure must not decide whether a model is reachable | [lessons/2026-10-31-probe-transport-is-not-a-verdict.md](lessons/2026-10-31-probe-transport-is-not-a-verdict.md) | fixed in f1f3c37 |
+| 2026-10-31 | A model-level protocol declaration outranks the provider route list | [lessons/2026-10-31-declared-protocol-filtered-by-routes.md](lessons/2026-10-31-declared-protocol-filtered-by-routes.md) | fixed in f1f3c37 |

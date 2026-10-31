@@ -23,9 +23,11 @@ lax log tail                                        # 看请求记录
 | `serve` | 前台起网关 |
 | `account add\|ls\|set\|rm\|test\|enable\|disable` | 加账号、列账号、换凭据、删账号、探活、启用、停用 |
 | `provider ls\|add\|set\|unset\|rm` | 维护厂商默认地址、默认协议与各协议的路由；`add` 只新建，`set` 只设值，删除走 `unset` |
-| `model ls` | 列出模型、可用账号与状态，可按厂商与账号筛选 |
+| `model ls` | 列出模型、可用账号与状态，可按厂商与账号筛选；`--json` 带每个账号的协议、HTTP 状态、探活时间与错误 |
+| `model show` | 按账号看一个模型的可达性事实：协议、状态、HTTP 状态、探活时间与错误；只读库，不发上游请求 |
+| `model add <模型> --account <账号> [--provider <厂商>] [--protocol <协议>]` | 手写一条「这个账号能用这个模型」，同事务写模型目录与账号可达性；可重复执行，决策模型与不在上游清单里的模型靠它声明 |
 | `model sync` | 从上游拉模型列表，写进本地，可按厂商与账号筛选 |
-| `model probe` | 逐个模型探活，把能用的写进账号，可按厂商与账号筛选 |
+| `model probe` | 逐个模型探活，把能用的写进账号，可按厂商与账号筛选；`--protocol` 只探指定的那一条协议 |
 | `model alias set\|unset\|ls` | 模型别名：把客户端写死的模型名指到真实模型名上，只影响请求方向 |
 | `model price set\|unset\|ls` | 模型单价：目录里的厂商级标价与某账号的覆盖价，`usage` 与 `model ls` 都读它 |
 | `usage` | 按账号、模型或日期汇总用量，含输入、输出与缓存读写 token |
@@ -205,11 +207,14 @@ systemone 是第五条线协议，不是对话：一条请求由一个 `state` �
 ```bash
 lax provider add typesafe --base-url https://api.typesafe.ai \
     --systemone /v1/systemone --default-protocol systemone
-lax account add ts --provider typesafe --key sk-xxx --models typesafe/jev   # 决策模型不在上游清单里，只能手工声明
-lax model probe --account ts
+lax account add ts --provider typesafe --key sk-xxx
+lax model add typesafe/jev --account ts --protocol systemone   # 决策模型不在上游清单里，只能手写声明
+lax model probe --account ts --model typesafe/jev --protocol systemone   # 只探 systemone 这一条路
 ```
 
-只声明 systemone 一条路由时要同时给 `--default-protocol systemone`：固定回退顺序只认 `openai-chat` → `openai-responses` → `anthropic`，不给的话这家厂商算不出默认协议。删这条路由是 `provider unset typesafe systemone`（删掉的正好是默认协议时会被拒绝，先把默认协议改成别的）。
+`model add` 一次写两张表：模型目录（来源 `manual`，协议集合加上 `systemone`）与账号可达性（`allowed`，账号级协议 `systemone`）。可重复执行，同名再写一次结果相同；从 `forbidden` / `missing` / `error` 翻回 `allowed` 时清掉旧的 HTTP 状态、错误与探活时间，下一轮照常重探。不给 `--account` 无法写可达性，只给模型名是用法错误。只声明 systemone 一条路由时要同时给 `--default-protocol systemone`：固定回退顺序只认 `openai-chat` → `openai-responses` → `anthropic`，不给的话这家厂商算不出默认协议。删这条路由是 `provider unset typesafe systemone`（删掉的正好是默认协议时会被拒绝，先把默认协议改成别的）。
+
+探活按模型声明的协议优先：`model add --protocol systemone` 写下的账号级协议会排在候选最前面，所以 `model probe --account ts` 不会先去打 anthropic 与 openai-chat；`--protocol` 则把候选收窄到这一条。连接层失败（连不上、TLS 超时）会先重试两次，重试完仍失败时不改可达性、保留上一次的 `allowed`；只有 `403`、`404` 与明说模型不存在的 `400` 才改可达性。`model show typesafe/jev` 能直接看到协议、HTTP 状态、探活时间与错误，不用再查库。`decide` 遇到模型不在任何账号清单里时，下一步文案也会指向 `lax model add` 而不是重新建账号。
 
 ```bash
 lax decide --model typesafe/jev --state "客户说：这个月的账单被扣了两次" \
