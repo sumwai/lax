@@ -2,7 +2,7 @@
 
 Found: 2026-10-31, from a reported failure where Claude Code on `deepseek-flash` returned
 `400 anthropic: 不支持的消息角色 "system"`.
-Fix: fix in progress, an anthropic decode that accepts a mid-conversation `system` message as an
+Fix: `43eb3a2`, an anthropic decode that accepts a mid-conversation `system` message as an
 IR `RoleSystem` message in place.
 
 ## Symptom
