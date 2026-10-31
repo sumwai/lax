@@ -9,7 +9,7 @@ import (
 	"lax/internal/gateway"
 )
 
-// 这个文件从网关这一层钉住工具约束（DESIGN 5.4「工具定义与选择」）：tools[].strict 只在两条
+// 这个文件从网关这一层钉住工具约束：tools[].strict 只在两条
 // openai 协议之间有落点，跨到 anthropic 与 gemini 必须消失；tool_choice 的白名单在
 // responses 保留、在 chat 降级成 auto、在 gemini 落成 ANY 加 allowedFunctionNames。
 // 这里断言的是假上游真正收到的那份报文。

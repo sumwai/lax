@@ -34,7 +34,7 @@ func accountID(t *testing.T, name string) int64 {
 }
 
 // addPricedAccount 加一个账号并给它的模型定好价，用来断言估算花费的具体金额。
-// 单价在模型目录上（见 DESIGN 5.13），所以定价是第二步 model price set，不再走 account add。
+// 单价在模型目录上，所以定价是第二步 model price set，不再走 account add。
 func addPricedAccount(t *testing.T, name, priceIn, priceOut string) {
 	t.Helper()
 	if code, _, stderr := addAccount(t, name, "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-1", "--models", "m1"); code != 0 {

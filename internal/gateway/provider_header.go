@@ -10,7 +10,7 @@ import (
 	"lax/internal/store"
 )
 
-// 厂商附加请求头的模板展开与注入（DESIGN 5.10）。声明存在 provider_headers 里，值可能是字面量，
+// 厂商附加请求头的模板展开与注入。声明存在 provider_headers 里，值可能是字面量，
 // 也可能是 {env:NAME}、{session}、{model} 三种占位符。展开只发生在发上游请求之前：入站响应、
 // `/v1/models` 这类只读接口、以及 requests 记录都不受影响。
 //
@@ -89,8 +89,8 @@ func expandProviderHeaderValue(tmpl string, in providerHeaderInput) (value, reas
 }
 
 // applyProviderHeaders 把 (厂商, 协议) 的有效附加头叠到已经配好凭据头的上游请求上。
-// 顺序固定为「先 setAuth 设默认凭据头，再叠声明」：同名时声明覆盖默认，这就是 DESIGN 5.10 的
-// 「声明优先」。冲突只在顺序上判一次，写入口不做判断。
+// 顺序固定为「先 setAuth 设默认凭据头，再叠声明」：同名时声明覆盖默认。
+// 冲突只在顺序上判一次，写入口不做判断。
 //
 // 读库失败时返回错误，不静默跳过：少一条附加头，上游直接回 400，静默跳过等于把一次配置故障
 // 变成一句看不懂的协议错误。错误文案指出下一步跑 doctor。
@@ -122,7 +122,8 @@ func (s *Server) applyProviderHeaders(httpReq *http.Request, a store.Account,
 	return nil
 }
 
-// newSessionID 生成一个 UUID v4，给没有会话键的请求里的 {session} 用（DESIGN 5.3、5.10）。
+// newSessionID 生成一个 UUID v4，给没有会话键的请求里的 {session} 用，每次调用都不同，
+// 因此不能拿一个固定值或者会重复的计数器凑。
 // 只用标准库：go.mod 里的 uuid 是别人的间接依赖，为一个 16 字节随机数把它转成直接依赖不值得。
 // 熵源不可用时返回空串，调用方按「没发这个头」处理：宁可少一条头，也不拿时间或计数器凑一个
 // 会重复的会话值。
@@ -131,7 +132,7 @@ func newSessionID() string {
 	if _, err := rand.Read(b[:]); err != nil {
 		return ""
 	}
-	b[6] = (b[6] & 0x0f) | 0x40 // 版本 4
-	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 变体
+	b[6] = (b[6] & 0x0f) | 0x40 // 版本 4：时间高 4 位改成 0100，接收方据此知道要按 v4 解析
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 变体：高 2 位改成 10，不写就与旧版 UUID 撞形状
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

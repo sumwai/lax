@@ -12,13 +12,13 @@ import (
 
 // model price 三条子命令只做命令面：参数个数、互斥与空值在这里判（退出码 2 并打用法行），
 // 单价归属、负数与「行不在目录里」由 store 判（见 internal/store/model_price.go），
-// 错误文案原样带出（退出码 1），cli 不自己写第二份规则（DESIGN 4、5.13）。
+// 错误文案原样带出（退出码 1），cli 不自己写第二份规则：两份规则会在同一条命令上给出两种结论。
 //
 // 价格属于「供应商 × 模型」，不在账号上：账号只在套餐不同时覆盖。
 // 因此这里有两个作用域——厂商级标价写 provider_models，账号覆盖写 account_models。
 
-// 这一组的 --help 不走 printGroupHelp：光列子命令说不清价格挂在谁身上（见 DESIGN 4 与
-// `model alias --help` 的做法），三条用法、一个示例与两段说明都写在 printModelPriceHelp 里。
+// 这一组的 --help 不走 printGroupHelp：光列子命令说不清价格挂在谁身上。
+// 三条用法、一个示例与两段说明都写在 printModelPriceHelp 里。
 
 const (
 	modelPriceSetUsage = "用法：lax model price set <模型> [--provider 供应商] [--account 账号] " +
@@ -32,7 +32,7 @@ const (
 		"  lax model price ls [<模型>] [--provider 供应商] [--account 账号]"
 )
 
-// printModelPriceHelp 是 `model price --help` 的输出：三条用法、一个示例与两段说明（见 DESIGN 4）。
+// printModelPriceHelp 是 `model price --help` 的输出：三条用法、一个示例与两段说明。
 // 光列子命令说不清价格挂在谁身上，所以不走 printGroupHelp。
 func printModelPriceHelp(w io.Writer) {
 	var b strings.Builder
@@ -174,7 +174,7 @@ func providersWithModel(st *store.Store, model string) ([]string, error) {
 
 // resolvePriceProvider 决定厂商级写价落在哪一家上：--provider 给了就用它（行在不在由 store 判），
 // 没给就按模型名唯一确定。同名模型出现在多家的目录里时是歧义，报错并列出候选——
-// 静默挑一家会让人以为改的是另一家的价（DESIGN 4 的 model price set）。
+// 静默挑一家会让人以为改的是另一家的价。
 func resolvePriceProvider(st *store.Store, model, flagValue, usageLine string) (string, error) {
 	if v := strings.TrimSpace(flagValue); v != "" {
 		return v, nil
@@ -215,7 +215,7 @@ func priceFieldText(prices store.ModelPrices) string {
 	return strings.Join(parts, "、")
 }
 
-// modelPriceSetJSON 是 model price set --json 的形状（DESIGN 4）。
+// modelPriceSetJSON 是 model price set --json 的形状。
 // 价格报的是这次写进去的那几项，没写的为 null：它回答的是「改了什么」，
 // 「合并之后是多少」由 model price ls 回答。
 type modelPriceSetJSON struct {
@@ -322,7 +322,7 @@ type modelPriceUnsetJSON struct {
 }
 
 // rejectDashPriceFields 拦下把字段写成 `--in` 这类参数写法：flag 包只会说「参数不认识」，
-// 这里能说清字段是位置参数并列出可用的四个（DESIGN 4 的 model price unset）。
+// 这里能说清字段是位置参数并列出可用的四个。
 func rejectDashPriceFields(args []string) error {
 	for _, arg := range args {
 		if !strings.HasPrefix(arg, "-") {
@@ -713,7 +713,7 @@ func priceColumnCell(catalog, effective *float64, withAccount bool) string {
 }
 
 // cacheColumnCell 是缓存那一格：两项都空时写「回退输入价」而不是 0（0 会让人以为缓存不花钱，
-// 见 DESIGN 5.5），只空一项时那一项写 -。给了 --account 时两边各一格、并排显示。
+// 而实际是没单独定价、按输入价算），只空一项时那一项写 -。给了 --account 时两边各一格、并排显示。
 func cacheColumnCell(catalog, effective priceValues, withAccount bool) string {
 	if !withAccount {
 		return cacheCell(catalog.cacheRead, catalog.cacheWrite)

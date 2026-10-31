@@ -31,7 +31,7 @@ func TestJoinEndpoint(t *testing.T) {
 	}
 }
 
-// TestModelEndpoint 钉住 {model} 占位符的替换规则（DESIGN 5.9）：只认这一个字面量，
+// TestModelEndpoint 钉住 {model} 占位符的替换规则：只认这一个字面量，
 // 出现几次换几次，其余字节不动；模型名按路径段转义，含 `/` 的名字仍是一段路径。
 func TestModelEndpoint(t *testing.T) {
 	cases := []struct{ endpoint, model, want string }{

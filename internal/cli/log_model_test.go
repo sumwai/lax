@@ -8,7 +8,7 @@ import (
 	"lax/internal/store"
 )
 
-// 这个文件钉住 `log tail` 的模型列怎么处理 requests 的两列（DESIGN 5.12）：
+// 这个文件钉住 `log tail` 的模型列怎么处理 requests 的两列：
 // 客户端给的名字与真正打出去的名字不同时写成 `别名 → 真名`，相同时只写一个名字；
 // --json 两个字段都给，`model` 仍是客户端给的那个名字。
 

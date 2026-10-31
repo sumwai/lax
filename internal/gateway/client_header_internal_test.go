@@ -16,7 +16,7 @@ func TestClientHeaderWhitelistDoesNotOverlapNeverForward(t *testing.T) {
 			}
 		}
 	}
-	// gemini 的白名单是空的（DESIGN 5.11）：表里不该出现它。
+	// gemini 的白名单是空的：表里不该出现它。
 	for _, rule := range clientHeaderRules {
 		if rule.protocol == ProtocolGemini {
 			t.Fatalf("gemini 不该有透传规则，实际 %q", rule.names)

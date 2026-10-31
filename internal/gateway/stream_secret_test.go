@@ -12,7 +12,7 @@ import (
 )
 
 // 这个文件钉住流内错误帧的脱敏：上游自己发来的错误帧正文会写进 requests.error，也会随错误帧
-// 发给客户端，必须与非 2xx 路径一样过一遍 scrubSecret（DESIGN 5.6）。gemini 的
+// 发给客户端，必须与非 2xx 路径一样过一遍 scrubSecret。gemini 的
 // {"error":{…}} 是流式解码里新增的入口，上游把凭据回显在 message 里时不能落库、不能出网关。
 
 // TestStreamErrorFrameScrubsSecret 让 gemini 上游在流里发一帧带凭据的错误体，三条入站协议

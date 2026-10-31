@@ -40,7 +40,7 @@ func irGenerationConfig(got map[string]any) map[string]any {
 	return gen
 }
 
-// TestThinkingNilWritesNothing 覆盖 DESIGN 5.4「思考配置参数」的第一条：客户端没给这类字段时
+// TestThinkingNilWritesNothing 覆盖思考配置参数的第一条：客户端没给这类字段时
 // 一个字节都不写，不凭协议默认值加。
 func TestThinkingNilWritesNothing(t *testing.T) {
 	for _, protocol := range []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini} {
@@ -98,7 +98,7 @@ func TestThinkingDisabledShapes(t *testing.T) {
 }
 
 // TestThinkingBudgetAndEffortBothGiven 覆盖「预算与档位都有时」的取舍：按目标协议能直接
-// 表达的那一个写——anthropic 与 gemini 用预算，两条 openai 协议用档位（DESIGN 5.4）。
+// 表达的那一个写——anthropic 与 gemini 用预算，两条 openai 协议用档位。
 func TestThinkingBudgetAndEffortBothGiven(t *testing.T) {
 	r := irTestRequest()
 	r.Thinking = &ThinkingConfig{Enabled: true, Budget: 4096, Effort: "high"}
@@ -170,7 +170,7 @@ func TestThinkingFoldsBetweenUnits(t *testing.T) {
 }
 
 // TestThinkingUnknownEffortNotWritten 覆盖认不出的档位：anthropic 与 gemini 没有对应的预算
-// 可写，宁可整块不写，也不编一个客户端没说过的深度（DESIGN 5.4）。
+// 可写，宁可整块不写，也不编一个客户端没说过的深度。
 func TestThinkingUnknownEffortNotWritten(t *testing.T) {
 	r := irTestRequest()
 	r.Thinking = &ThinkingConfig{Enabled: true, Effort: "turbo"}
@@ -193,7 +193,7 @@ func TestThinkingUnknownEffortNotWritten(t *testing.T) {
 
 // TestAllowedToolsWithoutNamesWritesNothing 覆盖空白名单：这一档说的是「只准调这些」，
 // 一个名字都没有时编一个空数组只会换来上游 400 或语义漂移，因此整条 tool_choice 不写，
-// 由上游按自己的默认值走（DESIGN 5.4）。
+// 由上游按自己的默认值走。
 func TestAllowedToolsWithoutNamesWritesNothing(t *testing.T) {
 	for _, protocol := range []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini} {
 		t.Run(protocol, func(t *testing.T) {
@@ -212,7 +212,7 @@ func TestAllowedToolsWithoutNamesWritesNothing(t *testing.T) {
 }
 
 // TestToolStrictOnlyTravelsBetweenOpenAIProtocols 覆盖 strict 的落点：两种 openai 协议之间
-// 原样搬运（nil 与 false 不是一回事），编到 anthropic 与 gemini 时丢弃（DESIGN 5.4）。
+// 原样搬运（nil 与 false 不是一回事），编到 anthropic 与 gemini 时丢弃。
 func TestToolStrictOnlyTravelsBetweenOpenAIProtocols(t *testing.T) {
 	no := false
 	yes := true

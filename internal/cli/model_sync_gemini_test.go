@@ -89,8 +89,8 @@ func TestSeedGeminiProviderSyncsModels(t *testing.T) {
 		t.Fatalf("gemini 路由的 models_path = %q，期望 /v1beta/models", route.ModelsPath)
 	}
 
-	// 2. account add --provider google-gemini：协议与地址都取厂商行（账号不再存这两项，
-	//    见 DESIGN 5.8），默认协议是这家的 gemini，地址在下面指到假上游。
+	// 2. account add --provider google-gemini：协议与地址都取厂商行（账号不存这两项），
+	//    默认协议是这家的 gemini，地址在下面指到假上游。
 	code, out, stderr := addAccount(t, "gem", "google-gemini", up.srv.URL, "", "--key", "sk-gemini-1")
 	if code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
@@ -139,7 +139,7 @@ func TestSeedGeminiProviderSyncsModels(t *testing.T) {
 		}
 	}
 
-	// 4. 落库的模型名是裸名：models/ 前缀去掉；只能做 embedding 的那条也进清单（DESIGN 5.15）。
+	// 4. 落库的模型名是裸名：models/ 前缀去掉；只能做 embedding 的那条也进清单。
 	code, out, stderr = run(t, "model", "ls", "--account", "gem", "--json")
 	if code != 0 {
 		t.Fatalf("model ls 退出码 = %d，stderr = %s", code, stderr)

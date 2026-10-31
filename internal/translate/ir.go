@@ -8,17 +8,18 @@ import (
 	"strings"
 )
 
-// 线协议名称。入站按路径区分，出站按账号的 protocol 字段区分。
-// gemini 两边都算一条线协议：入站路径是 /v1beta/models/{model}:generateContent（见 5.9）。
+// 线协议名称。入站按路径区分，出站按该模型的有效协议区分。
+// gemini 两边都算一条线协议：入站路径是 /v1beta/models/{model}:generateContent，
+// 模型名在路径里而不是请求体里。
 // systemone 是决策协议（TypeSafe System One / Jev）：入站与出站都是 POST /v1/systemone，
-// 只与自己互通、不经中间表示转换，存储层只把它当成第五个协议取值（见 5.14）。
+// 只与自己互通、不经中间表示转换，存储层只把它当成第五个协议取值。
 const (
 	ProtocolAnthropic = "anthropic"
 	ProtocolChat      = "openai-chat"
 	ProtocolResponses = "openai-responses"
 	ProtocolGemini    = "gemini"
 	ProtocolSystemOne = "systemone"
-	// ProtocolEmbeddings 是向量化的线协议（OpenAI 的 /v1/embeddings 报文，见 5.15）。
+	// ProtocolEmbeddings 是向量化的线协议（OpenAI 的 /v1/embeddings 报文）。
 	// 它没有消息序列，编解码器也不认它：网关只做同协议直通，translate 只用这个常量。
 	ProtocolEmbeddings = "openai-embeddings"
 )
@@ -44,7 +45,7 @@ const (
 	RoleDeveloper Role = "developer"
 )
 
-// replaySignaturePrefix 标记本网关自己盖的思考签名（DESIGN 5.4）。chat 与 responses 没
+// replaySignaturePrefix 标记本网关自己盖的思考签名。chat 与 responses 没
 // 有签名这个字段，而 anthropic 客户端只回传带签名的 thinking 块；上游要求把上一轮 CoT
 // 原样回传时（DeepSeek 的 thinking 模式带 tools 就是这样），网关靠这个签名让 CoT 经客户
 // 端往返一圈。签名是正文的子迹：同一段正文得到同一个签名，客户端改过正文就对不上。
@@ -59,7 +60,9 @@ func isReplaySignature(sig string) bool {
 	return strings.HasPrefix(sig, replaySignaturePrefix)
 }
 
-// BlockKind 是内容块的种类。
+// BlockKind 是内容块的种类。各协议的内容块种类不同：anthropic 有思考块与 redacted_thinking、
+// gemini 有 inlineData、chat 只有文本与工具调用。编解码按 Kind 决定去读哪个字段，
+// 识别不了的种类丢弃：硬塞成文本会把一段图片或思考变成正文发给上游。
 type BlockKind string
 
 const (
@@ -80,7 +83,7 @@ type Block struct {
 	Thinking   *Thinking
 }
 
-// Thinking 是一段思考内容（DESIGN 5.4）。
+// Thinking 是一段思考内容。
 // Text 是正文；Signature 是 anthropic 给出的签名，只有 anthropic 用得上，没有签名时
 // 不写进 anthropic 报文；Redacted 是 anthropic redacted_thinking 的不透明 data，
 // 同理只有 anthropic 能原样写回，编到另两条协议时丢弃。
@@ -119,8 +122,8 @@ type Message struct {
 // Type 只有 anthropic 的服务端内置工具才有值（例如 "web_search_20250305"）；空串与
 // "custom" 都表示客户端自己执行的函数，另两条协议的工具定义只认这种。
 // Strict 是两种 openai 协议共有的严格模式开关（参数按 schema 校验），nil 表示客户端没给
-// 这个字段，与给了 false 不是一回事：编回 openai 时只有非 nil 才写出去（DESIGN 5.4
-// 「工具定义与选择」）。
+// 这个字段，与给了 false 不是一回事：nil 是客户端没给，false 是客户端明确要关。
+// 编回 openai 时只有非 nil 才写出去，否则会把「没给」编成一次显式的关闭。
 type Tool struct {
 	Type        string
 	Name        string
@@ -129,7 +132,7 @@ type Tool struct {
 	Strict      *bool
 }
 
-// isClientTool 判断工具定义是不是客户端自己执行的函数（DESIGN 5.4）：anthropic 的
+// isClientTool 判断工具定义是不是客户端自己执行的函数：anthropic 的
 // 服务端内置工具在 chat 与 responses 里没有对应形状，整条丢弃而不是伪造 function。
 func isClientTool(t Tool) bool {
 	return t.Type == "" || t.Type == "custom"
@@ -137,7 +140,7 @@ func isClientTool(t Tool) bool {
 
 // emptyToolSchema 是工具参数结构缺失时补的空对象。三条协议都把参数结构当作必填：
 // anthropic 的 input_schema、chat 的 function.parameters、responses 的 parameters
-// 缺了会被上游拒收，补空对象只是让「没有参数」这件事表达得出来（DESIGN 5.4）。
+// 缺了会被上游拒收，补空对象只是让「没有参数」这件事表达得出来。
 var emptyToolSchema = json.RawMessage(`{"type":"object","properties":{}}`)
 
 // schemaOrEmpty 给缺失的参数结构补上空对象，已有内容一个字节都不改。
@@ -148,15 +151,16 @@ func schemaOrEmpty(raw json.RawMessage) json.RawMessage {
 	return raw
 }
 
-// 工具选择模式。
+// 工具选择模式。四条协议各自的写法不同，中间表示统一成这五种：前四种在各条协议上都能
+// 直接表达或降级，allowed_tools 只有 anthropic 与 openai-responses 有原生形状，
+// chat 降级成 auto、gemini 落成 ANY 加名字列表。
 const (
 	ToolChoiceAuto     = "auto"
 	ToolChoiceRequired = "required"
 	ToolChoiceNone     = "none"
 	ToolChoiceNamed    = "tool"
 	// ToolChoiceAllowedTools 是「只准调白名单里的这些工具」：anthropic 与 responses 有
-	// 原生形状，chat 没有（降级为 auto），gemini 用 ANY 加 allowedFunctionNames 表达
-	// （DESIGN 5.4「工具定义与选择」）。
+	// 原生形状，chat 没有（降级为 auto），gemini 用 ANY 加 allowedFunctionNames 表达。
 	ToolChoiceAllowedTools = "allowed_tools"
 )
 
@@ -168,7 +172,7 @@ type ToolChoice struct {
 	Allowed []string
 }
 
-// ThinkingConfig 是请求侧的思考配置（DESIGN 5.4「思考配置参数」）：客户端要不要模型思考、
+// ThinkingConfig 是请求侧的思考配置：客户端要不要模型思考、
 // 允许它想多深。它与 BlockKind 为 thinking 的内容块是两件事——这里是请求参数，那边是
 // 上游在响应里给出的思考正文（类型名与 Thinking 分开，避免两件事共用一个名字）。
 // Budget 是 token 预算（anthropic 与 gemini 用），Effort 是档位（两条 openai 协议用），
@@ -179,8 +183,10 @@ type ThinkingConfig struct {
 	Effort  string
 }
 
-// 档位与预算的换算（DESIGN 5.4「思考配置参数」的映射表）。换算是近似的：预算折成档位再折
-// 回来会丢精度，取舍是要让客户端设的值在另一条协议上起作用的代价。
+// 档位与预算的换算表：openai 那两条协议只给档位，anthropic 与 gemini 只收 token 预算，
+// 跨协议时只能靠这张固定表：minimal、low、medium、high 分别对应 1024、2048、4096、8192 个 token。
+// 换算是近似的：预算折成档位再折回来会丢精度（3000 折成 medium 再回成 4096），
+// 取舍是要让客户端设的值在另一条协议上起作用，而不是把它丢掉。
 const (
 	thinkingBudgetMinimal = 1024
 	thinkingBudgetLow     = 2048
@@ -235,7 +241,7 @@ func (t *ThinkingConfig) budgetTokens() (int, bool) {
 
 // openAIEffort 返回编给两条 openai 协议时的档位：档位优先（那是这两条协议原生的表达），
 // 没有档位时按预算折。空串表示这次不写这个字段：Enabled 为假时这两条协议没有「不思考」
-// 的档位可写（DESIGN 5.4）。
+// 的档位可写，写了只会把一次关闭说成一个不知道深浅的开。
 func (t *ThinkingConfig) openAIEffort() string {
 	if t == nil || !t.Enabled {
 		return ""
@@ -250,7 +256,7 @@ func (t *ThinkingConfig) openAIEffort() string {
 }
 
 // Request 是中间表示里的请求。各协议解码后都变成它，编码上游时再展开。
-// Thinking 只在客户端显式给了思考配置参数时才有值（DESIGN 5.4）。
+// Thinking 只在客户端显式给了思考配置参数时才有值：没给就不写，不问「默认要不要想」。
 type Request struct {
 	Model             string
 	System            []Block
@@ -275,17 +281,17 @@ type Usage struct {
 	// Reasoning 是上游上报的思考 token：chat 读 completion_tokens_details.reasoning_tokens，
 	// responses 读 output_tokens_details.reasoning_tokens（部分中转照 chat 的写法放在
 	// completion_tokens_details 里，两处都读），gemini 读 usageMetadata.thoughtsTokenCount。
-	// anthropic 没有独立字段，恒为 0（DESIGN 5.5）。
+	// anthropic 没有独立字段，恒为 0：它的 output_tokens 本来就含思考。
 	Reasoning int64
 	// Total 是上游上报的总 token，0 表示上游没报。思考算不算输出的一项只能按它判：
 	// 各协议做法不同，OpenAI 官方把 reasoning 当作 completion 的子集，有的中转把它报成
-	// 输出之外的一项、total 里才对得上（见 store.ReasoningExtra 与 DESIGN 5.5）。
+	// 输出之外的一项、total 里才对得上。判定只写在 store.ReasoningExtra 一处。
 	Total int64
 }
 
 // Response 是中间表示里的响应。
 // StopNote 装上游结束原因里四种取值装不下的那一档（gemini 的 SAFETY、RECITATION 等）：
-// 编给客户端时丢弃，由网关写进日志当备注（DESIGN 5.9）。其余三条协议目前不填。
+// 编给客户端时丢弃，由网关写进日志当备注。其余三条协议目前不填。
 type Response struct {
 	ID         string
 	Model      string
@@ -295,7 +301,8 @@ type Response struct {
 	Usage      Usage
 }
 
-// DeltaKind 是流式增量的种类。
+// DeltaKind 是流式增量的种类。解码器按上游帧反推出一个取值，编码器按它决定发哪一种帧，
+// 两侧因此能对齐：同一个上游事件在四条入站协议上写成四种形状，但增量本身只有这几种。
 type DeltaKind string
 
 const (
@@ -359,7 +366,7 @@ func DecodeRequest(protocol string, raw []byte) (*Request, error) {
 	case ProtocolResponses:
 		return DecodeResponsesRequest(raw)
 	case ProtocolGemini:
-		// gemini 的报文里没有模型名与 stream 标志：两者由网关按路径注入（DESIGN 5.9）。
+		// gemini 的报文里没有模型名与 stream 标志：两者由网关按路径注入。
 		return DecodeGeminiRequest(raw)
 	default:
 		return nil, fmt.Errorf("不支持的入站协议 %q", protocol)
@@ -399,7 +406,7 @@ func DecodeResponse(protocol string, raw []byte, requestedModel string) (*Respon
 }
 
 // EncodeResponse 按协议编码返回给客户端的响应。四条入站协议都认，gemini 的响应体是
-// candidates 加 usageMetadata（DESIGN 5.9）。
+// candidates 加 usageMetadata，与上游一致。
 func EncodeResponse(protocol string, r *Response) ([]byte, error) {
 	switch protocol {
 	case ProtocolAnthropic:
@@ -448,7 +455,7 @@ func NewStreamEncoder(protocol, model string) (StreamEncoder, error) {
 }
 
 // PathProtocol 把入站路径映射成协议。三条固定路径直接对；gemini 的模型名在路径里，
-// 因此按前缀认：/v1beta/models/{model}:generateContent 与 :streamGenerateContent（DESIGN 5.9）。
+// 因此按前缀认：/v1beta/models/{model}:generateContent 与 :streamGenerateContent。
 // 只认路径不认方法：两者都只接 POST，方法检查在网关那边。
 func PathProtocol(path string) (string, bool) {
 	switch path {
@@ -460,7 +467,7 @@ func PathProtocol(path string) (string, bool) {
 		return ProtocolResponses, true
 	}
 	if _, _, ok := GeminiPathAction(path); ok {
-		// 三个动作都算 gemini：向量化的 :embedContent 也落在这条入站协议上（DESIGN 5.15），
+		// 三个动作都算 gemini：向量化的 :embedContent 也落在这条入站协议上，
 		// 它不进中间表示，但报文确实走 gemini 的形状。
 		return ProtocolGemini, true
 	}
@@ -469,7 +476,7 @@ func PathProtocol(path string) (string, bool) {
 
 // UsageScanner 从同协议直通的流式字节里读出用量，不改变转发内容。
 // 读出的 Usage 带 Reasoning 与 Total：入账时判定思考 token 算不算输出的一项要用它们，
-// 判定本身在 store.ReasoningExtra（DESIGN 5.5）。
+// 判定本身在 store.ReasoningExtra。
 type UsageScanner interface {
 	Feed(data []byte)
 	Usage() Usage

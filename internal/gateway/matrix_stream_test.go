@@ -77,7 +77,7 @@ var streamEndMarkers = map[string]string{
 	translate.ProtocolAnthropic: "message_stop",
 	translate.ProtocolChat:      "[DONE]",
 	translate.ProtocolResponses: "response.completed",
-	// gemini 没有单独的结束事件，最后一帧的 finishReason 就是收尾（DESIGN 5.4）。
+	// gemini 没有单独的结束事件，最后一帧的 finishReason 就是收尾。
 	translate.ProtocolGemini: "finishReason",
 }
 

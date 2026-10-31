@@ -21,7 +21,7 @@ type fixture struct {
 	st  *store.Store
 	key []byte
 	// fakeProviders 记下 add 自己建的假厂商：同一对 (协议, 地址) 只建一次，后面的账号复用它。
-	// 迁移 0014 之后账号行只存厂商名，地址与默认协议都在厂商行上（见 DESIGN 5.8）。
+	// 迁移 0014 之后账号行只存厂商名，地址与默认协议都在厂商行上。
 	fakeProviders map[string]string
 }
 
@@ -68,7 +68,7 @@ func (f *fixture) fakeProvider(t *testing.T, protocol, baseURL string) string {
 // fakeRoutes 给假厂商声明路由，取值就是升级前从 base_url 后缀猜出来的那些地址：
 // 三条入站协议各一条，protocol 是 gemini 时再加上 gemini（没有 gemini 路由时默认协议指不到它）。
 // 路径能写成相对路径就写相对的（这样 base_url 仍是地址来源），地址里带脏写法拼不出来时
-// 退回整条地址：路由收整条地址时不拼 base_url，最终请求地址一样（见 DESIGN 5.8）。
+// 退回整条地址：路由收整条地址时不拼 base_url，最终请求地址一样。
 func fakeRoutes(baseURL, protocol string) []store.ProviderRoute {
 	protocols := []string{gateway.ProtocolAnthropic, gateway.ProtocolChat, gateway.ProtocolResponses}
 	if protocol == gateway.ProtocolGemini {
@@ -126,7 +126,7 @@ func (f *fixture) createAccount(t *testing.T, name, provider, secretValue string
 }
 
 // addOrphan 建一个指向不存在的厂商的账号：迁移 0014 之前留下的孤儿行，
-// 地址与默认协议都是空串（见 DESIGN 5.8）。
+// 地址与默认协议都是空串。
 func (f *fixture) addOrphan(t *testing.T, name, provider, secretValue string, models []string) store.Account {
 	t.Helper()
 	return f.createAccount(t, name, provider, secretValue, models, 100)
@@ -664,7 +664,7 @@ func TestEndpoint(t *testing.T) {
 		{"https://api.deepseek.com/v1", gateway.ProtocolChat, "https://api.deepseek.com/v1/chat/completions"},
 		{"https://api.anthropic.com", gateway.ProtocolAnthropic, "https://api.anthropic.com/v1/messages"},
 		{"https://proxy.example.com/v1", gateway.ProtocolAnthropic, "https://proxy.example.com/v1/messages"},
-		// gemini 的模型名在路径里，兜底同样留占位符，转发前才替换（DESIGN 5.9）。
+		// gemini 的模型名在路径里，兜底同样留占位符，转发前才替换。
 		{"https://generativelanguage.googleapis.com", gateway.ProtocolGemini,
 			"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"},
 		{"https://generativelanguage.googleapis.com/v1beta/", gateway.ProtocolGemini,

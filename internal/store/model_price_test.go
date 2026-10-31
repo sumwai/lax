@@ -12,7 +12,7 @@ import (
 	"lax/internal/store"
 )
 
-// 这一组用例钉住单价的归属与取值链（DESIGN 5.5、5.13）：价格属于「供应商 × 模型」，
+// 这一组用例钉住单价的归属与取值链：价格属于「供应商 × 模型」，
 // 账号只在套餐不同时覆盖，`usage` 按「这一行的账号 + 这一行的模型」现算。
 
 // catalogAccountForPrice 建一家厂商、一个账号，并把 m1 落进目录与该账号的可达性行，
@@ -410,7 +410,7 @@ func TestUsageCostAccountOverrideWins(t *testing.T) {
 	wantCost(t, oneUsage(t, st, "model", "m1").Cost, 6.5)
 }
 
-// TestUsageCostWithoutAnyPriceStayNull 钉住「缺价记 null」（DESIGN 5.5）：目录与账号都没有这个模型的价、
+// TestUsageCostWithoutAnyPriceStayNull 钉住「缺价记 null」：目录与账号都没有这个模型的价、
 // 账号行上的旧价又已经删了，这一行仍然进汇总（请求确实发生过），但花费是 nil——不知道多少钱，
 // 不是 0（0 是确实不花钱）。
 func TestUsageCostWithoutAnyPriceStayNull(t *testing.T) {

@@ -2,7 +2,7 @@ package cli_test
 
 import "testing"
 
-// 这个文件是建账号的测试入口。账号只存厂商名，地址与默认协议都在厂商行上（见 DESIGN 5.8），
+// 这个文件是建账号的测试入口。账号只存厂商名，地址与默认协议都在厂商行上，
 // 所以每个要建账号的用例都得先把厂商登记好；把这些步骤收在一处，用例里就不会再冒出
 // 已经删掉的 --base-url / --protocol。
 
@@ -42,7 +42,7 @@ func ensureProvider(t *testing.T, name, baseURL string, routes ...string) {
 }
 
 // routeFlagsForProtocol 把协议换成一家的路由声明：只声明这一条，默认协议因此就是它
-// （gemini 要显式指定，固定顺序回退里没有它，见 DESIGN 5.8）。空串按 openai-chat 算。
+// （gemini 要显式指定，固定顺序回退里没有它）。空串按 openai-chat 算。
 func routeFlagsForProtocol(protocol string) []string {
 	switch protocol {
 	case "anthropic":
@@ -52,7 +52,7 @@ func routeFlagsForProtocol(protocol string) []string {
 	case "gemini":
 		return []string{"--gemini", "/v1beta/models/{model}:generateContent", "--default-protocol", "gemini"}
 	case "systemone":
-		// 决策协议没有固定顺序可回退（DESIGN 5.8 的回退只认聊天那三条），默认协议因此要显式给。
+		// 决策协议没有固定顺序可回退（固定回退只认聊天那三条），默认协议因此要显式给。
 		return []string{"--systemone", "/v1/systemone", "--default-protocol", "systemone"}
 	default:
 		return []string{"--openai", "/v1/chat/completions"}

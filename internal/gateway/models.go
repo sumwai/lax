@@ -31,7 +31,8 @@ func ModelsEndpoint(base string) string {
 	return base + "/v1/models"
 }
 
-// modelsEndpoint 解析账号的模型列表地址，同时返回这条地址该用哪种协议发凭据头（见 DESIGN 5.7）：
+// modelsEndpoint 解析账号的模型列表地址，同时返回这条地址该用哪种协议发凭据头。
+// 地址与协议必须成对给出，下面五条规则同时决定这两样各自从哪来：
 //
 //  1. override 非空（`model sync --endpoint`）时用它，压过下面全部，协议取厂商的有效默认协议；取值可以是
 //     相对 base_url 的路径，也可以是整条地址（整条地址直接访问，不再拼 base_url）；
@@ -60,7 +61,7 @@ func (s *Server) modelsEndpoint(a store.Account, override string) (endpoint, pro
 
 	p, err := s.store.GetProvider(a.Provider)
 	if errors.Is(err, store.ErrProviderNotFound) {
-		// 地址只有厂商行上有（见 DESIGN 5.8）：孤儿行的 a.BaseURL 是空串，拼出来的
+		// 地址只存在厂商行上：孤儿行的 a.BaseURL 是空串，拼出来的
 		// 只会是 /v1/models 这种没有协议的路径。报配置缺什么，不报成「列表地址不合法」。
 		if a.BaseURL == "" {
 			return "", "", s.noAddressError(a, ProtocolChat)
@@ -91,16 +92,17 @@ func (s *Server) modelsEndpoint(a store.Account, override string) (endpoint, pro
 }
 
 // SyncModels 按厂商覆盖与路由的 models_path 拉取上游的模型列表，按名字排序去重。
-// 响应形状三种都认（见 parseModelListPage 与 DESIGN 5.7）：`{data:[…]}`、`{models:[…]}`
+// 响应形状三种都认（见 parseModelListPage）：`{data:[…]}`、`{models:[…]}`
 // 与顶层数组，形状不同的上游（例如 ollama 的 /api/tags）不必再靠 --models 手填。
-// gemini 的 `{models:[{name:"models/…"}]}` 复用第二种形状，另加两条后处理：按
-// `supportedGenerationMethods` 过滤、条目名去掉一个 `models/` 前缀；分页按 `nextPageToken` 取完。
-// 条目里能认出来的上下文长度、最大输出与协议集合跟着名字一起写进目录（`source='sync'`，见 DESIGN 5.7）。
+// gemini 的 `{models:[{name:"models/…"}]}` 复用第二种形状，另加两条后处理：条目名去掉一个
+// `models/` 前缀、按 `supportedGenerationMethods` 折成能力位（不再按它过滤整条：能算向量的
+// 模型也要进目录才选得到号）；分页按 `nextPageToken` 取完。
+// 条目里能认出来的上下文长度、最大输出与协议集合跟着名字一起写进目录（`source='sync'`）。
 func (s *Server) SyncModels(ctx context.Context, a store.Account) ([]string, error) {
 	return s.SyncModelsWithEndpoint(ctx, a, "")
 }
 
-// modelListPageSize 是请求模型列表时带的页大小（见 DESIGN 5.7）。gemini 的清单分页返回，
+// modelListPageSize 是请求模型列表时带的页大小。gemini 的清单分页返回，
 // 不带页大小时按服务端的默认值分页，模型多的账号要多打好几次；其它上游不认识这个参数，原样忽略。
 const modelListPageSize = 1000
 
@@ -116,7 +118,7 @@ const maxModelListPages = 10
 // 其它上游的列表地址一个字节都不改（见 modelListPageURL）。
 //
 // 清单里的元数据（上下文长度、最大输出、支持的协议）顺手写进目录 `provider_models`
-// （`source='sync'`，只写上游真的给出的字段，见 DESIGN 5.7 与 5.13）：路径与凭据头都在这里，
+// （`source='sync'`，只写上游真的给出的字段）：路径与凭据头都在这里，
 // 调用方拿到的只是名字，再让它去读一次 JSON 就多一份解析规则。写目录失败整次同步失败——
 // 静默丢掉元数据会让下一次同步也补不回来，看起来却像成功。可达性仍由调用方写（`ReplaceModels`）。
 func (s *Server) SyncModelsWithEndpoint(ctx context.Context, a store.Account, endpoint string) ([]string, error) {
@@ -196,8 +198,8 @@ func (s *Server) SyncModelsWithEndpoint(ctx context.Context, a store.Account, en
 }
 
 // catalogModels 把清单折成目录行：来源一律 `sync`。能力位只写上游真的声明过的那两类
-// （chat / embedding，见 entryCapabilities）；supported_parameters 这类形状各家不同的字段仍不解析
-// （见 DESIGN 5.13）。
+// （chat / embedding，见 entryCapabilities）；supported_parameters 这类形状各家不同的字段仍不解析，
+// 写进去只等于把一个猜出来的结论存成了事实。
 func catalogModels(models []listModel) []store.ProviderModel {
 	rows := make([]store.ProviderModel, 0, len(models))
 	for _, model := range models {
@@ -215,7 +217,7 @@ func catalogModels(models []listModel) []store.ProviderModel {
 
 // modelListPageURL 给需要分页的上游追加分页参数：pageSize 每页都带，pageToken 从第二页起带。
 // 只有 gemini 的清单按 pageSize / pageToken 翻页，paginated 为假时原样返回 target：地址里可能带
-// 签名（`?sig=…`），经 url.Parse 再 Encode 会重排参数、改写转义，签名当场失效（见 DESIGN 5.7）。
+// 签名（`?sig=…`），经 url.Parse 再 Encode 会重排参数、改写转义，签名当场失效，请求直接换回 401。
 // 追加时也只往原有查询串后面接一段，原有查询串的编码一个字节不改。
 func modelListPageURL(target, pageToken string, paginated bool) (string, error) {
 	if !paginated {
@@ -240,9 +242,11 @@ func modelListPageURL(target, pageToken string, paginated bool) (string, error) 
 }
 
 // fetchModelPage 取一页模型列表的原始响应体。凭据只在这里作为参数出现，错误文本一并过
-// scrubSecret，明文不进错误信息与日志（见 DESIGN 5.6）。错误信息里写的是 target（配置里的地址），
+// scrubSecret，明文不进错误信息与日志：拉列表失败的消息里常带上游回显的地址，
+// 而地址可能带着查询串里的凭据。错误信息里写的是 target（配置里的地址），
 // 不带这次追加的分页参数，便于照着命令里的取值排查。
-// 模型列表请求与转发同一套头：先 setAuth 设凭据头，再叠厂商附加头（见 DESIGN 5.7、5.10）。
+// 模型列表请求与转发同一套头：先 setAuth 设凭据头，再叠厂商附加头。少叠一层附加头就会让
+// 需要额外认证头的厂商在同步时换回 401，而同一个账号的转发却是通的。
 func (s *Server) fetchModelPage(ctx context.Context, pageURL, target, protocol string,
 	a store.Account, secretValue string) ([]byte, error) {
 
@@ -254,7 +258,8 @@ func (s *Server) fetchModelPage(ctx context.Context, pageURL, target, protocol s
 	// 凭据头跟着取到这条路径的协议走，不是厂商默认协议。
 	setAuth(req, protocol, secretValue)
 	// 模型列表请求没有模型名（{model} 展开为空时不发那条头），会话键也没有：
-	// {session} 在这里每次请求现生成一个（见 DESIGN 5.10）。
+	// {session} 在这里每次请求现生成一个：模型同步没有客户端请求，没有真会话可沿，
+	// 只能给一个本次请求专用的值。
 	if err := s.applyProviderHeaders(req, a, protocol, "", ""); err != nil {
 		return nil, err
 	}
@@ -277,7 +282,7 @@ func (s *Server) fetchModelPage(ctx context.Context, pageURL, target, protocol s
 	return raw, nil
 }
 
-// modelListShape 是模型列表响应的一种已知形状，按数组里的顺序依次尝试（见 DESIGN 5.7）。
+// modelListShape 是模型列表响应的一种已知形状，按数组里的顺序依次尝试：先试的形状命中就不再往下看。
 // field 为空串表示顶层本身就是条目数组，desc 是报错文案里给用户看的写法。
 type modelListShape struct {
 	field string
@@ -303,8 +308,8 @@ func modelShapeList() string {
 
 // listModel 是模型清单里的一条：名字，加上从条目对象里认出来的元数据。
 //
-// 字段缺失时留空（nil 表示上游没给），不猜默认值：清单里没写上下文长度不等于它是 0。
-// 每列从哪来见 DESIGN 5.7 的「元数据来源」表，落库口径见 5.13。
+// 字段缺失时留空（nil 表示上游没给），不猜默认值：清单里没写上下文长度不等于它是 0，
+// 存成 0 会让这个模型在按长度过滤时被当成不可用。每列只从上游真的给出的字段里取。
 type listModel struct {
 	name          string
 	contextWindow *int64
@@ -312,20 +317,22 @@ type listModel struct {
 	// protocols 是这条条目声明的线协议集合，按 wireProtocolOrder 的固定顺序排列。
 	protocols []string
 	// capabilities 是条目声明过的能力位（chat / embedding），按 capabilityOrder 排列。
-	// 空集合是「上游没说」，不表示不支持（DESIGN 5.13）。
+	// 空集合是「上游没说」，不表示不支持：把它读成不支持，就会把一个其实能用的模型
+	// 从候选里删掉。
 	capabilities []string
 }
 
 // generateContentMethod 是 gemini 清单里「这个模型能做生成」的方法名，它折成 gemini 协议。
 // 与它并列的 embedContent / batchEmbedContents 折成能力位 embedding（见 entryCapabilities）：
-// 它们不是线协议，而是这个模型能干什么（DESIGN 5.15）。
+// 它们不是线协议，而是这个模型能干什么：向量化能力不进协议集合，模型同步与选号靠它区分
+// 「这个模型能对话」与「这个模型只能算向量」。
 const (
 	generateContentMethod = "generateContent"
 	embedContentMethod    = "embedContent"
 	batchEmbedMethod      = "batchEmbedContents"
 )
 
-// 能力位取值与它们的固定顺序（DESIGN 5.13）：chat 在前，embedding 在后。
+// 能力位取值与它们的固定顺序：chat 在前，embedding 在后。
 const (
 	capabilityChat      = "chat"
 	capabilityEmbedding = "embedding"
@@ -338,7 +345,7 @@ var capabilityOrder = []string{capabilityChat, capabilityEmbedding}
 // 与协议编解码无关，translate 那边仍然是纯编解码、不认识厂商清单的字段名。
 //
 // 只认表里列出的写法，未识别的不计：端点名各家写法不同，猜一个相近的名字等于给探活安排一条
-// 这家未必声明过的路径，不如留空、由厂商路由决定（见 DESIGN 5.7、5.8）。
+// 这家未必声明过的路径，不如留空、由厂商路由决定。
 var endpointProtocols = map[string]string{
 	"/messages":         ProtocolAnthropic,
 	"/chat/completions": ProtocolChat,
@@ -349,8 +356,9 @@ var endpointProtocols = map[string]string{
 	"generateContent":   ProtocolGemini,
 }
 
-// wireProtocolOrder 是协议集合落库与排候选的固定顺序（见 DESIGN 5.13）：同一份上游数据多跑几次
-// 得到同一串，与上游列出端点的先后无关。向量化排在最后：它是唯一不会成为对话默认协议的线协议。
+// wireProtocolOrder 是协议集合落库与排候选的固定顺序：同一份上游数据多跑几次
+// 得到同一串，与上游列出端点的先后无关。不固定顺序的话，同一份清单两次同步能存出两串不同的值，
+// 对比数据库时看不出到底改了什么。向量化排在最后：它是唯一不会成为对话默认协议的线协议。
 var wireProtocolOrder = []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini, ProtocolSystemOne, ProtocolEmbeddings}
 
 // endpointProtocol 查端点名对应的线协议。表里没有的写法返回 false，调用方直接不计这个取值。
@@ -430,11 +438,12 @@ func nextPageToken(top map[string]json.RawMessage) string {
 //
 // 不再按 supportedGenerationMethods 过滤：以前 embedding 一类没有 generateContent 的条目
 // 整条不进清单，于是向量化模型连目录都进不去，也就无法选号。现在它们照旧进目录，
-// 只是能力位记成 embedding（见 DESIGN 5.15），能不能用由可达性与路由判定说。
+// 只是能力位记成 embedding，能不能用由可达性与路由判定说：一个只能算向量的模型被禁在
+// 目录之外时，它连选号的候选都不是。
 //
 // 去前缀与形状无关：凡是以 `models/` 开头的名字都去一个前缀。名字里带前缀的不只 gemini，
 // 而路由的 `{model}` 占位符在请求时只放回裸名，库里存带前缀的名字会让上游收到
-// `models/models/…`（见 DESIGN 5.7）。
+// `models/models/…`：两层前缀不是模型名，上游会当成不存在的模型回 404。
 func modelEntries(entries []json.RawMessage) []listModel {
 	seen := map[string]bool{}
 	var models []listModel
@@ -457,7 +466,7 @@ func modelEntries(entries []json.RawMessage) []listModel {
 }
 
 // entryCapabilities 把条目声明过的能力位折成 chat / embedding，按 capabilityOrder 排好去重。
-// 两个来源、三种写法（见 DESIGN 5.7 的元数据来源）：
+// 两个来源、三种写法：
 //
 //   - supportedGenerationMethods 里的 generateContent 是 chat，embedContent 与
 //     batchEmbedContents 是 embedding；
@@ -631,7 +640,7 @@ func modelEntryName(entry json.RawMessage) string {
 }
 
 // bareModelName 去掉名字开头的一个 `models/` 前缀，只去一个：`models/models/x` 落成 `models/x`。
-// 名字里是否带前缀与上游形状无关，这一条对所有形状都生效（见 DESIGN 5.7）——路由的 `{model}`
+// 名字里是否带前缀与上游形状无关，这一条对所有形状都生效——路由的 `{model}`
 // 占位符在请求时把裸名放回路径，库里存带前缀的名字会让上游收到两层前缀。
 func bareModelName(name string) string {
 	if rest, ok := strings.CutPrefix(name, "models/"); ok {
@@ -642,7 +651,8 @@ func bareModelName(name string) string {
 
 // maxModelListBytes 是一次读模型列表响应的上限。`model sync` 与 `account test` 共用这一个值：
 // 两条路径对同一份清单必须得出同一个结论。清单本身并不小——commandcode 的 94 个模型就有 18KB——
-// 按更小的上限截断会让同步拿到完整清单、`account test` 却报「上游返回的不是模型列表」（见 DESIGN 5.7）。
+// 按更小的上限截断会让同步拿到完整清单、`account test` 却报「上游返回的不是模型列表」：
+// 同一份清单在两条路径上得出两个结论，排查时无法分辨是上游变了还是网关截断了。
 const maxModelListBytes = 8 << 20
 
 // readModelList 读出一份模型清单的模型名（排序去重后）。形状判定复用 parseModelListPage，与
@@ -669,9 +679,10 @@ func readModelList(r io.Reader) ([]string, bool) {
 
 // ModelProbe 是单个模型在一次探活里的结论。
 //
-// Access 是结论的正文：`allowed` / `forbidden` / `missing` / `error`（见 store.Access* 与
-// DESIGN 5.13），调用方拿它写 store.SetAccountModelAccess。**401 不是模型层面的结论**，那一栏留空，
-// 表示「这一次不要写可达性」（见 DESIGN 5.7 里遇到 401 就停下那条）。
+// Access 是结论的正文：`allowed` / `forbidden` / `missing` / `error`（取值定义在 store.Access*），
+// 调用方拿它写 store.SetAccountModelAccess。**401 不是模型层面的结论**：凭据被拒时这一栏留空，
+// 表示「这一次不要写可达性」；否则一次全局凭据失效会把每个模型都标成 forbidden，
+// 换回凭据后那份清单仍全部不可用。
 //
 // Status 是迁移 0015 之前的状态词表，由 Access 推出，只为尚未改完的 internal/cli 保留：
 // 两栏永远同时有值或同时为空，读哪一栏都不会看到半个结论。
@@ -711,7 +722,7 @@ var defaultProbeProtocols = []string{
 }
 
 // isWireProtocol 判断一个取值是不是线协议。判定只有 store.IsWireProtocol 一份：gemini
-// 也是线协议（入站两条路径、流式双向都支持，见 DESIGN 5.9），厂商声明了 gemini 路由时探活要能用它。
+// 也是线协议（有原生入站路径，流式与非流式双向都支持），厂商声明了 gemini 路由时探活要能用它。
 // 别的值不能进探活：编码器遇见未知协议会报错，静默落进 chat 分支更糟——那会把一条配置
 // 错误变成对错误地址的上游调用。
 func isWireProtocol(p string) bool {
@@ -724,8 +735,8 @@ func isWireProtocol(p string) bool {
 //     白打的一次 404；
 //  2. 目录里这个模型声明支持的协议（provider_models.protocols）紧接着：上游自己说了它支持哪些协议
 //     （commandcode 的 supported_endpoints、gemini 的 supportedGenerationMethods），先按它打就少打几次
-//     错协议的请求。范围仍是第 3 步那批候选，声明了这家没有路由的协议时不打——那等于去撞一条
-//     没声明过的路径（见 DESIGN 5.7、5.8）；与第 1 步冲突时第 1 步优先；
+//     错协议的请求。范围仍是第 4 步那批候选，声明了这家没有路由的协议时不打——那等于去撞一条
+//     没声明过的路径，只能换回 404；与第 1 步冲突时第 1 步优先；
 //  3. 厂商的有效默认协议紧接其后，它既是对厂商配置的验证，也是 401 判定与全失败结论的依据；
 //  4. 其余按 resolver 给的顺序：Options.RouteProtocols 注入时用它，否则用该厂商在
 //     provider_routes 里声明过的协议（按协议名排序），都没有则三种全试。
@@ -771,8 +782,8 @@ func (s *Server) routeProtocolOrder(a store.Account, model string, override []st
 		candidates = defaultProbeProtocols
 	}
 
-	// 目录里声明的协议排在厂商默认协议之前，但只在这次候选范围之内：
-	// 声明了这家没有路由的协议时不打，理由同第 4 步。
+	// 目录里声明的协议排在厂商默认协议之前，但只在这次候选范围之内：candidates 就是这次要试的
+	// 全部协议，不在其中的没有可用的上游路径，去撞它等于把一次探活浪费在一个 404 上。
 	for _, p := range s.declaredProtocols(a, model) {
 		if !slices.Contains(candidates, p) {
 			continue
@@ -793,7 +804,7 @@ func (s *Server) routeProtocolOrder(a store.Account, model string, override []st
 	return order, nil
 }
 
-// declaredProtocols 读目录里这个模型声明支持的协议（provider_models.protocols，见 DESIGN 5.13）。
+// declaredProtocols 读目录里这个模型声明支持的协议（provider_models.protocols）。
 // 读不出来就当没有：一次读库失败不该让探活停下，候选仍按厂商路由与默认协议排。
 func (s *Server) declaredProtocols(a store.Account, model string) []string {
 	protocols, err := s.store.ProviderModelProtocols(a.Provider, model)
@@ -826,7 +837,8 @@ func (s *Server) providerProtocols(a store.Account, model string) ([]string, err
 //
 // hasEmbeddings 表示候选里还有向量化那一项：厂商同时声明了 openai-embeddings 路由时，一个
 // 400 也可能是「这个模型不是对话模型」——那种情况下直接判 error 会把一个能用向量化的模型
-// 标成失败（DESIGN 5.15）。有向量化候选时所有 400 都值得再试一次。
+// 标成失败：那种情况下直接下结论，就把一个只能算向量的模型当成了不能用。有向量化候选时
+// 所有 400 都值得再试一次。
 func retryOtherProtocol(res ModelProbe, hasEmbeddings bool) bool {
 	switch res.HTTPStatus {
 	case http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusForbidden:
@@ -869,7 +881,7 @@ func (s *Server) ProbeModel(ctx context.Context, a store.Account, model string) 
 //
 // 结论的写法：可达性放在 ModelProbe.Access（`allowed` / `forbidden` / `missing` / `error`），
 // 由调用方写进 store.SetAccountModelAccess；401 不是模型层面的结论，那一栏留空。
-// 协议发现成功时这里自己写 store.SetAccountModelProtocol（账号级覆盖，见 DESIGN 5.13）。
+// 协议发现成功时这里自己写 store.SetAccountModelProtocol（账号级覆盖）。
 func (s *Server) ProbeModelWithProtocols(ctx context.Context, a store.Account, model string,
 	candidates []string) (ModelProbe, error) {
 
@@ -888,7 +900,7 @@ func (s *Server) ProbeModelWithProtocols(ctx context.Context, a store.Account, m
 
 	if idx := slices.Index(order, ProtocolEmbeddings); idx >= 0 && idx != len(order)-1 {
 		// 向量化排在最后：它只在对话候选都不成时才值得试，垫在中间会让每个模型探活都多打一次。
-		// 排序只影响候选顺序，不影响已发现协议与目录声明那两步的优先级（DESIGN 5.15）。
+		// 排序只影响候选顺序，不影响已发现协议与目录声明那两步的优先级。
 		rest := append([]string{}, order[idx+1:]...)
 		order = append(order[:idx:idx], rest...)
 		order = append(order, ProtocolEmbeddings)
@@ -955,13 +967,13 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 	var raw []byte
 	var err error
 	// embedding 决定这次探活打哪个动作：向量化协议打 embeddings，gemini 的 embedding 模型打
-	// :embedContent。它就是 buildRequest 用来改写路径的那一个开关（DESIGN 5.15）。
+	// :embedContent。它就是 buildRequest 用来改写路径的那一个开关。
 	embedding := protocol == ProtocolEmbeddings ||
 		(protocol == ProtocolGemini && s.geminiEmbeddingOnly(a, model))
 	switch {
 	case protocol == ProtocolSystemOne:
 		// 决策模型的探活不是 max_tokens=1 的对话请求：决策端点不认 messages，发了只会换回 404，
-		// 把「模型可用」误判成「模型不存在」（DESIGN 5.14 的「探活」）。
+		// 把「模型可用」误判成「模型不存在」，探活反而会把一个能用的模型标成失败。
 		raw, err = systemOneProbeBody(model)
 	case protocol == ProtocolEmbeddings:
 		raw, err = embeddingsProbeBody(model)
@@ -980,7 +992,7 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 		res.Message = "按协议 " + protocol + " 编码探活请求失败: " + err.Error()
 		return att
 	}
-	// 模型同步没有客户端请求可依，入站头传 nil：客户端头透传只作用于转发路径（DESIGN 5.11）。
+	// 模型同步与探活没有客户端请求可依，入站头传 nil：客户端头透传只作用于转发路径。
 	upReq, err := s.buildRequest(ctx, a, protocol, protocol, nil, raw, ir, key, "", embedding)
 	if err != nil {
 		res.setAccess(store.AccessError)
@@ -1046,12 +1058,12 @@ type probeUsage struct {
 func readProbeUsage(protocol string, body []byte) probeUsage {
 	if protocol == ProtocolSystemOne {
 		// 决策协议没有 usage scanner（translate 的四套编解码器不认它）：两个字段直读，
-		// 没有缓存与思考两项（DESIGN 5.14）。
+		// 没有缓存与思考两项：决策端点的用量只有输入与输出。
 		in, out := systemOneUsage(body)
 		return probeUsage{in: in, out: out}
 	}
 	if protocol == ProtocolEmbeddings {
-		// 向量化同样没有 scanner：只有一个 prompt_tokens，输出恒为 0（DESIGN 5.15）。
+		// 向量化同样没有 scanner：只有一个 prompt_tokens，输出恒为 0，按对话形状去解只会拿到零值。
 		return probeUsage{in: embeddingsUsage(body)}
 	}
 	scanner, err := translate.NewUsageScanner(protocol)
@@ -1102,14 +1114,16 @@ func (s *Server) recordProbeAttempts(a store.Account, model string, attempts []p
 			HTTPStatus:     att.res.HTTPStatus,
 			OK:             i == verdict && att.res.HTTPStatus >= 200 && att.res.HTTPStatus < 300,
 			InTokens:       att.usage.in,
-			// 探活行也进 usage 汇总，所以同样按这次所用协议归一化输入 token：不归一化时
-			// 新列的默认值 0 会让探活输入的花费整块消失（见 store.UncachedInTokens）。
+			// 探活行也进 usage 汇总，所以同样按这次所用协议归一化输入 token：这一列是花费里输入
+			// 那一项的乘数，留默认值 0 会让探活输入的花费整块消失（归一化只写在 store.UncachedInTokens
+			// 一处，网关不按协议重算）。
 			InTokensUncached: store.UncachedInTokens(protocol, att.usage.in, att.usage.cacheRead),
 			OutTokens:        att.usage.out,
 			CacheRead:        att.usage.cacheRead,
 			CacheWrite:       att.usage.cacheWrite,
-			// 探活也算真实花费，思考 token 与转发行走同一个判定：原值入列，
-			// 只有「输出之外的一项」那份再按输出价计一次（见 DESIGN 5.5）。
+			// 探活也算真实花费，所以思考 token 与转发路径走同一个判定 store.ReasoningExtra：原值整列入列，
+			// 只有被判定成「输出之外的一项」的那部分再按输出价计一次——判定只写在那一处，
+			// 这里另写一套的话同一次调用在两张记录上会折出两个价。
 			ReasoningTokens:      att.usage.reasoning,
 			ReasoningTokensExtra: store.ReasoningExtra(att.usage.total, att.usage.in, att.usage.out, att.usage.reasoning),
 			LatencyMS:            att.res.Latency.Milliseconds(),

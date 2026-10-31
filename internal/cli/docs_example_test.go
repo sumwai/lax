@@ -8,22 +8,22 @@ import (
 	"testing"
 )
 
-// 这个文件把 README 与 DESIGN 第 3 节里出现的示例命令逐字搬进测试：
+// 这个文件把 README 里印出的示例命令逐字搬进测试：
 // 参数名、必填项与文档里印出来的输出一旦与实现漂移，这里会先红。
-// 唯一的额外一步是把上游地址指到 httptest 假上游——账号的地址只在厂商行上（见 DESIGN 5.8），
+// 唯一的额外一步是把上游地址指到 httptest 假上游——账号的地址只存在厂商行上，
 // 所以走 addAccount（先按厂商名把厂商的地址指过去）而不是直接调 account add；
-// 不这么做 model sync 会去连真实 deepseek，测试不许连真实厂商（见 AGENTS.md）。
+// 不这么做 model sync 会去连真实 deepseek，测试不许连真实厂商。
 
 // syncTableRow 匹配 model sync 人读表格的一行：账号、厂商、模型数、新增数。
 var syncTableRow = regexp.MustCompile(`(?m)^(\S+)\s+(\S+)\s+(\d+)\s+(\d+)\s*$`)
 
-// TestDesignSection3Examples 逐字跑 DESIGN 第 3 节的 provider 与 account 示例，
+// TestDesignSection3Examples 逐字跑文档里的 provider 与 account 示例，
 // 并断言文档里印出的输出行原样出现。
 func TestDesignSection3Examples(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
 
-	// DESIGN 2.1：每协议一条 flag 声明路由，输出一行确认。
+	// 每协议一条 flag 声明路由，输出一行确认。
 	code, out, stderr := run(t, "provider", "add", "acme",
 		"--base-url", "https://api.example.com",
 		"--openai", "/v1/chat/completions", "--anthropic", "/v1/messages")
@@ -34,7 +34,7 @@ func TestDesignSection3Examples(t *testing.T) {
 		t.Fatalf("provider add acme 的输出与 DESIGN 第 3 节不符：\n得到 %s\n期望包含 %q", out, want)
 	}
 
-	// DESIGN 2.1：删一条路由用 provider unset，输出两行。
+	// 删一条路由用 provider unset，输出两行。
 	code, out, stderr = run(t, "provider", "unset", "acme", "anthropic")
 	if code != 0 {
 		t.Fatalf("DESIGN 示例 provider unset acme anthropic 退出码 = %d，stderr = %s", code, stderr)
@@ -48,7 +48,7 @@ func TestDesignSection3Examples(t *testing.T) {
 		}
 	}
 
-	// DESIGN 2：account add 的输出格式（厂商、协议、脱敏凭据）。
+	// account add 的输出格式（厂商、协议、脱敏凭据）：脱敏后只留前三后一。
 	code, out, stderr = addAccount(t, "deepseek-1", "deepseek", "", "", "--key", "sk-xxxxxxxx")
 	if code != 0 {
 		t.Fatalf("DESIGN 示例 account add deepseek-1 退出码 = %d，stderr = %s", code, stderr)
@@ -58,7 +58,7 @@ func TestDesignSection3Examples(t *testing.T) {
 	}
 }
 
-// TestDesignSection3SyncExample 逐字跑 DESIGN 第 3 节第 3 步的 `model sync --account deepseek-1`：
+// TestDesignSection3SyncExample 逐字跑文档里的 `model sync --account deepseek-1` 那一步：
 // 表格五列、一行数据与下一步提示都要在，上游地址按 deepseek 的 chat 路由 models_path 取。
 // 唯一的额外一步是把 deepseek 的地址指到假上游（`provider set --base-url`），参数名与文档一致。
 func TestDesignSection3SyncExample(t *testing.T) {

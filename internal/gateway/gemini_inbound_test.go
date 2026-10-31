@@ -13,7 +13,7 @@ import (
 	"lax/internal/translate"
 )
 
-// gemini 的入站路径：模型名在路径里，两条路径后缀各自表示非流式与流式（DESIGN 5.9）。
+// gemini 的入站路径：模型名在路径里，两条路径后缀各自表示非流式与流式。
 const (
 	geminiInboundPath   = "/v1beta/models/gemini-2.5-flash:generateContent"
 	geminiInboundStream = "/v1beta/models/gemini-2.5-flash:streamGenerateContent"

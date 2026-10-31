@@ -30,7 +30,7 @@ func syncBody(t *testing.T, body, secretValue string) (models []string, syncErr 
 }
 
 // mustNotLeak 断言凭据明文既没进日志、也没进错误文本、也没进序列化后的模型列表。
-// 凭据只在内存里活到构造上游请求为止（见 DESIGN 5.6），模型同步这条路径也不例外。
+// 凭据只在内存里活到构造上游请求为止，模型同步这条路径也不例外。
 func mustNotLeak(t *testing.T, key string, models []string, syncErr error, logs string) {
 	t.Helper()
 	if strings.Contains(logs, key) {

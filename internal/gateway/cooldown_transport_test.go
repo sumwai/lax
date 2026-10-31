@@ -36,7 +36,7 @@ func assertCooldown(t *testing.T, f *fixture, name string, want time.Duration, b
 
 // TestTransportFailureCoolsTwoSeconds 钉住两件事同时成立：连接被拒时 requests.http_status 仍是
 // 502（表示网关没拿到上游响应），冷却却按连接层那一档从 2 秒起算，而不是上游 5xx 的 10 秒。
-// 单账号网关在断网恢复后能否马上接活取决于这一档（见 DESIGN 5.3）。
+// 单账号网关在断网恢复后能否马上接活取决于这一档。
 func TestTransportFailureCoolsTwoSeconds(t *testing.T) {
 	f := newFixture(t)
 	f.add(t, "dead", gateway.ProtocolChat, closedURL(t), "sk-test", []string{"m1"}, 100)

@@ -14,7 +14,7 @@ import (
 
 // 这个文件钉住「一帧怎么才算收尾」：判据是帧里的 type 字段或 SSE 的 event 名，不是字节子串，
 // 收尾帧到齐的完整流一个字节都不追加；收尾帧没到就是断流，转换与直通两条路径对断流给出同一个
-// 结论（DESIGN 5.2 第 6 条、5.4）：都补错误帧，都把那一次记成 ok=0。
+// 结论：都补错误帧，都把那一次记成 ok=0。
 
 // streamPost 用某协议的最小请求体打开一条流，返回状态与客户端收到的全部字节。
 func streamPost(t *testing.T, srv *httptest.Server, protocol string) (int, string) {

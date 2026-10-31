@@ -27,7 +27,7 @@ func (e SSEEvent) Bytes() []byte {
 	return b.Bytes()
 }
 
-// 断流时工具调用的参数可能只到一半（DESIGN 5.4 已知边界）：错误文案要说明这一条，
+// 断流时工具调用的参数可能只到一半：错误文案要说明这一条，
 // 客户端才不会把残缺的 input 当成完整参数。
 const incompleteToolArgsNote = "工具调用参数在上游中断，内容不完整"
 
@@ -161,7 +161,7 @@ func (s *AnthropicUsageScanner) Feed(data []byte) {
 }
 
 // Usage 返回读到的用量。anthropic 没有独立的思考与总 token 字段，Reasoning 与 Total 恒为 0：
-// 它的 output_tokens 本来就含思考，不需要再判一次（见 DESIGN 5.5）。
+// 它的 output_tokens 本来就含思考，不需要再判一次，再按输出价加一遍就是重复收费。
 func (s *AnthropicUsageScanner) Usage() Usage {
 	return Usage{In: s.in, Out: s.out, CacheRead: s.cacheRead, CacheWrite: s.cacheWrite}
 }

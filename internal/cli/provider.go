@@ -22,19 +22,19 @@ var providerSubs = []groupItem{
 	{"header", "声明上游除凭据头之外还要的附加请求头：set / unset / ls"},
 }
 
-// 五个协议 flag（`--anthropic`、`--openai`、`--responses`、`--gemini`、`--systemone`）的取值
-// 有两种写法（见 DESIGN 5.8）：相对厂商 base_url 的完整路径，或整条地址（含 `://`，直接用、
+// 六个协议 flag（`--anthropic`、`--openai`、`--responses`、`--gemini`、`--systemone`、
+// `--embeddings`）的取值有两种写法：相对厂商 base_url 的完整路径，或整条地址（含 `://`，直接用、
 // 不再拼 base_url）。相对路径由 store.NormalizePath 规整、不拒绝输入：`v1/chat/completions`、
 // `//v1//chat/completions`、`/v1/chat/completions/` 落成同一个地址；整条地址交给
 // store.NormalizeEndpoint 校验 scheme 与主机名，因此 `https://`、`https:///x`、`ftp://host/x`
 // 都是用法错误。cli 只判两件事：「规整之后为空」与「整条地址校验不过」，删除语义归 provider unset。
-// gemini 的入站与出站都可用（DESIGN 5.9），路由路径里的 `{model}` 占位符原样落库，由网关在
+// gemini 的入站与出站都可用，路由路径里的 `{model}` 占位符原样落库，由网关在
 // 发请求之前换成模型名：cli 不展开、不校验、也不改写它。systemone 的入站与出站是同一个
-// `POST /v1/systemone`（DESIGN 5.14），没有占位符，与其它协议走同一套规整与校验。
+// `POST /v1/systemone`，没有占位符，与其它协议走同一套规整与校验。
 
-// 三份用法行，所有用法错误都把它打出来，不让用户看着一句「参数错误」去猜参数（见 AGENTS.md）。
-// `--base-url` 在 add 里是可选的：三条路由与 models_path 都是整条地址时它拼不进任何地址，
-// 写它只是为了过校验（见 DESIGN 5.8）。
+// 三份用法行，所有用法错误都把它打出来，不让用户看着一句「参数错误」去猜参数。
+// `--base-url` 在 add 里是可选的：每条路由与 models_path 都写成整条地址时，它拼不进任何地址，
+// 这一项确实无处可用，给了也只过一遍本机校验、不参与拼地址。
 const (
 	providerAddUsage   = "用法：lax provider add <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--embeddings <路径>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]"
 	providerSetUsage   = "用法：lax provider set <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--embeddings <路径>] [--models-path <路径>] [--default-protocol <协议>] [--note <备注>]"
@@ -43,11 +43,11 @@ const (
 
 // providerUnsetField 是一个可以被 `provider unset` 清掉的字段。字段名用 flag 名，
 // 删路由的几项带上线协议；base-url 与厂商名不在这里：前者只能改成另一个地址（清掉之后相对路径
-// 的路由就拼不出完整地址），后者是主键（见 DESIGN 4）。
+// 的路由就拼不出完整地址），后者是主键。
 type providerUnsetField struct {
-	name     string // 位置参数上的字段名
-	what     string // 人读输出里的说法
-	protocol string // 删掉路由时的线协议；空表示不是路由
+	name     string // 位置参数上的字段名，也是这一项的 flag 名
+	what     string // 人读输出里的说法：输出里写「anthropic 路由」比写 anthropic 清楚
+	protocol string // 删掉路由时的线协议；空串表示这一项不是路由，不碰 provider_routes
 }
 
 var providerUnsetFields = []providerUnsetField{
@@ -97,7 +97,7 @@ type providerRouteJSON struct {
 }
 
 // providerJSON 是 provider ls / add / set / unset --json 的一行。protocols 恒为数组，没有路由时是 []。
-// DefaultProtocol 是有效默认协议（见 DESIGN 5.8），一条路由都没有时为空串。
+// DefaultProtocol 是有效默认协议，一条路由都没有时为空串。
 // ModelsPath 是厂商级的模型列表路径覆盖，空串表示按各路由自己的 models_path 取。
 type providerJSON struct {
 	Name            string              `json:"name"`
@@ -151,7 +151,7 @@ func joinCN(left, right string) string {
 }
 
 // providerModelsCell 是 provider ls 的「模型列表」列：厂商级覆盖非空就显示它，否则显示各路由
-// 自己的 models_path，都没有时显示 -（这种情况 model sync 会按 base_url 后缀猜，见 DESIGN 5.7）。
+// 自己的 models_path，都没有时显示 -（这种情况 model sync 会按 base_url 后缀猜）。
 func providerModelsCell(p store.Provider, routes []store.ProviderRoute) string {
 	if p.ModelsPath != "" {
 		return p.ModelsPath
@@ -171,7 +171,7 @@ func providerModelsCell(p store.Provider, routes []store.ProviderRoute) string {
 	return strings.Join(paths, "、")
 }
 
-// effectiveDefaultProtocol 问 store 要厂商的有效默认协议，cli 不自己算排序兜底（见 DESIGN 5.8）。
+// effectiveDefaultProtocol 问 store 要厂商的有效默认协议，cli 不自己算排序兜底：两份判定迟早对不上。
 // 厂商在但一条路由都没有时 store 返回 ErrProviderNoRoutes：这里换成空串，
 // 让调用方显示「无路由」而不是让整条命令失败。
 func effectiveDefaultProtocol(st *store.Store, name string) (string, error) {
@@ -231,7 +231,7 @@ func defaultProtocolCell(s providerSnapshot) string {
 }
 
 // baseURLCell 是地址列：base_url 可以为空（每条路由与 models_path 都是整条地址时它拼不进
-// 任何地址，见 DESIGN 5.8），空值显示 -，与默认协议列同一种写法，不打出一个空单元格。
+// 任何地址），空值显示 -，与默认协议列同一种写法，不打出一个空单元格。
 func baseURLCell(base string) string {
 	if base == "" {
 		return "-"
@@ -345,13 +345,13 @@ func (p providerPathFlags) pairs(fs *flagSet) []providerPathFlag {
 }
 
 // pathGiven 判断一个路径类取值算不算给了值：空串、只有空白、只有斜杠都算没给。
-// 判定走 store.NormalizePath，cli 因此只多判「规整之后为空」一条，不另立一套斜杠写法校验
-// （见 DESIGN 5.8）。整条地址的取值同样算给了值：它在 checkEndpoint 里单独判。
+// 判定走 store.NormalizePath，cli 因此只多判「规整之后为空」一条，不另立一套斜杠写法校验。整条地址的取值同样算给了值：它在 checkEndpoint 里单独判。
 func pathGiven(raw string) bool { return store.NormalizePath(raw) != "" }
 
 // checkRoutePathFlag 校验一个协议 flag 的取值。两条用法错误：空值（删除语义归 provider unset）、
 // 整条地址校验不过（缺主机名、scheme 不是 http(s)，判定交给 store.NormalizeEndpoint）。
-// 其余写法——缺前导斜杠、重复斜杠、末尾斜杠——继续交给 store 规整，cli 不拒绝（见 DESIGN 5.8）。
+// 其余写法——缺前导斜杠、重复斜杠、末尾斜杠——继续交给 store 规整，cli 不拒绝：
+// 路径是抄上游文档抄来的，多一个斜杠不算用法错误。
 func checkRoutePathFlag(f providerPathFlag, setCmd bool, usageLine string) error {
 	if !f.given {
 		return nil
@@ -379,7 +379,8 @@ func protocolFromCLI(value string) (string, error) {
 }
 
 // protocolFromCLIName 是 protocolFromCLI 的同一套映射，只把错误文案里的参数名与示例换成调用方那一个：
-// provider header 的 --protocol 也收这四个命令行写法，落库的必须是线协议全名（见 DESIGN 5.10）。
+// provider header 的 --protocol 也收这四个命令行写法，落库的必须是线协议全名：
+// 库里的路由与行按线协议全名匹配，存了一简称就永远匹配不上。
 func protocolFromCLIName(value, flagName, example string) (string, error) {
 	switch v := strings.TrimSpace(value); v {
 	case "":
@@ -402,7 +403,7 @@ func protocolFromCLIName(value, flagName, example string) (string, error) {
 
 // emptyValueError 是「给了参数但值是空」的统一文案，路径参数规整之后为空也算空。
 // 空串不再表示删除或清空：两者一律走 `provider unset`，避免 --note "" 这类写法
-// 顺手把已有值抹掉（见 DESIGN 4）。末尾附上这个子命令的用法行，用户不必再猜语法。
+// 顺手把已有值抹掉。末尾附上这个子命令的用法行，用户不必再猜语法。
 func emptyValueError(setCmd bool, flagName, usageLine string) error {
 	if setCmd {
 		return usagef("--%s 传了空值：provider set 只负责设值，取值不能为空；删除一条路由或清掉一项设置用 lax provider unset <名称> %s\n%s",
@@ -413,7 +414,7 @@ func emptyValueError(setCmd bool, flagName, usageLine string) error {
 }
 
 // lookupUnsetField 把一个位置参数换成字段描述。未知字段、带 -- 前缀、大小写不符都当场报错
-// 并列出可用字段：静默忽略会让「以为删了」留到下游转发才发现（见 DESIGN 4）。
+// 并列出可用字段：静默忽略会让「以为删了」留到下游转发才发现。
 func lookupUnsetField(raw string) (providerUnsetField, error) {
 	available := make([]string, 0, len(providerUnsetFields))
 	for _, f := range providerUnsetFields {
@@ -463,14 +464,15 @@ func cmdProviderAdd(e *Env, args []string) error {
 	}
 	name := fs.Arg(0)
 
-	// 空值一律是用法错误：删除与清空走 `provider unset`，不做「空串即删除」的约定（见 DESIGN 4）。
+	// 空值一律是用法错误：删除与清空走 `provider unset`，不做「空串即删除」的约定。
 	// 不给 --base-url 则是合法的：三条路由与 models_path 都是整条地址时它拼不进任何地址，
 	// 这个前提由 store.CreateProvider 判（store 是唯一一份校验），cli 只把它包成用法错误。
 	if flagWasSet(fs, "base-url") && strings.TrimSpace(*baseURL) == "" {
 		return usagef("--base-url 传了空值：要么给一个带主机名的完整地址（例如 --base-url https://api.example.com），要么整个去掉这个参数\n%s", providerAddUsage)
 	}
 	// 地址交给 store.NormalizeBaseURL 判定与规整，cli 不另写一份 scheme/主机名预检；
-	// 落库用的就是它返回的形态，与 provider set、account add 同一份规则（见 DESIGN 5.8）。
+	// 落库用的就是它返回的形态，与 provider set、account add 同一份规则：
+	// 三处各写一份预检的话，同一串地址在三条命令上会有两种命运。
 	if *baseURL != "" {
 		norm, err := checkBaseURL(*baseURL, providerAddUsage)
 		if err != nil {
@@ -496,7 +498,7 @@ func cmdProviderAdd(e *Env, args []string) error {
 	}
 
 	// 路径取值原样交给 store：写法（前导斜杠、重复斜杠、末尾斜杠）由 NormalizePath 规整，
-	// cli 不提前拒绝（见 DESIGN 5.8）。上面只判过「规整之后为空」与「写成了整条地址」两种用法错误。
+	// cli 不提前拒绝。上面只判过「规整之后为空」与「写成了整条地址」两种用法错误。
 	routes := make([]store.ProviderRoute, 0, 5)
 	for _, f := range paths.pairs(fs) {
 		if !f.given {
@@ -512,7 +514,7 @@ func cmdProviderAdd(e *Env, args []string) error {
 	if err != nil {
 		return err
 	}
-	// 没给 --models-path 时厂商级覆盖为空，按各路由的 models_path 取（见 DESIGN 5.7）。
+	// 没给 --models-path 时厂商级覆盖为空，按各路由的 models_path 取。
 	models := ""
 	if flagWasSet(fs, "models-path") {
 		models = *modelsPath
@@ -549,7 +551,7 @@ func cmdProviderAdd(e *Env, args []string) error {
 }
 
 // cmdProviderSet 只设值：传了的字段改成新值，没传的字段一律保留。
-// 删除一条路由、清掉覆盖或备注走 `provider unset`（见 DESIGN 4）。
+// 删除一条路由、清掉覆盖或备注走 `provider unset`：只设值不删值，一个写错的空参数不会抹掉已有配置。
 func cmdProviderSet(e *Env, args []string) error {
 	fs := newFlagSet(e, "provider set", "改一家厂商的地址、路由、默认协议或备注（支持 anthropic、openai、responses、gemini、systemone 五种协议）")
 	baseURL := fs.String("base-url", "", "改厂商的默认地址（带主机名的完整地址；每条路由都是整条地址时不需要它）")
@@ -573,7 +575,9 @@ func cmdProviderSet(e *Env, args []string) error {
 		if strings.TrimSpace(*baseURL) == "" {
 			return usagef("--base-url 传了空值：改地址要给带主机名的完整地址，例如 --base-url https://api.example.com；不需要地址的厂商本来就该省略这一项（见 DESIGN 5.8）")
 		}
-		// 与 provider add、account add 同一份校验与规整（见 DESIGN 5.8）。
+		// 地址走 checkBaseURL，与 provider add、account add 是同一份校验与规整：含 `://` 的整条地址
+		// 交给 store.NormalizeEndpoint 校验 scheme 与主机名，其余按相对路径规整。cli 不另写一份预检，
+		// 两份判定迟早对不上，`https://` 这种只有 scheme 的写法会被误报成「地址为空」。
 		norm, err := checkBaseURL(*baseURL, providerSetUsage)
 		if err != nil {
 			return err
@@ -614,7 +618,7 @@ func cmdProviderSet(e *Env, args []string) error {
 		if err := checkRoutePathFlag(f, true, providerSetUsage); err != nil {
 			return err
 		}
-		// 写法交给 store 规整，不再要求以 / 开头（见 DESIGN 5.8）。
+		// 写法交给 store 规整，不再要求以 / 开头。
 		patch.Routes[f.protocol] = f.value
 		changed = append(changed, f.flagName)
 	}
@@ -799,7 +803,7 @@ func cmdProviderRm(e *Env, args []string) error {
 	}
 
 	// --force 走 store.DeleteProviderForce：同一个事务里把指向它的账号停用，
-	// 否则这些账号留在选号池里必然 502（它们已经没有地址与路由了，见 DESIGN 5.8）。
+	// 否则这些账号留在选号池里必然 502（它们已经没有地址与路由了）。
 	if len(names) > 0 {
 		if err := a.st.DeleteProviderForce(name); err != nil {
 			return err
@@ -822,9 +826,9 @@ func cmdProviderRm(e *Env, args []string) error {
 	return nil
 }
 
-// isWireProtocol 判断一个取值是不是线协议。判定只有 store.IsWireProtocol 一份（五条线协议，
-// gemini 的入站与出站都可用，见 DESIGN 5.9；systemone 的入站与出站是同一个 POST /v1/systemone，
-// 见 DESIGN 5.14）：账号的 --protocol 与厂商的默认协议共用这一个判断，两处各写一份名单迟早会对不上。
+// isWireProtocol 判断一个取值是不是线协议。判定只有 store.IsWireProtocol 一份（六条线协议：
+// gemini 的入站与出站都可用；systemone 的入站与出站是同一个 POST /v1/systemone；向量化是第六条）：
+// 账号的 --protocol 与厂商的默认协议共用这一个判断，两处各写一份名单迟早会对不上。
 func isWireProtocol(proto string) bool {
 	return store.IsWireProtocol(proto)
 }
@@ -841,7 +845,7 @@ func flagWasSet(fs *flagSet, name string) bool {
 }
 
 // unknownProviderError 说明厂商表里没有这一行，并给出最接近的已知厂商与下一步命令。
-// 账号的地址与默认协议只在厂商行上（见 DESIGN 5.8），所以出路只有一条：先把厂商登记进去。
+// 账号的地址与默认协议只在厂商行上，所以出路只有一条：先把厂商登记进去。
 func unknownProviderError(st *store.Store, name string) error {
 	providers, err := st.ListProviders()
 	if err != nil {

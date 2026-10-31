@@ -308,7 +308,7 @@ func TestDecodeResponsesResponse(t *testing.T) {
 			},
 		},
 		{
-			// 非流式直通的记账走解码器，思考 token 与总 token 一并从 usage 里读出来（DESIGN 5.5）。
+			// 非流式直通的记账走解码器，思考 token 与总 token 一并从 usage 里读出来。
 			name: "思考 token",
 			body: `{"id":"resp_9","status":"completed",
 				"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"想完了"}]}],
@@ -828,7 +828,7 @@ func TestResponsesUsageScanner(t *testing.T) {
 
 // TestResponsesUsageScannerReadsReasoning 钉住思考 token 的两个落点：官方 Responses 报文
 // 放在 output_tokens_details.reasoning_tokens，部分中转照 chat 的写法放在
-// completion_tokens_details 里，两处都读（DESIGN 5.5）。
+// completion_tokens_details 里，两处都读。
 func TestResponsesUsageScannerReadsReasoning(t *testing.T) {
 	var official responsesUsageScanner
 	official.Feed([]byte(`{"id":"resp_1","object":"response","status":"completed","output":[],` +
@@ -1078,7 +1078,7 @@ type writerFunc func([]byte) (int, error)
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
 // TestResponsesStreamEncoderErrorKeepsTextOutOfOutput 确认断流时不把半截正文写进 output：
-// 正文已经按增量下发过，但 response.failed 的 output 仍是空数组（DESIGN 5.4）。
+// 正文已经按增量下发过，但 response.failed 的 output 仍是空数组。
 func TestResponsesStreamEncoderErrorKeepsTextOutOfOutput(t *testing.T) {
 	e := newResponsesStreamEncoder("gpt-5")
 	e.Emit(Delta{Kind: DeltaText, Text: "说到一半"})

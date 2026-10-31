@@ -9,7 +9,7 @@ import (
 )
 
 // 这个文件钉住思考 token 的两处展示：`log tail` 逐行一列、`usage` 三种分组各一列，
-// 文本与 `--json` 都带（DESIGN 第 4 节的列说明、5.5 的计价口径）。
+// 文本与 `--json` 都带。
 // 思考 token 与输出 token 分开显示：上游可能把它报成输出之外的一项，并进输出会看不出账。
 
 // TestLogTailShowsReasoningTokens 覆盖 log tail 的「思考」列：文本表格在输出之后多一列，
@@ -86,7 +86,7 @@ func TestUsageReasoningTotalsPerDimension(t *testing.T) {
 	if code, _, stderr := addAccount(t, "relay", "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-secret-usage", "--models", "m-a,m-b"); code != 0 {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
-	// 单价在模型目录上：两个模型各定一份，思考 token 按输出价计（见 DESIGN 5.5）。
+	// 单价在模型目录上：两个模型各定一份，思考 token 按输出价计。
 	for _, model := range []string{"m-a", "m-b"} {
 		if code, _, stderr := run(t, "model", "price", "set", model, "--provider", "mine", "--in", "2", "--out", "8"); code != 0 {
 			t.Fatalf("model price set %s 退出码 = %d，stderr = %s", model, code, stderr)

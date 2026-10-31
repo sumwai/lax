@@ -25,7 +25,7 @@ func TestNormalizePath(t *testing.T) {
 		{"///", ""},
 		{"   ", ""},
 		{"chat/completions", "/chat/completions"},
-		// gemini 的模型名占位符不是斜杠：花括号与冒号原样保留，转发时才替换（DESIGN 5.9）。
+		// gemini 的模型名占位符不是斜杠：花括号与冒号原样保留，转发时才替换。
 		{"/v1beta/models/{model}:generateContent", "/v1beta/models/{model}:generateContent"},
 		{"v1beta//models//{model}:generateContent/", "/v1beta/models/{model}:generateContent"},
 	}
@@ -188,7 +188,7 @@ func strPtr(v string) *string { return &v }
 
 // TestGeminiRouteKeepsModelPlaceholder 钉住 gemini 路由的写法：`{model}` 占位符在写入与读取
 // 两侧都原样保留（相对路径与整条地址都一样），路径规整只合并斜杠、不吃掉花括号与冒号；
-// gemini 也没有模型列表推导，`models_path` 留空表示回退到同厂商其它协议（DESIGN 5.9）。
+// gemini 也没有模型列表推导，`models_path` 留空表示回退到同厂商其它协议。
 func TestGeminiRouteKeepsModelPlaceholder(t *testing.T) {
 	st := openTemp(t)
 

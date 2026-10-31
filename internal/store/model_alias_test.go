@@ -168,7 +168,7 @@ func TestSetModelAliasOverwrites(t *testing.T) {
 	}
 }
 
-// TestSetModelAliasValidation 钉住 DESIGN 5.12 的写入校验：空白、控制字符、别名等于目标
+// TestSetModelAliasValidation 钉住写入校验：空白、控制字符、别名等于目标
 // （含去空白之后相等）、与账号真实模型名同名，各自报错；写法合规的一条都不拦。
 func TestSetModelAliasValidation(t *testing.T) {
 	st := openTemp(t)
@@ -233,7 +233,7 @@ func TestSetModelAliasValidation(t *testing.T) {
 	}
 }
 
-// TestSetModelAliasShadowCatalogOnly 钉住 DESIGN 5.12 的目录那一段检查：目录里的名字是真名，
+// TestSetModelAliasShadowCatalogOnly 钉住目录那一段检查：目录里的名字是真名，
 // 眼下没有账号能用它也不算——账号一恢复可用，这个别名的行为就会突然改变。
 // 文案要写出是哪家厂商的目录：用户去账号里找一个没人声明的名字是找不到的。
 func TestSetModelAliasShadowCatalogOnly(t *testing.T) {

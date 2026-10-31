@@ -162,7 +162,7 @@ type check struct {
 	Note string `json:"note"`
 }
 
-// legacyDirName 是改名前的默认目录名，改名前的库文件名是它加 .db（见 DESIGN 5.1 的路径约定）。
+// legacyDirName 是改名前的默认目录名，改名前的库文件名是它加 .db。
 // 改名只换了默认目录，老用户的数据还留在旧路径下，doctor 用它判断要不要提示搬家：
 // 运行时不读这个位置，别的地方也不做兼容分支。
 const legacyDirName = "switchboard"

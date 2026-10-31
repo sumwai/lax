@@ -90,8 +90,7 @@ func TestCallNoModelsHint(t *testing.T) {
 	}
 }
 
-// gemini 入站的两个用例共用这两份假报文：模型名在路径里，非流式与流式各一条路径
-// （见 DESIGN 5.9）。chat 上游的响应体用 fakeupstream_test.go 里的 chatCompletionOK。
+// gemini 入站的两个用例共用这两份假报文：模型名在路径里，非流式与流式各一条路径。chat 上游的响应体用 fakeupstream_test.go 里的 chatCompletionOK。
 const (
 	geminiResponseOK = `{"candidates":[{"content":{"role":"model","parts":[{"text":"pong"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":7,"candidatesTokenCount":2,"totalTokenCount":9}}`
 	geminiStreamOK   = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"po\"}]}}]}\n\n" +
@@ -99,7 +98,7 @@ const (
 )
 
 // TestCallGeminiInbound 确认 call 能按 gemini 入站打一条：模型名不在请求体里，由本命令拼进
-// 入站路径，服务端按路径里的模型名选号（DESIGN 4 的 call 行）。账号是 openai-chat，
+// 入站路径，服务端按路径里的模型名选号。账号是 openai-chat，
 // 因此这条请求走 gemini → chat 的转换路径，拿到的响应是 gemini 形状。
 func TestCallGeminiInbound(t *testing.T) {
 	sandbox(t)

@@ -341,7 +341,7 @@ func TestProbeEmptyModelsKeepsNoteOnFailure(t *testing.T) {
 
 // TestProbeModelNameSourceNotes 钉住最小调用的模型名三档取值与备注文案：
 // 账号可达模型第一项 → 上游模型清单第一项 → 兜底默认名，备注写清用的是哪一个与来源。
-// 第一档读的是 `access='allowed'` 的行（store.AllowedModels 按名字升序，见 DESIGN 5.13），
+// 第一档读的是 `access='allowed'` 的行（store.AllowedModels 按名字升序），
 // 所以它给的第一项是字典序最小的那个，不是手填清单的书写顺序。
 func TestProbeModelNameSourceNotes(t *testing.T) {
 	cases := []struct {
@@ -362,7 +362,7 @@ func TestProbeModelNameSourceNotes(t *testing.T) {
 			note:   "模型名取账号清单第一项 m-a",
 		},
 		{
-			// 空白名字不算模型（见 DESIGN 5.2.1）：跳过它们取第一个真名字。
+			// 空白名字不算模型：跳过它们取第一个真名字。
 			name:   "账号清单里的空白名字",
 			models: []string{"", "  ", "m-c"},
 			list:   probeReply{status: http.StatusOK, body: `{"data":[{"id":"m-z"}]}`},

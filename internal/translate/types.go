@@ -9,7 +9,7 @@ import (
 )
 
 // AnthropicRequest 是入站 /v1/messages 的请求体。
-// thinking 是请求侧的思考配置参数（DESIGN 5.4「思考配置参数」），与消息里的 thinking 块
+// thinking 是请求侧的思考配置参数，与消息里的 thinking 块
 // 不是一件事：那边是上游给出的思考正文。
 type AnthropicRequest struct {
 	Model         string               `json:"model"`
@@ -27,7 +27,7 @@ type AnthropicRequest struct {
 }
 
 // AnthropicThinking 是顶层的 thinking 字段：type 为 enabled 时带预算，为 disabled 时
-// 只有 type（DESIGN 5.4）。
+// 只有 type，disabled 与 enabled 靠这一个字段区分。
 type AnthropicThinking struct {
 	Type         string `json:"type"`
 	BudgetTokens int    `json:"budget_tokens,omitempty"`
@@ -62,7 +62,8 @@ type ContentBlock struct {
 	Data      string `json:"data,omitempty"`
 }
 
-// ImageSource 是 image 块的来源。
+// ImageSource 是 image 块的来源。anthropic 把图片写成 base64（data + media_type）或 url，两种写法
+// 都落在这里；编到别的协议时按目标支持的那一种输出，另一个字段留空。
 type ImageSource struct {
 	Type      string `json:"type"`
 	MediaType string `json:"media_type,omitempty"`
@@ -81,7 +82,7 @@ type AnthropicTool struct {
 
 // AnthropicToolChoice 是入站工具选择。
 // allowed_tools 这一档用 Tools 装白名单（每项形如 {"type":"tool","name":…}）；anthropic
-// 另有一个可选的 mode（auto 或 any），中间表示不搬它：编出去时一律按 auto 写（DESIGN 5.4）。
+// 另有一个可选的 mode（auto 或 any），中间表示不搬它：编出去时一律按 auto 写。
 type AnthropicToolChoice struct {
 	Type                   string                   `json:"type"`
 	Name                   string                   `json:"name,omitempty"`
@@ -171,8 +172,8 @@ func (c Content) Plain() string {
 
 // ChatRequest 是发往 openai-chat 上游的请求体（入站与出站同一形状）。
 // ReasoningEffort 与 Reasoning 都是请求侧的思考配置参数：前者是主流写法，后者是少数实现
-// 把同一个值包在对象里的写法，解码时两者都读，编码时只写 ReasoningEffort
-// （DESIGN 5.4「思考配置参数」）。
+// 把同一个值包在对象里的写法，解码时两者都读，编码时只写 ReasoningEffort：
+// 两条都写会让上游收到两个可能矛盾的档位。
 type ChatRequest struct {
 	Model             string             `json:"model"`
 	Messages          []ChatMessage      `json:"messages"`
@@ -234,7 +235,7 @@ type ChatTool struct {
 
 // ChatToolFunc 是工具定义的函数部分。
 // Strict 是严格模式开关（参数按 parameters 校验）：nil 表示客户端没给，非 nil 时写出去
-// 与搬进中间表示（DESIGN 5.4「工具定义与选择」）。
+// 与搬进中间表示。两种情况不能合成一个 false，否则往返一次就把「没开」变成了「显式关」。
 type ChatToolFunc struct {
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
@@ -275,7 +276,7 @@ type PromptTokenDetail struct {
 
 // CompletionTokenDetail 携带输出里的思考 token 数。各家口径不同：OpenAI 官方把这部分算在
 // completion_tokens 里（子集），有的中转把它报成输出之外的一项、只相加到 total。入账时按
-// total 判定要不要另算一遍，不按协议猜（见 store.ReasoningExtra 与 DESIGN 5.5）。
+// total 判定要不要另算一遍，不按协议猜：同一个协议的不同中转也会给出不同口径。
 type CompletionTokenDetail struct {
 	ReasoningTokens int64 `json:"reasoning_tokens"`
 }

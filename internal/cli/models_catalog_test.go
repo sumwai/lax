@@ -154,7 +154,7 @@ func TestModelsCatalogFollowsAccountEnableDisable(t *testing.T) {
 		t.Fatalf("停用后清单 = %s，期望空数组", raw)
 	}
 	// 代价也说清楚：名字虽然从清单里消失，客户端若照旧发过来，得到的是 503 而不是 404
-	// ——账号确实声明过这个模型，只是这一次全都停用了（见 5.2 第 8 步）。
+	// ——账号确实声明过这个模型，只是这一次全都停用了。
 	status, body := postGateway(t, srv, "/v1/chat/completions",
 		`{"model":"m1","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`)
 	if status != http.StatusServiceUnavailable {

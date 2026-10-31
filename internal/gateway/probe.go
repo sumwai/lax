@@ -41,13 +41,14 @@ type ProbeStep struct {
 	Latency time.Duration
 	Message string
 	// Transport 表示这一步一条 HTTP 响应都没拿到（连不上、超时、握手失败）：Status 仍记 502。
-	// 结论取这一步时冷却按连接层那一档算（见 DESIGN 5.3）；列表那一段只退回最小调用，不打冷却。
+	// 结论取这一步时冷却按连接层那一档算（2 秒起）：连不上多半是本机网络或中转抖动；
+	// 列表那一段只退回最小调用，不打冷却。
 	Transport bool
 }
 
 // ProbeResult 是一次探活的结果。主结论（Stage、Status、OK、Latency、Message）取模型调用那一段：
-// 列表接口 2xx 只证明地址通，公开的列表接口对任何 key 都回 200，凭据有效与否只能靠一次真实调用
-// （见 DESIGN 4、5.7）。Models 与 ModelsKnown 仍取列表那一段——只有列表接口报得出上游模型数。
+// 列表接口 2xx 只证明地址通，公开的列表接口对任何 key 都回 200，凭据有效与否只能靠一次真实调用。
+// Models 与 ModelsKnown 仍取列表那一段——只有列表接口报得出上游模型数。
 // List 留着列表那一段的完整结论，人读输出与 `--json` 靠它把两段分开说清楚。
 type ProbeResult struct {
 	Account     string
@@ -73,7 +74,7 @@ const probeFallbackModel = "default"
 // 好不好。列表接口不可用（404、405、403、取不到列表地址或连不上）时也走这条最小调用，只是备注里
 // 写清列表那一步为什么没成。两段都通过才判正常，状态与退出码按调用那段算；列表接口自己回
 // 401/429/5xx/其它 4xx 时已经是凭据或上游的结论，不再花一次调用。两个阶段的状态更新都只经
-// applyProbeState（见 DESIGN 4、5.7）。
+// applyProbeState——两段各自写库，不在这里另拼一份。
 func (s *Server) Probe(ctx context.Context, a store.Account) (ProbeResult, error) {
 	list, note, decided, err := s.probeModelsEndpoint(ctx, a)
 	if err != nil {
@@ -111,7 +112,7 @@ func withList(res ProbeResult, list ProbeStep) ProbeResult {
 // probeModelsEndpoint 是第一步：GET 模型列表，地址与凭据头跟 `model sync` 同一套规则
 // （见 modelsEndpoint）。返回的 fallbackNote 非空表示这一步得不出结论，调用方应发一条最小请求；
 // note 里写清为什么（列表接口 404、取不到地址、连不上），两段都失败时备注靠它区分是哪一步。
-// decided 为真表示这一步已经是最终结论（状态已按 5.3 落库），不必再花一次调用。
+// decided 为真表示这一步已经是最终结论（账号状态与冷却已经按这次结论落库），不必再花一次调用。
 func (s *Server) probeModelsEndpoint(ctx context.Context, a store.Account) (step ProbeStep, fallbackNote string, decided bool, err error) {
 	step = ProbeStep{Stage: ProbeStageModels}
 
@@ -137,7 +138,7 @@ func (s *Server) probeModelsEndpoint(ctx context.Context, a store.Account) (step
 	// 凭据头跟着取到这条地址的协议走，与 `model sync` 一致：deepseek 的 anthropic 账号
 	// 取到的是 chat 路由上的 /v1/models，得发 Bearer，按厂商默认协议发 x-api-key 只会换回 401。
 	setAuth(req, protocol, secretValue)
-	// 模型列表请求也带厂商附加头（见 DESIGN 5.7、5.10）。读库失败在这里算作错误而不是退回
+	// 模型列表请求也带厂商附加头。读库失败在这里算作错误而不是退回
 	// 最小请求：那是数据库或配置的故障，不是这家没有列表接口。
 	if err := s.applyProviderHeaders(req, a, protocol, "", ""); err != nil {
 		return step, "", false, err
@@ -211,8 +212,8 @@ func fallsBackToCall(status int) bool {
 //     再用固定名字去打只会把「模型名不对」误报成账号失败；
 //  3. probeFallbackModel——列表那一步没成或清单为空时只能用它，凭据好不好用仍要试出来。
 //
-// 第一档只读可达性：账号侧没有第二份「模型清单」列了（`accounts.models` 随迁移 0015 删掉，见
-// DESIGN 5.13），AllowedModels 与候选集合读到的是同一批行，不在这里另拼一份。
+// 第一档只读可达性：账号侧没有第二份「模型清单」列（`accounts.models` 已随迁移 0015 删掉），
+// AllowedModels 与候选集合读到的是同一批行，不在这里另拼一份。
 //
 // 备注写清这次用的是哪一个、来自哪一档（账号清单 / 上游清单 / 兜底默认名）：只说「模型调用返回 404」
 // 看不出是名字不对还是模型真的不能用。listNote 说明列表那一步的结果（通了、上游几个模型，或为什么
@@ -264,7 +265,7 @@ func (s *Server) probeMinimalCall(ctx context.Context, a store.Account, listNote
 	}
 	secretValue := string(key)
 	// 入站与出站都取这个派生协议：探活检验的是凭据与账号整体可用性。附加头由 buildRequest 叠上；
-	// 探活没有客户端请求，入站头传 nil（客户端头透传只作用于转发路径，DESIGN 5.11）。
+	// 探活没有客户端请求，入站头传 nil（客户端头透传只作用于转发路径）。
 	upReq, err := s.buildRequest(ctx, a, a.Protocol, a.Protocol, nil, raw, ir, secretValue, "", false)
 	if err != nil {
 		return step, err
@@ -274,7 +275,9 @@ func (s *Server) probeMinimalCall(ctx context.Context, a store.Account, listNote
 	resp, err := s.client.Do(upReq)
 	step.Latency = s.now().Sub(start)
 	if err != nil {
-		// 网络失败没有状态码，按转发路径的记法记 502，冷却按连接层那一档算（见 DESIGN 5.3）。
+		// 网络失败没有状态码，按转发路径的记法记 502，冷却按连接层那一档算（KindTransport，2 秒起）：
+		// 连不上、TLS 握手失败、读超时多半是本机网络或中转抖动，按上游 5xx 那个十秒起算，
+		// 断网恢复后账号还会被多锁一会儿。
 		step.Status = http.StatusBadGateway
 		step.Transport = true
 		step.Message = withNote("模型调用失败："+scrubSecret(err.Error(), secretValue), note)
@@ -297,10 +300,11 @@ func (s *Server) probeMinimalCall(ctx context.Context, a store.Account, listNote
 }
 
 // applyProbeState 按结论更新账号状态，是 `account test` 唯一的写入路径：两段都只经它落库，
-// 冷却、清零与停用不会长出第二套算法（见 DESIGN 5.3、6）。2xx 启用账号并清零（冷却、last_error
-// 与 fail_streak 一起），401 停用并把错误写进 last_error，429/5xx 与连接层失败按连续失败次数
-// 与三档冷却（见 cooldownKind），其它 4xx 只报原话、不动状态。同一份结论永远算出同一个时长，
-// 冷却不加抖动。
+// 冷却、清零与停用不会长出第二套算法：两个阶段、几条命令都只经过这里。2xx 启用账号并清零
+// （冷却、last_error 与 fail_streak 一起），401 停用并把错误写进 last_error，429/5xx 与连接层
+// 失败按连续失败次数与三档冷却（见 cooldownKind），其它 4xx 只报原话、不动状态。同一份结论
+// 永远算出同一个时长，冷却不加抖动（加了抖动，两个账号在同一时刻被限流会锁上不同的时长，
+// 排查时看不出规律）。
 func (s *Server) applyProbeState(a store.Account, step ProbeStep) error {
 	switch {
 	case step.OK:
@@ -319,7 +323,7 @@ func (s *Server) applyProbeState(a store.Account, step ProbeStep) error {
 }
 
 // firstModelName 取一组模型名里的第一个非空名字，没有时返回空串。
-// 空白名字不算模型（与 /v1/models 的口径一致，见 DESIGN 5.2.1）：它是历史行或上游清单留下的空档，
+// 空白名字不算模型（与 /v1/models 的口径一致）：它是历史行或上游清单留下的空档，
 // 拿它去请求上游只会换回一个 400，还把「模型名不对」记在凭据头上。
 func firstModelName(models []string) string {
 	for _, name := range models {

@@ -10,7 +10,8 @@ import (
 )
 
 // provider header 三条子命令只做命令面：校验参数、调 store、出文本与 --json 两条输出。
-// 表的形状、头名与值的校验、协议级覆盖厂商级的合并都在 store 与网关，这里不重算（见 DESIGN 5.10）。
+// 表的形状、头名与值的校验、协议级覆盖厂商级的合并都在 store 与网关，这里不重算：
+// cli 另写一份就会与转发时实际生效的规则不一致。
 
 // providerHeaderSubs 是 provider header 一组的子命令清单，组级帮助与错误提示都读它。
 var providerHeaderSubs = []groupItem{
@@ -76,7 +77,7 @@ func headerScopeCell(protocol string) string {
 }
 
 // printProviderHeaderHelp 是 `provider header --help` 的输出：三条用法、一个示例，
-// 以及三种占位符写法与「厂商级 vs 协议级、协议级覆盖厂商级」两段说明（见 DESIGN 5.10）。
+// 以及三种占位符写法与「厂商级 vs 协议级、协议级覆盖厂商级」两段说明。
 // 这段说明比组级帮助长，所以不走 printGroupHelp：光列子命令说清不了值怎么展开。
 func printProviderHeaderHelp(w io.Writer) {
 	var b strings.Builder
@@ -120,7 +121,7 @@ func cmdProviderHeader(e *Env, args []string) error {
 
 // headerProtocolFlag 把 --protocol 的取值换成线协议，不给（或没出现在命令行上）就是厂商级（空串）。
 // 映射与 --default-protocol 同一份（protocolFromCLIName），落到线协议全名：store 只认线协议，
-// 命令行写法 `openai` 直接落库会让这条头永远匹配不上真实协议（见 DESIGN 5.10）。
+// 命令行写法 `openai` 直接落库会让这条头永远匹配不上真实协议，等于这条头从来没生效过。
 func headerProtocolFlag(fs *flagSet, raw, usageLine string) (string, error) {
 	if !flagWasSet(fs, "protocol") {
 		return "", nil
@@ -215,7 +216,7 @@ func cmdProviderHeaderSet(e *Env, args []string) error {
 		return err
 	}
 
-	// store 落库时把头名归一成小写（见 DESIGN 5.10），输出照同一个形态写。
+	// store 落库时把头名归一成小写，输出照同一个形态写。
 	item := providerHeaderItem{
 		provider: provider,
 		header:   store.ProviderHeader{Protocol: proto, Name: strings.ToLower(name), Value: value},

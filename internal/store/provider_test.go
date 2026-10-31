@@ -39,7 +39,7 @@ var seedRoutes = []struct {
 	// 0009 种的 gemini 厂商：模型列表在 /v1beta/models，转发路径把模型名放在路径里（占位符原样落库）。
 	{"google-gemini", "https://generativelanguage.googleapis.com", "gemini",
 		"/v1beta/models/{model}:generateContent", "/v1beta/models", 9},
-	// 0017 只给这两家种向量化路由（DESIGN 5.15）。
+	// 0017 只给这两家种向量化路由。
 	{"openai", "https://api.openai.com", "openai-embeddings", "/v1/embeddings", "", 17},
 	{"ollama", "http://127.0.0.1:11434", "openai-embeddings", "/v1/embeddings", "", 17},
 }
@@ -821,7 +821,7 @@ func TestMigrationChainFrom0001ToLatest(t *testing.T) {
 	assertSeedDefaults(t, st)
 
 	// provider_routes：每条 (厂商, 协议) 都在，路径与种子一致。
-	// 这里不比 models_path：模型列表路径怎么存是实现细节（见 DESIGN 5.8），
+	// 这里不比 models_path：模型列表路径怎么存是实现细节，
 	// 升级要保证的是「路由还在、地址没变」。
 	for _, want := range seedRoutes {
 		route, ok, err := st.LookupProviderRoute(want.provider, want.protocol)
@@ -838,7 +838,7 @@ func TestMigrationChainFrom0001ToLatest(t *testing.T) {
 
 	// 可达性：0001 里手填的 m1 由 0015 补成 allowed，同步进来的 m2 也是 allowed。
 	// 0015 之前这里断言的是「账号的模型集合被整体改写成 m2」——accounts.models 那一列已经删掉，
-	// 同步只做加法（见 DESIGN 5.13）。
+	// 同步只做加法。
 	if _, err := st.ReplaceModels(1, []string{"m2"}); err != nil {
 		t.Fatalf("写入模型行: %v", err)
 	}

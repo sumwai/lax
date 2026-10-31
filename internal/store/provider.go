@@ -26,7 +26,8 @@ var (
 
 	// ErrBaseURLRequired 表示 base_url 为空，而这次要落库的路由或模型列表地址里有相对路径。
 	// 空的 base_url 只有一种形态是合法的：每一条路由的 path 与要落库的 models_path 都是整条地址，
-	// 那时 base_url 拼不进任何地址，写一个只为过校验的地址只是无效配置（见 DESIGN 5.8）。
+	// 那时 base_url 拼不进任何地址，写一个只为过校验的地址只是无效配置：
+	// 转发会拿着一个不存在的域名去请求，错误要到第一次调用才暴露。
 	// cli 用 errors.Is 判它，把错误包成用法错误（退出码 2），文案保留这里的原话。
 	ErrBaseURLRequired = errors.New("缺少 base_url")
 )
@@ -39,19 +40,19 @@ var defaultProtocolOrder = []string{
 }
 
 // modelProtocolOrder 是目录协议集合（provider_models.protocols）的取值顺序：先按默认协议那三条，
-// 再 gemini、最后 systemone（DESIGN 5.13）。后两条不进 defaultProtocolOrder：一条路由都没显式
+// 再 gemini、最后 systemone。后两条不进 defaultProtocolOrder：一条路由都没显式
 // 给默认协议的厂商不能因此算出 gemini，否则「只声明了 gemini 一条路由」就不再是配置缺口
-// （DESIGN 5.8）。systemone 排在最后，是因为决策协议不该在厂商同时声明 chat 与 systemone 时
-// 被选成默认：对话客户端打到决策端点上只会拿到 400。
+// （而是被当成一个合法的默认协议，问题留到转发时才爆）。systemone 排在最后，是因为决策协议
+// 不该在厂商同时声明 chat 与 systemone 时被选成默认：对话客户端打到决策端点上只会拿到 400。
 var modelProtocolOrder = append(append([]string{}, defaultProtocolOrder...),
 	translate.ProtocolEmbeddings, translate.ProtocolGemini, translate.ProtocolSystemOne)
 
 // Provider 是一行厂商。行里只有默认地址、默认协议、模型列表覆盖与备注，
 // 协议的路径细节都在 ProviderRoute 上。账号行只存厂商名，地址与默认协议都从这里读
-// （见迁移 0014 与 DESIGN 5.8），因此改这一行会立即影响所有引用它的账号。
+// （迁移 0014 把地址与协议从账号表里删了，账号行只存厂商名），因此改这一行会立即影响所有引用它的账号。
 // DefaultProtocol 为空字符串表示这家没有显式默认协议，按固定顺序取第一条路由；
 // 有效默认协议的算法只有 ResolveDefaultProtocol 一处，读库入口是 providerDefaultProtocol。
-// ModelsPath 是厂商级的模型列表地址覆盖，空字符串表示不覆盖、按路由的 models_path 取（见 5.7）。
+// ModelsPath 是厂商级的模型列表地址覆盖，空字符串表示不覆盖、按路由的 models_path 取。
 // 取值可以是相对 base_url 的路径，也可以是整条地址，两种写法同一套校验（见 NormalizeEndpoint）。
 type Provider struct {
 	Name            string
@@ -65,9 +66,9 @@ type Provider struct {
 // 是厂商 base_url 去掉末尾斜杠后直接拼它，整条地址（含 `://`）则直接使用、不再拼 base_url，
 // 因此同一厂商的不同协议可以落在不同域名上；两种写法都不做任何后缀猜测。
 // Path 与 ModelsPath 在写入时都经 NormalizeEndpoint 规整（相对路径补一个前导斜杠、合并重复斜杠、
-// 去尾斜杠；整条地址再校验 scheme 与主机名），读取侧拼地址时用的是同一套规则（DESIGN 5.8）。
+// 去尾斜杠；整条地址再校验 scheme 与主机名），读取侧拼地址时用的是同一套规则。
 // ModelsPath 是这条路由的模型列表地址，空字符串表示这条协议没有自己的列表接口，
-// 读取时回退到同厂商协议名排序的第一条非空值。写入侧见 prepareRoutes 与 upsertRoutes（DESIGN 5.7）。
+// 读取时回退到同厂商协议名排序的第一条非空值。写入侧见 prepareRoutes 与 upsertRoutes。
 type ProviderRoute struct {
 	Provider   string
 	Protocol   string
@@ -181,9 +182,9 @@ func (s *Store) ProviderProtocols(provider string) ([]string, error) {
 }
 
 // IsWireProtocol 判断一个取值是不是线协议。六个值都认：三条入站对话协议加 gemini，再加上
-// systemone 与 openai-embeddings。gemini 入站有两条路径、两个方向的流式都支持（DESIGN 5.9），
-// systemone 的入站与出站是同一个 POST /v1/systemone（DESIGN 5.14），向量化的入站与出站分别是
-// /v1/embeddings 与厂商路由声明的向量化路径（DESIGN 5.15）；它们同样是线上的协议取值，
+// systemone 与 openai-embeddings。gemini 入站有两条路径、两个方向的流式都支持，
+// systemone 的入站与出站是同一个 POST /v1/systemone，向量化的入站与出站分别是
+// /v1/embeddings 与厂商路由声明的向量化路径；它们同样是线上的协议取值，
 // 账号的 --protocol、厂商路由与默认协议、探活候选都用这一个判定：cli 不另写一份名单，两处名单迟早会对不上。
 func IsWireProtocol(protocol string) bool {
 	switch protocol {
@@ -221,7 +222,7 @@ func wireProtocolNames() string { return strings.Join(WireProtocols(), "、") }
 // 报错只会让人先改命令再重敲一遍，得到的仍然是同一个地址。真正的用法错误是取值为空
 // （删除语义归 `provider unset`），那一条由调用方判断。
 //
-// 路径里的 `{model}` 是出站模型名占位符（见 DESIGN 5.9）：它不是斜杠，规整不动它，
+// 路径里的 `{model}` 是出站模型名占位符：它不是斜杠，规整不动它，
 // 花括号与冒号原样保留，转发时由 gateway 替换。
 func NormalizePath(raw string) string {
 	path := collapseSlashes(strings.TrimSpace(raw))
@@ -308,7 +309,7 @@ func optionalBaseURL(raw string) (string, error) {
 // requireBaseURLCoverage 校验 base_url 为空时的唯一合法形态：每一条路由的 path 与要落库的
 // models_path 都是整条地址（含 `://`），一条相对路径都没有。有一条相对路径时缺 base_url 就拼不出
 // 完整地址，整笔拒绝，文案说清是哪条路由或哪项设置，以及两条出路：给 --base-url，或把这一项
-// 写成整条地址。base_url 非空时这个函数什么都不做：相对路径照旧拼它（见 DESIGN 5.8）。
+// 写成整条地址。base_url 非空时这个函数什么都不做：相对路径照旧拼它。
 // 一条路由都没有时同样拒绝：既没有地址又没有路由的厂商转发不了任何请求。
 func requireBaseURLCoverage(provider, base string, routes []ProviderRoute, modelsPath string) error {
 	if base != "" {
@@ -382,7 +383,7 @@ func normalizeAddress(raw, field string) (string, error) {
 // 跟着原样带过去，不换域名。
 // 空串表示「这条路由没有自己的列表接口」，读取时回退到同厂商其它协议的非空 models_path。
 // systemone 是决策端点（POST /v1/systemone），它没有模型列表，与 gemini 一样留空，不推 /models：
-// 推出来的地址上游根本不提供，模型同步只会拿它去 404（DESIGN 5.14）。
+// 推出来的地址上游根本不提供，模型同步只会拿它去 404。
 // 推导只发生在写入侧，读取侧不拿这一条重算：内置 anthropic 厂商只有 anthropic 一条路由，
 // 没有 openai 路由可推导，读时推导会让 anthropic 型账号彻底失去模型列表来源。
 func DeriveModelsPath(protocol, path string) string {
@@ -649,7 +650,7 @@ func (s *Store) SetProvider(name string, patch ProviderPatch) error {
 	}
 	// 改完之后地址与路由必须自洽：库里地址为空时，改完的路由与 models_path 都得是整条地址。
 	// 把一条路由从整条地址改成相对路径、又没给 base_url、库里也没有时，整笔拒绝：
-	// 这种行落库之后拼出来的是一个没有 scheme 的相对地址（见 DESIGN 5.8）。
+	// 这种行落库之后拼出来的是一个没有 scheme 的相对地址，请求直接失败。
 	if err := requireBaseURLCoverage(name, p.BaseURL, routes, p.ModelsPath); err != nil {
 		return err
 	}
@@ -669,7 +670,7 @@ func (s *Store) SetProvider(name string, patch ProviderPatch) error {
 }
 
 // protocolFlagName 把协议名换成 `provider set` 上对应的那个 flag，错误文案直接给出下一步能敲的命令。
-// gemini 的 `--gemini` flag 还没进命令面（DESIGN 第 7 节已知未做），这里照旧给出 flag 名：
+// gemini 的 `--gemini` flag 目前不在命令面上，这里照旧给出 flag 名：
 // 有了 flag 之后文案不用改；没有的时候，只靠 CLI 也写不进 gemini 路由。
 // systemone 的 flag 就是协议名 `--systemone`，与 `--default-protocol systemone` 两种写法同形。
 func protocolFlagName(protocol string) string {
@@ -854,7 +855,7 @@ func ResolveDefaultProtocol(explicit string, routes []ProviderRoute) string {
 //  4. 都没有时返回空串与空串，调用方按 base_url 兜底或报错。
 //
 // 协议必须与路径一起返回：凭据头按协议选（anthropic 用 x-api-key，gemini 用 x-goog-api-key，
-// openai 的两条用 Bearer，见 DESIGN 5.9），
+// openai 的两条用 Bearer），
 // 地址来自哪条路由就用哪条路由的协议，否则 deepseek 的 anthropic 账号会打 chat 的
 // /v1/models 却发 x-api-key，第一个真实账号就会在 /models 上收到 401/403。
 func ResolveModelsPath(override string, routes []ProviderRoute, accountProtocol string) (path, protocol string) {
@@ -926,8 +927,8 @@ func (s *Store) DeleteProvider(name string) error {
 }
 
 // DeleteProviderForce 是 `provider rm --force` 的入口：除了删厂商与路由，还在同一个事务里把指向
-// 它的账号停用（enabled=0 并写明 last_error）。为什么要停用：账号行的地址与默认协议都从厂商行取
-// （见 DESIGN 5.8），厂商没了这两样就都没了，留它们在选号池里必然一个请求一个 502。
+// 它的账号停用（enabled=0 并写明 last_error）。为什么要停用：账号行的地址与默认协议都从厂商行取，
+// 厂商没了这两样就都没了，留它们在选号池里必然一个请求一个 502。
 // 停用走的是 setEnabledTx，与 SetEnabled 同一条写路径；账号本身与它的 key、模型清单、探活结果都不删，
 // 用 `provider add` 重建同名厂商或 `account set` 改厂商之后手动 `account enable` 就能接着用。
 func (s *Store) DeleteProviderForce(name string) error {
@@ -968,7 +969,7 @@ func (s *Store) deleteProvider(name string, force bool) error {
 }
 
 // providerDeletedReason 是 `provider rm --force` 停用账号时写进 last_error 的话：
-// 说清发生了什么与下一步做什么（DESIGN 5.8）。
+// 说清发生了什么与下一步做什么。
 const providerDeletedReason = "厂商已删除，请 provider add 重建或修改账号的厂商"
 
 // accountIDsByProviderTx 是事务里列指向某家厂商的账号，按 id 升序，结果与行序无关。

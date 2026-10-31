@@ -11,10 +11,9 @@ import (
 	"lax/internal/translate"
 )
 
-// systemOnePath 是决策协议的出站路径：入站与出站同一个路径（DESIGN 5.14）。
+// systemOnePath 是决策协议的出站路径：入站与出站同一个路径。
 const systemOnePath = "/v1/systemone"
 
-// TestWireProtocolsOrder 钉住线协议清单与顺序：anthropic → openai-chat → openai-responses
 // TestWireProtocolsOrder 钉住线协议清单与顺序：anthropic → openai-chat → openai-responses
 // → gemini → systemone → openai-embeddings。错误文案、CLI 的 flag 与默认协议的候选都从这一份清单取，
 // 顺序或成员错了，`--default-protocol` 的提示会跟着错。
@@ -53,7 +52,7 @@ func TestWireProtocolsOrder(t *testing.T) {
 
 // TestProviderSystemOneRouteRoundTrip 钉住 systemone 路由的写入与读回：
 // `provider add/set --systemone <路径>` 落库之后能原样读回，路径按同一套规则规整，
-// 且这条路由不推导 models_path（决策端点没有列表接口，DESIGN 5.14）。
+// 且这条路由不推导 models_path（决策端点没有列表接口）。
 func TestProviderSystemOneRouteRoundTrip(t *testing.T) {
 	st := openTemp(t)
 	if err := st.CreateProvider(store.Provider{
@@ -184,7 +183,7 @@ func TestSystemOneDefaultProtocolRequiresDeclaredRoute(t *testing.T) {
 	}
 }
 
-// TestEffectiveProtocolSystemOneFromCatalog 钉住有效协议在协议集合里的顺序（DESIGN 5.13）：
+// TestEffectiveProtocolSystemOneFromCatalog 钉住有效协议在协议集合里的顺序：
 // 厂商默认协议在集合里就赢；否则 chat → responses → anthropic → gemini → systemone。
 // systemone 排在最后，所以厂商同时声明 chat 与 systemone 时决策协议不会被选成默认。
 func TestEffectiveProtocolSystemOneFromCatalog(t *testing.T) {
@@ -229,7 +228,7 @@ func TestEffectiveProtocolSystemOneFromCatalog(t *testing.T) {
 		}
 	}
 
-	// 只有 systemone 一条路由的厂商算不出默认协议：它不该被当成厂商默认（DESIGN 5.8），
+	// 只有 systemone 一条路由的厂商算不出默认协议：它不该被当成厂商默认，
 	// 有效协议靠目录里的协议集合给出。
 	if err := st.CreateProvider(store.Provider{
 		Name: "decision-only", BaseURL: "https://api.typesafe.ai",

@@ -11,7 +11,7 @@ import (
 	"lax/internal/gateway"
 )
 
-// 这个文件从网关这一层钉住请求侧的思考配置参数（DESIGN 5.4「思考配置参数」）：跨协议时
+// 这个文件从网关这一层钉住请求侧的思考配置参数：跨协议时
 // 假上游真正收到的请求体里有没有那个字段、值是多少；同协议直通时不写不删；客户端没给时
 // 一个字段都不出现。translate 层的对拍用例钉的是编解码结果，这里钉的是转发链路上
 // 传出去的那份报文——中间任何一层把 ThinkingConfig 丢掉或多写一个字段，都只有这一层看得出来。
@@ -70,7 +70,7 @@ func assertNoThinkingParams(t *testing.T, body string) {
 }
 
 // TestAnthropicThinkingBudgetToChatUpstreamEffort 覆盖 anthropic 入站、chat 出站：
-// thinking{budget_tokens} 折成 reasoning_effort，档位按 DESIGN 5.4 的表
+// thinking{budget_tokens} 折成 reasoning_effort，档位按四档折算：
 // （≥8192 high、≥2048 medium、否则 low）。预算本身在 chat 上没有落点。
 func TestAnthropicThinkingBudgetToChatUpstreamEffort(t *testing.T) {
 	cases := []struct {
@@ -110,7 +110,7 @@ func TestAnthropicThinkingBudgetToChatUpstreamEffort(t *testing.T) {
 }
 
 // TestChatReasoningEffortToAnthropicUpstreamThinking 覆盖 chat 入站、anthropic 出站：
-// reasoning_effort:high 折成 thinking{type:enabled,budget_tokens:8192}（DESIGN 5.4 的档位→预算表）。
+// reasoning_effort:high 折成 thinking{type:enabled,budget_tokens:8192}，8192 就是档位→预算换算表里 high 那一档。
 func TestChatReasoningEffortToAnthropicUpstreamThinking(t *testing.T) {
 	f := newFixture(t)
 	up, rec := fakeProtocolUpstream(t, gateway.ProtocolAnthropic)

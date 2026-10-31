@@ -6,12 +6,13 @@ import (
 	"testing"
 )
 
-// 这个文件钉住 systemone 的命令面（DESIGN 第 4 节的 decide 一行与 5.14）：
+// 这个文件钉住 systemone 的命令面：
 // `provider add/set --systemone`、`provider unset systemone`、`--default-protocol systemone`、
 // `lax decide` 的三种拼法与错误，以及 `call` 撞上 systemone 模型时的拒绝。
 
 // systemOneDecideOK 是假决策上游的正常响应：三个问题的答案加一行用量。答案按真实形状写：
-// 结论平铺在顶层（noul / choice / score），不共用一个 answer 字段（DESIGN 5.14）。
+// 结论平铺在顶层（noul / choice / score），不共用一个 answer 字段：三种问题的结论形状不同，
+// 共用一个字段就得再套一层类型判断。
 const systemOneDecideOK = `{"answers":{` +
 	`"present":{"type":"noul","noul":0.99},` +
 	`"mood":{"type":"choice","choice":"billing","confidence":0.87,"probabilities":{"billing":0.9,"other":0.1}},` +
@@ -58,7 +59,7 @@ func TestProviderSystemOneRoute(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
 
-	// 固定回退顺序只认 openai-chat → openai-responses → anthropic（DESIGN 5.8），所以只声明
+	// 固定回退顺序只认 openai-chat → openai-responses → anthropic，所以只声明
 	// systemone 一条路由时默认协议要显式给；不给时它就是空的（provider ls 显示 -）。
 	code, out, stderr := run(t, "provider", "add", "typesafe",
 		"--base-url", "https://api.typesafe.ai", "--systemone", "/v1/systemone")
@@ -95,7 +96,7 @@ func TestProviderSystemOneRoute(t *testing.T) {
 		t.Fatalf("provider ls 的路由列应显示 systemone 路由: %v", got)
 	}
 
-	// 整条地址的写法：与相对路径走同一套校验与规整（见 DESIGN 5.8）。
+	// 整条地址的写法：与相对路径走同一套校验与规整。
 	code, _, stderr = run(t, "provider", "add", "typesafe-full",
 		"--systemone", "https://api.typesafe.ai/v1/systemone", "--default-protocol", "systemone")
 	if code != 0 {
@@ -124,8 +125,7 @@ func TestProviderSystemOneRoute(t *testing.T) {
 	}
 }
 
-// TestProviderSystemOneHelp 钉住 provider add --help 里的 systemone 示例与默认协议提示
-// （见 DESIGN 第 4 节与 5.14）。
+// TestProviderSystemOneHelp 钉住 provider add --help 里的 systemone 示例与默认协议提示。
 func TestProviderSystemOneHelp(t *testing.T) {
 	sandbox(t)
 
@@ -147,7 +147,7 @@ func TestProviderSystemOneHelp(t *testing.T) {
 }
 
 // TestProviderSystemOneUnset 钉住 `provider unset systemone` 与默认协议的两条交叉规则：
-// 默认协议不是它时删得掉；删掉的正好是默认协议时整笔拒绝（见 DESIGN 5.8）。
+// 默认协议不是它时删得掉；删掉的正好是默认协议时整笔拒绝。
 func TestProviderSystemOneUnset(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
@@ -199,7 +199,7 @@ func TestProviderSystemOneUnset(t *testing.T) {
 }
 
 // TestDecideNoulQuestions 钉住 decide 的人读输出：每个问题一行（名字、类型、答案），
-// noul 给概率、choice 与 score 给置信度，最后一行是用量（见 DESIGN 第 4 节的 decide 一行）。
+// noul 给概率、choice 与 score 给置信度，最后一行是用量。
 func TestDecideNoulQuestions(t *testing.T) {
 	sandbox(t)
 	up := decideUpstream(t)
@@ -229,7 +229,7 @@ func TestDecideNoulQuestions(t *testing.T) {
 		t.Fatalf("输出末尾应有用量行: %s", out)
 	}
 
-	// 上游收到的是一条 systemone 请求：路径、模型名、state 与三种问题的形状都按 DESIGN 5.14。
+	// 上游收到的是一条 systemone 请求：路径、模型名、state 与三种问题的形状都按那条协议原样转发。
 	call := up.mustSingleCall(t)
 	if call.path != "/v1/systemone" || call.bearer != "Bearer sk-test" {
 		t.Fatalf("上游调用 = %+v，期望 POST /v1/systemone 且带 Bearer 凭据", call)
@@ -302,7 +302,7 @@ func TestDecideQuestionsJSON(t *testing.T) {
 }
 
 // TestDecideJSONOutput 钉住 --json 的字段：上游的 answers 与 usage 原样，另加 model、account、
-// latency_ms（见 DESIGN 第 4 节的 decide 一行）。
+// latency_ms。
 func TestDecideJSONOutput(t *testing.T) {
 	sandbox(t)
 	up := decideUpstream(t)
@@ -440,7 +440,7 @@ func TestDecideModelNotFound(t *testing.T) {
 }
 
 // TestDecideHTTPErrorUsesDetailMessage 钉住错误体：非 2xx 时取 detail.message 作为文案，
-// 退出码 1（见 DESIGN 5.14 的错误体一行）。
+// 退出码 1（这条协议的客户端直接读上游那一层错误，不做二次包装）。
 func TestDecideHTTPErrorUsesDetailMessage(t *testing.T) {
 	sandbox(t)
 	up := newRecorderUpstream(t, map[string]fakeResponse{
@@ -509,7 +509,7 @@ func equalFields(got, want []string) bool {
 }
 
 // TestDecideWithoutDefaultProtocol 钉住「路由声明了但默认协议是空的」这一条：固定回退顺序只认
-// openai-chat → openai-responses → anthropic（DESIGN 5.8），所以只声明 systemone 一条路由时
+// openai-chat → openai-responses → anthropic，所以只声明 systemone 一条路由时
 // 厂商算不出默认协议，decide 的文案要指出补 --default-protocol，而不是让人去重复声明路由。
 func TestDecideWithoutDefaultProtocol(t *testing.T) {
 	sandbox(t)

@@ -270,7 +270,7 @@ func TestPathProtocol(t *testing.T) {
 }
 
 // TestEncodeAnthropicRequestFoldsToolResults 确认 RoleTool 消息编成 user 加 tool_result 块：
-// anthropic 没有 role=tool，原样写过去会被上游以 400 拒绝（DESIGN 5.4）。
+// anthropic 没有 role=tool，原样写过去会被上游以 400 拒绝。
 func TestEncodeAnthropicRequestFoldsToolResults(t *testing.T) {
 	req := &Request{
 		Model: "claude-x",
@@ -327,7 +327,7 @@ func TestEncodeAnthropicRequestFoldsToolResults(t *testing.T) {
 // TestEncodeAnthropicRequestDropsEmptyMessages 确认编码后一块内容都不剩的消息整条不写出去：
 // anthropic 拒绝空的 content 数组，一条只剩无签名思考块的 assistant 消息就是这么变空的。
 // 丢弃之后上下两条 user 消息并成一条，块顺序不变；全部消息都被丢弃时编码报错，
-// 不写出空的 messages（DESIGN 5.4）。
+// 不写出空的 messages。
 func TestEncodeAnthropicRequestDropsEmptyMessages(t *testing.T) {
 	req := &Request{
 		Model: "claude-x",
@@ -372,7 +372,7 @@ func TestEncodeAnthropicRequestDropsEmptyMessages(t *testing.T) {
 
 // TestEncodeAnthropicRequestKeepsSignedThinkingOnlyAssistant 确认一条只剩 signed 思考块的
 // assistant 消息编回 anthropic 时整条保住：anthropic 是唯一要求回填思考块的协议，
-// 带 signature 的块不丢，块前面的用户消息与后面的追问也不会被并到别处（DESIGN 5.4）。
+// 带 signature 的块不丢，块前面的用户消息与后面的追问也不会被并到别处。
 func TestEncodeAnthropicRequestKeepsSignedThinkingOnlyAssistant(t *testing.T) {
 	req := &Request{
 		Model: "claude-x",
@@ -417,7 +417,7 @@ func TestEncodeAnthropicRequestKeepsSignedThinkingOnlyAssistant(t *testing.T) {
 }
 
 // TestAnthropicToolTypeRoundTrip 确认服务端内置工具的 type 编回 anthropic 时保留，
-// 不会被补上一个伪造的 input_schema（DESIGN 5.4）。
+// 不会被补上一个伪造的 input_schema。
 func TestAnthropicToolTypeRoundTrip(t *testing.T) {
 	decoded, err := DecodeAnthropicRequest([]byte(`{"model":"claude-x","max_tokens":16,"messages":[{"role":"user","content":"hi"}],
 		"tools":[{"type":"web_search_20250305","name":"web_search"},
@@ -456,7 +456,7 @@ func TestAnthropicToolTypeRoundTrip(t *testing.T) {
 
 // TestAnthropicStreamEncoderKeepsDeltasOnOpenBlocks 确认思考增量与工具参数交替时，
 // 每个 content_block_delta 都落在未关闭的块上：块被关掉之后要重开一个新块，不能往
-// 已经发过 content_block_stop 的块继续写（DESIGN 5.4）。
+// 已经发过 content_block_stop 的块继续写。
 func TestAnthropicStreamEncoderKeepsDeltasOnOpenBlocks(t *testing.T) {
 	enc := newAnthropicStreamEncoder("claude-x")
 	events := enc.Start()

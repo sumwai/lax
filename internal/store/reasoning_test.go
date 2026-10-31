@@ -11,7 +11,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// TestReasoningExtra 钉住思考 token 的判定（DESIGN 5.5）：按上报的数字判，不按协议猜。
+// TestReasoningExtra 钉住思考 token 的判定：按上报的数字判，不按协议猜。
 // extra 只有「思考是输出之外的一项」时非 0，其余情况为 0，原值本身不受影响。
 func TestReasoningExtra(t *testing.T) {
 	cases := []struct {
@@ -39,7 +39,7 @@ func TestReasoningExtra(t *testing.T) {
 	}
 }
 
-// TestUsageCostCountsIndependentReasoning 钉住独立思考 token 的花费（DESIGN 5.5）：
+// TestUsageCostCountsIndependentReasoning 钉住独立思考 token 的花费：
 // 输出价 8、prompt 7、completion 1、total 132、reasoning 124 时，花费是 (1+124) × 8 / 1e6。
 // 只按 completion 算输出会把这 124 个思考 token 的九成以上花费漏掉。
 func TestUsageCostCountsIndependentReasoning(t *testing.T) {
@@ -53,7 +53,7 @@ func TestUsageCostCountsIndependentReasoning(t *testing.T) {
 	if err := st.CreateAccount(&acc); err != nil {
 		t.Fatalf("建账号: %v", err)
 	}
-	// 单价不在账号上：写到这个账号在这个模型上的覆盖值（DESIGN 5.13）。输入价不填，
+	// 单价不在账号上：写到这个账号在这个模型上的覆盖值。输入价不填，
 	// 这个用例只看输出侧，没价的输入项不计（不是按 0 元算）。
 	if err := st.SetAccountModelPrices("relay", "m1", store.ModelPrices{Out: &priceOut}); err != nil {
 		t.Fatalf("写输出价: %v", err)

@@ -265,7 +265,7 @@ func TestClientHeadersGeminiPassthroughNone(t *testing.T) {
 
 // TestClientCredentialsAndHopByHopNotForwarded 钉住「永远不透传」名单：客户端的凭据、
 // Cookie、Host 与 Content-Length 都不带上去，上游收到的仍是账号凭据与它自己的 Host、
-// Content-Length（DESIGN 5.11）。
+// Content-Length。
 func TestClientCredentialsAndHopByHopNotForwarded(t *testing.T) {
 	f := newFixture(t)
 	var upstreamBody string
@@ -331,7 +331,7 @@ func TestClientCredentialsAndHopByHopNotForwarded(t *testing.T) {
 }
 
 // TestClientHeaderDeclarationOverridesClient 钉住优先级由顺序决定：厂商附加头声明排在客户端头
-// 之后叠加，同名时声明压住客户端带来的值（DESIGN 5.11 与 5.10）。
+// 之后叠加，同名时声明压住客户端带来的值。
 func TestClientHeaderDeclarationOverridesClient(t *testing.T) {
 	f := newFixture(t)
 	up := newHeaderUpstream(t, map[string]string{

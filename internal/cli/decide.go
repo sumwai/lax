@@ -19,8 +19,9 @@ import (
 	"lax/internal/store"
 )
 
-// systemOnePath 是 systemone 的入站路径（DESIGN 5.14）：模型名在请求体里，不在路径上。
-// cli 一直是这样写死入站路径的（见 observe.go 的 inboundPath），网关那边注册的也是这一串。
+// systemOnePath 是 systemone 的入站路径：模型名在请求体里、不在路径上，所以这条路径固定，
+// 不随模型变化。cli 自己拼请求时用它（observe.go 的 inboundPath 是同一串），
+// 网关注册的入站路径也必须与它一致，否则命令行能发出去、网关却回 404。
 const systemOnePath = "/v1/systemone"
 
 // decideUsage 是所有用法错误都会打出来的那一行：参数形状、三种拼问题的写法与整块 JSON 的写法。
@@ -42,7 +43,7 @@ func (r *repeatedFlag) Set(v string) error {
 }
 
 // decideItem 是 choice 的一个选项或 score 的一级级别：key 是判据本身，desc 是可选说明。
-// 写法是逗号分隔的 `key` 或 `key=说明`（见 DESIGN 第 4 节的 decide 一行）。
+// 写法是逗号分隔的 `key` 或 `key=说明`，`key=说明` 时说明是给人读的判据标签。
 type decideItem struct {
 	key     string
 	desc    string
@@ -257,7 +258,8 @@ func encodeQuestions(questions []decideQuestion) (json.RawMessage, error) {
 }
 
 // decodeQuestionsJSON 收下 --questions 的整块对象：必须是带至少一个问题的 JSON 对象。
-// 内容不替上游校验（DESIGN 5.14 的最少校验），但形状与空的区别要与上游一致地在这里说清。
+// 内容不替上游校验，但形状与空的区别要与上游一致地在这里说清：本地放过一个空对象，
+// 上游会回一条格式不同的错误，用户得在两个地方看两种话。
 func decodeQuestionsJSON(raw string) (json.RawMessage, []decideMeta, error) {
 	trimmed := strings.TrimSpace(raw)
 	var questions map[string]json.RawMessage
@@ -285,7 +287,7 @@ func decodeQuestionsJSON(raw string) (json.RawMessage, []decideMeta, error) {
 	return json.RawMessage(trimmed), metas, nil
 }
 
-// encodeDecideState 把 --state 变成请求体里的一段 JSON（见 DESIGN 第 4 节的 decide 一行）：
+// encodeDecideState 把 --state 变成请求体里的一段 JSON：
 // 去掉首尾空白后首字符是 `{`、`[` 或 `"` 时按 JSON 解析，其余按纯文本字符串发。
 // 纯文本原样进 JSON（不裁剪内部的空白）：它就是模型要看的材料。
 func encodeDecideState(raw string) (json.RawMessage, error) {
@@ -323,7 +325,8 @@ type decideTarget struct {
 
 // pickDecideTarget 按选号顺序找第一个「有效出站协议是 systemone」的候选账号。规则与网关的选号
 // 一致（启用、冷却已过、模型列表覆盖该模型、priority 升序），但不带会话粘性：decide 一次只发
-// 一条请求，没有会话可沿。有效协议只问 store.EffectiveProtocol，cli 不另算一份（见 DESIGN 5.13）。
+// 一条请求，没有会话可沿。有效协议只问 store.EffectiveProtocol，cli 不另算一份：
+// 两份优先级迟早对不上，命令行会把请求发给一个网关不会用的账号。
 //
 // 三条失败各写清发生了什么、为什么、下一步敲什么：决策请求没有对话可以退化成别的协议，
 // 「不是 systemone」只能靠声明一条路由或换一个模型解决。
@@ -350,7 +353,7 @@ func pickDecideTarget(st *store.Store, model string) (decideTarget, error) {
 		return decideTarget{}, fmt.Errorf("模型 %s 的账号都在冷却或被停用：这一次选不出账号；用 lax account ls 看状态，冷却几十秒后重试，被停用的用 lax account enable <账号> 启用", resolved)
 	}
 
-	// 网关遇到算不出协议或协议不相通的候选会跳过它看下一个（DESIGN 5.14 的协议互通），
+	// 网关遇到算不出协议或协议不相通的候选会跳过它看下一个，
 	// 这里照同一个顺序找第一个走 systemone 的候选；firstProtocol 记第一个候选的协议，供文案说明。
 	firstProtocol := ""
 	for _, cand := range candidates {
@@ -368,7 +371,7 @@ func pickDecideTarget(st *store.Store, model string) (decideTarget, error) {
 
 	if firstProtocol == "" {
 		// 算不出协议的两种成因要分开说：路由没声明、或者声明了但默认协议空（回退顺序只认
-		// openai-chat → openai-responses → anthropic，见 DESIGN 5.8），两种下一步不一样。
+		// openai-chat → openai-responses → anthropic），两种下一步不一样。
 		provider := candidates[0].Provider
 		declared, err := st.ProviderProtocols(provider)
 		if err != nil {
@@ -384,7 +387,7 @@ func pickDecideTarget(st *store.Store, model string) (decideTarget, error) {
 }
 
 // systemOneOnlyModel 判断这个模型的候选账号是否全部以 systemone 出站。call 发的是对话请求，
-// 这种模型对它只会回 400（DESIGN 5.14 的协议互通），所以在发出去之前就拒绝。
+// 这种模型对它只会回 400，所以在发出去之前就拒绝。
 // 一个候选都没有、或某一个候选走别的协议时返回假：那些情况由网关照常给出 404/503 或者照常转发。
 func systemOneOnlyModel(st *store.Store, model string) (bool, error) {
 	resolved, isAlias, err := st.ResolveModelAlias(model)
@@ -434,7 +437,7 @@ type decideResponse struct {
 
 // decideAnswer 是上游给一个问题的答案。四种问题类型各自把结论平铺在顶层，不共用一个
 // `answer` 字段：noul 给 `noul`（是非的概率），choice 给 `choice` 与 `probabilities`，
-// score 给 `score`、`legend` 与 `probabilities`，box 给 `box`（DESIGN 5.14）。
+// score 给 `score`、`legend` 与 `probabilities`，box 给 `box`。
 // 数值一律按可选处理：上游没给的列写 -，不补一个 0 冒充结论。
 type decideAnswer struct {
 	Type          string             `json:"type"`
@@ -674,7 +677,7 @@ func cmdDecide(e *Env, args []string) error {
 }
 
 // decideRequestBody 是发往 POST /v1/systemone 的请求体：这里只放这一段协议的三个必有字段，
-// assets 一类本命令产不出来的键不伪造（见 DESIGN 5.14 的请求体一行）。
+// assets 一类本命令产不出来的键不伪造：它们的值只属于上游自己生成的请求。
 type decideRequestBody struct {
 	Model     string          `json:"model"`
 	State     json.RawMessage `json:"state"`
@@ -682,7 +685,7 @@ type decideRequestBody struct {
 }
 
 // decideHTTPError 把非 2xx 的响应变成一条错误（退出码 1）。文案取 detail.message：
-// 这条协议的错误体是 {"detail":{"error_type":…,"message":…}}（DESIGN 5.2 与 5.14），
+// 这条协议的错误体是 {"detail":{"error_type":…,"message":…}}，
 // 两个字段名都认（`error_type` 与早期文档里的 `type`）；其它形状退回响应原文。
 func decideHTTPError(status int, raw []byte, accountName string) error {
 	var env struct {
@@ -734,7 +737,7 @@ func decideMetricCell(value *float64) string {
 	return strconv.FormatFloat(*value, 'f', -1, 64)
 }
 
-// decideUsageLine 是最后一行用量：这条协议只有输入与输出两个数（DESIGN 5.14），
+// decideUsageLine 是最后一行用量：这条协议只有输入与输出两个数，
 // 上游没给全时说明白缺的是哪个，不留一行 0。
 func decideUsageLine(raw json.RawMessage) string {
 	if len(raw) == 0 {

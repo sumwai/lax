@@ -7,7 +7,7 @@ import (
 	"lax/internal/store"
 )
 
-// 这个文件钉住 model price 这一组命令面（DESIGN 4 的三行）：厂商级标价写 provider_models，
+// 这个文件钉住 model price 这一组命令面：厂商级标价写 provider_models，
 // 账号覆盖写 account_models，两者互斥；清值与列价都只读模型目录与合并结果。
 // 价格不在账号上，所以建账号之后定价是第二步。
 
@@ -484,7 +484,7 @@ func TestModelPriceLsTextAndJSON(t *testing.T) {
 }
 
 // TestModelLsPricesComeFromMergedCatalog 钉住 model ls 的价格列来自合并值
-// （账号覆盖 → 厂商级标价，见 DESIGN 5.13）：一个模型只有厂商级标价、另一个被账号覆盖，
+// （账号覆盖 → 厂商级标价）：一个模型只有厂商级标价、另一个被账号覆盖，
 // 两行都要显示对，文本与 --json 同源。
 func TestModelLsPricesComeFromMergedCatalog(t *testing.T) {
 	sandbox(t)
@@ -544,7 +544,7 @@ func TestModelLsPricesComeFromMergedCatalog(t *testing.T) {
 }
 
 // TestModelPriceHelp 钉住 model price --help 的形状：三条用法、一个示例与两段说明。
-// 光列子命令说不清价格挂在谁身上（DESIGN 4）。
+// 光列子命令说不清价格挂在谁身上。
 func TestModelPriceHelp(t *testing.T) {
 	sandbox(t)
 

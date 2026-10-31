@@ -8,8 +8,10 @@ import (
 	"strings"
 )
 
-// 本文件负责 openai-chat 与中间表示之间的编解码，入站与出站共用同一套映射。
-// 映射规则依据 DESIGN.md 第 5.4 节，表里没有的字段一律丢弃。
+// 本文件负责 openai-chat 与中间表示之间的编解码，入站与出站共用同一套映射：
+// 客户端从这个方向进来、上游从同一个方向出去，两边读写的字段因此只有一份定义。
+// 表里没有的字段一律丢弃，不原样透传：能带到另一条协议上的东西必须先落成 IR，
+// 留在原报文里的字段到了另一条协议就没人读，透传出去只会让上游回 400。
 
 // DecodeChatRequest 把 openai-chat 请求体解析成 IR。
 // system/developer 消息归入 Request.System，tool 消息变成 tool_result 块，
@@ -31,7 +33,7 @@ func DecodeChatRequest(raw []byte) (*Request, error) {
 	}
 
 	// 思考配置参数：reasoning_effort 是主流写法，reasoning.effort 是少数实现包一层的写法，
-	// 两个都有时以顶层那个为准（DESIGN 5.4「思考配置参数」）。
+	// 两个都有时以顶层那个为准：顶层写法是主流，包一层的那个只是兼容。
 	effort := strings.TrimSpace(in.ReasoningEffort)
 	if effort == "" && in.Reasoning != nil {
 		effort = strings.TrimSpace(in.Reasoning.Effort)
@@ -119,7 +121,7 @@ func EncodeChatRequest(r *Request, model string) ([]byte, error) {
 	}
 
 	// 思考配置参数：档位在这条协议上原生可写，因此档位优先、没档位时按预算折；
-	// Enabled 为假时一个字段都不写——chat 没有「不思考」的档位（DESIGN 5.4）。
+	// Enabled 为假时一个字段都不写——chat 没有「不思考」的档位，写一个空值只会让上游报参数错。
 	if effort := r.Thinking.openAIEffort(); effort != "" {
 		out.ReasoningEffort = effort
 	}
@@ -396,7 +398,7 @@ type chatStreamEncoder struct {
 	usageSent bool
 	done      bool
 	// toolSlots 把上游的块号映射成 chat 的稠密序号：上游 anthropic 有文本块时
-	// 首个工具是 1，按稠密下标建数组的客户端会撞上空位（DESIGN 5.4）。
+	// 首个工具是 1，按稠密下标建数组的客户端会撞上空位。
 	toolSlots map[int]int
 	// toolOpen 记「有工具块开了还没收」，断流时用来补说明。
 	toolOpen bool
@@ -687,7 +689,7 @@ func chatAssistantBlocks(m ChatMessage) ([]Block, error) {
 // chatMessagesFor 把一条 IR 消息展开成若干条 chat 消息。
 // user 里的 tool_result 块必须先变成独立的 tool 消息，其后才是同一条消息里的文本与图片。
 // keepReasoning 表示这次请求带 tools：只有这时才把本网关回执签名的思考写回
-// reasoning_content，推理模型的 thinking 模式也是在这个条件下要求回传（DESIGN 5.4）。
+// reasoning_content，推理模型的 thinking 模式也是在这个条件下要求回传。
 func chatMessagesFor(m Message, keepReasoning bool) ([]ChatMessage, error) {
 	switch m.Role {
 	case RoleSystem:
@@ -757,7 +759,7 @@ func chatMessagesFor(m Message, keepReasoning bool) ([]ChatMessage, error) {
 				text.WriteString(b.Text)
 			case BlockThinking:
 				// 只在带 tools 的请求里回填带本网关回执签名的块：推理模型的 thinking 模式正是
-				// 在这个条件下要求把上一轮 CoT 原样传回，缺了直接 400（DESIGN 5.4）。
+				// 在这个条件下要求把上一轮 CoT 原样传回，缺了直接 400。
 				// 客户端自己带来的 reasoning_content 没有签名，回填它只会在主流推理模型上
 				// 换回一个 400，仍然丢弃。
 				if keepReasoning && b.Thinking != nil && b.Thinking.Text != "" && isReplaySignature(b.Thinking.Signature) {
@@ -891,7 +893,7 @@ func chatJoinText(blocks []Block) string {
 }
 
 // chatReasoningText 取思考内容正文。主流实现写在 reasoning_content，
-// 少数写在 reasoning；两个都读，同时出现时以前者为准（DESIGN 5.4）。
+// 少数写在 reasoning；两个都读，同时出现时以前者为准。
 func chatReasoningText(primary, compat string) string {
 	if primary != "" {
 		return primary
@@ -962,7 +964,8 @@ func chatToolChoiceToWire(tc *ToolChoice) (any, error) {
 		return "none", nil
 	case ToolChoiceAllowedTools:
 		// chat 只有 auto、required、none 三档，没有白名单形状：降级为 auto，白名单丢掉
-		// （DESIGN 5.4）。空白名单整条不写：没有名字可降级，不写时上游默认就是 auto。
+		// 降级为 auto，白名单丢掉——chat 没有能表达「只准调这几个」的字段。
+		// 空白名单整条不写：没有名字可降级，不写时上游默认就是 auto。
 		if len(tc.Allowed) == 0 {
 			return nil, nil
 		}

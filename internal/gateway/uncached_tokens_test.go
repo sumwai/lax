@@ -23,7 +23,7 @@ const (
 		`"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":10,"totalTokenCount":110,"cachedContentTokenCount":60}}`
 )
 
-// TestRecordedUncachedInTokensByOutbound 钉住入账时的输入 token 归一化（DESIGN 5.5）：
+// TestRecordedUncachedInTokensByOutbound 钉住入账时的输入 token 归一化：
 // 出站是 anthropic 时 in_tokens_uncached 等于上游的 input_tokens，出站是 chat 或 gemini 时
 // 要减掉 cache_read；in_tokens 本身仍是上游原值，log tail 与 usage 的输入列因此不变。
 func TestRecordedUncachedInTokensByOutbound(t *testing.T) {

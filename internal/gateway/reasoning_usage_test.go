@@ -11,7 +11,7 @@ import (
 	"lax/internal/translate"
 )
 
-// 这个文件钉住思考 token 的记账链路（DESIGN 5.5）：scanner 与解码器读到的 reasoning 与 total
+// 这个文件钉住思考 token 的记账链路：scanner 与解码器读到的 reasoning 与 total
 // 要一路传到 requests 的两列，判定只在 store.ReasoningExtra 里做一次。
 //
 // 报文取真实中转的形状：prompt 7、completion 1、total 132、reasoning 124——思考既不在

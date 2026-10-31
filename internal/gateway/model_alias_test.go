@@ -13,7 +13,7 @@ import (
 	"lax/internal/translate"
 )
 
-// 这个文件钉住「模型别名接进转发与清单」（DESIGN 5.12）：别名只在请求方向生效，
+// 这个文件钉住「模型别名接进转发与清单」：别名只在请求方向生效，
 // 解析只做一次，选号、路由 {model} 占位符、请求体里的 model 与 gemini 路径都用解析后的
 // 真名，响应里的 model 仍是上游的真名；两个清单接口同时列出真名与别名。
 
@@ -164,7 +164,7 @@ func TestAliasCycleIsBadRequest(t *testing.T) {
 func TestAliasTargetWithoutProvider(t *testing.T) {
 	f := newFixture(t)
 	f.add(t, "ds1", gateway.ProtocolChat, "http://127.0.0.1:1", "sk-ds", []string{"m1"}, 100)
-	// 目标可以暂时没有账号提供（DESIGN 5.12 的写入校验允许这样），此时别名接不了请求。
+	// 目标可以暂时没有账号提供（写入校验允许这样），此时别名接不了请求。
 	mustAlias(t, f, "fast", "ghost-model")
 	srv := f.server(t)
 

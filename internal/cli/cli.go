@@ -19,7 +19,10 @@ const (
 	exitUsage = 2
 )
 
-// errNotImplemented 表示子命令已在设计文档中定义，但当前里程碑尚未实现。
+// errNotImplemented 用于「子命令的接口定下来了、这一版还没接上实现」这种占位。
+// 返回它让退出码落在 1（执行失败）而不是 2（参数写错），脚本据此能分清「这一版没有」
+// 与「参数写歪了」。当前所有子命令都已接上实现，因此没有调用点；要删它，得连「未实现」
+// 这个语义一起删。
 var errNotImplemented = errors.New("尚未实现，见 DESIGN.md 的里程碑")
 
 // usageError 是用法错误，退出码 2。
@@ -186,12 +189,13 @@ func printFlagDefaults(w io.Writer, fs *flag.FlagSet) {
 }
 
 // zeroDefault 判断参数默认值是否等于该类型的零值，是就不写进参数清单。
+// 清单里只列非零默认值：每一行都挂一个 (default false) 会把真正需要注意的默认值淹掉。
 func zeroDefault(f *flag.Flag, placeholder string) bool {
 	switch placeholder {
 	case "string":
 		return f.DefValue == ""
 	case "":
-		// 开关参数
+		// 布尔 flag 没有占位符，零值是 "false"：默认值是真时才值得在清单里写出来。
 		return f.DefValue == "false"
 	case "duration":
 		return f.DefValue == "0s"

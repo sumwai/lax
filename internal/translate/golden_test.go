@@ -11,7 +11,7 @@ import (
 
 // goldenCase 是对拍用例的信封。from 是入站（客户端）协议，to 是出站（上游）协议：
 // 请求由 from 解码、往 to 编码；响应与流式由 to 解码、往 from 编码。
-// 用例名说明场景，覆盖 DESIGN.md 5.4 的映射表。
+// 用例名说明场景，覆盖各协议之间的映射表。
 type goldenCase struct {
 	From   string            `json:"from"`
 	To     string            `json:"to"`

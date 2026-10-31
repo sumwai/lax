@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// 模型事实与账号可达性分两张表存（迁移 0015，见 DESIGN 5.13）：
+// 模型事实与账号可达性分两张表存（迁移 0015）：
 //
 //   - provider_models 是目录：上下文长度、最大输出、支持的协议、能力位与厂商级价格。同一个模型
 //     在多家账号下只有一份，改一次就够。
@@ -111,7 +111,7 @@ type AccountModel struct {
 }
 
 // ModelInfo 是一个账号上一个模型的有效值：能不能用，加上合并了目录与覆盖之后的元数据。
-// 取值优先级一律是「账号覆盖 → 目录 → 厂商默认」（见 DESIGN 5.13）。
+// 取值优先级一律是「账号覆盖 → 目录 → 厂商默认」。
 type ModelInfo struct {
 	Model           string
 	Access          string
@@ -288,7 +288,7 @@ func upsertProviderModelTx(tx *sql.Tx, m ProviderModel) error {
 // 两个「只带名字」的写入口（`ReplaceModels`、`declareModelsTx`）用它而不是 providerModelUpsert：
 // 后者按来源等级判断，manual 会把这行改成 manual，而 manual 是最强的一档，此后 sync 再也写不进去，
 // 上游给的上下文长度与协议集合就永远停在第一次同步的值上。名字只说明「这个名字存在」，
-// 已有的模型事实不归它改（见 DESIGN 5.13）。
+// 已有的模型事实不归它改。
 const providerModelInsertOnly = `INSERT INTO provider_models
 	(provider, model, source, context_window, max_output, protocols, capabilities,
 	 price_in, price_out, price_cache_read, price_cache_write, updated_at)
@@ -296,7 +296,7 @@ const providerModelInsertOnly = `INSERT INTO provider_models
 	ON CONFLICT (provider, model) DO NOTHING`
 
 // ProviderModelProtocols 返回目录里这一行声明支持的协议（provider_models.protocols），
-// 行不存在时返回空。探活只读这一列，用它把上游自己声明的协议排在候选前面（见 DESIGN 5.7）。
+// 行不存在时返回空。探活只读这一列，用它把上游自己声明的协议排在候选前面。
 func (s *Store) ProviderModelProtocols(provider, model string) ([]string, error) {
 	m, ok, err := s.providerModel(strings.TrimSpace(provider), strings.TrimSpace(model))
 	if err != nil || !ok {
@@ -315,7 +315,8 @@ func declareModelsTx(tx *sql.Tx, accountID int64, provider string, models []stri
 		return nil
 	}
 	for _, name := range names {
-		// 目录里没有的名字补一行 manual；已有的行一个字段都不动，理由同 ReplaceModels。
+		// 目录里没有的名字补一行 manual；已有的行一个字段都不动：名字只说明「这个名字存在」，
+		// 长度、价格与协议集合得由同步或探活写，手填清单不该把它们冲成空。
 		if _, err := tx.Exec(providerModelInsertOnly, provider, name, SourceManual, time.Now().Unix()); err != nil {
 			return err
 		}
@@ -355,8 +356,7 @@ func (s *Store) ProviderModels(provider string) ([]ProviderModel, error) {
 	return out, rows.Err()
 }
 
-// ProviderModel 是 providerModel 的导出版本：网关探活要看这个模型的能力位才知道打对话还是打向量化
-// （DESIGN 5.15）。读不到行不是错误，第二个返回值为假。
+// ProviderModel 是 providerModel 的导出版本：网关探活要看这个模型的能力位才知道打对话还是打向量化。读不到行不是错误，第二个返回值为假。
 func (s *Store) ProviderModel(provider, model string) (ProviderModel, bool, error) {
 	return s.providerModel(provider, model)
 }
@@ -479,7 +479,7 @@ func (s *Store) fillDerivedModels(list []Account) error {
 }
 
 // EffectiveModels 返回一个账号全部模型行的有效值，按模型名升序：可达性来自 account_models，
-// 元数据按「账号覆盖 → 目录 → 厂商默认」合并（见 DESIGN 5.13）。
+// 元数据按「账号覆盖 → 目录 → 厂商默认」合并。
 // 返回的行不按可达性过滤：调用方自己看 Access（`/v1/models` 只列 allowed）。
 func (s *Store) EffectiveModels(accountID int64) ([]ModelInfo, error) {
 	rows, err := s.AccountModels(accountID)
@@ -531,13 +531,13 @@ func (s *Store) EffectiveModels(accountID int64) ([]ModelInfo, error) {
 }
 
 // resolveModelProtocol 是有效协议的另一半：账号覆盖优先，其次是目录里这个模型支持的协议，
-// 最后回退到厂商的有效默认协议（见 DESIGN 5.13）。
+// 最后回退到厂商的有效默认协议。
 //
 // 目录给出的是一组协议而不是一个，取值顺序固定，不受库里的行序影响：
 // 厂商的有效默认协议在这组里就用它（按厂商配置打是首选），否则按 modelProtocolOrder
 // （openai-chat → openai-responses → anthropic → gemini → systemone）取第一个，
 // 再没有就取字典序最小的那个。systemone 排在最后：决策协议不该在厂商同时声明 chat 与
-// systemone 时被选成默认（DESIGN 5.13、5.14）。
+// systemone 时被选成默认——那样所有对话请求都会因为协议不相通而变成 400。
 func resolveModelProtocol(providerDefault string, modelProtocols []string, accountProtocol string) string {
 	if accountProtocol != "" {
 		return accountProtocol
@@ -659,7 +659,7 @@ func (s *Store) SetAccountModelOverride(accountID int64, model string, o Account
 }
 
 // ResolveProtocol 是有效出站协议的纯规则：模型行上有协议就用它，否则用厂商的有效默认协议
-// （账号行不再存协议，见迁移 0014 与 DESIGN 5.8）。两部分都是空串时结果就是空串。
+// （账号行不再存协议，迁移 0014 把那一列删了）。两部分都是空串时结果就是空串。
 func ResolveProtocol(providerProtocol, modelProtocol string) string {
 	if modelProtocol != "" {
 		return modelProtocol
@@ -683,7 +683,7 @@ func (s *Store) ModelProtocol(accountID int64, model string) (string, error) {
 }
 
 // EffectiveProtocol 返回账号在某个模型上的有效出站协议，转发与展示共用这一次读。
-// 顺序按 DESIGN 5.13：账号覆盖（account_models.protocol）→ 目录里这个模型支持的协议
+// 顺序：账号覆盖（account_models.protocol）→ 目录里这个模型支持的协议
 // （provider_models.protocols，见 resolveModelProtocol）→ 厂商的有效默认协议。
 // 行不存在、列为空、厂商行不存在或这家没有路由时都回退到空串，不报错。
 //
@@ -752,7 +752,7 @@ func (s *Store) accountProviderStrict(accountID int64) (string, error) {
 
 // ReplaceModels 把这些名字标成 allowed，其余模型行一行都不动，返回新增的行数。
 //
-// 这是 `model sync` 的写入口（DESIGN 5.13）：上游清单里出现的名字变成这个账号可达的模型，
+// 这是 `model sync` 的写入口：上游清单里出现的名字变成这个账号可达的模型，
 // 目录里没有的补一行 source='manual'。名字只说明「这个名字存在」，长度、价格、能力位与协议集合
 // 都不归这里写：已有的目录行一个字段都不动（含 source），同步写进来的事实由同步自己刷新。
 // 清单里没出现的行保持原状：

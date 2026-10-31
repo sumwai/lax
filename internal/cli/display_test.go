@@ -10,7 +10,7 @@ import (
 )
 
 // TestModelLsShowsEffectiveProtocol 覆盖 model ls 的协议列：
-// 每个账号显示该模型的有效协议，模型行没有协议时回退到厂商的有效默认协议（见 DESIGN 5.8）。
+// 每个账号显示该模型的有效协议，模型行没有协议时回退到厂商的有效默认协议。
 func TestModelLsShowsEffectiveProtocol(t *testing.T) {
 	sandbox(t)
 	if code, _, stderr := run(t, "init"); code != 0 {
@@ -271,7 +271,7 @@ func TestAccountLsCountsModelsByAccess(t *testing.T) {
 }
 
 // TestModelLsShowsCatalogMetadata 覆盖 model ls 的目录元数据列：上下文长度、最大输出与
-// 支持的协议集合都取自 provider_models（长度按「账号覆盖 → 目录」，见 DESIGN 5.13），
+// 支持的协议集合都取自 provider_models（长度按「账号覆盖 → 目录」，协议没有账号级覆盖），
 // 目录里没填的项在文本里写 -、在 --json 里是 null 或空数组。
 func TestModelLsShowsCatalogMetadata(t *testing.T) {
 	sandbox(t)

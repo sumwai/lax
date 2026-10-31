@@ -1,4 +1,4 @@
--- 思考 token 单独记两列（见 DESIGN 5.5、6）。
+-- 思考 token 单独记两列。
 --
 -- reasoning_tokens 是上游上报的思考 token 原值：chat 读 completion_tokens_details.reasoning_tokens，
 -- responses 读 output_tokens_details.reasoning_tokens，gemini 读 thoughtsTokenCount；

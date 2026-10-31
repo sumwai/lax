@@ -13,11 +13,11 @@ import (
 	"lax/internal/store"
 )
 
-// 向量化（DESIGN 5.15）：两个入站路径、只做同协议直通、没有流式、用量只记输入。
+// 向量化：两个入站路径、只做同协议直通、没有流式、用量只记输入。
 // 这里的用例都打 httptest 假上游，逐字节核对转发了什么。
 
 // embeddingsProvider 建一家同时声明对话与向量化路由的厂商，再挂一个账号。
-// 默认协议设成向量化：探活与转发都按厂商声明的那条路由走（DESIGN 5.15）。
+// 默认协议设成向量化：探活与转发都按厂商声明的那条路由走。
 func embeddingsProvider(t *testing.T, f *fixture, baseURL string, models []string) store.Account {
 	t.Helper()
 	routes := []store.ProviderRoute{
@@ -216,7 +216,7 @@ func TestGeminiEmbedContentRejectsGenerateModel(t *testing.T) {
 	f.addAs(t, "gem", "google-gemini", gateway.ProtocolGemini, up.URL, "sk-gem", []string{"gemini-2.5-flash"})
 	srv := f.server(t)
 
-	// 对话模型被按向量化动作打：上游怎么答就怎么回，网关不拦（5.15 的已知行为）。
+	// 对话模型被按向量化动作打：上游怎么答就怎么回，网关不拦（这是已知行为：入站协议由路径定，不看模型）。
 	postPath(t, srv, "/v1beta/models/gemini-2.5-flash:embedContent", `{"content":{"parts":[{"text":"hi"}]}}`)
 	if path, _ := seen(); path != "/v1beta/models/gemini-2.5-flash:embedContent" {
 		t.Fatalf("上游路径 = %q，期望 :embedContent", path)

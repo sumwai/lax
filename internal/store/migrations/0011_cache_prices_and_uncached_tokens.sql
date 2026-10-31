@@ -1,4 +1,4 @@
--- 缓存读写按单价计入估算花费，并把「未命中缓存的输入 token」单独记一列（见 DESIGN 5.5、6）。
+-- 缓存读写按单价计入估算花费，并把「未命中缓存的输入 token」单独记一列。
 --
 -- price_cache_read 与 price_cache_write 是账号上的缓存单价（每百万 token），可空：
 -- 空表示没填，花费估算按输入价 price_in 回退（SQL 里是 COALESCE(price_cache_read, price_in, 0)）。

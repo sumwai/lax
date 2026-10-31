@@ -15,7 +15,7 @@ import (
 //
 //   - 请求方向不回填：anthropic 客户端的历史里带签名 thinking 块，换成 openai-chat 或
 //     openai-responses 账号时，发给上游的报文里不能有 reasoning_content、也不能有
-//     reasoning 字段/条目——主流推理上游对回填这两种字段直接回 400（DESIGN 5.4）。
+//     reasoning 字段/条目——主流推理上游对回填这两种字段直接回 400。
 //   - 响应方向照旧搬运：上游回来的思考正文仍要写进客户端协议的落点。
 //
 // 只剩思考内容的 assistant 消息在这两条路上会被整条丢掉，用例一并断言丢掉之后上游报文

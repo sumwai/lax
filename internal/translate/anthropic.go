@@ -25,7 +25,7 @@ func DecodeAnthropicRequest(raw []byte) (*Request, error) {
 		Stop:        wire.StopSequences,
 		Stream:      wire.Stream,
 	}
-	// 顶层 thinking 是请求侧的思考配置参数，与消息里的 thinking 块无关（DESIGN 5.4）。
+	// 顶层 thinking 是请求侧的思考配置参数，与消息里的 thinking 块无关。
 	// 只认 enabled 与 disabled 两种 type，其余写法丢弃，不猜它的语义。
 	if th := wire.Thinking; th != nil {
 		switch th.Type {
@@ -84,7 +84,7 @@ func EncodeAnthropicRequest(r *Request, model string) ([]byte, error) {
 
 	// 思考配置参数：Enabled 为假写 disabled，有预算（或能折成预算的档位）写 enabled 加
 	// budget_tokens。既没有预算也没有认得出的档位时不写：anthropic 的 enabled 必须带预算，
-	// 编造一个数字等于替客户端下了它没说过的决心（DESIGN 5.4）。
+	// 编造一个数字等于替客户端下了它没说过的决心。
 	if th := r.Thinking; th != nil {
 		if !th.Enabled {
 			wire.Thinking = &AnthropicThinking{Type: "disabled"}
@@ -103,11 +103,10 @@ func EncodeAnthropicRequest(r *Request, model string) ([]byte, error) {
 
 	// anthropic 没有 role=tool，工具结果必须落进 user 消息里的 tool_result 块，原样写过去
 	// 会被上游以 400 拒绝。anthropic 也不接受两条相邻的 user 消息，所以连续的 user 侧内容
-	// （工具结果与普通 user 消息）并成一条：tool_result 块在前，普通内容按原顺序跟随
-	// （DESIGN 5.4）。
+	// （工具结果与普通 user 消息）并成一条：tool_result 块在前，普通内容按原顺序跟随。
 	var pendingResults, pendingBlocks []ContentBlock
 	// emit 写出一条消息：块数为 0 的不写。anthropic 拒绝空的 content 数组，一条只剩无签名
-	// 思考块的 assistant 消息编出来就是空的（DESIGN 5.4）。丢弃之后相邻的同角色消息按块
+	// 思考块的 assistant 消息编出来就是空的。丢弃之后相邻的同角色消息按块
 	// 顺序并成一条，assistant 也一样：丢一条空消息不该在报文里留下两条相邻的 assistant。
 	emit := func(msg AnthropicMessage) {
 		if len(msg.Content.Blocks) == 0 {
@@ -159,7 +158,7 @@ func EncodeAnthropicRequest(r *Request, model string) ([]byte, error) {
 
 	for _, t := range r.Tools {
 		// `input_schema` 是必填项，客户端函数缺它时补空对象；内置工具本来就没有 schema，
-		// 补一个出来就是伪造上游事实（DESIGN 5.4）。
+		// 补一个出来就是伪造上游事实：上游会按这个 schema 校验参数。
 		schema := t.Schema
 		if isClientTool(t) {
 			schema = schemaOrEmpty(schema)
@@ -257,8 +256,7 @@ func EncodeAnthropicResponse(r *Response) ([]byte, error) {
 				continue
 			}
 			// chat 与 responses 的思考没有签名，而 anthropic 客户端只回传带签名的块：
-			// 没有签名时盖一个回执签名，客户端下一轮原样带回时才能把 CoT 还给上游
-			// （DESIGN 5.4）。
+			// 没有签名时盖一个回执签名，客户端下一轮原样带回时才能把 CoT 还给上游。
 			t := *b.Thinking
 			if t.Redacted == "" && t.Text != "" && t.Signature == "" {
 				t.Signature = replaySignature(t.Text)
@@ -393,11 +391,11 @@ type anthropicStreamEncoder struct {
 	openIndex int
 	openKind  BlockKind
 	// closedBlocks 记哪些块号已经发过 content_block_stop：收过 stop 的块不能再收
-	// content_block_delta，需要重开一个新块（DESIGN 5.4）。
+	// content_block_delta，需要重开一个新块。
 	closedBlocks map[int]bool
 	// openThinking 记当前思考块的正文，openSigned 记它是否已经发过签名增量：
 	// 收尾时没发过签名的块要盖一个回执签名补上去（chat 与 responses 的思考没有签名，
-	// anthropic 客户端只回传带签名的块，DESIGN 5.4）。
+	// anthropic 客户端只回传带签名的块）。
 	openThinking strings.Builder
 	openSigned   bool
 	// toolBlocks 是上游块号 → 最近一次开的 anthropic 块号，toolSpecs 记重开时要写的
@@ -655,8 +653,9 @@ func anthropicSystemBlocks(raw json.RawMessage) []Block {
 
 func anthropicMessage(m AnthropicMessage) (Message, error) {
 	role := Role(m.Role)
-	// 对话中间允许 role=system：Claude Code 的 mid-conv system 就发这个形状，
-	// 模型名不在它的能力表里时默认开启（见 LESSONS）。与顶层 system 一致，只留文本块。
+	// 对话中间允许 role=system：Claude Code 的 mid-conv system 就发这个形状，客户端不区分
+	// 模型名就把它发出来，本网关不认这条形状就只能报错。与顶层 system 一致，只留文本块：
+	// 非文本块放进 system 会被上游拒收。
 	if role == RoleSystem {
 		msg := Message{Role: RoleSystem}
 		for _, b := range m.Content.All() {
@@ -729,7 +728,7 @@ func toAnthropicMessage(m Message) (AnthropicMessage, error) {
 				continue
 			}
 			// 带本网关回执签名的块只属于客户端手里的对话：真正的 anthropic 上游只认
-			// 它自己签的块，转发过去只会换回 400（DESIGN 5.4）。
+			// 它自己签的块，转发过去只会换回 400。
 			if isReplaySignature(b.Thinking.Signature) {
 				continue
 			}
@@ -792,7 +791,7 @@ func toolResultBlocks(m Message) []ContentBlock {
 	return blocks
 }
 
-// anthropicThinkingBlock 把思考块编成 anthropic 的 content block（DESIGN 5.4）。
+// anthropicThinkingBlock 把思考块编成 anthropic 的 content block。
 // redacted_thinking 的 data 原样写回；普通思考块没有签名就不写——伪造签名会让上游以
 // 400 拒绝整条请求，宁可丢掉这段正文。
 func anthropicThinkingBlock(t Thinking) (ContentBlock, bool) {
@@ -832,7 +831,7 @@ func fromAnthropicToolChoice(tc *AnthropicToolChoice) (*ToolChoice, *bool) {
 	case "tool":
 		return &ToolChoice{Mode: ToolChoiceNamed, Name: tc.Name}, parallel
 	case ToolChoiceAllowedTools:
-		// 白名单只搬名字（DESIGN 5.4）。一项名字都没有的空白名单整条丢弃：这一档说的是
+		// 白名单只搬名字。一项名字都没有的空白名单整条丢弃：这一档说的是
 		// 「只准调这些」，一个名字都没有时把它的意图改成 auto 或 none 都是替客户端说话，
 		// 不写出去时上游按自己的默认值走（与编码侧的空白名单同一个处理）。
 		names := make([]string, 0, len(tc.Tools))
@@ -869,7 +868,7 @@ func toAnthropicToolChoice(tc *ToolChoice, parallel *bool) (*AnthropicToolChoice
 		out.Type, out.Name = "tool", tc.Name
 	case ToolChoiceAllowedTools:
 		// 空白名单不编：写一个 {"type":"allowed_tools","tools":[]} 只能换回一个 400，
-		// 整条不写时上游按自己默认的 auto 走（DESIGN 5.4）。
+		// 整条不写时上游按自己默认的 auto 走。
 		if len(tc.Allowed) == 0 {
 			return nil, nil
 		}

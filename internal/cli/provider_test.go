@@ -64,7 +64,7 @@ func providerLine(t *testing.T, out, name string) []string {
 
 // seedProviderWithoutRoutes 用 store 的过渡写入口造一家一条路由都没有的厂商。
 // 命令行已经造不出这种行（`provider add` 至少要求一条路由），但升级上来的老库里可能有：
-// `account add` 与 `provider ls` 在这种行上的行为仍要钉住（见 DESIGN 5.8）。
+// `account add` 与 `provider ls` 在这种行上的行为仍要钉住：老库升级上来会带着它们。
 func seedProviderWithoutRoutes(t *testing.T, name, baseURL string) {
 	t.Helper()
 	paths, err := config.Resolve("", "")
@@ -346,7 +346,7 @@ func TestProviderAddCreates(t *testing.T) {
 
 // TestProviderPathWritesAreNormalized 钉住「路径只规整、不拒绝输入」：provider add 与
 // provider set 收到的 `v1/chat/completions`、`//v2//chat//completions/`、`v1/models` 这些写法
-// 一律退出码 0、落库成规整形态；转发与模型同步打的是规整后的完整地址（见 DESIGN 5.8）。
+// 一律退出码 0、落库成规整形态；转发与模型同步打的是规整后的完整地址。
 func TestProviderPathWritesAreNormalized(t *testing.T) {
 	sandbox(t)
 	up := newRecorderUpstream(t, map[string]fakeResponse{
@@ -439,7 +439,7 @@ func TestProviderAddNormalizedPathsHitFullURL(t *testing.T) {
 		t.Fatalf("厂商级模型列表路径 = %q，期望 /v1/models", added.ModelsPath)
 	}
 
-	// 账号的地址与默认协议都取厂商行（见 DESIGN 5.8）：这家默认协议是 openai-chat。
+	// 账号的地址与默认协议都取厂商行：这家默认协议是 openai-chat。
 	if code, _, stderr := addAccount(t, "a-chat", "mine", "", "", "--key", "sk-test", "--models", "m1"); code != 0 {
 		t.Fatalf("account add a-chat 退出码 = %d，stderr = %s", code, stderr)
 	}
@@ -474,7 +474,7 @@ func TestProviderAddNormalizedPathsHitFullURL(t *testing.T) {
 
 // TestAccountTestFallbackUsesProviderRoutes 钉住退回最小请求时打的是路由拼出来的完整地址：
 // 列表接口不通（这里是没有这个接口，上游回 404）时，出站协议取厂商的有效默认协议
-// （账号不再存协议，见 DESIGN 5.8），默认 openai-chat 的厂商打 --openai 那条、
+// （账号不存协议），默认 openai-chat 的厂商打 --openai 那条、
 // 默认 anthropic 的打 --anthropic 那条，两条路径都经过规整。
 func TestAccountTestFallbackUsesProviderRoutes(t *testing.T) {
 	sandbox(t)
@@ -484,7 +484,7 @@ func TestAccountTestFallbackUsesProviderRoutes(t *testing.T) {
 	})
 	mustInit(t)
 
-	// 两家厂商，各只声明一条路由：默认协议因此就是那一条（见 DESIGN 5.8）。
+	// 两家厂商，各只声明一条路由：默认协议因此就是那一条。
 	if code, _, stderr := run(t, "provider", "add", "chatco",
 		"--base-url", up.srv.URL, "--openai", "//v1//chat/completions/"); code != 0 {
 		t.Fatalf("provider add chatco 退出码 = %d，stderr = %s", code, stderr)
@@ -771,7 +771,7 @@ func TestProviderAddUsageErrors(t *testing.T) {
 			t.Fatalf("退出码 = %d，stdout = %q", code, out)
 		}
 		// 缺 base_url 只在一个前提下算错：有相对路径要拼它。文案要说清是哪条路由与两条出路
-		//（给 --base-url，或把这条路由写成整条地址），判定与文案来自 store（见 DESIGN 5.8）。
+		//（给 --base-url，或把这条路由写成整条地址），判定与文案来自 store。
 		for _, want := range []string{"openai-chat", "/v1/chat/completions", "相对路径", "需要 --base-url", "整条地址", "lax provider add <名称>"} {
 			if !strings.Contains(stderr, want) {
 				t.Fatalf("stderr 应提到 %q: %s", want, stderr)
@@ -882,7 +882,7 @@ func TestProviderAddDefaultProtocol(t *testing.T) {
 }
 
 // TestProviderGeminiRoute 钉住 --gemini 这条路：路由与默认协议一起写进去，{model} 占位符原样落库，
-// provider ls 能带出它，provider set 能补一条，provider unset gemini 能删掉它（见 DESIGN 4 与 5.9）。
+// provider ls 能带出它，provider set 能补一条，provider unset gemini 能删掉它。
 func TestProviderGeminiRoute(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
@@ -912,7 +912,7 @@ func TestProviderGeminiRoute(t *testing.T) {
 	if route.Path != geminiPath {
 		t.Fatalf("gemini 路由的 path = %q，期望原样保留 %q", route.Path, geminiPath)
 	}
-	// gemini 没有自己的列表接口，推导不出 models_path（读取时回退到同厂商其它协议，见 DESIGN 5.7）。
+	// gemini 没有自己的列表接口，推导不出 models_path（读取时回退到同厂商其它协议）。
 	if route.ModelsPath != "" {
 		t.Fatalf("gemini 路由不该有推导出来的 models_path: %+v", route)
 	}
@@ -1020,7 +1020,7 @@ func TestProviderGeminiErrors(t *testing.T) {
 }
 
 // TestProviderAddHelpMentionsGemini 钉住帮助文案里的真实示例：取值形状、{model} 占位符的说明
-// 与 gemini 示例都在 provider add --help 里（见 DESIGN 4）。
+// 与 gemini 示例都在 provider add --help 里。
 func TestProviderAddHelpMentionsGemini(t *testing.T) {
 	sandbox(t)
 
@@ -1158,7 +1158,7 @@ func TestProviderSetErrors(t *testing.T) {
 		}
 	})
 
-	// 路由路径的写法不在这里断言：拼接改成程序规整、不报错（同上）。
+	// 路由路径的写法不在这里断言：拼接改成程序规整、不报错。
 
 	t.Run("厂商不存在", func(t *testing.T) {
 		code, _, stderr := run(t, "provider", "set", "nope", "--note", "x")
@@ -1505,7 +1505,7 @@ func TestProviderRmMissingAndJSON(t *testing.T) {
 }
 
 // TestProviderRmForceDisablesAccounts 确认 provider rm --force 删掉厂商行与它的全部路由之后，
-// 原先用这家厂商的账号在同一个事务里被停用：地址与默认协议都随厂商一起没了（见 DESIGN 5.8），
+// 原先用这家厂商的账号在同一个事务里被停用：地址与默认协议都随厂商一起没了，
 // 留在选号池里只会必然 502。账号行、凭据与模型清单都不删，重建厂商后 account enable 就能接着用。
 func TestProviderRmForceDisablesAccounts(t *testing.T) {
 	sandbox(t)
@@ -2131,7 +2131,7 @@ func TestProviderAddWithoutBaseURL(t *testing.T) {
 	mustInit(t)
 
 	const key = "sk-bigmodel-plain-9f2"
-	// 一条相对路径的路由会需要 base_url：这个前提由 store 判（见 DESIGN 5.8）。
+	// 一条相对路径的路由会需要 base_url：这个前提由 store 判。
 	if code, _, stderr := run(t, "provider", "add", "bigmodel",
 		"--anthropic", anthropicUp.srv.URL+"/api/anthropic/v1/messages",
 		"--openai", chatUp.srv.URL+"/api/coding/paas/v4/chat/completions",
@@ -2236,7 +2236,7 @@ func TestProviderAddWithoutBaseURL(t *testing.T) {
 
 // TestProviderAddWithoutBaseURLRejectsRelativeRoute 钉住缺 base_url 时唯一的拒绝条件：
 // 有一条路由是相对路径就拼不出完整地址，退出码 2，文案说清是哪条协议、两条出路都写出来，
-// 并且一条路由都不落库。cli 不自己算这条规则，判定与文案来自 store（见 DESIGN 5.8）。
+// 并且一条路由都不落库。cli 不自己算这条规则，判定与文案来自 store。
 func TestProviderAddWithoutBaseURLRejectsRelativeRoute(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
@@ -2311,7 +2311,7 @@ func TestProviderSetKeepsBaseURLCoverage(t *testing.T) {
 		t.Fatalf("anthropic 路由 = %q，期望相对路径落库", got)
 	}
 
-	// 出站协议取厂商的有效默认协议（账号不再存协议，见 DESIGN 5.8）：这条用例要打 anthropic 那条。
+	// 出站协议取厂商的有效默认协议（账号不存协议）：这条用例要打 anthropic 那条。
 	if code, _, stderr := run(t, "provider", "set", "bigmodel", "--default-protocol", "anthropic"); code != 0 {
 		t.Fatalf("provider set --default-protocol 退出码 = %d，stderr = %s", code, stderr)
 	}

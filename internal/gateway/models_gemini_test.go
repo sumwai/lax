@@ -47,7 +47,7 @@ func syncGemini(t *testing.T, pages []geminiPage, secretValue string) (
 }
 
 // TestSyncModelsGeminiShape 钉住 gemini 的清单形状：`{models:[{name:"models/…"}]}` 复用第二种形状，
-// 另加一条后处理：名字去掉一个 `models/` 前缀。向量化条目不再被丢出清单（DESIGN 5.15），
+// 另加一条后处理：名字去掉一个 `models/` 前缀。向量化条目仍留在清单里，
 // 它们进目录、能力位记成 embedding；没写 supportedGenerationMethods 的条目同样保留，能力位留空。
 // 地址与凭据头按种子的 gemini 路由走：`/v1beta/models` 加 `x-goog-api-key`。
 func TestSyncModelsGeminiShape(t *testing.T) {
@@ -78,7 +78,7 @@ func TestSyncModelsGeminiShape(t *testing.T) {
 }
 
 // TestSyncModelsGeminiAuthHeader 钉住 gemini 的列表请求发 x-goog-api-key：地址来自 gemini 路由，
-// 凭据头就按 gemini 选，不是厂商默认协议那一套之外的猜法（见 DESIGN 5.7）。
+// 凭据头就按 gemini 选，不按厂商默认协议猜：猜错了会换回 401。
 func TestSyncModelsGeminiAuthHeader(t *testing.T) {
 	f := newFixture(t)
 	var apiKey, bearer string

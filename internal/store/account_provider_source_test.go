@@ -207,7 +207,7 @@ func TestAccountsDeriveAddressAndProtocol(t *testing.T) {
 		t.Fatalf("不存在的厂商不该有账号，得到 %+v", none)
 	}
 
-	// 改厂商地址立刻影响所有引用它的账号：单一来源应有的行为（见 DESIGN 5.8）。
+	// 改厂商地址立刻影响所有引用它的账号：单一来源应有的行为。
 	addr := "https://moved.example.com"
 	if err := st.SetProvider("co", store.ProviderPatch{BaseURL: &addr}); err != nil {
 		t.Fatalf("改厂商地址: %v", err)

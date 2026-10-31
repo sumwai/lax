@@ -108,7 +108,7 @@ func TestCandidatesStickySession(t *testing.T) {
 
 func TestCooldownGrowsAndCaps(t *testing.T) {
 	// 三档起始值、翻倍序列与上限都一样长，只有底数不同：连接层 2 秒、上游 5xx 10 秒、
-	// 限流 60 秒（见 DESIGN 5.3）。
+	// 限流 60 秒。
 	cases := []struct {
 		name string
 		kind account.FailureKind

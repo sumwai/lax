@@ -10,34 +10,35 @@ import (
 	"lax/internal/translate"
 )
 
-// systemone 决策协议（DESIGN 5.14）。它不是对话：输入一个 state 加一组带名字的 questions，
+// systemone 决策协议。它不是对话：输入一个 state 加一组带名字的 questions，
 // 输出每个问题的答案与概率，不产文本。因此这条协议只与自己互通、没有流式，也没有消息序列
-// 可以进中间表示（DESIGN 5.4 的中间表示只服务其余四条）。这个文件里的东西都是纯函数：
-// 输入请求体或两个协议名，输出判定，不读环境、不发请求、不读文件、不碰时间。
+// 可以进中间表示——中间表示的基础单位是对话消息，这里没有对话可描述。
+// 这个文件里的东西都是纯函数：输入请求体或两个协议名，输出判定，不读环境、不发请求、不读文件、
+// 不碰时间。
 
-// systemOnePath 是入站路径。模型名在请求体里，不在路径上（DESIGN 5.14 的「入站路径」）。
+// systemOnePath 是入站路径。模型名在请求体里，不在路径上，所以路径不随模型变化。
 const systemOnePath = "/v1/systemone"
 
 // systemOneMaxBody 是本条协议入站请求体的上限（8 MiB）。上游自己的 32 MiB、64 层嵌套与
-// 有限数这些规则不在这里复制一份（DESIGN 5.14 的「最少校验」），但读入必须有上限：
-// 不加一条上限时一个坏客户端能把网关的内存吃满。
+// 有限数这些规则不在这里复制一份，但读入必须有上限：不加一条上限时一个坏客户端
+// 能把网关的内存吃满。
 const systemOneMaxBody = 8 << 20
 
 // systemOneNoStreamMessage 是请求体带 `"stream": true` 时的拒绝文案。说清「这条协议没有流式」
-// 与下一步改成什么：静默当同步会让等 SSE 的客户端挂到超时（DESIGN 5.14 的「流式」）。
+// 与下一步改成什么：静默当同步会让等 SSE 的客户端挂到超时，它等的是一个永不会来的事件流。
 // 不在这里再写协议名：调用方统一给解析错误加 "systemone: " 前缀。
 const systemOneNoStreamMessage = "这条协议没有流式：一个请求只回一个 JSON 响应，" +
 	"把请求体里的 \"stream\" 去掉（或改成 false）再发一次"
 
-// inboundProtocol 按入站路径定协议（DESIGN 5.2）。与 translate.PathProtocol 只差 systemone
-// 这一条：它的报文与其余四条不相通，translate 的编解码器也不认它（DESIGN 5.14），
-// 所以这条路径在网关这一层认，不进 translate 的协议分发。
+// inboundProtocol 按入站路径定协议。与 translate.PathProtocol 只差 systemone 与向量化
+// 两条：它们的报文与其余四条不相通，translate 的编解码器也不认它们，
+// 所以这两条路径在网关这一层认，不进 translate 的协议分发。
 func inboundProtocol(path string) (string, bool) {
 	if path == systemOnePath {
 		return ProtocolSystemOne, true
 	}
 	if path == embeddingsPath {
-		// 向量化也不进 translate 的协议分发：它没有编解码器，只做同协议直通（DESIGN 5.15）。
+		// 向量化同样不进 translate 的协议分发：它没有编解码器，只做同协议直通。
 		return ProtocolEmbeddings, true
 	}
 	return translate.PathProtocol(path)
@@ -64,14 +65,15 @@ func inboundPath(protocol string) string {
 }
 
 // protocolInteropError 判断入站协议与这次算出的有效出站协议能不能互通，返回 400 的文案；
-// 空串表示可以转发。判定只有这一处，两个方向共用它（DESIGN 5.14 的「协议互通」）：
+// 空串表示可以转发。判定只有这一处，两个方向共用它，否则会出现「进来能转、出去不能」
+// 这种单边放行的错配：
 //
 //   - 入站是 systemone、有效出站协议是另外四条：这条协议只与自己互通；
 //   - 入站是那四条、有效出站协议是 systemone：同样不相通；
-//   - 向量化与对话也不相通：向量化模型不产出文本，对话模型也不产出向量（DESIGN 5.15）。
+//   - 向量化与对话也不相通：向量化模型不产出文本，对话模型也不产出向量，换过去只能换回 400。
 //
 // 不试图经中间表示转换：决策与向量化请求都没有对话消息序列，转换规则无从定义，硬转只会
-// 把一条请求发成一条错协议的请求（DESIGN 5.4 的中间表示服务的是其余四条）。
+// 把一条请求发成一条错协议的请求：转换规则写不出来时，转发只是把 400 推后到上游。
 func protocolInteropError(inbound, outbound, model string) string {
 	if inbound == outbound {
 		return ""
@@ -95,8 +97,7 @@ func protocolInteropError(inbound, outbound, model string) string {
 		model, outbound, inboundPath(outbound), providerPathHint(ProtocolSystemOne))
 }
 
-// decodeSystemOneRequest 做最少校验，返回选号要用的模型名。规则只有三条（DESIGN 5.14 的
-// 「最少校验」）：`model` 是非空字符串、`questions` 是非空对象、不要求流式。
+// decodeSystemOneRequest 做最少校验，返回选号要用的模型名。规则只有三条：`model` 是非空字符串、`questions` 是非空对象、不要求流式。
 // 其余字段（state、questions 的内容、assets）不解析、不改写：转发时原样带走。
 func decodeSystemOneRequest(raw []byte) (*translate.Request, error) {
 	var fields map[string]json.RawMessage
@@ -147,8 +148,8 @@ func isJSONNull(raw json.RawMessage) bool {
 }
 
 // systemOneUsage 读响应体里的 usage.input_tokens 与 usage.output_tokens。响应体本身不做任何
-// 改写（直通），这里只取这两个数进请求记录；这条协议没有缓存与思考字段（DESIGN 5.14），
-// 输入 token 因此按不含缓存处理。
+// 改写（直通），这里只取这两个数进请求记录；这条协议没有缓存与思考字段，
+// 输入 token 因此按不含缓存处理——减 cache_read 只会把花费算少。
 func systemOneUsage(body []byte) (in, out int64) {
 	var env struct {
 		Usage struct {
@@ -163,7 +164,7 @@ func systemOneUsage(body []byte) (in, out int64) {
 }
 
 // systemOneProbeBody 是一条最小决策请求：state 是 ping，一个问题（noul 型）问一句话在不在
-// （DESIGN 5.14 的「探活」）。探活对 systemone 模型不能发 max_tokens=1 的对话请求：
+// （一个 noul 型的问题，问一句话在不在）。探活对 systemone 模型不能发 max_tokens=1 的对话请求：
 // 决策端点不认 messages，只会换回 404，把「模型可用」误判成「模型不存在」。
 func systemOneProbeBody(model string) ([]byte, error) {
 	return json.Marshal(map[string]any{

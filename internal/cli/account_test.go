@@ -29,8 +29,8 @@ func mustAccountAdd(t *testing.T, out string) accountAddJSON {
 	return got
 }
 
-// TestAccountAddUsesProviderTable 覆盖 account add 的地址与协议来源：两个值都从厂商行读
-// （见 DESIGN 5.8），账号不再持有副本，因此也没有能覆盖它们的参数。
+// TestAccountAddUsesProviderTable 覆盖 account add 的地址与协议来源：两个值都从厂商行读，
+// 账号不持有副本，因此也没有能覆盖它们的参数。
 func TestAccountAddUsesProviderTable(t *testing.T) {
 	sandbox(t)
 	if code, _, stderr := run(t, "init"); code != 0 {
@@ -66,7 +66,7 @@ func TestAccountAddUsesProviderTable(t *testing.T) {
 		t.Fatalf("openai-responses 账号 = %+v", got)
 	}
 
-	// gemini 入站与出站都可用（DESIGN 5.9）：厂商把默认协议设成 gemini 时，账号也按它算。
+	// gemini 入站与出站都可用：厂商把默认协议设成 gemini 时，账号也按它算。
 	code, out, stderr = addAccount(t, "g1", "gemco", "https://gem.example.com", "gemini", "--key", "sk-4", "--json")
 	if code != 0 {
 		t.Fatalf("gemini 账号的退出码 = %d，stderr = %s", code, stderr)
@@ -75,7 +75,7 @@ func TestAccountAddUsesProviderTable(t *testing.T) {
 		t.Fatalf("gemini 账号 = %+v", got)
 	}
 
-	// 厂商的 base_url 为空是合法的（路由与 models_path 都是整条地址，见 DESIGN 5.8），
+	// 厂商的 base_url 为空是合法的（路由与 models_path 都是整条地址），
 	// 账号的派生地址因此也是空串，--json 里是空串而不是占位。
 	if code, _, stderr := run(t, "provider", "add", "splitco",
 		"--openai", "https://openai.example.com/v1/chat/completions"); code != 0 {
@@ -146,7 +146,7 @@ func TestAccountAddHelpFollowsProviderTable(t *testing.T) {
 
 // TestAccountAddProviderWithoutRoutes 覆盖厂商行在、但一条路由都没声明的情况：默认协议
 // 算不出来，但建账号本身不算错——转发时按厂商默认协议推导，推导为空由转发层报错
-// （见 DESIGN 5.8），所以这里不报错，地址照旧来自厂商行。
+// （转发层会报错），所以这里不报错，地址照旧来自厂商行。
 func TestAccountAddProviderWithoutRoutes(t *testing.T) {
 	sandbox(t)
 	if code, _, stderr := run(t, "init"); code != 0 {
@@ -273,7 +273,7 @@ func TestAccountAddWithoutProviders(t *testing.T) {
 }
 
 // TestAccountLsShowsProviderAddressAndProtocol 覆盖 account ls 的地址列与协议列：
-// 两列都从厂商行取（见 DESIGN 5.8），base_url 为空的厂商地址列写 -。
+// 两列都从厂商行取，base_url 为空的厂商地址列写 -。
 func TestAccountLsShowsProviderAddressAndProtocol(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
@@ -531,7 +531,7 @@ func TestAccountSetJSONMasksKey(t *testing.T) {
 			t.Fatalf("--json 的 %s = %v，期望 true", field, got[field])
 		}
 	}
-	// 价格不在账号上：这条命令的 --json 不再有四个价格字段（见 DESIGN 第 4 节的 account set）。
+	// 价格不在账号上：这条命令的 --json 不再有四个价格字段。
 	for _, gone := range []string{"price_in", "price_out", "price_cache_read", "price_cache_write"} {
 		if _, ok := got[gone]; ok {
 			t.Fatalf("account set --json 不该再有 %s: %s", gone, out)

@@ -13,7 +13,7 @@ import (
 	"lax/internal/translate"
 )
 
-// 这个文件钉住「错误体按入站协议给形状」（DESIGN 5.2）：四条入站路径的客户端读的字段不同，
+// 这个文件钉住「错误体按入站协议给形状」：四条入站路径的客户端读的字段不同，
 // 形状由入站协议决定，不由上游协议决定。anthropic 是统一形状加 error.type；两条 openai 入站
 // 只有顶层 error，param 与 code 显式给 null；gemini 是 google 的 code（HTTP 状态码整数）与
 // status（状态名）。没有入站协议可依的路径（/v1/models、/healthz、未知路径、405）仍是统一形状。
@@ -211,7 +211,7 @@ func TestInboundErrorShapeWhenModelMissing(t *testing.T) {
 }
 
 // TestInboundErrorShapeScrubsSecret 钉住四种形状都过 scrubSecret：上游把凭据回显到错误正文里，
-// 客户端拿到的四种形状里都只能是 ***（DESIGN 5.6）。
+// 客户端拿到的四种形状里都只能是 ***。
 func TestInboundErrorShapeScrubsSecret(t *testing.T) {
 	const key = "sk-echo-in-error-body"
 

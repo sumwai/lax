@@ -5,7 +5,7 @@
 --
 -- 写法与 0006 一致：厂商行只放 base_url、备注、默认协议与厂商级列表覆盖，路径细节全在
 -- provider_routes 上。gemini 路由的 models_path 要显式给：写入侧的默认值只推导 openai-chat
--- 一条（见 DESIGN 5.8），gemini 自己的列表路径没有推导规则。
+-- 一条，gemini 自己的列表路径没有推导规则。
 --
 -- 用 INSERT OR IGNORE 而不是 INSERT：升级时用户可能已经用 `provider add google-gemini`
 -- 自己建过这家厂商（名字撞上、地址指向代理），那两行原样保留，迁移不覆盖用户的写法，

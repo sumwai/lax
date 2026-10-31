@@ -30,7 +30,7 @@ type Store struct {
 // Account 是一行账号。
 //
 // Provider 是唯一的地址来源：转发用的地址、默认协议与路由都按它在 providers / provider_routes
-// 里查（见 DESIGN 5.8）。BaseURL 与 Protocol 是只读派生值，账号表里没有这两列（迁移 0014 删掉了）：
+// 里查。BaseURL 与 Protocol 是只读派生值，账号表里没有这两列（迁移 0014 删掉了）：
 // 读账号时由 queryAccounts 填上，写入（CreateAccount）不看它们，改了也不会落库。
 type Account struct {
 	ID       int64
@@ -44,12 +44,12 @@ type Account struct {
 	Protocol  string
 	KeyCipher []byte
 	// Models 是运行期派生的字段：读账号时它等于该账号 access='allowed' 的模型行集合
-	// （迁移 0015 删掉了 accounts.models 列，见 DESIGN 5.13），按模型名升序。
+	// （迁移 0015 删掉了 accounts.models 列），按模型名升序。
 	// 写账号时（CreateAccount）它表示「这个账号要声明哪些模型」：这些名字会被落成
 	// provider_models 里 source='manual' 的行与该账号 access='allowed' 的可达性行。
 	Models []string
 	// 价格不在这里：单价属于「供应商 × 模型」，厂商级标价在 provider_models、套餐差异在
-	// account_models 的覆盖列（见 DESIGN 5.13）。账号行上的四个价格列由迁移 0016 删除。
+	// account_models 的覆盖列。账号行上的四个价格列由迁移 0016 删除。
 	Priority      int
 	Enabled       bool
 	CooldownUntil int64
@@ -72,14 +72,15 @@ type RequestRecord struct {
 	OK             bool
 	InTokens       int64
 	// InTokensUncached 是归一化之后的输入 token：没命中缓存的那部分，花费按它折输入价。
-	// 入账时由 UncachedInTokens 按出站协议算出，见那里与 DESIGN 5.5。
+	// 入账时由 UncachedInTokens 按出站协议算出：这一列是花费里输入那一项的乘数，
+	// 留默认值 0 会让输入的花费整块消失。
 	InTokensUncached int64
 	OutTokens        int64
 	CacheRead        int64
 	CacheWrite       int64
 	// ReasoningTokens 是上游上报的思考 token 原值（anthropic 没有独立字段，恒为 0），
 	// ReasoningTokensExtra 是其中「输出之外的一项」那部分：只给 extra 按输出价再计一次，
-	// 判定由 ReasoningExtra 给（见 DESIGN 5.5）。两列都进 requests 的独立列。
+	// 判定由 ReasoningExtra 给。两列都进 requests 的独立列，方便事后按列重算花费。
 	ReasoningTokens      int64
 	ReasoningTokensExtra int64
 	LatencyMS            int64
@@ -211,10 +212,11 @@ const accountSelect = `SELECT a.id, a.name, a.provider, a.key_cipher,
 	FROM accounts a LEFT JOIN providers p ON p.name = a.provider`
 
 // CreateAccount 插入账号，名称重复时返回错误。
-// 只写账号自己的列：地址与默认协议在厂商行上（见迁移 0014 与 DESIGN 5.8），
+// 只写账号自己的列：地址与默认协议在厂商行上（迁移 0014 把这两列从账号表里删了），
 // 传进来的 BaseURL 与 Protocol 不落库，读回来的是派生值。
 // a.Models 是「这个账号要声明哪些模型」（`account add --models`）：名字去空白去重之后落成
-// provider_models 的 manual 行与该账号 access='allowed' 的可达性行，与账号本身同一个事务（DESIGN 5.13）。
+// provider_models 的 manual 行与该账号 access='allowed' 的可达性行，与账号本身同一个事务：
+// 拆开写会出现「账号建好了但没有模型」或「模型可达但账号不存在」的半截状态。
 // 没有厂商名的账号不写目录：目录以厂商为键，空厂商名只会造出一批谁都用不上的行。
 func (s *Store) CreateAccount(a *Account) error {
 	if a.CreatedAt == 0 {
@@ -374,7 +376,7 @@ func (s *Store) SetEnabled(id int64, enabled bool, lastErr string) error {
 }
 
 // RotateKey 换掉一个账号的凭据，并在同一个事务里清掉旧凭据留下的结论：
-// 清冷却、清最近错误与连续失败次数，并把账号重新启用（`account set --key`，见 DESIGN 4、5.6）。
+// 清冷却、清最近错误与连续失败次数，并把账号重新启用（`account set --key`）。
 // 换 key 意味着之前那些失败都是上一个凭据的结果，留在库里会让新 key 一上来就排在候选之外：
 // 干净的凭据应该从干净的账号状态开始。冷却、清零与启停的 SQL 复用 clearFailureTx 与 setEnabledTx，
 // 不另拼一份；`account_models` 的可达性、协议发现与覆盖值一个字不动，只换凭据与失败状态。
@@ -501,7 +503,7 @@ func (s *Store) RecentRequests(limit int) ([]RequestRecord, error) {
 //   - anthropic 的 input_tokens 已经排除缓存读写，直接用；
 //   - chat 的 prompt_tokens 与 gemini 的 promptTokenCount 都包含命中缓存的部分（
 //     prompt_tokens_details.cached_tokens 与 cachedContentTokenCount），要减掉 cache_read；
-//   - systemone（决策协议）只报 input_tokens 与 output_tokens，没有缓存字段（DESIGN 5.14）。
+//   - systemone（决策协议）只报 input_tokens 与 output_tokens，没有缓存字段。
 //
 // 减到 0 为止：上游若报出自相矛盾的数（缓存比输入还多），负的输入 token 会让花费变成负数，
 // 库里的列与实际账目都比一个夹到 0 的估算更难解释。in_tokens 本身不改，展示与 log tail 不变。
@@ -514,7 +516,7 @@ func UncachedInTokens(outbound string, inTokens, cacheRead int64) int64 {
 		}
 		return 0
 	case translate.ProtocolSystemOne:
-		// systemone 的 input_tokens 不含缓存：决策端点没有缓存读写这一说（DESIGN 5.14），
+		// systemone 的 input_tokens 不含缓存：决策端点没有缓存读写这一说，
 		// 减 cache_read 只会把花费算少。
 		return inTokens
 	default:
@@ -523,7 +525,7 @@ func UncachedInTokens(outbound string, inTokens, cacheRead int64) int64 {
 }
 
 // ReasoningExtra 判定上游上报的思考 token 里有多少是「输出之外的一项」，入账时只给这一部分
-// 按输出价再计一次（DESIGN 5.5）。各家对「思考算不算输出」的做法不同，只能按上报的数字判，
+// 按输出价再计一次。各家对「思考算不算输出」的做法不同，只能按上报的数字判，
 // 不按协议猜：
 //
 //   - total > in + out：思考是输出之外的一项。有的中转只把思考报在 reasoning_tokens 里、
@@ -546,8 +548,9 @@ func ReasoningExtra(total, in, out, reasoning int64) int64 {
 
 // UsageRow 是一行用量汇总。
 // Cost 按 UncachedInTokens 归一化之后的输入、缓存读、缓存写、输出与独立的思考 token 折价
-// （见 DESIGN 5.5）：单价按「这一行的账号 + 这一行的 model_used」现算，取值链见
+// （单价按「这一行的账号 + 这一行的 model_used」现算，取值链见
 // usagePriceIn 那一组常量（账号覆盖 → 目录标价）；缓存单价未填时回退到输入价。
+// 每条请求按自己当时的单价折，不按一个全局价目表：同一模型在不同账号上可以有不同的套餐价。
 type UsageRow struct {
 	Key       string
 	Requests  int64
@@ -566,7 +569,7 @@ type UsageRow struct {
 // Usage 按 dimension 汇总 since 之后的请求。dimension 取 account、model 或 day。
 // 每行花费按它自己的账号与 model_used 现算单价，见 usagePriceIn 那一组常量。
 //
-// 花费分两层算（DESIGN 5.5）：内层按行把每一项折成金额，单价缺的那一项整项是 NULL（不计，
+// 花费分两层算：内层按行把每一项折成金额，单价缺的那一项整项是 NULL（不计，
 // 而不是按 0 元算）；外层只把非 NULL 的项加起来，并数一遍有没有任何一项拿到价——
 // 一项价都没拿到时整组是 NULL（未定价），拿到过就是那些项的和（部分缺项照算）。
 func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {

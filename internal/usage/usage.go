@@ -41,7 +41,7 @@ func ParseSince(s string, now time.Time) (int64, error) {
 // Yuan 把金额格式化成自适应精度的字符串：0 写两位小数，小于 0.01 的写四位小数，其余写两位。
 //
 // 固定两位不够用：决策请求的一次调用常见价是万分之几，固定两位会把 0.0021 显示成 0.00，
-// 看上去与免费、与缺价都没区别（见 DESIGN 5.5）。
+// 看上去与免费、与缺价都没区别。
 func Yuan(v float64) string {
 	switch {
 	case v == 0:

@@ -16,14 +16,15 @@ const (
 	CooldownServer = 10 * time.Second
 	// CooldownTransport 是没有拿到任何 HTTP 响应时首次的冷却时长：连不上、TLS 握手失败、
 	// 读超时、unexpected EOF 都算。这类失败多半来自本机网络或中转抖动，按上游 5xx 的时长
-	// 处理会在断网恢复后仍把单账号网关锁住（见 DESIGN 5.3）。
+	// 处理会在断网恢复后仍把单账号网关锁住。
 	CooldownTransport = 2 * time.Second
 	// MaxCooldown 是冷却上限，三档相同。
 	MaxCooldown = 30 * time.Minute
 )
 
 // FailureKind 是一次失败落在哪一档冷却。档位由失败的来源定，不由状态码反推：没有拿到 HTTP
-// 响应的失败在 requests 里同样记 502，但与上游明确回了 5xx 是两回事（见 DESIGN 5.3）。
+// 响应的失败在 requests 里同样记 502，但与上游明确回了 5xx 是两回事：前者说明这台机器到上游的
+// 路不通，后者说明上游自己有问题，两者的冷却时长因此差了五倍。
 // 零值表示没有给出档位，Cooldown 按 KindServer 算，与只认状态码时的兜底一致。
 type FailureKind int
 
@@ -46,7 +47,8 @@ func KindFromStatus(status int) FailureKind {
 }
 
 // Cooldown 按失败档位与连续失败次数算冷却时长，失败次数从 0 开始。
-// 三档同样翻倍、同样上限（见 DESIGN 5.3）。
+// 三档同样翻倍、同样上限：档位只决定起始时长，连续失败时的退避曲线一致，
+// 因此不会出现「连接层失败永远不翻倍」这种越等越久的分叉。
 func Cooldown(kind FailureKind, streak int) time.Duration {
 	base := CooldownServer
 	switch kind {

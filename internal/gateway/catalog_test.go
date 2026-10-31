@@ -384,7 +384,7 @@ func TestModelsEndpointsLeaveExistingRoutesAlone(t *testing.T) {
 		}
 	}
 
-	// 认不出的模型名仍走 5.2 的 404，文案与清单接口的那句不同（一个讲清单、一个讲这次请求）。
+	// 认不出的模型名仍走 404，文案与清单接口的那句不同（一个讲清单、一个讲这次请求）。
 	resp, err := http.Post(srv.URL+"/v1/messages", "application/json",
 		strings.NewReader(`{"model":"nope","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`))
 	if err != nil {

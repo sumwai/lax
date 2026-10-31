@@ -170,8 +170,8 @@ func TestGeminiUnauthorizedDisablesAccountWithoutFailover(t *testing.T) {
 	if status != http.StatusUnauthorized {
 		t.Fatalf("状态 = %d，期望 401，响应 %s", status, body)
 	}
-	// gemini 入站拿 google 的形状：code 是 HTTP 状态码整数，status 是 google 的状态名
-	// （DESIGN 5.2），不是 anthropic 那套 error.type。
+	// gemini 入站拿 google 的形状：code 是 HTTP 状态码整数，status 是 google 的状态名，
+	// 不是 anthropic 那套 error.type。
 	var out struct {
 		Type  string `json:"type"`
 		Error struct {

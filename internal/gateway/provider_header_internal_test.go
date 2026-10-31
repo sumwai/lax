@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// TestExpandProviderHeaderValue 钉住四种写法的展开边界（DESIGN 5.10）：字面量原样、
+// TestExpandProviderHeaderValue 钉住四种写法的展开边界：字面量原样、
 // {env:NAME} 取进程环境、{session} 取会话键、{model} 取模型名；展开后为空一律不发，
 // 原因只提到变量名或占位符，不带值。
 func TestExpandProviderHeaderValue(t *testing.T) {

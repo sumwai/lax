@@ -21,17 +21,20 @@ import (
 	"lax/internal/translate"
 )
 
-// 协议常量。入站按路径区分，出站按该模型的有效协议（account_models.protocol 优先，
-// 否则账号所属厂商的有效默认协议，见 store.EffectiveProtocol）。gemini 入站与出站都支持（DESIGN 5.9）。
+// 协议常量。入站按路径区分，出站按该模型的有效协议：先看目录里这个模型声明过的协议，
+// 没有再退回账号所属厂商的有效默认协议（优先级只写在 store.EffectiveProtocol 一处）。
+// gemini 有自己的原生入站路径，因此入站与出站都能用它。
 const (
 	ProtocolAnthropic = translate.ProtocolAnthropic
 	ProtocolChat      = translate.ProtocolChat
 	ProtocolResponses = translate.ProtocolResponses
 	ProtocolGemini    = translate.ProtocolGemini
 	// ProtocolSystemOne 是第五条线协议：一个 state 加一组 questions，不出文本、没有流式。
-	// 它只与自己互通，也不进中间表示（DESIGN 5.14）。
+	// 它只与自己互通：入站是 systemone 才能出站 systemone，其它协议进不来也出不去，
+	// 因为它没有对话消息序列，转不成中间表示。
 	ProtocolSystemOne = translate.ProtocolSystemOne
-	// ProtocolEmbeddings 是第六条线协议：向量化，只做同协议直通，没有流式（DESIGN 5.15）。
+	// ProtocolEmbeddings 是第六条线协议：只做同协议直通，没有流式，也不进中间表示。
+	// 向量化报文只有输入与向量结果，没有对话消息序列，与任何对话协议都换不过去。
 	ProtocolEmbeddings = translate.ProtocolEmbeddings
 
 	// InboundAnthropic 保留给旧调用方，等价于 ProtocolAnthropic。
@@ -48,9 +51,11 @@ type Options struct {
 	// DumpBodies 为真时把发往上游的请求体也打出来，供排障用。
 	DumpBodies bool
 	// RouteProtocols 给出探活一个模型时该试哪些协议：入参是账号的厂商与模型名，返回按优先
-	// 次序排好的候选（nil 表示没有意见）。不注入时用该厂商在 provider_routes 里声明过的协议
-	// （见 DESIGN 5.8），厂商没声明就三种全试。厂商默认协议与库里已发现的协议由网关排在候选前面
-	// （见 routeProtocolOrder），取值只认三种线协议，出现别的值直接报错，不会静默落进 chat 分支。
+	// 次序排好的候选（nil 表示没有意见）。不注入时用该厂商在 provider_routes 里声明过的协议，
+	// 厂商一个路由都没声明时退回 anthropic、openai-chat、openai-responses 三种全试。
+	// 厂商默认协议与库里已发现的协议由 routeProtocolOrder 排在候选前面。
+	// 取值必须是线协议，出现别的值直接报错：编码器遇见未知协议会报错，静默落进 chat 分支更糟，
+	// 那会把一条配置错误变成对错误地址的上游调用。
 	RouteProtocols func(provider, model string) []string
 }
 
@@ -88,8 +93,9 @@ func New(o Options) (*Server, error) {
 	return s, nil
 }
 
-// Handler 返回 http 处理器。三条固定入站路径与 gemini 的模型名前缀按路径定协议（见 5.2），
-// 另有两个只读的模型清单接口给客户端发现模型名用（见 5.2.1）；`/v1/models/{id}` 用前缀注册，
+// Handler 返回 http 处理器。五条固定入站路径（anthropic、openai-chat、openai-responses、
+// systemone、embeddings）与 gemini 的模型名前缀都按路径定协议；另有两个只读的模型清单接口
+// （GET /v1/models 与 GET /v1/models/{id}）给客户端发现模型名用。`/v1/models/{id}` 用前缀注册，
 // 其后全部算模型名，含 `/` 的模型名也照取。其余路径由 mux 返回 404。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -97,8 +103,8 @@ func (s *Server) Handler() http.Handler {
 	for _, path := range []string{"/v1/messages", "/v1/chat/completions", "/v1/responses", systemOnePath, embeddingsPath} {
 		mux.HandleFunc(path, s.handleInbound)
 	}
-	// gemini 的模型名在路径里（/v1beta/models/{model}:generateContent），按前缀注册，
-	// 模型名与流式标志由 translate.GeminiPathTarget 解析（DESIGN 5.9）。
+	// gemini 的模型名在路径里（/v1beta/models/{model}:generateContent），模型名的长度与内容都
+	// 不固定，没法逐条注册，所以按前缀注册，模型名与流式标志交给 translate.GeminiPathTarget 解析。
 	mux.HandleFunc(translate.GeminiInboundPathPrefix, s.handleInbound)
 	mux.HandleFunc(modelsPath, s.handleModelList)
 	mux.HandleFunc(modelsPathPrefix, s.handleModelByID)
@@ -164,7 +170,8 @@ type attempt struct {
 	cacheRead  int64
 	cacheWrite int64
 	// reasoning 是上游上报的思考 token，total 是上游上报的总 token（0 表示没报）。
-	// 两个都只用于入账判定（store.ReasoningExtra），转发路径不读它们（见 DESIGN 5.5）。
+	// 两个都只用于入账判定 store.ReasoningExtra：total 大于输入加输出时才说明思考是输出之外的
+	// 一项，那一部分才再按输出价计一次。转发路径不读它们。
 	reasoning int64
 	total     int64
 	wrote     bool
@@ -172,11 +179,13 @@ type attempt struct {
 	err       error
 	// upstreamBody 是上游错误响应的原始正文，只在入站是 systemone 且正文里不含凭据时保留：
 	// 这条协议的客户端直接读上游自己的错误形状（例如一条 422 的 detail 数组），
-	// 包成我们的 detail 对象反而会让它读不懂（DESIGN 5.14 的「错误体」）。
+	// 包成我们的 detail 对象反而会让它读不懂：它读的是上游自己那一层 detail。
 	upstreamBody []byte
 	// transport 表示这一次没有拿到任何 HTTP 响应：连接没建立、请求没发出去、响应体没读完。
 	// status 对这类失败仍记 502（表示「网关没能拿到上游响应」），冷却却按连接层那一档算
-	// （见 DESIGN 5.3）。已经向客户端写出字节之后的断流不在此列，见 handleInbound 的冷却分支。
+	// （2 秒起，上限同样是 30 分钟）：这类失败多半来自本机网络或中转抖动，按上游 5xx 的十秒
+	// 起算的话，断网恢复后账号还会被多锁一会儿。已经向客户端写出字节之后的断流不在此列，
+	// 见 handleInbound 的冷却分支。
 	transport bool
 }
 
@@ -185,7 +194,9 @@ type attempt struct {
 const upstreamErrorBodyMax = 64 << 10
 
 // cooldownKind 把一次失败的来源折成冷却档位：没拿到 HTTP 响应的是连接层，拿到了状态的按
-// 状态码分限流与服务端失败。转发与探活两个入口都只经这一个函数定档，不各自算（见 DESIGN 5.3）。
+// 状态码分限流与服务端失败。转发与探活两个入口都只经这一个函数定档，不各自算：
+// 两处定档不一致时，同一个失败会在探活与转发上折出两个冷却时长，账号可能在一边已解冻、
+// 另一边还锁着。
 func cooldownKind(status int, noResponse bool) account.FailureKind {
 	if noResponse {
 		return account.KindTransport
@@ -200,10 +211,10 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// gemini 的报文里没有模型名（它在路径上），流式也由路径后缀表示而非请求体里的 stream
-	// 字段：两个值都按路径注入（DESIGN 5.9）。用 EscapedPath 取值，模型名里的 %2F 因此仍是
-	// 一个路径段，PathUnescape 能还原成 org/gemini。
-	// 路径后缀是 :embedContent 时这条请求是向量化而不是对话（DESIGN 5.15）：动作决定往下走哪条
-	// 分支，模型名与是否对话仍按路径注入。
+	// 字段，两个值都要按路径注入。用 EscapedPath 取值，模型名里的 %2F 因此仍是一个路径段，
+	// PathUnescape 能还原成 org/gemini；用 Path 取值会先把 %2F 解开，模型名被拆成两段。
+	// 路径后缀是 :embedContent 时这条请求是向量化而不是对话：动作决定往下走哪条分支，
+	// 模型名与是否对话仍按路径注入。
 	var pathModel string
 	var pathStream bool
 	var embedding bool
@@ -221,7 +232,8 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodPost {
 		// 405 带上 `Allow: POST`，与两个只读清单接口的 `Allow: GET` 对称：
-		// 客户端据此能判断是方法用错了，而不是路径不存在（见 DESIGN 5.2.1）。
+		// 客户端据此能判断是方法用错了，而不是路径不存在。不带这个头时 405 与 404 在客户端
+		// 看来只差一个数字，排查时容易先怀疑路径拼错。
 		w.Header().Set("Allow", http.MethodPost)
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error",
 			"这条入站路径只接受 POST；对话请求用 POST 发到 "+r.URL.Path+"，查模型清单用 GET /v1/models")
@@ -229,7 +241,8 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 从这里开始入站协议已经定下来，错误体按它给形状（writeInboundError）。
-	// 请求体上限按协议取：systemone 是 8 MiB（DESIGN 5.14），其余四条仍是 32 MiB。
+	// 请求体上限按协议取：systemone 是 8 MiB（决策请求只带一个 state 与若干问题，比对话请求
+	// 小得多），其余四条是 32 MiB。
 	// 多读一个字节是为了在 systemone 上认出「超了」而不是静默截断成一条解析失败。
 	limit := int64(32 << 20)
 	if inbound == ProtocolSystemOne {
@@ -250,14 +263,24 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	var req *translate.Request
 	switch {
 	case inbound == ProtocolSystemOne:
-		// 这条协议的编解码器不存在（它不进中间表示），最少校验也只在本机做那三条（DESIGN 5.14）。
+		// systemone 没有编解码器，也不进中间表示：它没有对话消息序列，转不成 IR。
+		// 因此本机只做选号与拒绝不支持的写法所必需的三件事：
+		//   - model 必须是非空字符串（按它选账号）；
+		//   - questions 必须是非空对象（一个问题的决策请求没有意义）；
+		//   - stream 不能是布尔 true（这条协议没有流式，静默当同步会让客户端等到超时）。
+		// 其余字段（state、questions 的内容、assets）不解析、不改写，原样交给上游校验。
 		req, err = decodeSystemOneRequest(raw)
 		if err != nil {
 			writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", "systemone: "+err.Error())
 			return
 		}
 	case inbound == ProtocolEmbeddings:
-		// 向量化也没有编码器（DESIGN 5.15），最少校验与 systemone 同一个形状。
+		// 向量化与 systemone 一样没有编解码器，也不进中间表示：向量化报文没有对话消息序列可转换。
+		// 本机只做选号与拒绝空请求所必需的事：
+		//   - model 必须是非空字符串（按它选账号）；
+		//   - input 必须存在（没有输入就没有可向量化的内容）；
+		//   - stream 不能是布尔 true（这条协议没有流式，静默当同步会让客户端等到超时）。
+		// 其余字段不解析、不改写，原样交给上游校验。
 		req, err = decodeEmbeddingsRequest(raw)
 		if err != nil {
 			writeInboundError(w, inbound, http.StatusBadRequest, "invalid_request_error", "向量化: "+err.Error())
@@ -286,10 +309,10 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 别名解析只做一次（DESIGN 5.12）：客户端给的名字原样记进 model_requested，此后选号、
-	// 路由的 {model} 占位符、请求体里的 model 与 gemini 路径全部用解析后的真实名字。
-	// 响应里的模型名不改，别名只影响请求方向。走链、成环与超长的判定只有 store.ResolveModelAlias
-	// 一份，这里不自己按跳查表。
+	// 别名解析只做一次：客户端给的名字原样记进 model_requested，此后选号、路由的 {model}
+	// 占位符、请求体里的 model 与 gemini 路径全部用解析后的真实名字。响应里的模型名不改，
+	// 别名只影响请求方向。走链、成环与超长的判定只有 store.ResolveModelAlias 一份，
+	// 这里不自己按跳查表。
 	requested := req.Model
 	if resolved, isAlias, err := s.store.ResolveModelAlias(requested); err != nil {
 		// 链成环或太长：这不是「清单里没有这个模型」，而是这个名字眼下解不出真实名字，
@@ -325,9 +348,10 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	}
 
 	lastErr := "没有可用账号"
-	// interopRejected 记第一次「入站协议与有效出站协议不相通」的文案，onlyInterop 表示每一个候选
-	// 都停在这一条上（没有谁因为别的理由被跳过，也没发出过上游调用）：那是一次请求本身的 400，
-	// 不是「所有账号都失败」的 503（DESIGN 5.14）。
+	// interopRejected 记第一次「入站协议与有效出站协议不相通」的文案，onlyInterop 表示每个候选都停在这一条上：
+	// 没有谁因为账号冷却、被停用或连接失败等别的理由被跳过，也没有一次上游调用真的发出去过。
+	// 这两种情况给客户端的答案不同：请求本身与这条协议不相通是 400，换账号重试也没用；
+	// 所有账号都失败才是 503，换个时间才有意义。混成 503 会让客户端反复重试一个永远失败的写法。
 	interopRejected := ""
 	onlyInterop := true
 	for _, cand := range candidates {
@@ -335,10 +359,12 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// 有效出站协议只有一处算：账号覆盖 → 目录里这个模型支持的协议 → 厂商的有效默认协议
-		// （store.EffectiveProtocol，见 DESIGN 5.13）。账号行不再存协议，cand.Protocol 只是厂商默认
-		// 协议的展示值；有效价格与上下文长度同理只从 store.EffectiveModels 取，网关不重算优先级。
-		// 向量化是例外：它的协议由厂商声明的那条路由决定，不按模型的有效协议猜（DESIGN 5.15）。
+		// 有效出站协议只有一处算：store.EffectiveProtocol 按「账号覆盖 → 目录里这个模型支持的协议 →
+		// 厂商的有效默认协议」定优先级。账号行不存协议，cand.Protocol 只是厂商默认协议的展示值。
+		// 在这里另算一遍优先级，两处迟早对不上，转发会打到一条账号根本没用过的路由上。
+		// 有效价格与上下文长度同理只从 store.EffectiveModels 取，网关不重算优先级。
+		// 向量化是例外：它只能同协议直通，协议由厂商声明的那一条向量化路由决定，
+		// 不按模型的有效协议猜——对话协议的有效协议与向量化的线协议不是同一回事。
 		var outbound string
 		if embedding {
 			var msg string
@@ -385,8 +411,9 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		res := s.tryUpstream(r.Context(), w, cand, outbound, inbound, r.Header, raw, req, session, embedding)
 		latency := s.now().Sub(attemptStart)
 
-		// 两列正好分工（DESIGN 5.12）：model_requested 记客户端给的名字（可能是别名），
-		// model_used 记真正发给上游的真实名字。
+		// 两列正好分工：model_requested 记客户端给的名字（可能是别名），
+		// model_used 记真正发给上游的真实名字。只用一列的话，聚合用量时要么看不出客户端用了
+		// 哪个别名，要么看不出实际打的是哪个模型。
 		rec := &store.RequestRecord{
 			TS:             attemptStart.Unix(),
 			Inbound:        inbound,
@@ -398,14 +425,16 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			OK:             res.err == nil && res.status >= 200 && res.status < 300,
 			InTokens:       res.inTok,
 			// 入账时按出站协议归一化输入 token：anthropic 的 input_tokens 已排除缓存读写，
-			// chat 与 gemini 的上游把命中缓存的部分也算在输入里，花费只能按归一化后的这一列折
-			// （见 store.UncachedInTokens 与 DESIGN 5.5）。in_tokens 仍是上游原值，展示不变。
+			// chat、responses 与 gemini 的上游把命中缓存的部分也算在输入里，花费只能按归一化后的
+			// 这一列折，否则同一笔输入会被输入价与缓存价各算一次。in_tokens 仍是上游原值，
+			// 展示不变。
 			InTokensUncached: store.UncachedInTokens(outbound, res.inTok, res.cacheRead),
 			OutTokens:        res.outTok,
 			CacheRead:        res.cacheRead,
 			CacheWrite:       res.cacheWrite,
 			// 思考 token 原值整列入账，是否再按输出价计一次交给 ReasoningExtra：
-			// 判定只写在那一处，不在这里按协议猜（见 DESIGN 5.5）。
+			// 判定只写在那一处，不在这里按协议猜：各家对「思考算不算输出」的做法不同，
+			// 只能按上游上报的数字判。
 			ReasoningTokens:      res.reasoning,
 			ReasoningTokensExtra: store.ReasoningExtra(res.total, res.inTok, res.outTok, res.reasoning),
 			LatencyMS:            latency.Milliseconds(),
@@ -462,8 +491,8 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		default:
 			if inbound == ProtocolSystemOne && len(res.upstreamBody) > 0 {
 				// 上游自己的错误正文原样透传：状态码与正文都照旧，不重新包装，也不把 422 的
-				// detail 数组转成对象（DESIGN 5.14 的「错误体」）。请求记录与日志里用的仍是
-				// 解出来并脱敏过的那一句话，不是这份原文。
+				// detail 数组转成对象——这条协议的客户端读的就是上游那一层。请求记录与日志里用的
+				// 仍是解出来并脱敏过的那一句话，不是这份原文。
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(res.status)
 				_, _ = w.Write(res.upstreamBody)
@@ -484,7 +513,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 // modelNotFoundKind 给出「没有账号提供该模型」在入站协议里的错误类型：anthropic 用它自己的
 // not_found_error，两条 openai 路径用 invalid_request_error（都没有专门的「模型未配置」类型）。
 func modelNotFoundKind(inbound string) string {
-	// systemone 的错误类型取值与 anthropic 同名（DESIGN 5.2 的表格），「清单里没有这个模型」
+	// systemone 的错误类型取值与 anthropic 同名，「清单里没有这个模型」
 	// 在那一套里就是 not_found_error。
 	if inbound == ProtocolAnthropic || inbound == ProtocolSystemOne {
 		return "not_found_error"
@@ -494,8 +523,7 @@ func modelNotFoundKind(inbound string) string {
 
 // modelNotFoundMessage 说明找不到模型，并给出下一步的两条命令：先看现有清单，再探活。
 // requested 是客户端给的名字，used 是解析后的真实名字（没有别名时两者相同）。别名命中时
-// 必须把两个名字都写出来：只说「没有账号提供 X」会让人去清单里找一个永远不存在的名字
-// （DESIGN 5.12）。
+// 必须把两个名字都写出来：只说「没有账号提供 X」会让人去清单里找一个永远不存在的名字。
 func modelNotFoundMessage(requested, used string) string {
 	if requested != used {
 		return fmt.Sprintf("别名 %s 指向 %s，但没有账号提供 %s；用 lax model ls 看现有清单",
@@ -512,7 +540,7 @@ func aliasBrokenMessage(name string, err error) string {
 		"改掉或删掉其中一条，客户端也可以直接写真实模型名", name, err)
 }
 
-// requestSession 取本次入站请求的会话键（见 DESIGN 5.3）：`x-lax-session` 头优先，
+// requestSession 取本次入站请求的会话键：`x-lax-session` 头优先，
 // 其次请求体里的 metadata.user_id。选号粘性与附加头的 {session} 都走这一个函数，不写第二份——
 // 两处取到不同的值会让「同一个对话」在选号与上游看来不是同一个会话。
 func requestSession(r *http.Request, raw []byte) string {
@@ -593,15 +621,16 @@ func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store
 // buildRequest 按有效出站协议构造上游请求：路径、凭据头、附加头与请求体编码都跟它走。
 // 入站协议与它相同时直通（只改 model），不同时经中间表示转换。
 // inboundHeaders 是入站请求头，只有转发路径才给（模型同步与探活没有客户端请求，传 nil），
-// 白名单里的头按 DESIGN 5.11 透传。
+// 白名单里的头原样透传：客户端自己带的 trace id、地域限制等参数由它传到上游，
+// 网关不维护第二份意图表。
 // session 是本次请求的会话键（必要时是空串），供附加头的 {session} 用；模型名取 req.Model。
 func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, inbound string,
 	inboundHeaders http.Header, raw []byte,
 	req *translate.Request, key, session string, embedding bool) (*http.Request, error) {
 
-	// 路由的 path 里可以有 {model} 占位符（gemini 的模型名在路径里，见 DESIGN 5.9）：
-	// 先拼好地址再替换，替换后才是真正要访问的 URL。gemini 的流式另走
-	// :streamGenerateContent 与 alt=sse（见 geminiStreamEndpoint）。
+	// 路由的 path 里可以有 {model} 占位符（gemini 的模型名在路径里）：先拼好地址再替换，
+	// 替换后才是真正要访问的 URL。gemini 的流式另走 :streamGenerateContent 与 alt=sse
+	// （见 geminiStreamEndpoint）。
 	// 拼不出地址时直接报错：拿一个空 base_url 猜出来的路径只会换回「unsupported protocol scheme」。
 	upstream, err := s.endpoint(a, outbound)
 	if err != nil {
@@ -613,7 +642,7 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, in
 	}
 	if embedding && outbound == ProtocolGemini {
 		// gemini 的向量化是另一个接口动作（:embedContent），路由里存的是对话那个后缀，
-		// 这里只换后缀、不动查询串与模型名（DESIGN 5.15）。
+		// 这里只换后缀、不动查询串与模型名：换掉整条路径会连路由里配好的版本前缀一起丢掉。
 		endpoint = geminiEmbedEndpoint(endpoint)
 	}
 
@@ -623,7 +652,7 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, in
 		body, err = translate.EncodeRequest(outbound, req, req.Model)
 	case outbound == ProtocolGemini:
 		// gemini 的报文里没有 model 字段（模型名在路径上），所以直通时请求体一个字节都不改：
-		// 往里面塞一个 model 只会让上游以「未知字段」拒掉整条请求（DESIGN 5.9）。
+		// 往里面塞一个 model 只会让上游以「未知字段」拒掉整条请求，而模型名已经由路径带过去了。
 		body = raw
 	default:
 		// 同协议直通：只替换 model，其余字节原样保留。
@@ -642,13 +671,15 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound, in
 		httpReq.Header.Set("Accept", "text/event-stream")
 	}
 	setAuth(httpReq, outbound, key)
-	// 客户端白名单头排在 setAuth 之后、附加头之前：头名冲突的优先级由顺序决定，不另写判断
-	// （DESIGN 5.11）：setAuth 的默认值 < 客户端头 < 厂商附加头声明。
+	// 客户端白名单头排在 setAuth 之后、附加头之前：头名冲突的优先级由这个顺序决定，不另写判断。
+	// 优先级是 setAuth 给的默认凭据头 < 客户端头 < 厂商附加头声明。
 	for _, d := range applyClientHeaders(httpReq, inboundHeaders, inbound, outbound) {
 		s.logf("客户端头 %s 被丢弃：值有 %d 字节，超过 %d 字节上限，不往上游透传",
 			d.Name, d.Bytes, clientHeaderMaxBytes)
 	}
-	// 附加头压后叠加：同名时声明覆盖客户端头与 setAuth 给的默认凭据头（DESIGN 5.10 的「声明优先」）。
+	// 附加头压后叠加：同名时厂商声明覆盖客户端头与 setAuth 给的默认凭据头。
+	// 声明在内层循环之后应用，是因为厂商声明的头才代表厂商真正要求的值，
+	// 客户端想覆盖它会印出上游 400，不如让声明赢。
 	if err := s.applyProviderHeaders(httpReq, a, outbound, req.Model, session); err != nil {
 		return nil, err
 	}
@@ -698,7 +729,8 @@ func (s *Server) jsonSuccess(w http.ResponseWriter, resp *http.Response,
 			// 决策协议没有编解码器（它不进中间表示），用量两个字段直读；响应体不改写。
 			res.inTok, res.outTok = systemOneUsage(body)
 		case outbound == ProtocolEmbeddings:
-			// 向量化同样没有编解码器，用量只有一个 prompt_tokens（DESIGN 5.15）。
+			// 向量化也没有编解码器，只解析用量：这条报文只有 prompt_tokens 一个计数，没有输出 token，
+			// 按对话响应的形状去解只会拿到零值，这次调用的花费因此整块漏掉。
 			res.inTok = embeddingsUsage(body)
 		default:
 			if parsed, err := translate.DecodeResponse(outbound, body, req.Model); err == nil {
@@ -719,7 +751,7 @@ func (s *Server) jsonSuccess(w http.ResponseWriter, resp *http.Response,
 	}
 	if parsed.StopNote != "" {
 		// 上游的结束原因在中间表示里没有对应取值（gemini 的 SAFETY 一类），统一按正常结束编给
-		// 客户端，原值只进日志当备注（DESIGN 5.9）。
+		// 客户端：编一个不存在的取值会让客户端拿到它不认识的枚举值，原值只进日志当备注。
 		s.logf("上游 %s 的结束原因 %s 在中间表示里没有对应取值，按 %s 编给客户端", outbound, parsed.StopNote, parsed.StopReason)
 	}
 	payload, err := translate.EncodeResponse(inbound, parsed)
@@ -779,11 +811,13 @@ func (s *Server) streamSuccess(ctx context.Context, w http.ResponseWriter, resp 
 	// upstreamErr 记上游自己发过来的错误帧正文：客户端已经收到那条错误，这里不再补一个，
 	// 但它仍然说明这次请求失败了，请求记录要写上游的原话而不是一句泛泛的断流。
 	// 这条正文会同时写进 requests.error 与发给客户端的错误帧，与非 2xx 路径一样过 scrubSecret：
-	// gemini 的 {"error":{…}} 是新增入口，上游把凭据回显在 message 里时不能落库（DESIGN 5.6）。
+	// gemini 的 {"error":{…}} 是一条新增入口，上游把凭据回显在 message 里时不能落库、
+	// 也不能再回给客户端。
 	// 四个出站协议的错误增量都走这一个分支，脱敏只在这一处做。
 	var upstreamErr string
 	// finished 记「收尾事件已经写到客户端了」。客户端拿到收尾之后自己断开（codex 收到
-	// response.completed 就关连接）与断流是两回事：这一次请求对客户端已经完成（DESIGN 5.2 第 6 条）。
+	// response.completed 就关连接）与断流是两回事：这一次请求对客户端已经完成，
+	// 按失败处理会把一次成功的调用记成错误，并给它落一份没人需要的冷却。
 	var finished bool
 	// gone 把「客户端不在了」翻译成记账结论：收尾前断开是没送完的请求，收尾后断开不算失败。
 	gone := func() attempt {
@@ -820,8 +854,8 @@ func (s *Server) streamSuccess(ctx context.Context, w http.ResponseWriter, resp 
 		return gone()
 	}
 
-	// ended 记「上游把收尾帧发过来了」：收尾帧没到就是断流，判据与直通路径一致
-	// （DESIGN 5.2 第 6 条、5.4），不单靠解码器报错——干净 EOF 时解码器一声不响。
+	// ended 记「上游把收尾帧发过来了」：收尾帧没到就是断流，判据与直通路径一致，
+	// 不单靠解码器报错——干净 EOF 时解码器一声不响，只看到 EOF 的调用方会把半截流转成正常结束。
 	var ended bool
 	scanErr := translate.ScanSSE(resp.Body, func(event string, data []byte) error {
 		if streamFrameEnded(outbound, event, data) {
@@ -837,9 +871,10 @@ func (s *Server) streamSuccess(ctx context.Context, w http.ResponseWriter, resp 
 		return emit(deltas)
 	})
 
-	// 客户端自己断开时，上游的读也会跟着醒：Go 把请求上下文的取撤销到上游连接上，
-	// 读错误就是 context canceled。这不是上游的问题（DESIGN 5.2 第 6 条）：收尾已经发出就是
-	// 一次完成的请求，没收尾就是没送完，两种都不写「上游流式响应中断」。
+	// 客户端自己断开时，上游的读也会跟着醒：Go 把请求上下文的取消传到上游连接上，
+	// 读错误就是 context canceled。这不是上游的问题：收尾已经发出就是一次完成的请求，
+	// 没收尾就是没送完，两种都不写「上游流式响应中断」，否则客户端挂断会被算成上游故障，
+	// 账号白白落一份冷却。
 	clientGone := ctx.Err() != nil || errors.Is(scanErr, context.Canceled)
 	failure := ""
 	switch {
@@ -857,7 +892,7 @@ func (s *Server) streamSuccess(ctx context.Context, w http.ResponseWriter, resp 
 	if failure != "" && upstreamErr == "" && !clientGone {
 		// 错误增量走编码器，不另写一帧：入站协议是 responses 时它就是 error 加
 		// response.failed，是 anthropic 时是 event: error——形状跟入站协议走，与非 2xx 响应用的是
-		// 同一份映射（DESIGN 5.2 的错误体一节）。
+		// 同一份映射，客户端只需要一套错误处理。
 		_ = emit([]translate.Delta{{Kind: translate.DeltaError, Text: failure}})
 	}
 	_ = emit(dec.Close())
@@ -868,8 +903,8 @@ func (s *Server) streamSuccess(ctx context.Context, w http.ResponseWriter, resp 
 		reasoning: usage.Reasoning, total: usage.Total}
 	if failure != "" {
 		// 写出之后的断流：status 仍是 200、wrote 为真，handleInbound 因此不冷却也不换号。
-		// 它虽然是「读流的时候断了」，但已经向客户端写出了字节，不算可以重试的连接层失败，
-		// 也不改这一类失败的处理方式（见 DESIGN 5.3）。
+		// 它虽然是「读流的时候断了」，但已经向客户端写出了字节，不算可以重试的连接层失败：
+		// 换号重试会把客户端已经收到的半截内容再发一遍。
 		// 记账用的摘要也过一遍脱敏：scanErr 的原文里可能带着上游回显的地址或凭据。
 		res.message = scrubSecret(failure, secretValue)
 		res.err = errStreamTruncated
@@ -887,8 +922,9 @@ func (s *Server) streamSuccess(ctx context.Context, w http.ResponseWriter, resp 
 // passthroughStream 原样转发同协议上游的字节，同时读出用量。
 //
 // 上游没发到收尾帧就断开时，已写出的字节一个不动，只在末尾追加该协议的合法结尾
-// （见 passthroughTail）：直通与转换两条路径对断流的处理一致，客户端总能拿到一个
-// 结束了的流，而不是戛然而止的半截字节（DESIGN 5.2 第 6 条、5.4）。
+// （见 passthroughTail）：客户端总能拿到一个收尾完整的流，而不是半截报文。
+// 不补收尾的代价是客户端按 SSE 约定把这条流当成连接断了，已经收到的内容可能整段丢弃，
+// 用户看到一次“空回复”，而上游实际上已经回了大半。
 func (s *Server) passthroughStream(ctx context.Context, w http.ResponseWriter, resp *http.Response, protocol string,
 	flush func(), secretValue string) attempt {
 	scanner, err := translate.NewUsageScanner(protocol)
@@ -971,7 +1007,7 @@ func (s *Server) passthroughStream(ctx context.Context, w http.ResponseWriter, r
 		cacheRead: scanned.CacheRead, cacheWrite: scanned.CacheWrite,
 		reasoning: scanned.Reasoning, total: scanned.Total}
 	// 客户端断开时上游的读会以 context canceled 醒来，与转换路径同一个判据：
-	// 收尾帧已经转发就是完整的流，没收尾只是没送完，两者都不是上游失败（DESIGN 5.2 第 6 条）。
+	// 收尾帧已经转发就是完整的流，没收尾只是没送完，两者都不是上游失败。
 	clientGone := ctx.Err() != nil || errors.Is(readErr, context.Canceled)
 	switch {
 	case readErr != nil && clientGone && !ended:
@@ -988,7 +1024,7 @@ func (s *Server) passthroughStream(ctx context.Context, w http.ResponseWriter, r
 			res.err = errStreamTruncated
 		}
 		// 错误帧的正文既发给客户端也写进 requests，与转换路径一样先过 scrubSecret：
-		// 读错误里可能带上游回显的地址或凭据（DESIGN 5.6）。
+		// 读错误里可能带上游回显的地址或凭据，这类内容一旦落库就再也取不掉。
 		res.message = scrubSecret(res.message, secretValue)
 		appendStreamTail(w, flush, tail, passthroughTail(protocol, res.message, in, out))
 	}
@@ -999,7 +1035,8 @@ func (s *Server) passthroughStream(ctx context.Context, w http.ResponseWriter, r
 var errStreamTruncated = errors.New("上游流式响应在收尾帧之前结束")
 
 // errClientGone 表示客户端自己关了连接、上游的读跟着被撤销。它不是上游失败：
-// 收尾前断开记失败的请求，收尾后断开直接算完成（DESIGN 5.2 第 6 条）。
+// 收尾前断开记成失败的请求，收尾后断开直接算完成。当成上游失败会给一个只是提前退出的
+// 客户端落一份账号冷却，而那个账号什么错都没犯。
 var errClientGone = errors.New("客户端提前断开")
 
 // clientGoneMessage 是客户端提前断开时写进 requests.error 的说明。
@@ -1069,7 +1106,7 @@ func streamFrameEnded(protocol, event string, data []byte) bool {
 //   - gemini：一帧 data: {"error":…}，再补一帧带 finishReason 与 usageMetadata 的候选（gemini
 //     没有单独的结束事件，收尾就是这一帧）。
 //
-// 错误帧的形状与四条入站路径的非流式错误一致（DESIGN 5.2）：openai-responses 的错误体在
+// 错误帧的形状与四条入站路径的非流式错误一致：openai-responses 的错误体在
 // response.failed 的 response.error 里，gemini 用 google 的 code 与 status——流已经以 200
 // 开头，没有别的 HTTP 状态码可用，因此 code 固定 500、status 是 INTERNAL。
 //
@@ -1175,7 +1212,8 @@ func Endpoint(base, protocol string) string {
 		// 向量化没有厂商路由时猜 /v1/embeddings：与 OpenAI 的路径一致，ollama 的兼容层同样认它。
 		suffix = "/embeddings"
 	case ProtocolSystemOne:
-		// 决策协议的出站路径与入站路径同名（DESIGN 5.14）；漏了这一格，猜出来的会是对话路径。
+		// 决策协议的入站与出站是同一个 POST /v1/systemone，所以猜出来的后缀是 /systemone。
+		// 漏了这一格会落进下面的对话路径，请求打到一个厂商没声明过的地址，只能换回 404。
 		suffix = "/systemone"
 	}
 	if strings.HasSuffix(base, "/v1") {
@@ -1184,9 +1222,9 @@ func Endpoint(base, protocol string) string {
 	return base + "/v1" + suffix
 }
 
-// endpoint 解析账号在某种协议上的上游地址：厂商在 provider_routes 里声明过这条协议就用它的取值——
-// 相对路径拼 base_url、整条地址直接用（见 joinEndpoint）；没有厂商行、或这家没有该协议的路由时
-// 退回后缀猜测（见 DESIGN 5.8）。
+// endpoint 解析账号在某种协议上的上游地址：厂商在 provider_routes 里声明过这条协议就用它的取值
+// （相对路径拼 base_url、整条地址直接用，见 joinEndpoint）；没有厂商行、或这家没有该协议的路由时
+// 退回后缀猜测。
 //
 // 地址只有一份，在厂商行上（`a.BaseURL` 是 providers.base_url 的派生值）。后缀猜测要 base_url
 // 才能拼，拿不到时不是猜出一个畸形地址去打，而是报错并给出下一步命令：历史孤儿行（厂商行已不存在）
@@ -1284,7 +1322,8 @@ func normalizedBase(base string) string {
 // store.NormalizeEndpoint 规整：scheme 归一成小写、路径合并重复斜杠去尾斜杠，
 // 授权部分、查询串与 `#` 之后的内容照抄。相对路径仍与 base_url 拼接：base_url 去尾斜杠、
 // 路径补一个前导斜杠并去尾斜杠，因此最终地址的路径部分不出现 `//`，`base_url` 里真实存在的前缀
-// （如 /api/paas/v4）原样保留。规整只碰路径（DESIGN 5.8）。其余一律照抄，不推 /v1、不猜后缀。
+// （如 /api/paas/v4）原样保留。规整只碰路径，不动授权部分、查询串与 `#` 之后的内容。
+// 其余一律照抄，不推 /v1、不猜后缀：路由里写的路径就是上游的路径。
 // 校验不过的脏取值原样返回，交给 http.NewRequest 报错：读侧不改写用户数据。
 func joinEndpoint(base, path string) string {
 	if store.IsFullAddress(path) {
@@ -1297,7 +1336,8 @@ func joinEndpoint(base, path string) string {
 }
 
 // geminiGeneratePath 是 gemini 非流式生成的路径形状（相对 base_url，含模型名占位符）。
-// 模型名在路径里是 gemini 的原生写法，因此路由的 path 支持 {model} 占位符（DESIGN 5.9）。
+// 模型名在路径里是 gemini 的原生写法，因此路由的 path 支持 {model} 占位符：一条路由能覆盖
+// 整家厂商的所有模型，不用每个模型各声明一条。
 const geminiGeneratePath = "/v1beta/models/{model}:generateContent"
 
 // gemini 的两种动作后缀。路由的 path 按非流式写法（:generateContent）给，流式时由
@@ -1328,7 +1368,7 @@ func modelEndpoint(endpoint, model string) string {
 //
 // 只认路径末尾（查询串之前）的后缀：模型名里可以带 `:`（url.PathEscape 不转义它），路由本身
 // 没有这个后缀时模型名里的 :generateContent 就会留在路径中间；在整个地址里找子串会把它改掉，
-// 同一个模型的流式与非流式因此打到两个不同地址（DESIGN 5.9）。
+// 同一个模型的流式与非流式因此打到两个不同地址，后面那条会换回 404。
 func geminiStreamEndpoint(endpoint string) string {
 	pathPart, query := endpoint, ""
 	if i := strings.IndexByte(endpoint, '?'); i >= 0 {
@@ -1352,8 +1392,8 @@ func geminiStreamEndpoint(endpoint string) string {
 
 // setAuth 按协议给上游请求配好凭据头：gemini 用 x-goog-api-key，anthropic 用 x-api-key
 // 加 anthropic-version，两条 openai 协议与 systemone 用 Bearer（TypeSafe 本家与 commandcode 的
-// 决策端点都读 Authorization）。凭据头按协议而不是按厂商选
-// （同一家上游的不同协议也可能用不同写法，见 DESIGN 5.8）。
+// 决策端点都读 Authorization）。凭据头按协议而不是按厂商选：同一家上游的不同协议
+// 也可能用不同写法，按厂商选就让分类好像同一个厂商的路径全用同一种凭据头。
 func setAuth(req *http.Request, protocol, key string) {
 	switch protocol {
 	case ProtocolAnthropic:
@@ -1449,22 +1489,25 @@ func writeError(w http.ResponseWriter, status int, kind, message string) {
 	})
 }
 
-// writeInboundError 按入站协议写出错误体（DESIGN 5.2）：五条入站路径的客户端读的字段不同，
-// 形状由入站协议决定，不由上游协议决定。入站协议为空或认不出时退回统一形状。
+// writeInboundError 按入站协议写出错误体：五条入站路径的客户端读的字段不同，形状由入站协议
+// 决定，不由上游协议决定。入站协议为空或认不出时退回统一形状。
 //
 //   - anthropic：规定形状，与 writeError 一致；
 //   - openai-chat 与 openai-responses：顶层只有 error，type 用 OpenAI 的取值，param 与 code
-//     显式给 null（SDK 会读这两个键在不在）；
-//   - gemini：code 是 HTTP 状态码的整数，status 是 google 的状态名；
+//     显式给 null（SDK 会读这两个键在不在，缺键与 null 在它们眼里不是一回事）；
+//   - gemini：code 是 HTTP 状态码的整数，status 是 google 的状态名，两者类型都不能换；
 //   - systemone：顶层只有 detail，里面是 message 与 error_type（不是 type）。真实的客户端是
 //     TypeSafe 的 SDK，它读这两个字段，用对象而不是纯字符串是为了留下类型又不改 SDK 的读法；
-//     error_type 的取值与 anthropic 那套同名（DESIGN 5.14）。
+//     error_type 的取值与 anthropic 那套同名，同一种错误在两条协议上的说法因此能对上。
 //
-// message 由调用方给：上游原话在 tryUpstream 里已经过 scrubSecret（DESIGN 5.6）。
+// 形状写错时客户端读不出错误：把 anthropic 形状的错误体回给 openai 客户端，SDK 拿到的是
+// 一个空的 error 对象，用户看到「未知错误」而不是上游的原话。
+//
+// message 由调用方给：上游原话在 tryUpstream 里已经过 scrubSecret，凭据不会随错误体回到客户端。
 func writeInboundError(w http.ResponseWriter, inbound string, status int, kind, message string) {
 	switch inbound {
 	case ProtocolChat, ProtocolResponses, ProtocolEmbeddings:
-		// 向量化是 OpenAI 的报文，错误体也是那一套（DESIGN 5.15）。
+		// 向量化是 OpenAI 的报文，错误体也照那一套写，客户端用的是同一个 SDK。
 		writeJSON(w, status, map[string]any{"error": map[string]any{
 			"message": message,
 			"type":    openAIErrorType(kind),
@@ -1478,8 +1521,8 @@ func writeInboundError(w http.ResponseWriter, inbound string, status int, kind, 
 			"status":  googleErrorStatus(status),
 		}})
 	case ProtocolSystemOne:
-		// 字段名是 error_type 而不是 type：TypeSafe SDK 读 detail.error_type 与 detail.message
-		// （DESIGN 5.14 的「错误体」）。用对象而不是纯字符串，好在留下类型的同时不改 SDK 的读法。
+		// 字段名是 error_type 而不是 type：TypeSafe SDK 读 detail.error_type 与 detail.message。
+		// 用对象而不是纯字符串，好在留下类型的同时不改 SDK 的读法。
 		writeJSON(w, status, map[string]any{"detail": map[string]any{
 			"message":    message,
 			"error_type": kind,
@@ -1502,7 +1545,8 @@ func openAIErrorType(kind string) string {
 	return kind
 }
 
-// googleErrorStatus 把 HTTP 状态码换成 google 的状态名（DESIGN 5.2）。映射之外的码给 UNKNOWN：
+// googleErrorStatus 把 HTTP 状态码换成 google 的状态名：google 的客户端按这个字符串分类错误，
+// 它不认识数字状态码。映射之外的码给 UNKNOWN：
 // 编一个更具体却不对的名字会让客户端按错的类别重试或放弃。
 func googleErrorStatus(status int) string {
 	switch status {

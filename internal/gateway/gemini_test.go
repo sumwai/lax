@@ -13,8 +13,7 @@ import (
 	"lax/internal/translate"
 )
 
-// geminiRoute 是 gemini 的路由写法：相对 base_url 的路径，模型名用 {model} 占位符
-// （DESIGN 5.9）。gemini 的模型名在 URL 路径里，不在请求体里。
+// geminiRoute 是 gemini 的路由写法：相对 base_url 的路径，模型名用 {model} 占位符。gemini 的模型名在 URL 路径里，不在请求体里。
 const geminiRoute = "/v1beta/models/{model}:generateContent"
 
 // geminiReply 是一个最小的 gemini 非流式响应：一段正文，用量 12/7，其中 4 个命中缓存。

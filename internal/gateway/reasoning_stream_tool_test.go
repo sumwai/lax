@@ -12,7 +12,7 @@ import (
 // 这个文件从网关这一层钉住「思考增量在前、工具参数分片在后」这类跨协议流式：
 // chat 上游先发 reasoning_content，再发 tool_calls 的参数分片，下发给 anthropic 客户端的事件
 // 必须合法——每个 content_block_delta 都落在一个开着、还没收到 content_block_stop 的块上，
-// 收尾事件各一份，拼起来的工具参数本身是合法 JSON（DESIGN 5.4）。
+// 收尾事件各一份，拼起来的工具参数本身是合法 JSON。
 
 // TestChatReasoningThenToolArgsStreamToAnthropicClient 覆盖 chat 上游的
 // reasoning_content → tool_calls 分片序列走 anthropogenic 客户端：
@@ -177,7 +177,8 @@ func TestChatReasoningThenToolArgsStreamToAnthropicClient(t *testing.T) {
 
 // TestChatReasoningBetweenToolArgsStreamToAnthropicClient 覆盖思考增量插在两次工具参数之间：
 // 已经关掉的工具块不能再收 input_json_delta，编码器必须先关块再重开，每个 delta 仍落在
-// 开着的块上。同一个上游块号因此会出现两个 tool_use 块，这是 DESIGN 5.4 记下的代价。
+// 开着的块上。同一个上游块号因此会出现两个 tool_use 块：已经发过 content_block_stop 的块不能再收
+// content_block_delta，只能重开一个。
 func TestChatReasoningBetweenToolArgsStreamToAnthropicClient(t *testing.T) {
 	f := newFixture(t)
 	upstream := "" +

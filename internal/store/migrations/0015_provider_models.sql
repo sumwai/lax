@@ -1,4 +1,4 @@
--- 模型事实与账号可达性拆成两张表（见 DESIGN 5.13）：provider_models 存上游的模型事实，
+-- 模型事实与账号可达性拆成两张表：provider_models 存上游的模型事实，
 -- 同一个模型在多家账号下只存一份；account_models 只存「这个账号能不能用这个模型」与
 -- 账号侧的覆盖值（协议、长度、价格），同一个模型在三个账号下不会有三份重复元数据。
 --
@@ -6,7 +6,7 @@
 -- 最后把 accounts.models 里手填的名字补进两张表并删掉那一列。中途失败整笔回滚，因此不会出现
 -- 「列已经删了、名字却还没落进可达性表」的库。
 --
--- 映射按 DESIGN 5.13：usable → allowed，forbidden → forbidden，notfound → missing，其余 → error。
+-- 映射：usable → allowed，forbidden → forbidden，notfound → missing，其余 → error。
 -- synced（同步过、从未探活）与 auth（凭据被拒）都落成 error：它们在旧库里本来就不是选号依据，
 -- accounts.models 里的名字由下面第四步单独补成 allowed，选号结果因此与升级前一致。
 --

@@ -9,7 +9,7 @@ import (
 // 这个文件从命令行这一层钉住模型列表的三种已知形状：
 // `{data:[…]}`、`{models:[…]}`（ollama 的 /api/tags 这类）与顶层数组。
 // 形状自动识别只决定怎么读响应，不改变「地址从哪来」的优先级——厂商级 models_path 与
-// `--endpoint` 的顺序照旧，前一条能拿到列表时不因为形状不同就去试后一条（DESIGN 5.7）。
+// `--endpoint` 的顺序照旧，前一条能拿到列表时不因为形状不同就去试后一条。
 
 // syncRow 是 model sync --json 的一行。
 type syncRow struct {
@@ -47,7 +47,7 @@ func mustModelRowStatuses(t *testing.T) map[string]string {
 
 // TestModelSyncResponseShapesWriteModels 三种形状各跑一次完整的 model sync：
 // 退出码 0、拉到并新增的模型数对得上、每个名字都进模型目录且这个账号的行是 allowed
-// （同步写「目录 + 该账号可达性」，见 DESIGN 5.13）。
+// （同步写「目录 + 该账号可达性」）。
 func TestModelSyncResponseShapesWriteModels(t *testing.T) {
 	cases := []struct {
 		name string
@@ -281,8 +281,8 @@ func TestModelSyncShapeDetectionKeepsModelsPathPriority(t *testing.T) {
 	if calls := lists.all(); len(calls) != 0 {
 		t.Fatalf("厂商覆盖那台收到 %+v，--endpoint 生效时不该再打它", calls)
 	}
-	// 上一轮拉到的 llama3:latest 留着：同步只做加法，可达性只由探活结论改动
-	// （见 DESIGN 5.13），一次少给了几个名字不等于这些模型不可用。
+	// 上一轮拉到的 llama3:latest 留着：同步只做加法，可达性只由探活结论改动，
+	// 一次少给了几个名字不等于这些模型不可用。
 	statuses := mustModelRowStatuses(t)
 	if len(statuses) != 2 || statuses["m-endpoint"] != "allowed" || statuses["llama3:latest"] != "allowed" {
 		t.Fatalf("model ls = %v，期望 m-endpoint 与上一轮的 llama3:latest 都在、都是 allowed", statuses)

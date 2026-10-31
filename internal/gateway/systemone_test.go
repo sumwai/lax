@@ -15,7 +15,7 @@ import (
 	"lax/internal/store"
 )
 
-// 这个文件钉住第五条线协议 systemone 的入站、协议互通、错误体与探活（DESIGN 5.14）。
+// 这个文件钉住第五条线协议 systemone 的入站、协议互通、错误体与探活。
 // 它只与自己互通：决策请求没有对话消息序列也没有流，中间表示里没有它的位置，所以本文件里
 // 没有一条「跨协议转换」的用例，只有同协议直通与两个方向的 400。
 
@@ -32,7 +32,7 @@ const systemOneRequestBody = `{"model":"typesafe/jev","state":{"text":"hello"},`
 	`"assets":[{"id":"a1","kind":"text"}],"metadata":{"user_id":"s-1"}}`
 
 // systemOneCall 是一次打到假决策上游的请求：路径、凭据头、整份头与请求体原文。
-// 整份头留着断言「一个客户端头都不透传」（DESIGN 5.11 的白名单里没有 systemone）。
+// 整份头留着断言「一个客户端头都不透传」（白名单里没有 systemone）。
 type systemOneCall struct {
 	path   string
 	bearer string
@@ -77,7 +77,7 @@ func (u *systemOneUpstream) all() []systemOneCall {
 
 // addSystemOneProvider 建一家只声明 systemone 路由、默认协议也是 systemone 的厂商，
 // 并返回它名下带 models 的账号。决策模型的名字上游不列（commandcode 的清单里没有），
-// 只能手工声明（DESIGN 5.14 的「同步」）。
+// 只能手工声明：上游的模型清单里没有决策端点这一项。
 func addSystemOneProvider(t *testing.T, f *fixture, name, baseURL, secretValue string, models []string) store.Account {
 	t.Helper()
 	provider := "typesafe-" + name
@@ -305,7 +305,7 @@ func TestSystemOneRejectsOversizedBody(t *testing.T) {
 }
 
 // TestSystemOneModelNotFoundShape 钉住 404 的错误体形状与类型：detail 对象、类型是
-// not_found_error（与 anthropic 那套同名，DESIGN 5.2 的表格）。
+// not_found_error（与 anthropic 那套同名）。
 func TestSystemOneModelNotFoundShape(t *testing.T) {
 	f := newFixture(t)
 	addSystemOneProvider(t, f, "ts1", "http://127.0.0.1:1", "sk-ts", []string{"typesafe/jev"})
@@ -505,7 +505,7 @@ func TestSystemOneRejectsBadModelField(t *testing.T) {
 }
 
 // TestSystemOneUpstreamErrorKeepsType 钉住上游失败的形状与冷却：一次 429 会先把账号打进冷却
-// （5.3 那一档），单账号时候选耗尽，最后回 503 与 api_error；错误体始终是 detail 对象。
+// （限流那一档，1 分钟起），单账号时候选耗尽，最后回 503 与 api_error；错误体始终是 detail 对象。
 func TestSystemOneUpstreamErrorKeepsType(t *testing.T) {
 	f := newFixture(t)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -526,7 +526,7 @@ func TestSystemOneUpstreamErrorKeepsType(t *testing.T) {
 		t.Fatalf("错误 = %s/%s，期望 api_error 且带上上游原话", kind, message)
 	}
 
-	// 一次 429 只打一个账号，冷却与失败计数照旧走 5.3 那一档。
+	// 一次 429 只打一个账号，冷却与失败计数照旧走限流那一档。
 	acc, err := f.st.GetAccount("ts1")
 	if err != nil {
 		t.Fatalf("读账号: %v", err)
@@ -585,7 +585,7 @@ func TestSystemOneUpstreamErrorPassedThrough(t *testing.T) {
 
 // TestSystemOneResponseModelNotRewritten 钉住实测的上游行为：请求 model 是 jev-latest，
 // 响应里的 model 是上游自己解析出的 jev-1.14.0。响应方向不解析别名、也不改写字节
-// （DESIGN 5.12 的「响应里的模型名不改」与 5.14 的「响应直通」）。
+// 响应方向不解析别名、也不改写字节。
 func TestSystemOneResponseModelNotRewritten(t *testing.T) {
 	const reply = `{"model":"jev-1.14.0","answers":{"present":{"answer":"yes","probability":0.99}},` +
 		`"usage":{"input_tokens":9,"output_tokens":2}}`

@@ -26,7 +26,7 @@ var geminiProvider = struct {
 }
 
 // assertGeminiSeed 断言 gemini 的厂商行与路由都在，且 `{model}` 占位符原样落库：
-// 写入侧只合并斜杠，花括号与冒号不做任何改写，替换发生在网关拼好地址之后（见 DESIGN 5.9）。
+// 写入侧只合并斜杠，花括号与冒号不做任何改写，替换发生在网关拼好地址之后。
 func assertGeminiSeed(t *testing.T, st *store.Store) {
 	t.Helper()
 

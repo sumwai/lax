@@ -9,7 +9,7 @@ import (
 	"lax/internal/store"
 )
 
-// 这个文件钉住「目录里声明的协议排在探活候选前面」这条排序（见 DESIGN 5.7）：
+// 这个文件钉住「目录里声明的协议排在探活候选前面」这条排序：
 // 上游清单自己说了这个模型支持哪些协议（commandcode 的 supported_endpoints、gemini 的
 // supportedGenerationMethods），探活就先用它打，少打几次错协议的请求；范围仍是厂商声明过的路由，
 // 与已经发现的协议冲突时已发现的优先。

@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-// 客户端头透传（DESIGN 5.11）。上游请求头不全量照抄入站头：照抄会把客户端自己的凭据送出去，
+// 客户端头透传。上游请求头不全量照抄入站头：照抄会把客户端自己的凭据送出去，
 // 也会把 Host、Content-Length 这类逐跳头拼坏。但一个都不给也不行：客户端靠 anthropic-beta、
 // openai-organization 一类头开关上游特性，全丢掉时客户端看到的是「特性没生效」而没有任何错误。
 //
@@ -23,22 +23,22 @@ type clientHeaderRule struct {
 	names    []string
 }
 
-// clientHeaderRules 是 DESIGN 5.11 的白名单表。表里没有的协议（gemini 与 systemone）
+// clientHeaderRules 是白名单表。表里没有的协议（gemini 与 systemone）
 // 不透传任何头：gemini 的特性开关在查询串与请求体里，不在头里；systemone 是一份决策请求，
-// 没有靠头开关的特性，一个头都不透传（见 DESIGN 5.14 与 5.11）。
+// 没有靠头开关的特性，一个头都不透传。
 var clientHeaderRules = []clientHeaderRule{
 	{protocol: ProtocolAnthropic, names: []string{"anthropic-beta", "anthropic-version"}},
 	{protocol: ProtocolChat, names: []string{"openai-beta", "openai-organization", "openai-project"}},
 	{protocol: ProtocolResponses, names: []string{"openai-beta", "openai-organization", "openai-project"}},
 }
 
-// neverForwardHeaders 是永远不从入站请求带到上游的头（DESIGN 5.11）。白名单本身已经把
+// neverForwardHeaders 是永远不从入站请求带到上游的头。白名单本身已经把
 // 这些头挡在外面，这张名单是第二道闸：以后往白名单里加名字时，误加同名头仍会被挡下。
 //
 //   - 凭据类：客户端的凭据不是我们的凭据，带上去只会让上游按客户端的身份鉴权，或者把
 //     客户端自己的 key 泄漏给另一家厂商。
 //   - 逐跳头：它们描述的是「这一段连接」，交给 http.Client 自己算。
-//   - x-lax-session：本网关自己的会话键，只用于选号粘性（见 5.3），不进上游。
+//   - x-lax-session：本网关自己的会话键，只用于选号粘性，不进上游。
 var neverForwardHeaders = []string{
 	"Authorization", "x-api-key", "x-goog-api-key", "Cookie",
 	"Host", "Connection", "Content-Length", "Transfer-Encoding", "Expect", "Upgrade",
@@ -64,7 +64,7 @@ func isNeverForwardedHeader(name string) bool {
 
 // applyClientHeaders 把客户端白名单头叠到已经设好凭据头的上游请求上，返回被丢弃的超长条目。
 // 调用顺序固定在 setAuth 之后、厂商附加头之前：顺序就是优先级，客户端头压过 setAuth 的默认值
-// （例如 anthropic-version），厂商附加头再压过客户端头（DESIGN 5.11 与 5.10 的「声明优先」）。
+// （例如 anthropic-version），厂商附加头再压过客户端头。
 //
 // 入站协议与有效出站协议不同时一个都不透传：anthropic-beta 发给 chat 上游只会换回 400。
 // 同名多值按出现顺序全部 Add 上去（anthropic-beta 可以重复出现表示同时开多个 beta）；

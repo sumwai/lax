@@ -13,7 +13,7 @@ import (
 
 // 这个文件钉住 gemini 流式端点的后缀改写只认路径末尾（查询串之前）：url.PathEscape 不转义
 // `:`，模型名里可以自带 :generateContent；自定义路由本身没有这个动作后缀时，它在路径中间，
-// 改写它会让同一个模型的流式与非流式打到两个不同地址（DESIGN 5.9）。
+// 改写它会让同一个模型的流式与非流式打到两个不同地址。
 
 // TestGeminiStreamEndpointRewritesOnlyPathTail 用两个形状各跑一遍流式与非流式：
 // 自定义路由没有动作后缀（模型名里的 :generateContent 必须原样留在路径中间），

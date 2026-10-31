@@ -50,7 +50,7 @@ func TestAnthropicUsageScanner(t *testing.T) {
 	if u.In != 42 || u.Out != 17 || u.CacheRead != 7 {
 		t.Fatalf("用量 = %d/%d/缓存 %d，期望 42/17/7", u.In, u.Out, u.CacheRead)
 	}
-	// anthropic 没有独立的思考与总 token 字段，两个都是 0（见 DESIGN 5.5）。
+	// anthropic 没有独立的思考与总 token 字段，两个都是 0。
 	if u.Reasoning != 0 || u.Total != 0 {
 		t.Fatalf("anthropic 的思考与总 token 应为 0，实际 %d/%d", u.Reasoning, u.Total)
 	}

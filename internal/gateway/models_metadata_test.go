@@ -54,7 +54,7 @@ func mustInt64(t *testing.T, what string, got *int64, want *int64) {
 
 func ptr(v int64) *int64 { return &v }
 
-// TestSyncModelsMetadataByShape 钉住三种已知形状都能从条目对象里读出元数据（见 DESIGN 5.7 的来源表）：
+// TestSyncModelsMetadataByShape 钉住三种已知形状都能从条目对象里读出元数据：
 // commandcode 的 context_length 与 supported_endpoints、openrouter 的 top_provider.max_completion_tokens、
 // gemini 的 inputTokenLimit 与 outputTokenLimit 与 supportedGenerationMethods。
 // 三种形状走的是同一个解析器，元数据跟着名字一起写进目录。
@@ -121,7 +121,7 @@ func TestSyncModelsMetadataByShape(t *testing.T) {
 		if got := strings.Join(row.Protocols, ","); got != gateway.ProtocolGemini {
 			t.Fatalf("协议 = %q，期望 gemini（generateContent，countTokens 不算）", got)
 		}
-		// 没有 generateContent 的条目不再被过滤：它进目录，能力位记成 embedding（DESIGN 5.15）。
+		// 没有 generateContent 的条目不被过滤：它进目录，能力位记成 embedding。
 		embed, ok := catalog["text-embedding-004"]
 		if !ok {
 			t.Fatalf("embedding 条目应当进目录：%+v", catalog)
@@ -171,7 +171,7 @@ func TestSyncModelsMetadataMissing(t *testing.T) {
 				t.Fatalf("%s 的协议/能力位 = %v / %v，期望留空", name, row.Protocols, row.Capabilities)
 			}
 			// zero 声明了 supported_endpoints:["/embeddings"]：端点名认得出就折成向量化的
-			// 协议与能力位，长度类仍然留空（见 DESIGN 5.15）。
+			// 协议与能力位，长度类仍然留空。
 			if got := strings.Join(row.Protocols, ","); got != gateway.ProtocolEmbeddings {
 				t.Fatalf("zero 的协议 = %q，期望 %q", got, gateway.ProtocolEmbeddings)
 			}
@@ -186,7 +186,7 @@ func TestSyncModelsMetadataMissing(t *testing.T) {
 }
 
 // TestSyncModelsKeepsManualMetadata 钉住来源不降级：用户手填过的目录行不会被一次同步改写，
-// 上游这次给的上下文长度与协议集合都写不进去（见 DESIGN 5.13）。
+// 上游这次给的上下文长度与协议集合都写不进去。
 func TestSyncModelsKeepsManualMetadata(t *testing.T) {
 	f := newFixture(t)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

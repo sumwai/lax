@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// 只读的模型清单接口（见 DESIGN 5.2.1）。两个接口都只读 accounts 一份数据，
+// 只读的模型清单接口：两个接口都只读 accounts 一份数据，
 // 不写 requests、不动冷却与选号：客户端问「有哪些模型名可用」不该改变网关的任何状态。
 const (
 	// modelsPath 是清单的列表入口，modelsPathPrefix 是单模型入口的前缀（其后全部算模型名，
@@ -52,7 +52,7 @@ type modelCatalog struct {
 }
 
 // modelCatalog 汇总选号实际读的那份清单：`enabled=1` 账号的可达模型（`account_models.access='allowed'`，
-// 由 store 的派生字段 `Account.Models` 一并读出来），按模型名去重、升序，再补上别名（DESIGN 5.12）。
+// 由 store 的派生字段 `Account.Models` 一并读出来），按模型名去重、升序，再补上别名。
 // 三条规则：
 //
 //  1. 只看 `enabled=1`：停用账号的模型不出现在清单里，客户端因此不会把请求发到一个
@@ -63,7 +63,7 @@ type modelCatalog struct {
 //  3. `owned_by` 取厂商名；同名模型被多家支持时取厂商名字典序第一个，不看 priority
 //     与账号顺序：同一份库必须给出同一份响应，否则客户端缓存与测试断言都会抖。
 //
-// 数据来源与 5.3 的候选集合是同一批行：`account_models.access='allowed'`（见 5.13）。
+// 数据来源与选号候选集合同一批行：`account_models.access='allowed'`，解析别名后按名字匹配。
 // 同步与探活的过程值（`forbidden` / `missing` / `error`）不进这里，账号行也没有第二份清单列可读。
 // 别名只在这份真实清单之上加条目：解析不到目标的别名不会凭空造出一个能接请求的名字。
 func (s *Server) modelCatalog() (*modelCatalog, error) {
@@ -109,7 +109,7 @@ func (s *Server) modelCatalog() (*modelCatalog, error) {
 		brokenAliases: map[string]error{},
 	}
 	// 逐个别名问 store，而不是在这里按跳查表：走链、成环与超长的判定只有 store.ResolveModelAlias
-	// 一份（DESIGN 5.12）。别名是手工维护的、表很小，多几趟小查询换一条判定规则。
+	// 一份。别名是手工维护的、表很小，多几趟小查询换一条判定规则。
 	for _, a := range aliases {
 		target, _, err := s.store.ResolveModelAlias(a.Alias)
 		if err != nil {
@@ -165,7 +165,7 @@ func (c *modelCatalog) find(id string) (ModelEntry, bool) {
 }
 
 // notFoundMessage 是 `GET /v1/models/{id}` 的 404 文案。别名要把目标写出来：只说「清单里没有 X」
-// 会让人去清单里找一个永远不存在的名字（DESIGN 5.12）；链坏了的别名要说清是哪条链，
+// 会让人去清单里找一个永远不存在的名字；链坏了的别名要说清是哪条链，
 // 不然用户只会看到一个怎么也查不到的名字。
 func (c *modelCatalog) notFoundMessage(id string) string {
 	if err, ok := c.brokenAliases[id]; ok {
@@ -200,8 +200,8 @@ func (s *Server) handleModelList(w http.ResponseWriter, r *http.Request) {
 // handleModelByID 是 `GET /v1/models/{id}`：单个模型名，别名也查得到同一条目。未命中返回 404 与
 // `not_found_error`，文案给出两条下一步命令（看清单、探活）。文案讲的是「清单里没有」
 // 而不是「没有账号提供」：清单只算 `enabled=1` 的账号、冷却中的账号照样算，所以只由停用
-// 账号提供的名字在这里是 404，转发时却是 503（账号存在但当前不可用），两者的分界写在
-// DESIGN 5.2.1。
+// 账号提供的名字在这里是 404，转发时却是 503（账号存在但当前不可用），两者的分界就是
+// 「清单只算现在能接请求的账号」与「转发看的是有没有账号持有这个名字」两件事。
 func (s *Server) handleModelByID(w http.ResponseWriter, r *http.Request) {
 	if !allowGet(w, r) {
 		return

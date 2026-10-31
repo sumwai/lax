@@ -426,7 +426,7 @@ func TestModelProbeNoProgressOutsideTerminal(t *testing.T) {
 }
 
 // TestAccountProbeAllForbiddenRecordsAccess 确认零可用时退出码 1，且结论照样落库：
-// 探不动的名字从 allowed 变成 forbidden，行不删、也不再进候选（见 DESIGN 5.13）。
+// 探不动的名字从 allowed 变成 forbidden，行不删、也不再进候选。
 func TestAccountProbeAllForbiddenRecordsAccess(t *testing.T) {
 	sandbox(t)
 	up := newProbeUpstream(t, nil, map[string]int{"keep-me": http.StatusForbidden})
@@ -548,7 +548,7 @@ func probeVerdictRow(t *testing.T, recs []store.RequestRecord, model string) sto
 	return store.RequestRecord{}
 }
 
-// addProbeAccount 初始化数据库，加一个指向假上游的账号。地址只在厂商行上（DESIGN 5.8），
+// addProbeAccount 初始化数据库，加一个指向假上游的账号。地址只在厂商行上，
 // 所以先按账号名登记一家厂商，再建账号：每个账号一家厂商，两个账号指向两个假上游时
 // 才不会被后写的地址一起改掉。
 func addProbeAccount(t *testing.T, up *probeUpstream, name string, extra ...string) {
@@ -557,7 +557,7 @@ func addProbeAccount(t *testing.T, up *probeUpstream, name string, extra ...stri
 		t.Fatalf("init 退出码 = %d，stderr = %s", code, stderr)
 	}
 	provider := name + "-co"
-	// 三条非 gemini 路由都声明：探活的候选协议跟着路由收紧（见 DESIGN 5.8），
+	// 三条非 gemini 路由都声明：探活的候选协议跟着路由收紧，
 	// 只声明一条时 403 之后就没有别的协议可换，探活行数会跟着变。
 	ensureProvider(t, provider, up.srv.URL,
 		"--openai", "/v1/chat/completions",
@@ -852,7 +852,7 @@ func TestModelProbeModelFlagRespectsFreshness(t *testing.T) {
 }
 
 // TestModelProbeDoesNotSkipUnsettledAccess 确认只有「有定论且记了时间」才跳过：
-// access 为 error 的行、以及 allowed 但 checked_at 为 0 的行都要照常探（见 DESIGN 5.7）。
+// access 为 error 的行、以及 allowed 但 checked_at 为 0 的行都要照常探。
 func TestModelProbeDoesNotSkipUnsettledAccess(t *testing.T) {
 	sandbox(t)
 	up := newProbeUpstream(t, nil, nil)
@@ -948,7 +948,7 @@ func TestModelProbeAllSkippedKeepsAccess(t *testing.T) {
 	}
 }
 
-// TestModelProbeMixedAccountsExitCode 盯多账号的退出码：按照 5.7「报错与否只看终态」，
+// TestModelProbeMixedAccountsExitCode 盯多账号的退出码：报错与否只看终态，
 // 整次命令退 0 的条件是库里至少一个账号有 usable，而不是每个账号都探出了东西。
 func TestModelProbeMixedAccountsExitCode(t *testing.T) {
 	t.Run("一号全跳过二号真实探活", func(t *testing.T) {

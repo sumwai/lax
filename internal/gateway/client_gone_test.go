@@ -16,7 +16,7 @@ import (
 
 // 客户端自己挂断与上游断流是两件事：Go 把请求上下文的取消透到上游连接上，
 // 读响应体就以 context canceled 醒来。收尾事件已经发给客户端的请求因此要记成成功，
-// 否则每一次「客户端读够就关连接」都会在账上留下一条上游错误（DESIGN 5.2 第 6 条）。
+// 否则每一次「客户端读够就关连接」都会在账上留下一条上游错误。
 
 // waitRequests 轮询到请求记录落库，最多等 3 秒。
 func waitRequests(t *testing.T, st *store.Store, n int) []store.RequestRecord {

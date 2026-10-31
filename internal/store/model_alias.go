@@ -13,7 +13,7 @@ import (
 // 把「别名写错了」与「数据库打不开」分开：删不到一律算失败，不静默当成功。
 var ErrModelAliasNotFound = errors.New("别名不存在")
 
-// ErrModelAliasShadow 表示要写的别名已经是真实模型名，见 DESIGN 5.12。
+// ErrModelAliasShadow 表示要写的别名已经是真实模型名。
 // 真名有两处：目录（provider_models）里有这一行，或者某个账号现在就能用它（account_models
 // 里 access='allowed'）。这种别名会遮蔽真名：客户端请求那个名字时，命中哪个模型会随账号增减
 // 而变，所以写入侧直接拒绝，而不是留到请求时才发现。
@@ -26,11 +26,11 @@ var ErrModelAliasCycle = errors.New("别名链成环")
 // 链过长多半是别名互相串起来写错了：与其让请求时悄悄多走几跳，不如解析时就报出来。
 var ErrModelAliasTooDeep = errors.New("别名链太长")
 
-// ModelAliasMaxHops 是一条别名链最多能走几跳（DESIGN 5.12）。
+// ModelAliasMaxHops 是一条别名链最多能走几跳。
 // 一跳是「别名 → 真实名字」；八跳够把几个客户端的写死名字串到同一个真名上，再多只能说明链写歪了。
 const ModelAliasMaxHops = 8
 
-// ModelAlias 是 model_aliases 里的一行（迁移 0013，见 DESIGN 5.12、6）。
+// ModelAlias 是 model_aliases 里的一行（迁移 0013）。
 // Alias 是客户端用的名字，Target 是真实模型名或另一个别名，CreatedAt 是这一行第一次写进来的
 // Unix 秒（覆盖改目标不动它）。这里没有凭据：别名表只放名字。
 type ModelAlias struct {
@@ -42,7 +42,7 @@ type ModelAlias struct {
 // SetModelAlias 写入（或覆盖）一条别名，是这张表的唯一写入口。
 // 同一个别名再写一次就是改目标，不报错、不留旧行；覆盖时不改 created_at。
 //
-// 校验按 DESIGN 5.12：别名与目标都去首尾空白后不能为空（落库就是去空白后的值）、不能含控制
+// 校验：别名与目标都去首尾空白后不能为空（落库就是去空白后的值）、不能含控制
 // 字符、别名不能等于目标，别名也不能与任何真实模型名同名——那会遮蔽真名。真名按两处认：
 // 目录（provider_models）里存在同名模型，或者某个账号现在就能用它（access='allowed'）。
 // 只查账号会漏掉「目录里有、眼下没有账号可用」的名字：账号一恢复可用，这个别名的行为
@@ -198,7 +198,7 @@ func resolveAliasChain(targets map[string]string, name string) (string, bool, er
 }
 
 // aliasCatalogProvidersTx 在事务里找出目录里有 alias 这个模型的厂商，按名称升序。
-// 目录（provider_models）是真名的事实来源（DESIGN 5.13）：一家厂商能看到的模型与「眼下有没有
+// 目录（provider_models）是真名的事实来源：一家厂商能看到的模型与「眼下有没有
 // 账号能用它」是两件事，实测 bigmodel 的清单里就有某个 key 无权访问的模型。目录里的名字因此
 // 与当前可达性无关，仍然是会被别名遮蔽的真名。
 func aliasCatalogProvidersTx(tx *sql.Tx, alias string) ([]string, error) {
@@ -242,7 +242,7 @@ func aliasShadowErr(alias string, providers, accounts []string) error {
 
 // aliasShadowingAccountsTx 在事务里找出把 alias 声明成真实模型名、且现在就能用的账号，按名称升序。
 // 比的是该账号 access='allowed' 的模型名集合——迁移 0015 之后它就是「这个账号现在能用哪些
-// 真实模型名」的那份清单（原来是 accounts.models 那一列 JSON），区分大小写的精确匹配（DESIGN 5.12）：
+// 真实模型名」的那份清单（原来是 accounts.models 那一列 JSON），区分大小写的精确匹配：
 // 名字发给上游时不会做大小写归一，`GLM-4.6` 与 `glm-4.6` 在上游看来是两个名字。
 func aliasShadowingAccountsTx(tx *sql.Tx, alias string) ([]string, error) {
 	rows, err := tx.Query(`SELECT DISTINCT a.name FROM accounts a

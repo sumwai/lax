@@ -127,14 +127,14 @@ func cmdUsage(e *Env, args []string) error {
 		fmt.Fprintln(e.Stdout, "花费为 0：单价已填且都是 0，这些请求算免费")
 	}
 	if totalCacheRead+totalCacheWrite > 0 {
-		// 缓存 token 已经折进花费，不说清就会被当成只显示；口径与 DESIGN 5.5 的公式一致。
+		// 缓存 token 已经折进花费，不说清就会被当成只显示。
 		fmt.Fprintln(e.Stdout, "缓存读写已按模型的缓存单价计入估算花费，未填缓存单价时按输入价算")
 	}
 	return nil
 }
 
 // resolveInboundProtocol 把命令行上的简写换回协议名。四条线协议都能当入站用
-// （gemini 的两条入站路径见 DESIGN 5.9）。
+// （gemini 的两条入站路径由它的前缀与动作后缀区分）。
 func resolveInboundProtocol(name string) (string, bool) {
 	switch name {
 	case "", translate.ProtocolAnthropic:
@@ -308,7 +308,7 @@ func printRecords(e *Env, records []store.RequestRecord, names map[int64]string)
 }
 
 // modelCell 给出「模型」列的内容。客户端给的名字与真正打出去的名字不同时写成
-// `别名 → 真名`，一次别名命中因此一眼能看出实际打了哪个模型（DESIGN 5.12）；
+// `别名 → 真名`，一次别名命中因此一眼能看出实际打了哪个模型；
 // 相同时只写一个名字，不让每一行都背上一次重复。两个名字各自按 24 个显示宽度截断，
 // 与单名字时的同一上限，`→` 只占一列，宽度对齐照旧交给 renderTable。
 func modelCell(requested, used string) string {
@@ -332,7 +332,7 @@ func cmdCall(e *Env, args []string) error {
 	inbound, ok := resolveInboundProtocol(*protocol)
 	if !ok {
 		// systemone 是第五条线协议，但它不是对话：一条决策请求由一个 state 加一组问题组成，
-		// 没有提示词可发（DESIGN 5.14 的 CLI 一行）。这是「这个命令接不了它」，不是用法写歪了，
+		// 没有提示词可发。这是「这个命令接不了它」，不是用法写歪了，
 		// 所以走运行失败（退出码 1）并直接指向真正该用的命令。
 		if strings.TrimSpace(*protocol) == gateway.ProtocolSystemOne {
 			return fmt.Errorf("systemone 不是对话协议：一条决策请求由一个 state 加一组问题组成，没有提示词可发，call 发不了它；改用 lax decide --model <模型> --state <文本或 JSON> --noul <名>=<问句>（见 lax decide --help）")
@@ -369,7 +369,7 @@ func cmdCall(e *Env, args []string) error {
 	}
 
 	// 这个模型的候选账号全部以 systemone 出站时，这条对话请求在网关里只会换回一句
-	// 「协议不相通」的 400（DESIGN 5.14 的协议互通）：在发出去之前就说清，并给出该用的命令。
+	// 「协议不相通」的 400：在发出去之前就说清，并给出该用的命令。
 	if only, err := systemOneOnlyModel(a.st, usedModel); err != nil {
 		return err
 	} else if only {
@@ -475,7 +475,7 @@ func cmdCall(e *Env, args []string) error {
 }
 
 // inboundPath 给出这条请求要打的入站路径。gemini 的模型名在路径里、流式由后缀决定
-// （DESIGN 5.9）：模型名按路径段转义后拼进去，其余三条路径固定。
+// （模型名按路径段转义后拼进去，其余三条路径固定）。
 func inboundPath(protocol, model string, stream bool) string {
 	if protocol != translate.ProtocolGemini {
 		return map[string]string{

@@ -15,7 +15,7 @@ import (
 // 后者是写错了厂商。
 var ErrProviderHeaderNotFound = errors.New("厂商没有声明这条附加头")
 
-// ProviderHeader 是一行厂商附加请求头（迁移 0010，见 DESIGN 5.10）。
+// ProviderHeader 是一行厂商附加请求头（迁移 0010）。
 // Protocol 为空字符串表示整个厂商的每条路由都加，非空表示只加给这条协议；同名头两边都有时
 // 协议级覆盖厂商级，解析在 EffectiveProviderHeaders。Name 落库前归一成小写（HTTP 头名大小写
 // 不敏感），Value 是声明的原样：字面量，或 {env:NAME}、{session}、{model} 三种占位符，

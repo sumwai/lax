@@ -45,7 +45,7 @@ func cmdAccount(e *Env, args []string) error {
 	case "ls":
 		return cmdAccountLs(e, args[1:])
 	case "set", "update":
-		// update 是 set 的同义词：帮助里只列 set，但两个写法都收（见 DESIGN 4）。
+		// update 是 set 的同义词：帮助里只列 set，但两个写法都收，老脚本不用改。
 		return cmdAccountSet(e, args[1:])
 	case "rm":
 		return cmdAccountRm(e, args[1:])
@@ -110,7 +110,7 @@ const accountSetUsage = "用法：lax account set <名称> [--key <key>]\n" +
 	"--key 三种给法：直接写值、写 - 从标准输入读、留空读环境变量 LAX_KEY\n" +
 	"价格不在账号上：模型单价属于「供应商 × 模型」，改价用 lax model price set <模型> --in N --out N"
 
-// retiredAccountPriceFlags 是从 account add 与 account set 上删掉的四个价格参数（见 DESIGN 4、5.13）。
+// retiredAccountPriceFlags 是从 account add 与 account set 上删掉的四个价格参数。
 // 单价搬到模型目录之后账号不再是价格的落点：同一家上游的同一个模型只该有一份标价，
 // 账号只在套餐不同时覆盖。误敲这四个参数仍是用法错误（退出码 2），文案说清它去了哪、下一步跑什么。
 const retiredAccountPriceHint = "模型单价已经只存在模型目录上：同一家上游的同一个模型只该有一份标价，账号不再是价格的落点；改价用 lax model price set <模型> --in N --out N，套餐不同时才对某个账号加 --account 覆盖"
@@ -123,8 +123,8 @@ var retiredAccountPriceFlags = map[string]string{
 }
 
 // cmdAccountSet 换掉一个已有账号的凭据，不删号重建：删了会丢掉探活结果、协议发现与请求记录归属。
-// 换 key 之后旧凭据的结论作废，同一个事务里清掉冷却、最近错误与连续失败次数并重新启用账号（见 DESIGN 4、5.6）。
-// 价格不在这条命令上：单价属于「供应商 × 模型」，改价走 model price set（见 DESIGN 5.13）。
+// 换 key 之后旧凭据的结论作废，同一个事务里清掉冷却、最近错误与连续失败次数并重新启用账号。
+// 价格不在这条命令上：单价属于「供应商 × 模型」，改价走 model price set。
 // `account_models` 里的可达性、覆盖值与协议发现结果一个字不动，也不碰厂商表与模型目录。
 func cmdAccountSet(e *Env, args []string) error {
 	if err := rejectRetiredFlags(args, retiredAccountPriceFlags, accountSetUsage); err != nil {
@@ -178,7 +178,7 @@ func cmdAccountSet(e *Env, args []string) error {
 			"enabled":             true,
 		})
 	}
-	// 厂商是厂商行派生的只读值（见 DESIGN 5.8），确认行里带上它才知道换的是哪个上游的凭据。
+	// 厂商是厂商行派生的只读值，确认行里带上它才知道换的是哪个上游的凭据。
 	fmt.Fprintf(e.Stdout, "已更新 %s（%s）的凭据（%s）；冷却与失败计数已清零，账号已启用\n",
 		name, dashIfEmpty(acc.Provider), secret.Mask(keyValue))
 	return nil
@@ -189,7 +189,7 @@ const accountAddUsage = "用法：lax account add <名称> --provider <厂商> -
 	"地址与默认协议不落在账号上：先 lax provider add <厂商> --base-url <地址> --openai /v1/chat/completions 登记厂商，再建账号\n" +
 	"--models 手填的名字写进模型目录（不带长度与价格），并把这个账号标成可用；留空则等 model sync 与 model probe"
 
-// retiredAccountAddFlags 是已经从 account add 上删掉的两个参数与各自的替代做法（见 DESIGN 4、5.8）：
+// retiredAccountAddFlags 是已经从 account add 上删掉的两个参数与各自的替代做法：
 // 地址与默认协议只在厂商行上，账号不再持有副本。误用时给一句指出下一步的用法错误，
 // 而不是让人对着「参数不存在」自己找原因。
 var retiredAccountAddFlags = map[string]string{
@@ -251,7 +251,7 @@ func cmdAccountAdd(e *Env, args []string) error {
 	}
 	defer a.Close()
 
-	// 地址与默认协议只在厂商行上（见 DESIGN 5.8）：账号只认厂商名，厂商不在表里就没有
+	// 地址与默认协议只在厂商行上：账号只认厂商名，厂商不在表里就没有
 	// 地址可拼、没有协议可推导，先在厂商表里登记它。厂商行在但一条路由都没声明不算错：
 	// 转发时按厂商默认协议推导，推导为空由转发层报错。
 	if _, err := a.st.GetProvider(*provider); err != nil {
@@ -277,7 +277,7 @@ func cmdAccountAdd(e *Env, args []string) error {
 		Models:    splitModels(*models),
 		Priority:  *priority,
 		Enabled:   true,
-		// 价格不在这里：单价属于「供应商 × 模型」，写入口是 model price set（见 DESIGN 5.13）。
+		// 价格不在这里：单价属于「供应商 × 模型」，写入口是 model price set。
 	}
 	if err := a.st.CreateAccount(&acc); err != nil {
 		return fmt.Errorf("新增账号失败: %w", err)
@@ -294,7 +294,7 @@ func cmdAccountAdd(e *Env, args []string) error {
 			"protocol": acc.Protocol,
 			"base_url": acc.BaseURL,
 			// models 是写完再读一次的派生值：这个账号 access='allowed' 的名字集合，
-			// 给了 --models 就是那些名字（先写目录，再标这个账号可用，见 DESIGN 5.13）。
+			// 给了 --models 就是那些名字（先写目录，再标这个账号可用）。
 			"models": acc.Models,
 			"key":    secret.Mask(keyValue),
 		})
@@ -389,7 +389,7 @@ func cmdAccountLs(e *Env, args []string) error {
 		for _, acc := range accounts {
 			c := counts[acc.ID]
 			// protocol 与 base_url 都是厂商行派生的只读值：协议取厂商的有效默认协议
-			// （见 DESIGN 5.8），地址取厂商的 base_url，厂商行不在时都是空串。
+			// 协议取厂商的有效默认协议，地址取厂商的 base_url，厂商行不在时都是空串。
 			out = append(out, map[string]any{
 				"name":           acc.Name,
 				"provider":       acc.Provider,
@@ -402,7 +402,7 @@ func cmdAccountLs(e *Env, args []string) error {
 				"cooldown_until": acc.CooldownUntil,
 				"last_error":     acc.LastError,
 				// 与文本输出的「N 可用 / M 已登记」同一组计数：两个数都来自 account_models，
-				// usable 数 access='allowed' 的行，synced 数全部行（见 DESIGN 5.13）。
+				// usable 数 access='allowed' 的行，synced 数全部行。
 				"models_usable": c.Usable,
 				"models_synced": c.Total,
 				// 默认协议在前，其余是探活发现到的、与默认不同的协议。
@@ -434,7 +434,7 @@ func cmdAccountLs(e *Env, args []string) error {
 }
 
 // modelCount 是一个账号在 account_models 里的汇总。
-// Usable 是 access='allowed' 的行数（能不能进候选只看这一列，见 DESIGN 5.13），
+// Usable 是 access='allowed' 的行数（能不能进候选只看这一列），
 // Total 是这个账号在 account_models 里的全部行数：同步、手填与探活都会留行。
 // Protocols 是模型行上发现过的协议，升序去重，含与账号默认协议相同的那些。
 type modelCount struct {
@@ -560,7 +560,7 @@ func cmdAccountRm(e *Env, args []string) error {
 // cmdAccountTest 探活一个账号。判定分两步：先 GET 模型列表（地址与凭据头跟 `model sync` 同一套规则），
 // 证明地址通并报出上游模型数；随后一律发一条 max_tokens=1 的请求证明凭据有效——公开的列表接口
 // 对任何 key 都回 200，光凭列表判不出凭据。两段都通过才判正常，状态与退出码按调用那段算。
-// 它只判凭据与连通性，某个模型能不能用由 `model probe` 决定（见 DESIGN 4、5.7）。
+// 它只判凭据与连通性，某个模型能不能用由 `model probe` 决定。
 func cmdAccountTest(e *Env, args []string) error {
 	fs := newFlagSet(e, "account test", "先 GET 模型列表证明地址通，再发一条最小请求证明凭据有效")
 	if err := fs.Parse(args); err != nil {
@@ -730,8 +730,7 @@ func cmdModelLs(e *Env, args []string) error {
 		rowByAccount[r.AccountID] = append(rowByAccount[r.AccountID], r)
 	}
 
-	// 支持的协议集合只在目录里：账号侧没有协议集合的覆盖值，合并只发生在长度与价格上
-	// （见 DESIGN 5.13）。一家厂商的目录读一次就够，按模型名索引。
+	// 支持的协议集合只在目录里：账号侧没有协议集合的覆盖值，合并只发生在长度与价格上。一家厂商的目录读一次就够，按模型名索引。
 	catalogs := map[string]map[string]store.ProviderModel{}
 	catalogOf := func(provider string) (map[string]store.ProviderModel, error) {
 		if cat, ok := catalogs[provider]; ok {
@@ -757,7 +756,7 @@ func cmdModelLs(e *Env, args []string) error {
 			continue
 		}
 		// 元数据与有效协议都问 store.EffectiveModels：长度与价格按「账号覆盖 → 目录」合并，
-		// 协议按账号覆盖 → 目录里的协议集合 → 厂商默认协议定序（见 DESIGN 5.13）。
+		// 协议按账号覆盖 → 目录里的协议集合 → 厂商默认协议定序。
 		// cli 不在这里重算一份合并规则。
 		infos, err := a.st.EffectiveModels(acc.ID)
 		if err != nil {
@@ -780,7 +779,7 @@ func cmdModelLs(e *Env, args []string) error {
 			if !ok {
 				ent = &entry{
 					model: r.Model,
-					// 价格列读合并之后的单价（账号覆盖 → 厂商级标价，见 DESIGN 5.13）：
+					// 价格列读合并之后的单价（账号覆盖 → 厂商级标价）：
 					// 单价不在 accounts 上，账号的 PriceIn 只是历史遗留，不再是这一列的来源。
 					priceIn:       info.PriceIn,
 					priceOut:      info.PriceOut,
@@ -995,7 +994,7 @@ func cmdModelSync(e *Env, args []string) error {
 	failed := 0
 	for _, acc := range accounts {
 		r := row{Account: acc.Name, Provider: acc.Provider}
-		// 抓取走网关、写库走 store 的同步入口（store.ReplaceModels，见 DESIGN 5.13）：
+		// 抓取走网关、写库走 store 的同步入口（store.ReplaceModels）：
 		// 名字进模型目录，这个账号的行标 allowed，已有的可达性与协议发现一律保留。
 		// cli 不拼 SQL，也不自己决定写哪张表。
 		models, err := gs.SyncModelsWithEndpoint(ctx, acc, strings.TrimSpace(*endpoint))
@@ -1078,7 +1077,7 @@ func cmdModelProbe(e *Env, args []string) error {
 	// 跳过的不进 hits，--json 只给被探的模型；空结果是 [] 而不是 null。
 	hits := make([]hit, 0, len(accounts))
 	// reachableByAccount 记每个账号探完之后库里 access='allowed' 的行数：
-	// 选号只看这一列（见 DESIGN 5.13），探活不再另写一份模型清单。
+	// 选号只看这一列，探活不再另写一份模型清单。
 	reachableByAccount := map[string]int{}
 	authFailed := ""
 	syncFailed := 0
@@ -1266,7 +1265,7 @@ func zeroUsableReason(probed, skipped, syncFailed int) string {
 		msg += fmt.Sprintf("；另有 %d 个账号同步失败", syncFailed)
 	}
 	// 零可用不等于「什么都没写」：可达性已经按这一轮的结论落库，进不了候选的是
-	// access 为 forbidden / missing 的那些行（见 DESIGN 5.13）。
+	// access 为 forbidden / missing 的那些行。
 	return msg + "；可达性已记录，access 为 forbidden / missing 的模型不会进候选"
 }
 
@@ -1298,7 +1297,7 @@ func probeCandidates(rows []store.AccountModel, only string) []probeCandidate {
 	return out
 }
 
-// probeAuthFailed 判断这一轮里有没有凭据被拒：口径是上游回 401（见 DESIGN 5.7）。
+// probeAuthFailed 判断这一轮里有没有凭据被拒：口径是上游回 401。
 // 只看 HTTP 状态，不认状态词表——词表由网关给，换成 access 那套也不影响这条判定。
 func probeAuthFailed(results []gateway.ModelProbe) bool {
 	for _, res := range results {

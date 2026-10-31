@@ -13,7 +13,7 @@ import (
 	"lax/internal/translate"
 )
 
-// 这个文件钉住「模型事实在目录、账号只有可达性」之后网关的三条边界（见 DESIGN 5.13）：
+// 这个文件钉住「模型事实在目录、账号只有可达性」之后网关的三条边界：
 //
 //   - 选号只认 `account_models.access='allowed'`，forbidden / missing 的行不进候选；
 //   - 可达性只由探活结论改写，拉清单（SyncModels）本身一个字段都不写；
@@ -94,7 +94,7 @@ func TestSelectSkipsForbiddenAndMissingModels(t *testing.T) {
 // 上游清单里有 m1 与 m2，账号上 m1 已经被探活判成 forbidden、m2 根本没有行，
 // SyncModels 只把名字交回调用方，account_models 一行都不改——同步不能把探活结论翻成 allowed。
 //
-// 目录由 gateway 自己写（`UpsertProviderModels(source='sync')`，带上清单里的元数据，见 DESIGN 5.7），
+// 目录由 gateway 自己写（`UpsertProviderModels(source='sync')`，带上清单里的元数据），
 // 可达性归命令层（`ReplaceModels` 只给没有行的名字插 allowed）。
 func TestSyncModelsLeavesAccessAlone(t *testing.T) {
 	f := newFixture(t)

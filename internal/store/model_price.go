@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// 模型单价的写入口与花费的取值链（DESIGN 5.5、5.13）。
+// 模型单价的写入口与花费的取值链。
 //
 // 价格属于「供应商 × 模型」：同一家上游的同一个模型只该有一份标价，账号只在套餐不同时覆盖，
 // 否则改一次价要改 N 个账号，`usage` 还会给同一件事算出 N 个单价。两个写入口因此分工明确：
@@ -17,7 +17,8 @@ import (
 //   - SetAccountModelPrices 写该账号在这个模型上的覆盖值（account_models）。
 //
 // 清空另走 ClearProviderModelPrices / ClearAccountModelPrices：`model price set` 只写命令行上
-// 给过的那几项，nil 表示「这一项不动」（继承），删除必须显式声明（DESIGN 4）。
+// 给过的那几项，nil 表示「这一项不动」（继承），删除必须显式声明：把空值当成删除时，
+// 一个写错的参数会静默清掉一项已有的价。
 //
 // `accounts` 上曾经有同名四列，是模型事实还没拆出账号时的过渡形态：迁移 0016 把它们搬成
 // account_models 的覆盖值后删掉，取值链因此只剩上面两层。
@@ -38,7 +39,7 @@ var (
 )
 
 // PriceField 是单价的四个字段名，也就是 `model price set/unset` 的字段参数
-// （`in`、`out`、`cache-read`、`cache-write`，见 DESIGN 4）。
+// （`in`、`out`、`cache-read`、`cache-write`）。
 //
 // 字段名与列名的对应只在 store 层有一份：cli 把命令行给的名字原样交过来，
 // 不自己拼列名，也不在别处散落裸字符串。
@@ -159,7 +160,7 @@ func (p ModelPrices) field(f PriceField) *float64 {
 	return nil
 }
 
-// SetProviderModelPrices 写目录里 (厂商, 模型) 这一行的厂商级标价（DESIGN 5.13）。
+// SetProviderModelPrices 写目录里 (厂商, 模型) 这一行的厂商级标价。
 //
 // 行必须已经在目录里，否则报 ErrModelNotInCatalog：价格是模型事实的附属信息，不顺手插一行
 // （理由见那个错误值的说明）。只写传进来的那几项，nil 表示这一项不动，0 是合法值。
@@ -195,7 +196,7 @@ func (s *Store) SetProviderModelPrices(provider, model string, prices ModelPrice
 	})
 }
 
-// SetAccountModelPrices 写该账号在这个模型上的覆盖价（DESIGN 5.13）。account 是账号名。
+// SetAccountModelPrices 写该账号在这个模型上的覆盖价。account 是账号名。
 //
 // 该账号必须有这个模型的可达性行（不论 access 是 allowed、forbidden 还是别的结论），
 // 否则报 ErrAccountModelNotRegistered：覆盖价挂在那一行上，没有结论就说明这个账号与这个模型
@@ -235,7 +236,7 @@ func (s *Store) SetAccountModelPrices(account, model string, prices ModelPrices)
 
 // ClearProviderModelPrices 把目录里这一行的指定价格列置 NULL（= 这一项未知）。
 //
-// 本来为空的字段不报错：清两次与清一次结果相同，幂等（DESIGN 4 的 `model price unset`）。
+// 本来为空的字段不报错：清两次与清一次结果相同，幂等。
 // 行不在目录里时报 ErrModelNotInCatalog：那多半是模型名写错了，静默当成功会让人以为
 // 那一项已经清掉，而实际上整个模型名都是错的。
 func (s *Store) ClearProviderModelPrices(provider, model string, fields []string) error {
@@ -260,7 +261,7 @@ func (s *Store) ClearProviderModelPrices(provider, model string, fields []string
 }
 
 // ClearAccountModelPrices 把该账号在这个模型上的指定覆盖列置 NULL（= 回到厂商级标价，
-// 不是「免费」，见 DESIGN 4 的 `model price unset`）。account 是账号名。
+// 不是「免费」）。account 是账号名。
 //
 // 该账号根本没有这个模型的行时不报错：没有行就没有覆盖值，要清的那几项本来就不存在，
 // 与「本来为空不报错」同一条幂等规则。账号本身不存在时仍报错——那是账号名写错了。
@@ -340,7 +341,7 @@ func accountIDByNameTx(tx *sql.Tx, account string) (int64, error) {
 	return id, err
 }
 
-// 花费公式里单价的取值链（DESIGN 5.5、5.13）。顺序只有这一处：这一行请求的账号 + 这一行的
+// 花费公式里单价的取值链。顺序只有这一处：这一行请求的账号 + 这一行的
 // model_used 在 account_models 里的覆盖值 → provider_models 里 (账号的厂商, model_used) 的
 // 厂商级标价 → 都没有就是 NULL（这一项不计，整组都没价时花费记 null，见 store.Usage）。
 //

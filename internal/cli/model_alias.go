@@ -11,7 +11,7 @@ import (
 
 // model alias 三条子命令只做命令面：参数个数与空值在这里判（退出码 2），
 // 遮蔽真名、成环与超过跳数上限由 store 判并把下一步写在错误里，cli 原样带出（退出码 1）。
-// 解析走 store.ResolveModelAlias 这一处，cli 不自己走链、也不另写一份回退规则（见 DESIGN 5.12）。
+// 解析走 store.ResolveModelAlias 这一处，cli 不自己走链、也不另写一份回退规则。
 
 // modelAliasSubs 是 model alias 一组的子命令清单，组级帮助与错误提示都读它。
 var modelAliasSubs = []groupItem{
@@ -57,7 +57,7 @@ func (r modelAliasRow) toJSON() modelAliasJSON {
 }
 
 // printModelAliasHelp 是 `model alias --help` 的输出：三条用法、一个示例，
-// 以及「只影响请求方向」「请求记录里两个模型名会不同」两段说明（见 DESIGN 5.12）。
+// 以及「只影响请求方向」「请求记录里两个模型名会不同」两段说明。
 // 光列子命令说不清别名改的是什么、不改的是什么，所以不走 printGroupHelp。
 func printModelAliasHelp(w io.Writer) {
 	var b strings.Builder

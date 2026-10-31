@@ -47,7 +47,7 @@ func TestGeminiPathTarget(t *testing.T) {
 			t.Fatalf("GeminiPathTarget(%q) = %q,%v,%v，期望 %q,%v,%v",
 				c.path, model, stream, ok, c.model, c.stream, c.ok)
 		}
-		// PathProtocol 与它差一条：向量化动作也算 gemini 入站（DESIGN 5.15）。
+		// PathProtocol 与它差一条：向量化动作也算 gemini 入站。
 		got, ok := PathProtocol(c.path)
 		embedPath := strings.HasSuffix(c.path, ":embedContent")
 		wantProtocol := c.ok || embedPath
@@ -235,7 +235,7 @@ func TestGeminiCodecEntries(t *testing.T) {
 
 // TestEncodeGeminiRequestDropsOrphanToolResult 钉住工具结果找不到函数名时的处理：
 // gemini 的 functionResponse 只按函数名对回调用。查不到名字就整块丢弃，不拿 tool_use_id
-// 冒充函数名——那会让上游认为请求里有一个没声明过的函数（DESIGN 5.9）。
+// 冒充函数名——那会让上游认为请求里有一个没声明过的函数。
 func TestEncodeGeminiRequestDropsOrphanToolResult(t *testing.T) {
 	raw, err := EncodeGeminiRequest(&Request{
 		Messages: []Message{
@@ -258,7 +258,7 @@ func TestEncodeGeminiRequestDropsOrphanToolResult(t *testing.T) {
 }
 
 // TestEncodeGeminiRequestOmitsNonObjectArgs 钉住工具参数的边界：gemini 的 args 是对象，
-// 非对象的参数整段省略，不让一条参数把整条请求换成 400（DESIGN 5.9 的取舍）。
+// 非对象的参数整段省略，不让一条参数把整条请求换成 400。
 func TestEncodeGeminiRequestOmitsNonObjectArgs(t *testing.T) {
 	raw, err := EncodeGeminiRequest(&Request{
 		Messages: []Message{{
@@ -316,7 +316,7 @@ func TestGeminiUsageScanner(t *testing.T) {
 
 // TestGeminiUsageScannerReadsThoughts 钉住思考 token 的读法：gemini 把它报成
 // usageMetadata.thoughtsTokenCount，totalTokenCount 把它算在里面，入账按这两个数判定
-// 要不要另计一次（DESIGN 5.5）。
+// 要不要另计一次。
 func TestGeminiUsageScannerReadsThoughts(t *testing.T) {
 	scanner, err := NewUsageScanner(ProtocolGemini)
 	if err != nil {
@@ -335,7 +335,7 @@ func TestGeminiUsageScannerReadsThoughts(t *testing.T) {
 }
 
 // TestGeminiStopNoteKeepsUnmappedReason 钉住非正常 finishReason：中间表示只有四种结束原因，
-// SAFETY 一类统一映射成 end_turn，原值放进 StopNote 备查，不编给客户端（DESIGN 5.9）。
+// SAFETY 一类统一映射成 end_turn，原值放进 StopNote 备查，不编给客户端。
 func TestGeminiStopNoteKeepsUnmappedReason(t *testing.T) {
 	resp, err := DecodeGeminiResponse([]byte(`{"candidates":[{"content":{"role":"model",`+
 		`"parts":[{"text":"我不能回答"}]},"finishReason":"SAFETY"}]}`), "gemini-2.5-flash")
@@ -362,7 +362,7 @@ func TestGeminiStopNoteKeepsUnmappedReason(t *testing.T) {
 
 // TestDecodeGeminiRequestAlignsToolCallIDs 钉住入站工具调用的 id 对齐：gemini 只有函数名，
 // 编给 anthropic 与 chat 时工具结果必须引用同一轮 tool_use 的 id，否则上游会拒掉整条请求。
-// 同名函数被调两次时按出现顺序各对一次（DESIGN 5.9）。
+// 同名函数被调两次时按出现顺序各对一次。
 func TestDecodeGeminiRequestAlignsToolCallIDs(t *testing.T) {
 	req, err := DecodeGeminiRequest([]byte(`{"contents":[
 		{"role":"user","parts":[{"text":"北京和上海天气"}]},
@@ -409,7 +409,7 @@ func TestDecodeGeminiRequestAlignsToolCallIDs(t *testing.T) {
 }
 
 // TestDecodeGeminiRequestOrphanToolResultKeepsName 钉住历史里查不到调用的工具结果：退回函数名，
-// 不丢整条结果（DESIGN 5.9）。
+// 不丢整条结果。
 func TestDecodeGeminiRequestOrphanToolResultKeepsName(t *testing.T) {
 	req, err := DecodeGeminiRequest([]byte(`{"contents":[
 		{"role":"user","parts":[{"functionResponse":{"name":"weather","response":{"result":"晴"}}}]}

@@ -439,7 +439,7 @@ func TestChatDecodeResponse(t *testing.T) {
 		},
 		{
 			// 直通路径的非流式响应体走解码器记账，思考 token 与总 token 也要从这四个字段里读出来：
-			// 少读一个，入账时就判不出思考是不是独立的一项（见 DESIGN 5.5）。
+			// 少读一个，入账时就判不出思考是不是独立的一项。
 			name: "思考 token",
 			raw: `{"id":"chatcmpl-9","choices":[{"index":0,
 				"message":{"role":"assistant","content":"想完了"},"finish_reason":"stop"}],
@@ -951,8 +951,7 @@ func TestChatUsageScanner(t *testing.T) {
 }
 
 // TestChatUsageScannerReadsReasoning 钉住思考 token 的读法：chat 把它报在
-// completion_tokens_details.reasoning_tokens 里，与 total_tokens 一起读出来交给入账判定
-// （DESIGN 5.5）。
+// completion_tokens_details.reasoning_tokens 里，与 total_tokens 一起读出来交给入账判定。
 func TestChatUsageScannerReadsReasoning(t *testing.T) {
 	s := &chatUsageScanner{}
 	s.Feed([]byte(`{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":1,"total_tokens":132,
@@ -975,7 +974,7 @@ func TestChatUsageScannerEmpty(t *testing.T) {
 
 // TestEncodeChatRequestDropsThinking 确认请求方向不回填思考内容：chat 的
 // reasoning_content 是上游自己产生的字段，客户端把它回填给推理模型会被以 400 拒掉
-// 整条请求，响应方向照旧搬运（DESIGN 5.4）。
+// 整条请求，响应方向照旧搬运。
 func TestEncodeChatRequestDropsThinking(t *testing.T) {
 	req := &Request{
 		Model: "m1",
@@ -1044,7 +1043,7 @@ func TestDecodeChatReasoningOnlyMessage(t *testing.T) {
 
 // TestChatStreamEncoderDenseToolIndex 确认工具序号按出现顺序从 0 连续编号：
 // 上游 anthropic 有文本块时首个工具是 1，并行工具是 1、2，照搬块号会让按稠密下标
-// 建数组的客户端撞空位（DESIGN 5.4）。
+// 建数组的客户端撞空位。
 func TestChatStreamEncoderDenseToolIndex(t *testing.T) {
 	e := newChatStreamEncoder("m1")
 	e.Start()

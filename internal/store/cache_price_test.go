@@ -13,10 +13,10 @@ import (
 // floatPtr 是价格参数的取值辅助：nil 表示「这一列不动」。
 func floatPtr(v float64) *float64 { return &v }
 
-// TestUncachedInTokensByOutboundProtocol 钉住输入 token 的协议差异（DESIGN 5.5）：
+// TestUncachedInTokensByOutboundProtocol 钉住输入 token 的协议差异：
 // anthropic 的 input_tokens 已排除缓存读写，直接用；chat、responses 与 gemini 的上游
 // 把命中缓存的部分也算在输入里，要减掉 cache_read，减到 0 为止。
-// systemone 是决策协议，只报 input_tokens / output_tokens，没有缓存字段（DESIGN 5.14），
+// systemone 是决策协议，只报 input_tokens / output_tokens，没有缓存字段，
 // 与 anthropic 一样不减。
 func TestUncachedInTokensByOutboundProtocol(t *testing.T) {
 	cases := []struct {
@@ -45,7 +45,7 @@ func TestUncachedInTokensByOutboundProtocol(t *testing.T) {
 	}
 }
 
-// TestUsageCostUsesCachePrices 钉住花费公式（DESIGN 5.5）：
+// TestUsageCostUsesCachePrices 钉住花费公式：
 // 未命中缓存的输入按 price_in、缓存读按 price_cache_read、缓存写按 price_cache_write、
 // 输出按 price_out，四项都除以 1e6。历史行（in_tokens_uncached 还没归一化过）不算在内。
 func TestUsageCostUsesCachePrices(t *testing.T) {
@@ -147,7 +147,7 @@ func TestUsageCostFallsBackToInputPrice(t *testing.T) {
 	}
 }
 
-// TestUsageCostWithoutAnyPrice 钉住「缺价记 null」（DESIGN 5.5）：一个价都没填时花费是 nil（未定价），
+// TestUsageCostWithoutAnyPrice 钉住「缺价记 null」：一个价都没填时花费是 nil（未定价），
 // 而不是 0——0 是「确实不花钱」，两件事混成一个数就看不出该不该去补价。
 func TestUsageCostWithoutAnyPrice(t *testing.T) {
 	st := openTemp(t)
@@ -175,7 +175,7 @@ func TestUsageCostWithoutAnyPrice(t *testing.T) {
 }
 
 // TestAccountRowHasNoPriceColumns 钉住迁移 0016 的结果：账号行上不再有四个价格列，
-// 单价只存在 provider_models 与 account_models 上（DESIGN 5.13）。
+// 单价只存在 provider_models 与 account_models 上。
 func TestAccountRowHasNoPriceColumns(t *testing.T) {
 	st := openTemp(t)
 	// 从空库跑到最新也该是这个形状，不只能升级来的库。

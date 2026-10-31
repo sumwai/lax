@@ -297,7 +297,7 @@ func TestStreamCutInsideMultibyteRuneKeepsValidUTF8(t *testing.T) {
 	if len(recs) != 1 || recs[0].OK || !strings.Contains(recs[0].Error, "上游流式响应中断") {
 		t.Fatalf("请求记录 = %+v，期望一行 ok=0 且写明上游中断", recs)
 	}
-	// 同上：断点前只有正文帧，没有 usage，记账就是 0/0。
+	// 这个断点同样落在 usage 帧之前：已读到的只有正文帧，记账因此是 0/0。
 	if recs[0].InTokens != 0 || recs[0].OutTokens != 0 {
 		t.Fatalf("请求记录的用量 = %d/%d，期望 0/0", recs[0].InTokens, recs[0].OutTokens)
 	}
@@ -350,9 +350,9 @@ func TestStreamDisconnectBeforeFinishFrameKeepsLegalEnding(t *testing.T) {
 }
 
 // TestPassthroughStreamDisconnectKeepsLegalEnding 覆盖同协议直通时上游掉线，三种协议各一条：
-// 已经读到的字节按原样转发，末尾按入站协议补上合法结尾。补结尾是设计要求，不是顺手加的——
-// 上游中断时向客户端发一个错误事件并结束本次请求（DESIGN 5.2 第 6 条），直通与转换两条路径
-// 对断流的处理一致（DESIGN 5.4）：anthropic 补 event: error 加 message_delta（带已知 usage）
+// 已经读到的字节按原样转发，末尾按入站协议补上合法结尾。补结尾是协议要求，不是顺手加的：
+// 上游中断时向客户端发一个错误事件并结束本次请求，直通与转换两条路径
+// 对断流的处理一致：anthropic 补 event: error 加 message_delta（带已知 usage）
 // 与 message_stop，openai-chat 补一帧 data: {"error":…} 加 data: [DONE]，
 // openai-responses 补 event: error 加 response.failed。
 // 收尾帧到齐的完整流不会被追加任何字节，这条由 matrix_stream_test 的逐字节断言钉住。

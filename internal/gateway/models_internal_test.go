@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// TestEndpointProtocolMapping 逐项钉住「上游声明的端点名 → 线协议」那张表（见 DESIGN 5.7）：
+// TestEndpointProtocolMapping 逐项钉住「上游声明的端点名 → 线协议」那张表：
 // 表里四个端点名各一条，加上两个写法（带不带前导斜杠的 generateContent），
 // 其余写法一律不计——未识别的端点名不猜。
 func TestEndpointProtocolMapping(t *testing.T) {

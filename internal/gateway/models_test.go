@@ -482,7 +482,7 @@ func TestProbeModelRecordsFailedRequest(t *testing.T) {
 	})
 }
 
-// anthropic 的探活行要把缓存读与缓存写一起记下：5.5 说这两列由该协议的 scanner 读出。
+// anthropic 的探活行要把缓存读与缓存写一起记下：这两列由该协议的 scanner 读出，别的协议只读缓存读。
 func TestProbeModelRecordsCacheTokens(t *testing.T) {
 	f := newFixture(t)
 

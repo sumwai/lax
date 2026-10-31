@@ -114,7 +114,7 @@ func TestRequestRecordsAndUsage(t *testing.T) {
 	if err := st.CreateAccount(&acc); err != nil {
 		t.Fatalf("新增: %v", err)
 	}
-	// 单价不在账号上：写到这个账号在这个模型上的覆盖值（DESIGN 5.13）。
+	// 单价不在账号上：写到这个账号在这个模型上的覆盖值。
 	if err := st.SetAccountModelPrices("ds1", "m1", store.ModelPrices{
 		In: &priceIn, Out: &priceOut,
 	}); err != nil {
@@ -279,7 +279,7 @@ func TestReplaceModelsFirstInsert(t *testing.T) {
 }
 
 // TestReplaceModelsKeepsProbeState 钉住同步只做加法：清单里没出现的名字不删、不清状态
-// （迁移 0015 之前那种「消失的行删除」随 accounts.models 一起没了，见 DESIGN 5.13）。
+// （迁移 0015 之前那种「消失的行删除」随 accounts.models 一起没了）。
 func TestReplaceModelsKeepsProbeState(t *testing.T) {
 	st := openTemp(t)
 	acc := newAccount(t, st, "ds1", nil)
@@ -599,7 +599,7 @@ func TestMigration0005UpgradesOldDatabase(t *testing.T) {
 		t.Fatalf("读老行: %v", err)
 	}
 	// 老库里的 m1 有一条 usable 的探活行，手填清单里还有 m2：0015 之后前者是 allowed 的可达性行，
-	// 后者补成一行 allowed（迁移 0015，见 DESIGN 5.13）。
+	// 后者补成一行 allowed（迁移 0015）。
 	if len(rows) != 2 || rows[0].Model != "m1" || rows[1].Model != "m2" {
 		t.Fatalf("老库的模型行 = %+v，期望 m1 与 m2", rows)
 	}
@@ -625,7 +625,7 @@ func TestMigration0005UpgradesOldDatabase(t *testing.T) {
 	}
 	// 迁移 0014 把孤儿账号的地址搬成了一行厂商（名字取账号的 provider，地址取账号的 base_url），
 	// 账号的 BaseURL 因此是那条厂商的地址；这家一条路由都没声明，默认协议算不出来，
-	// Protocol 就是空串（见 DESIGN 5.8）。
+	// Protocol 就是空串。
 	if len(acc.Models) != 2 || acc.BaseURL != "http://127.0.0.1:1" || acc.Protocol != "" {
 		t.Fatalf("老账号的派生值不对: %+v", acc)
 	}

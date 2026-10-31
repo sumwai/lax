@@ -34,7 +34,7 @@ func protocolUpstream(t *testing.T, rec *callRecorder) *httptest.Server {
 }
 
 // twoRouteProvider 建一家声明 chat 与 anthropic 两条路由、默认协议由调用方定的厂商。
-// 默认协议只有厂商行上一份（见 DESIGN 5.8），账号行不再存 protocol。
+// 默认协议只有厂商行上一份，账号行不存 protocol。
 func (f *fixture) twoRouteProvider(t *testing.T, name, baseURL, defaultProtocol string) {
 	t.Helper()
 	if err := f.st.CreateProvider(store.Provider{Name: name, BaseURL: baseURL, DefaultProtocol: defaultProtocol},

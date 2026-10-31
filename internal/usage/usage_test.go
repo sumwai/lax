@@ -45,7 +45,7 @@ func TestParseSince(t *testing.T) {
 	}
 }
 
-// TestYuanAdaptivePrecision 钉住金额的三档精度（DESIGN 5.5）：0 两位，小于 0.01 四位，其余两位。
+// TestYuanAdaptivePrecision 钉住金额的三档精度：0 两位，小于 0.01 四位，其余两位。
 // 固定两位会把决策请求的万分之几显示成 0.00，与免费、与缺价都看不出区别。
 func TestYuanAdaptivePrecision(t *testing.T) {
 	cases := []struct {

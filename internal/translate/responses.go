@@ -16,7 +16,8 @@ import (
 
 // responsesRequest 是 POST /v1/responses 的请求体。
 // input 是字符串或 item 数组，tool_choice 是字符串或对象，两者都先留原文再按需解析。
-// reasoning 是请求侧的思考配置参数，只读 effort，其余子字段（summary 等）没有落点（DESIGN 5.4）。
+// reasoning 是请求侧的思考配置参数，只读 effort，其余子字段（summary 等）没有落点：
+// 中间表示里没有描述思考摘要的地方，搬进来也带不到另一条协议上。
 type responsesRequest struct {
 	Model             string              `json:"model"`
 	Instructions      string              `json:"instructions,omitempty"`
@@ -38,7 +39,8 @@ type responsesReasoning struct {
 }
 
 // responsesTool 是请求里的工具定义。第一版只认 function，其余 type 丢弃。
-// Strict 是严格模式开关（参数按 parameters 校验），nil 表示客户端没给（DESIGN 5.4）。
+// Strict 是严格模式开关（参数按 parameters 校验），nil 表示客户端没给，与 false 是两件事；它需要写回上游，
+// 因此搬进中间表示。
 type responsesTool struct {
 	Type        string          `json:"type"`
 	Name        string          `json:"name,omitempty"`
@@ -112,7 +114,8 @@ func (u *responsesUsage) reasoningTokens() int64 {
 }
 
 // responsesUsageToIR 把上游报的用量映射成 IR 用量，含思考 token 与总 token。
-// 思考算不算输出的一项不在这里定，判定在 store.ReasoningExtra（DESIGN 5.5）。
+// 思考算不算输出的一项不在这里定，判定在 store.ReasoningExtra：判定只写一处，
+// 两条路径（转发与探活）才不会折出两个价。
 func responsesUsageToIR(u *responsesUsage) Usage {
 	if u == nil {
 		return Usage{}
@@ -212,7 +215,7 @@ func DecodeResponsesRequest(raw []byte) (*Request, error) {
 		Stream:            in.Stream,
 		ParallelToolCalls: in.ParallelToolCalls,
 	}
-	// 思考配置参数在 reasoning.effort 上（DESIGN 5.4「思考配置参数」）。
+	// 思考配置参数在 reasoning.effort 上，是两个子字段里唯一有落点的。
 	if in.Reasoning != nil {
 		if effort := strings.TrimSpace(in.Reasoning.Effort); effort != "" {
 			req.Thinking = &ThinkingConfig{Enabled: true, Effort: effort}
@@ -422,7 +425,8 @@ func responsesImageURL(raw json.RawMessage) string {
 }
 
 // responsesReasoningText 取 reasoning item 的正文：content 与 summary 里的文本都算，
-// 两处都有时 content 在前、summary 在后，用换行拼起来（DESIGN 5.4）。
+// 两处都有时 content 在前、summary 在后，用换行拼起来：两处都是同一段思考的不同呈现，
+// 丢掉任何一处都会少一截正文。
 func responsesReasoningText(content, summary []responsesContentPart) string {
 	var parts []string
 	for _, group := range [][]responsesContentPart{content, summary} {
@@ -514,7 +518,7 @@ func responsesDecodeToolChoice(raw json.RawMessage) (*ToolChoice, error) {
 		return &ToolChoice{Mode: ToolChoiceNamed, Name: obj.Name}, nil
 	}
 	if obj.Type == ToolChoiceAllowedTools {
-		// 白名单只搬名字（DESIGN 5.4）。一项名字都没有时整条丢弃：这一档说的是「只准调
+		// 白名单只搬名字。一项名字都没有时整条丢弃：这一档说的是「只准调
 		// 这些」，一个名字都没有时改成 auto 或 none 都是替客户端说话（与 anthropic 同一处理）。
 		var refs []struct {
 			Name string `json:"name"`
@@ -557,8 +561,7 @@ func EncodeResponsesRequest(r *Request, model string) ([]byte, error) {
 	}
 
 	// 思考配置参数写在 reasoning.effort 上：档位在这条协议上原生可写，所以档位优先、
-	// 没档位时按预算折；Enabled 为假时整块不写，这条协议没有「不思考」的档位
-	// （DESIGN 5.4「思考配置参数」）。
+	// 没档位时按预算折；Enabled 为假时整块不写，这条协议没有「不思考」的档位。
 	if effort := r.Thinking.openAIEffort(); effort != "" {
 		out.Reasoning = &responsesReasoning{Effort: effort}
 	}
@@ -650,7 +653,7 @@ func responsesEncodeMessage(m Message) ([]any, error) {
 			parts = append(parts, map[string]any{"type": textType, "text": b.Text})
 		case BlockThinking:
 			// 请求方向不回填思考内容：responses 的 input 里的 reasoning item 只属于发出它的
-			// 上游，客户端把它回填进下一轮请求会被上游拒收（DESIGN 5.4）。
+			// 上游，客户端把它回填进下一轮请求会被上游拒收。
 			continue
 		case BlockImage:
 			if b.Image == nil || b.Image.URL == "" {
@@ -727,7 +730,7 @@ func responsesEncodeToolChoice(tc *ToolChoice) (json.RawMessage, error) {
 		}
 		return json.RawMessage(b), nil
 	case ToolChoiceAllowedTools:
-		// 白名单在本协议里有原生形状，名字与 mode 顺着中间表示写出去（DESIGN 5.4）。
+		// 白名单在本协议里有原生形状，名字与 mode 顺着中间表示写出去。
 		// 空白名单整条不写：写一个空的 tools 数组只会让上游拒或当成「什么都不能调」，
 		// 而不写时上游按自己默认的 auto 走。
 		if len(tc.Allowed) == 0 {
@@ -815,7 +818,7 @@ func DecodeResponsesResponse(raw []byte, requestedModel string) (*Response, erro
 	return out, nil
 }
 
-// responsesStopReason 按 DESIGN.md 第 5 节的规则映射结束原因：
+// responsesStopReason 按结束原因的优先级映射：先看 incomplete_details.reason，
 // max_output_tokens 优先，其次有工具调用算 tool_use，其余算 end_turn。
 func responsesStopReason(in responsesResponse, hasToolUse bool) string {
 	if in.IncompleteDetails != nil {
@@ -947,7 +950,7 @@ type responsesStreamDecoder struct {
 	hasTool       bool
 	finished      bool
 	// 按 output 序号记「已经发过哪个增量」：只发 output_item.done 的上游需要在
-	// 那里补 ToolStart / ToolArgs，已经发过的部分不能重复（DESIGN 5.4）。
+	// 那里补 ToolStart / ToolArgs，已经发过的部分不能重复。
 	toolStarted  map[int]bool
 	toolArgsSeen map[int]bool
 }
@@ -1159,11 +1162,11 @@ type responsesStreamEncoder struct {
 	finished bool
 	sentStop bool
 	// reasoningIndex 是思考 item 的 output 序号，reasoning 是已经按增量下发的正文：
-	// 收尾要补 output_item.done 并把 item 回填进 output（DESIGN 5.4）。
+	// 收尾要补 output_item.done 并把 item 回填进 output，否则客户端拿到的 output 少一条。
 	reasoningIndex int
 	reasoning      strings.Builder
 	// textSegments 是按 output 序号攒正文的文本 item：每个文本块一个 message item，
-	// 收尾时给出全文并按序号进 output（DESIGN 5.4）。openText 是当前还开着的那个块，
+	// 收尾时给出全文并按序号进 output。openText 是当前还开着的那个块，
 	// textKey 记它的上游块号：块号变了、或者中间插进了工具与思考 item，就另起一个 item。
 	textSegments []*responsesTextBuffer
 	openText     *responsesTextBuffer
@@ -1174,7 +1177,7 @@ type responsesStreamEncoder struct {
 	textCapped bool
 	toolIndex  map[int]int
 	// toolBuffers 按 output 序号缓存工具 item 的名称、call_id 与已转发的参数：
-	// 收尾要补 function_call_arguments.done 与 output_item.done，并把 output 回填（DESIGN 5.4）。
+	// 收尾要补 function_call_arguments.done 与 output_item.done，并把 output 回填。
 	toolBuffers map[int]*responsesToolBuffer
 	toolOrder   []int
 	// toolOpen 记「有工具块开了还没收」，断流时用来补说明。
@@ -1190,7 +1193,8 @@ type streamItem struct {
 }
 
 // responsesTextCap 是单条流式响应攒的正文总长上限（1MB）。到过之后就停止继续攒：
-// 这是内存上限，不是内容校验；增量照旧下发给客户端，收尾时只是不再给全文（DESIGN 5.4）。
+// 这是内存上限，不是内容校验；增量照旧下发给客户端，收尾时只是不再给全文——
+// 给一份被截成一半的全文比不给更糟，客户端会把截断后的正文当成完整回复。
 const responsesTextCap = 1 << 20
 
 // responsesTextBuffer 是一个正在流式下发的文本 item：正文按增量攒在 text 里，
@@ -1203,7 +1207,7 @@ type responsesTextBuffer struct {
 }
 
 // addedItem 是 output_item.added 里的 item：文本 item 开出来时只有类型、角色与状态，
-// content 是空数组，正文随增量给出（DESIGN 5.4）。
+// content 是空数组，正文随增量给出。
 func (b *responsesTextBuffer) addedItem() map[string]any {
 	return map[string]any{
 		"type":    "message",
@@ -1463,7 +1467,7 @@ func (e *responsesStreamEncoder) outputItems() []any {
 }
 
 // streamItems 按 output 序号列出已经发过增量的 item 及其收尾形状：思考 item、文本 item
-// 与工具 item 都有收尾；正文超过上限攒不全的文本 item 不给收尾，也不进 output（DESIGN 5.4）。
+// 与工具 item 都有收尾；正文超过上限攒不全的文本 item 不给收尾，也不进 output。
 func (e *responsesStreamEncoder) streamItems() []streamItem {
 	var items []streamItem
 	if e.reasoningIndex >= 0 {
@@ -1487,7 +1491,7 @@ func (e *responsesStreamEncoder) streamItems() []streamItem {
 }
 
 // reasoningItem 是思考 item 的收尾形状：正文落在 summary 的 summary_text 里（与非流式
-// 响应同一位置），status 是流式 item 的收尾状态（DESIGN 5.4）。
+// 响应同一位置），status 是流式 item 的收尾状态。
 func (e *responsesStreamEncoder) reasoningItem() map[string]any {
 	return map[string]any{
 		"type":   "reasoning",
@@ -1500,7 +1504,7 @@ func (e *responsesStreamEncoder) reasoningItem() map[string]any {
 }
 
 // textSegment 取当前要攒正文的文本块：上一个块已经关了、或上游块号变了，就新开一个
-// message item，调用方先给它发 response.output_item.added（DESIGN 5.4）。
+// message item，调用方先给它发 response.output_item.added。
 func (e *responsesStreamEncoder) textSegment(upstream int) (*responsesTextBuffer, bool) {
 	if e.openText != nil && e.textKey == upstream {
 		return e.openText, false
