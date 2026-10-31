@@ -1,6 +1,11 @@
 package cli_test
 
 import (
+	"encoding/base64"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,5 +68,51 @@ func TestTranscribeUsageErrors(t *testing.T) {
 				t.Fatalf("stderr 应提到 %q: %s", c.want, stderr)
 			}
 		})
+	}
+}
+
+// TestSpeakJSONWritesOut 钉住 --json 与 --out 同时用时音频仍然落盘：
+// JSON 只是元信息，不能反过来把音频写文件这一步跳过。
+func TestSpeakJSONWritesOut(t *testing.T) {
+	sandbox(t)
+	audio := []byte("RIFF-fake-wav")
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"audio":{"data":"`+
+			base64.StdEncoding.EncodeToString(audio)+`"}}}]}`)
+	}))
+	t.Cleanup(up.Close)
+
+	if code, _, stderr := run(t, "init"); code != 0 {
+		t.Fatalf("init 失败: %s", stderr)
+	}
+	if code, _, stderr := addAccount(t, "mimo1", "mimo-cli", up.URL, "", "--key", "sk-test", "--models", "mimo-v2.5-tts"); code != 0 {
+		t.Fatalf("account add 失败: %s", stderr)
+	}
+	if code, _, stderr := run(t, "model", "capability", "set", "mimo-v2.5-tts", "--provider", "mimo-cli",
+		"--capability", "speech", "--voices", "Mia", "--audio-formats", "mp3,wav",
+		"--dialect", "lax/mimo-chat-speech@1"); code != 0 {
+		t.Fatalf("capability set 失败: %s", stderr)
+	}
+
+	out := filepath.Join(t.TempDir(), "out.wav")
+	code, stdout, stderr := run(t, "speak", "--model", "mimo-v2.5-tts", "--text", "hi", "--voice", "Mia",
+		"--format", "wav", "--out", out, "--json")
+	if code != 0 {
+		t.Fatalf("speak 退出码 = %d，stderr = %s", code, stderr)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("--json 时音频文件没写出来: %v", err)
+	}
+	if string(got) != string(audio) {
+		t.Fatalf("音频 = %q，期望 %q", got, audio)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal([]byte(stdout), &meta); err != nil {
+		t.Fatalf("--json 输出不是 JSON: %v，%s", err, stdout)
+	}
+	if meta["out"] != out {
+		t.Fatalf("--json 的 out = %v，期望 %s", meta["out"], out)
 	}
 }

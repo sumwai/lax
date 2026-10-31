@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"lax/internal/plugin"
 	"lax/internal/store"
 )
 
@@ -19,9 +20,9 @@ import (
 
 const (
 	modelCapabilityAddUsage = "用法：lax model capability add <模型> [--provider 厂商] " +
-		"[--capability <能力>]... [--voices <音色[,音色...]>] [--audio-formats <格式[,格式...]>]"
+		"[--capability <能力>]... [--voices <音色[,音色...]>] [--audio-formats <格式[,格式...]>] [--dialect <方言>]"
 	modelCapabilitySetUsage = "用法：lax model capability set <模型> [--provider 厂商] " +
-		"[--capability <能力>]... [--voices <音色[,音色...]>] [--audio-formats <格式[,格式...]>]"
+		"[--capability <能力>]... [--voices <音色[,音色...]>] [--audio-formats <格式[,格式...]>] [--dialect <方言>]"
 	modelCapabilityUnsetUsage = "用法：lax model capability unset <模型> [--provider 厂商] <字段> [<字段>...]\n" +
 		"可用字段：capability、voices、audio-formats"
 	modelCapabilityLsUsage = "用法：lax model capability ls [<模型>] [--provider 厂商]"
@@ -58,12 +59,14 @@ func cmdModelCapability(e *Env, args []string) error {
 }
 
 // capabilityWriteJSON 是 add 与 set 的 --json 形状：报的是合并之后整行的事实。
+// Dialects 只在本次给了 --dialect 时出现，键是操作名。
 type capabilityWriteJSON struct {
-	Model        string   `json:"model"`
-	Provider     string   `json:"provider"`
-	Capabilities []string `json:"capabilities"`
-	Voices       []string `json:"voices"`
-	AudioFormats []string `json:"audio_formats"`
+	Model        string            `json:"model"`
+	Provider     string            `json:"provider"`
+	Capabilities []string          `json:"capabilities"`
+	Voices       []string          `json:"voices"`
+	AudioFormats []string          `json:"audio_formats"`
+	Dialects     map[string]string `json:"dialects,omitempty"`
 }
 
 func cmdModelCapabilityWrite(e *Env, args []string, additive bool) error {
@@ -81,6 +84,7 @@ func cmdModelCapabilityWrite(e *Env, args []string, additive bool) error {
 	fs.Var(&capabilityFlags, "capability", "能力位：chat | embedding | speech | transcription，可重复或逗号分隔")
 	voices := fs.String("voices", "", "音色名，逗号分隔，例如 mimo_default,Mia,Chloe")
 	formats := fs.String("audio-formats", "", "音频格式，逗号分隔，例如 mp3,wav,pcm16")
+	dialect := fs.String("dialect", "", "把语音操作绑到这条方言，例如 lax/mimo-chat-speech@1")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -101,8 +105,8 @@ func cmdModelCapabilityWrite(e *Env, args []string, additive bool) error {
 	if flagWasSet(fs, "audio-formats") {
 		patch.AudioFormats = splitCSV([]string{*formats})
 	}
-	if patch.Capabilities == nil && patch.Voices == nil && patch.AudioFormats == nil {
-		return usagef("一项都没给：至少给 --capability、--voices 或 --audio-formats 之一\n%s", usageLine)
+	if patch.Capabilities == nil && patch.Voices == nil && patch.AudioFormats == nil && *dialect == "" {
+		return usagef("一项都没给：至少给 --capability、--voices、--audio-formats 或 --dialect 之一\n%s", usageLine)
 	}
 
 	a, err := openApp(e, true)
@@ -126,6 +130,11 @@ func cmdModelCapabilityWrite(e *Env, args []string, additive bool) error {
 		return err
 	}
 
+	bindings, err := bindModelDialect(a.st, prov, model, row.Capabilities, *dialect)
+	if err != nil {
+		return err
+	}
+
 	if e.JSON {
 		return e.printJSON(capabilityWriteJSON{
 			Model:        row.Model,
@@ -133,6 +142,7 @@ func cmdModelCapabilityWrite(e *Env, args []string, additive bool) error {
 			Capabilities: row.Capabilities,
 			Voices:       row.Voices,
 			AudioFormats: row.AudioFormats,
+			Dialects:     bindings,
 		})
 	}
 
@@ -141,8 +151,57 @@ func cmdModelCapabilityWrite(e *Env, args []string, additive bool) error {
 		verb = "已合并"
 	}
 	fmt.Fprintf(e.Stdout, "%s厂商 %s 的 %s 能力声明：%s\n", verb, row.Provider, row.Model, capabilitySummary(row))
+	for _, op := range sortedKeys(bindings) {
+		fmt.Fprintf(e.Stdout, "已把 %s 的 %s 绑到方言 %s\n", row.Model, op, bindings[op])
+	}
 	fmt.Fprintln(e.Stdout, "下一步：lax model capability ls 查看全部声明，或 lax model ls 确认模型已可用")
 	return nil
+}
+
+// capabilityOperations 把能力位翻成它对应的操作：语音两条是方言现在唯一承载的操作。
+func capabilityOperations(capabilities []string) []string {
+	var out []string
+	for _, capability := range capabilities {
+		switch capability {
+		case store.CapabilitySpeech:
+			out = append(out, plugin.OpSpeechSynthesize)
+		case store.CapabilityTranscription:
+			out = append(out, plugin.OpSpeechTranscribe)
+		}
+	}
+	return out
+}
+
+// bindModelDialect 把模型的语音操作绑到给定方言。没给方言时什么也不做。
+func bindModelDialect(st *store.Store, provider, model string, capabilities []string, dialect string) (map[string]string, error) {
+	if dialect == "" {
+		return nil, nil
+	}
+	operations := capabilityOperations(capabilities)
+	if len(operations) == 0 {
+		return nil, usagef("--dialect 要配合 --capability speech 或 --capability transcription：模型 %s 没有声明语音能力，方言绑在语音操作上", model)
+	}
+	bindings := make(map[string]string, len(operations))
+	for _, operation := range operations {
+		if err := st.SetModelOperation(store.ModelOperation{
+			Provider: provider, Model: model, Operation: operation,
+			DialectID: dialect, Source: "manual",
+		}); err != nil {
+			return nil, fmt.Errorf("把 %s 的 %s 绑到方言 %s 失败：%v", model, operation, dialect, err)
+		}
+		bindings[operation] = dialect
+	}
+	return bindings, nil
+}
+
+// sortedKeys 按字典序返回 map 的键，输出与 --json 都靠它稳定。
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // capabilityUnsetJSON 是 unset 的 --json 形状。

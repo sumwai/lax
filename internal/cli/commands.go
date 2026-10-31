@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -24,6 +25,7 @@ var commandTable = map[string]command{
 	"account":    {name: "account", summary: "管理上游账号：add / ls / rm / test / enable / disable", run: cmdAccount},
 	"model":      {name: "model", summary: "模型：ls / show / add / sync / probe / alias / price", run: cmdModel},
 	"provider":   {name: "provider", summary: "厂商与路由：ls / add / set / unset / rm / header", run: cmdProvider},
+	"plugin":     {name: "plugin", summary: "插件：install / ls / show / enable / disable / rm / doctor / reload", run: cmdPlugin},
 	"usage":      {name: "usage", summary: "按账号、模型或日期汇总用量", run: cmdUsage},
 	"log":        {name: "log", summary: "查看请求记录：tail", run: cmdLog},
 	"call":       {name: "call", summary: "手工打一条请求，打印选号过程", run: cmdCall},
@@ -34,7 +36,7 @@ var commandTable = map[string]command{
 	"version":    {name: "version", summary: "打印版本", run: cmdVersion},
 }
 
-var commandOrder = []string{"init", "serve", "account", "model", "provider", "usage", "log", "call", "decide", "speak", "transcribe", "doctor", "version"}
+var commandOrder = []string{"init", "serve", "account", "model", "provider", "plugin", "usage", "log", "call", "decide", "speak", "transcribe", "doctor", "version"}
 
 func cmdInit(e *Env, args []string) error {
 	fs := newFlagSet(e, "init", "初始化配置目录与数据库")
@@ -104,10 +106,28 @@ func cmdServe(e *Env, args []string) error {
 	if *addr != "" {
 		listen = *addr
 	}
+	dataDir := filepath.Dir(a.paths.DB)
+
+	// 插件加载失败只提示一句：一个装坏的插件不该让网关起不来，别的厂商还在用。
+	dialects, notes, err := loadRegistry(a.st, dataDir, e.Stdout)
+	if err != nil {
+		return fmt.Errorf("读插件表失败: %w", err)
+	}
+	for _, note := range notes {
+		fmt.Fprintf(e.Stderr, "警告：%s\n", note)
+	}
+	// 语音能力位是手工声明的，启动时补一次方言绑定：漏绑的模型在语音入站会被挡下来。
+	// 这一步失败只记一行，管理员仍能用 lax model capability 手工绑。
+	if added, err := a.st.BackfillSpeechDialects(time.Now().Unix()); err != nil {
+		fmt.Fprintf(e.Stderr, "警告：回填语音方言绑定失败：%v\n", err)
+	} else if added > 0 && !e.JSON {
+		fmt.Fprintf(e.Stdout, "补齐语音方言绑定 %d 条\n", added)
+	}
 
 	gs, err := gateway.New(gateway.Options{
-		Store: a.st,
-		Key:   a.key,
+		Store:    a.st,
+		Key:      a.key,
+		Dialects: dialects,
 		Logf: func(format string, logArgs ...any) {
 			fmt.Fprintf(e.Stdout, "%s %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, logArgs...))
 		},
@@ -115,6 +135,20 @@ func cmdServe(e *Env, args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// pid 文件写在监听之前，退出时删掉：`plugin reload` 凭它找进程。
+	// 监听失败时这个 defer 也会把它清掉，不会留下指向已退出进程的文件。
+	pidPath := servePidPath(dataDir)
+	if err := writeServePid(pidPath); err != nil {
+		return err
+	}
+	defer func() {
+		// 只删自己写的那一个：同一个地址起第二个 serve 会先覆盖 pid 文件再在监听上失败，
+		// 它退出时不该把第一个 serve 的文件删掉。
+		if pid, err := readServePid(pidPath); err == nil && pid == os.Getpid() {
+			_ = os.Remove(pidPath)
+		}
+	}()
 
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
@@ -147,7 +181,66 @@ func cmdServe(e *Env, args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// SIGHUP 热加载：重建注册表并整表换掉，在途请求手里拿的仍是换表前取到的方言。
+	// 失败只打一行日志、当前注册表一个字不动：一次手滑不该让在跑的服务断掉。
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	go func() {
+		for range hup {
+			reloaded, reloadNotes, err := loadRegistry(a.st, dataDir, e.Stdout)
+			if err != nil {
+				fmt.Fprintf(e.Stderr, "警告：重读插件表失败，继续用当前注册表：%v\n", err)
+				continue
+			}
+			gs.SetDialects(reloaded)
+			for _, note := range reloadNotes {
+				fmt.Fprintf(e.Stderr, "警告：%s\n", note)
+			}
+			auditPluginReload(e, a.st, pluginActorSIGHUP, "")
+		}
+	}()
+
 	return gs.Serve(ctx, ln)
+}
+
+// servePidName 是 serve 的 pid 文件名。它放在数据目录里：`plugin reload` 按同一个
+// 数据目录找它，--config / --db 指到哪就跟到哪，不会发错进程。
+const servePidName = "lax.pid"
+
+func servePidPath(dataDir string) string { return filepath.Join(dataDir, servePidName) }
+
+// writeServePid 写下当前进程号（带换行），权限 0600：同一台机器上的其他用户不该知道
+// 哪条命令能敲一下就让网关换表。
+//
+// os.WriteFile 只在新建时用给定权限，已存在的文件保留旧权限，所以写完再 chmod 一次。
+func writeServePid(path string) error {
+	if err := os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+		return fmt.Errorf("写 pid 文件 %s 失败：%v；检查数据目录的权限", path, err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("把 pid 文件 %s 的权限改成 0600 失败：%v", path, err)
+	}
+	return nil
+}
+
+// readServePid 读 pid 文件。文件不存在或内容不是进程号时都说清楚下一步该做什么：
+// 这两种情况都只能靠人动手，猜一个进程号发信号更糟。
+func readServePid(path string) (int, error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, fmt.Errorf("没有 pid 文件 %s：lax serve 没在跑，先在一个终端里 lax serve（后台跑用 nohup lax serve &）", path)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("读 pid 文件 %s 失败：%v", path, err)
+	}
+	text := strings.TrimSpace(string(raw))
+	pid, err := strconv.Atoi(text)
+	if err != nil || pid <= 0 {
+		return 0, fmt.Errorf("pid 文件 %s 里不是进程号（%q）：删掉它再启动 lax serve", path, text)
+	}
+	return pid, nil
 }
 
 func cmdVersion(e *Env, args []string) error {

@@ -662,10 +662,11 @@ var modelSubs = []groupItem{
 	{"alias", "维护模型别名：客户端写死的模型名指到真实模型名上（set / unset / ls）"},
 	{"price", "模型单价：目录里的厂商级标价与某账号的覆盖价（set / unset / ls）"},
 	{"capability", "模型能力声明：能力位、音色与音频格式（add / set / unset / ls）"},
+	{"dialect", "方言绑定：模型的上游形状由哪条方言描述（ls / set / unset）"},
 }
 
 // modelSubCommands 是「可用子命令」那条错误文案里的清单，与 modelSubs 同序。
-const modelSubCommands = "ls | show | add | sync | probe | alias | price | capability"
+const modelSubCommands = "ls | show | add | sync | probe | alias | price | capability | dialect"
 
 // cmdModel 是 model 这一组子命令的入口。
 func cmdModel(e *Env, args []string) error {
@@ -693,6 +694,8 @@ func cmdModel(e *Env, args []string) error {
 		return cmdModelPrice(e, args[1:])
 	case "capability":
 		return cmdModelCapability(e, args[1:])
+	case "dialect":
+		return cmdModelDialect(e, args[1:])
 	default:
 		return usagef("未知子命令 %q，可用：%s\n用 lax model --help 查看子命令", args[0], modelSubCommands)
 	}

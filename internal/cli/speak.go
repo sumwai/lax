@@ -88,6 +88,19 @@ func cmdSpeak(e *Env, args []string) error {
 		return fmt.Errorf("读网关响应失败：%v；用 lax log tail 看这一次的记录", err)
 	}
 
+	if *out != "" {
+		if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil && filepath.Dir(*out) != "." {
+			return fmt.Errorf("创建目录 %s 失败：%v", filepath.Dir(*out), err)
+		}
+		if err := os.WriteFile(*out, audio, 0o644); err != nil {
+			return fmt.Errorf("写音频文件 %s 失败：%v", *out, err)
+		}
+		if !e.JSON {
+			fmt.Fprintf(e.Stderr, "已写入 %s（模型 %s，%d 字节，%s）\n",
+				*out, *model, len(audio), dashIfEmpty(resp.Header.Get("Content-Type")))
+		}
+	}
+
 	if e.JSON {
 		return e.printJSON(map[string]any{
 			"model":        *model,
@@ -101,14 +114,6 @@ func cmdSpeak(e *Env, args []string) error {
 	}
 
 	if *out != "" {
-		if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil && filepath.Dir(*out) != "." {
-			return fmt.Errorf("创建目录 %s 失败：%v", filepath.Dir(*out), err)
-		}
-		if err := os.WriteFile(*out, audio, 0o644); err != nil {
-			return fmt.Errorf("写音频文件 %s 失败：%v", *out, err)
-		}
-		fmt.Fprintf(e.Stderr, "已写入 %s（模型 %s，%d 字节，%s）\n",
-			*out, *model, len(audio), dashIfEmpty(resp.Header.Get("Content-Type")))
 		return nil
 	}
 
