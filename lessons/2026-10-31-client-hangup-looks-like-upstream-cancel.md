@@ -3,8 +3,8 @@
 Found: 2026-10-31, from a codex 0.166 session against a chat upstream: the client worked, but
 `lax log tail` showed rows alternating between clean successes and
 `上游流式响应中断: context canceled`.
-Fix: `fix(gateway)` that treats a cancelled request context as a client hang-up and records it
-against whether the terminal event had already been sent.
+Fix: `d77792e`, which treats a cancelled request context as a client hang-up and records it against
+whether the terminal event had already been sent.
 
 ## Symptom
 
