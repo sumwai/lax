@@ -8,7 +8,7 @@ import (
 
 	"lax/internal/store"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/glebarez/go-sqlite"
 )
 
 // geminiProvider 是迁移 0009 种下的厂商行与它的 gemini 路由，逐字段写死。

@@ -18,6 +18,10 @@ const (
 type Config struct {
 	Addr string `json:"addr"`
 	DB   string `json:"db"`
+	// Driver 是数据库后端：sqlite（缺省）、postgres 或 mysql。
+	Driver string `json:"driver,omitempty"`
+	// DSN 非空时用它连库，此时 DB 被忽略。SQLite 后端留空即可，由 store 拼连接串。
+	DSN string `json:"dsn,omitempty"`
 }
 
 // Paths 是一次运行里用到的两个文件位置。
@@ -52,7 +56,7 @@ func Resolve(configOverride, dbOverride string) (Paths, error) {
 
 // Default 返回首次初始化写入的配置。
 func Default(p Paths) Config {
-	return Config{Addr: DefaultAddr, DB: p.DB}
+	return Config{Addr: DefaultAddr, DB: p.DB, Driver: "sqlite"}
 }
 
 // Load 读取配置。字段缺失时补默认值，不视为错误。
@@ -71,6 +75,9 @@ func Load(p Paths) (Config, error) {
 	}
 	if cfg.DB == "" {
 		cfg.DB = p.DB
+	}
+	if cfg.Driver == "" {
+		cfg.Driver = "sqlite"
 	}
 	return cfg, nil
 }

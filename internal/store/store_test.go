@@ -8,7 +8,7 @@ import (
 
 	"lax/internal/store"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/glebarez/go-sqlite"
 )
 
 func openTemp(t *testing.T) *store.Store {
@@ -633,7 +633,7 @@ func TestMigration0005UpgradesOldDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("迁移没给孤儿账号补建厂商: %v", err)
 	}
-	if p.BaseURL != "http://127.0.0.1:1" || p.DefaultProtocol != "openai-chat" || p.Note != "由迁移 0014 从账号地址补建" {
+	if p.BaseURL != "http://127.0.0.1:1" || p.DefaultProtocol != "openai-chat" || p.Note != "由旧库搬迁从账号地址补建" {
 		t.Fatalf("补建的厂商行不对: %+v", p)
 	}
 

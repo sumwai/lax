@@ -7,7 +7,7 @@ import (
 
 	"lax/internal/store"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/glebarez/go-sqlite"
 )
 
 // floatPtr 是价格参数的取值辅助：nil 表示「这一列不动」。

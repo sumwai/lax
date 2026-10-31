@@ -8,7 +8,7 @@
 
 与同类产品的差别：
 
-- 不是多租户服务。没有用户、充值、额度与网页后台。一个进程、一个 SQLite 文件、一份配置。
+- 不是多租户服务。没有用户、充值、额度与网页后台。一个进程、一份配置、一个数据库（缺省是 SQLite 单文件）。
 - 不是图形应用。所有操作都是子命令，输出能用 `--json` 解析，方便写脚本。
 - 服务端只在回环地址上监听，默认不对外开端口。
 
@@ -21,7 +21,7 @@
 | 客户端配置改写 | 不做 | 程序只管网关与账号，各客户端里把 base URL 与 key 填成本机地址即可；改写别人家的配置文件不属于这里的职责 |
 | 入站协议 | anthropic、openai-chat、openai-responses 与 gemini 四个入口，按路径区分 | 客户端说什么协议就应当能接什么：Claude Code 说 anthropic，Codex 说 responses，普通 OpenAI SDK 说 chat，直接用 Google SDK 的客户端说 gemini 原生的 `generateContent`。只做一个入口等于把其余客户端挡在门外 |
 | 出站协议 | anthropic、openai-chat、openai-responses 三条加上 gemini，归属在模型上（见 5.7） | 账号那头的协议不由账号名决定：同一家的 `claude-*` 与其余模型走不同路径。gemini 另有一套路径与凭据头，单独算一条协议比在 openai 兼容层里塞特例清楚（见 5.9） |
-| 存储 | SQLite 单文件 | 不装数据库服务，事务与查询都够用 |
+| 存储 | SQLite 单文件，可选 PostgreSQL 与 MySQL | 缺省不装数据库服务，事务与查询都够用；需要多进程共享同一份状态时换外部库（见第 6 节） |
 | 界面 | 纯命令行 | 用量由 `usage` 与 `log` 子命令查看 |
 | 计费 | 不做 | 没有第三方付款方，只记录 token 与估算花费 |
 
@@ -187,11 +187,20 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 
 | 路径 | 内容 |
 | --- | --- |
-| `$XDG_CONFIG_HOME/lax/config.json` | 监听地址、数据库路径，权限 0600 |
-| `$XDG_DATA_HOME/lax/lax.db` | 账号、请求记录 |
+| `$XDG_CONFIG_HOME/lax/config.json` | 监听地址、数据库路径、后端与连接串，权限 0600 |
+| `$XDG_DATA_HOME/lax/lax.db` | 账号、请求记录（只用 SQLite 后端时） |
 | `$XDG_DATA_HOME/lax/secret.key` | 加密账号凭据的对称密钥，权限 0600 |
 
-配置只有两项，其余状态都在数据库里。改状态一律走子命令，不手改库。
+配置有四项：
+
+| 字段 | 缺省 | 说明 |
+| --- | --- | --- |
+| `addr` | `127.0.0.1:4567` | 监听地址，只绑回环 |
+| `db` | `$XDG_DATA_HOME/lax/lax.db` | SQLite 单文件路径 |
+| `driver` | `sqlite` | `sqlite`、`postgres` 或 `mysql` |
+| `dsn` | 空串 | 非空时用它连库，此时 `db` 被忽略 |
+
+`driver` 不是 `sqlite` 且 `dsn` 为空是用法错误：外部数据库不给连接串连不上。只有 SQLite 后端的 `dsn` 由程序拼（带 `busy_timeout`、`journal_mode=WAL` 与 `foreign_keys`），外部后端原样使用用户给的值。其余状态都在数据库里，改状态一律走子命令，不手改库。
 
 ### 5.2 请求生命周期
 
@@ -853,105 +862,157 @@ TypeSafe 的 System One（Jev）不是对话：输入一个 `state` 加一组带
 
 ## 6 数据模型
 
-```sql
-CREATE TABLE accounts (
-  id             INTEGER PRIMARY KEY,
-  name           TEXT    NOT NULL UNIQUE,
-  provider       TEXT    NOT NULL,           -- 只存名字：地址、默认协议、路由都在 providers 上
-  key_cipher     BLOB    NOT NULL,
-  priority       INTEGER NOT NULL DEFAULT 100,
-  enabled        INTEGER NOT NULL DEFAULT 1,
-  cooldown_until INTEGER,
-  last_error     TEXT,
-  fail_streak    INTEGER NOT NULL DEFAULT 0,
-  created_at     INTEGER NOT NULL
-);
+表结构由 `internal/store/model.go` 的 GORM model 定义，建表与加列由 `AutoMigrate` 完成。没有迁移文件，也没有版本号：`AutoMigrate` 是幂等的 schema diff，表不存在就建，缺列就 `ALTER TABLE ADD COLUMN`，不改列类型、不删列、不删索引。需要删列或改类型时不能依赖它，必须写成一次性搬迁命令。
 
-CREATE TABLE requests (
-  id              INTEGER PRIMARY KEY,
-  ts              INTEGER NOT NULL,
-  inbound         TEXT    NOT NULL,
-  outbound        TEXT    NOT NULL,
-  model_requested TEXT    NOT NULL,
-  model_used      TEXT    NOT NULL,
-  account_id      INTEGER,
-  http_status     INTEGER NOT NULL,
-  ok              INTEGER NOT NULL,
-  in_tokens       INTEGER NOT NULL DEFAULT 0,
-  in_tokens_uncached INTEGER NOT NULL DEFAULT 0,
-  out_tokens      INTEGER NOT NULL DEFAULT 0,
-  cache_read      INTEGER NOT NULL DEFAULT 0,
-  cache_write     INTEGER NOT NULL DEFAULT 0,
-  reasoning_tokens       INTEGER NOT NULL DEFAULT 0,
-  reasoning_tokens_extra INTEGER NOT NULL DEFAULT 0,
-  latency_ms      INTEGER NOT NULL DEFAULT 0,
-  error           TEXT
-);
+支持三种后端，由配置文件的 `driver` 与 `dsn` 决定，缺省是 SQLite 单文件：
 
-CREATE INDEX requests_ts ON requests(ts DESC);
+**当前范围**：连接、建表、加列、旧库搬迁已经与后端无关；查询层仍在改写中，仍按 SQLite 方言写（`?` 占位符、`INSERT OR IGNORE`、`date(ts,'unixepoch')`、布尔当整数相加）。因此 `postgres` 与 `mysql` 现在连得上、建得出表，但查询会在方言差异处报错。查询层全部改成 GORM 链式之后，这两个后端才可用。
 
-CREATE TABLE provider_models (
-  provider        TEXT    NOT NULL,
-  model           TEXT    NOT NULL,
-  source          TEXT    NOT NULL,           -- sync / manual / probe
-  context_window  INTEGER,
-  max_output      INTEGER,
-  protocols       TEXT    NOT NULL DEFAULT '', -- 该模型支持的协议，逗号分隔
-  capabilities    TEXT    NOT NULL DEFAULT '',
-  price_in        REAL,
-  price_out       REAL,
-  price_cache_read  REAL,
-  price_cache_write REAL,
-  updated_at      INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (provider, model)
-);
+| `driver` | 包 | 说明 |
+| --- | --- | --- |
+| `sqlite` | `github.com/glebarez/sqlite` | 纯 Go，不需要 cgo，交叉编译不受影响 |
+| `postgres` | `gorm.io/driver/postgres` | pgx 的 `database/sql` 适配层 |
+| `mysql` | `gorm.io/driver/mysql` | `go-sql-driver/mysql` |
 
-CREATE TABLE account_models (
-  account_id      INTEGER NOT NULL,
-  model           TEXT    NOT NULL,
-  access          TEXT    NOT NULL,           -- allowed / forbidden / missing / error
-  http_status     INTEGER NOT NULL DEFAULT 0,
-  error           TEXT    NOT NULL DEFAULT '',
-  checked_at      INTEGER NOT NULL DEFAULT 0,
-  protocol        TEXT    NOT NULL DEFAULT '', -- 账号级的协议覆盖（探活发现）
-  context_window  INTEGER,                     -- NULL 表示继承目录
-  max_output      INTEGER,
-  price_in        REAL,
-  price_out       REAL,
-  price_cache_read  REAL,
-  price_cache_write REAL,
-  PRIMARY KEY (account_id, model)
-);
+SQLite 后端在连接上设 `SetMaxOpenConns(1)`：单文件只有一个写者，多连接会撞 `database is locked`。另外两个后端不设上限，用驱动默认值。SQLite 的 DSN 由程序拼，另外两个后端的 DSN 由用户给。
 
-CREATE TABLE providers (
-  name             TEXT PRIMARY KEY,
-  base_url         TEXT NOT NULL,           -- 账号兜底的地址，路由写相对路径时靠它拼
-  note             TEXT NOT NULL DEFAULT '',
-  default_protocol TEXT NOT NULL DEFAULT '',
-  models_path      TEXT NOT NULL DEFAULT '' -- 相对路径或整条地址，空串表示不覆盖
-);
+列类型由各 driver 的 `DataTypeOf` 按方言映射，下表只写语义：
 
-CREATE TABLE provider_routes (
-  provider    TEXT NOT NULL,
-  protocol    TEXT NOT NULL,                -- 线协议名，含迁移 0017 补的 openai-embeddings
-  path        TEXT NOT NULL,                -- 相对 base_url 的路径，或整条地址（含 ://），可含 {model} 占位符
-  models_path TEXT NOT NULL DEFAULT '',     -- 同上，空串表示回退到同厂商其它协议
-  PRIMARY KEY (provider, protocol)
-);
+| 语义 | SQLite | PostgreSQL | MySQL |
+| --- | --- | --- | --- |
+| 整数 | `integer` | `bigint` / `integer` | `bigint` / `bigint unsigned` |
+| 自增主键 | `integer PRIMARY KEY AUTOINCREMENT` | `bigserial` | `bigint AUTO_INCREMENT` |
+| 文本 | `text` | `text` | `longtext`；有默认值或主键时 `varchar(191)` |
+| 实数 | `real` | `numeric` | `double` |
+| 二进制 | `blob` | `bytea` | `longblob` |
+| 布尔 | `numeric` | `boolean` | `boolean` |
 
-CREATE TABLE provider_headers (
-  provider TEXT NOT NULL REFERENCES providers(name) ON DELETE CASCADE,  -- 删厂商时它的头一起走
-  protocol TEXT NOT NULL,                   -- 空串表示整个厂商，非空只加给这条协议
-  name     TEXT NOT NULL,                   -- HTTP 头名，落库归一成小写
-  value    TEXT NOT NULL,                   -- 字面量，或 {env:…}、{session}、{model} 占位符（见 5.10）
-  PRIMARY KEY (provider, protocol, name)
-);
-CREATE TABLE model_aliases (
-  alias          TEXT    PRIMARY KEY,
-  target         TEXT    NOT NULL,
-  created_at     INTEGER NOT NULL
-);
-```
+MySQL 的文本列在有默认值或主键时落成 `varchar(191)`：这是 GORM 的 MySQL driver 为绕开「TEXT 不能有默认值」做的选择。本仓库带默认值的文本列（`provider_models.protocols`、`provider_models.capabilities`、`provider_routes.path` 等）都远短于 191 字节；新增带默认值的文本列时要确认长度。
+
+### accounts
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `id` | 整数，自增主键 | |
+| `name` | 文本，唯一 | 账号名 |
+| `provider` | 文本 | 只存名字：地址、默认协议、路由都在 `providers` 上 |
+| `key_cipher` | 二进制 | `secret` 加密后的凭据 |
+| `priority` | 整数，默认 100 | 选号时小的优先 |
+| `enabled` | 布尔，默认 true | 停用的账号不参与选号 |
+| `cooldown_until` | 整数，可空 | Unix 秒，NULL 表示没在冷却 |
+| `last_error` | 文本，可空 | 最近一次失败的错误 |
+| `fail_streak` | 整数，默认 0 | 连续失败次数，用于冷却翻倍（见 5.3） |
+| `created_at` | 整数 | Unix 秒 |
+
+### requests
+
+一行是一次上游尝试（见 5.5）。
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `id` | 整数，自增主键 | |
+| `ts` | 整数 | Unix 秒，带降序索引 `requests_ts` |
+| `inbound` | 文本 | 入站协议名 |
+| `outbound` | 文本 | 出站协议名 |
+| `model_requested` | 文本 | 客户端请求的模型名（别名未解析前） |
+| `model_used` | 文本 | 实际打到上游的模型名 |
+| `account_id` | 整数，可空 | 命中的账号，账号删掉后留 NULL |
+| `http_status` | 整数 | 上游返回的状态码 |
+| `ok` | 布尔 | 这次尝试是否成功 |
+| `in_tokens` | 整数，默认 0 | 上游报告的输入 token 原值 |
+| `in_tokens_uncached` | 整数，默认 0 | 归一化后的输入 token（没命中缓存的那部分），花费按它折输入价 |
+| `out_tokens` | 整数，默认 0 | 输出 token |
+| `cache_read` | 整数，默认 0 | 缓存命中读取的 token |
+| `cache_write` | 整数，默认 0 | 缓存写入的 token |
+| `reasoning_tokens` | 整数，默认 0 | 上游上报的思考 token 原值（anthropic 没有独立字段，恒为 0） |
+| `reasoning_tokens_extra` | 整数，默认 0 | 其中「输出之外的一项」那部分，只给它按输出价再计一次 |
+| `latency_ms` | 整数，默认 0 | 上游调用耗时（毫秒） |
+| `error` | 文本，可空 | 失败原因 |
+
+### provider_models
+
+模型目录，按厂商共享（见 5.13）。
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `provider` | 文本，主键之一 | |
+| `model` | 文本，主键之一 | |
+| `source` | 文本 | `sync` / `manual` / `probe` |
+| `context_window` | 整数，可空 | NULL 表示不知道 |
+| `max_output` | 整数，可空 | NULL 表示不知道 |
+| `protocols` | 文本，默认空串 | 该模型支持的协议，逗号分隔 |
+| `capabilities` | 文本，默认空串 | 能力位，逗号分隔（目前只有 `embedding`） |
+| `price_in` | 实数，可空 | 每百万 token 的输入价 |
+| `price_out` | 实数，可空 | 每百万 token 的输出价 |
+| `price_cache_read` | 实数，可空 | 缓存读单价，NULL 表示按输入价回退 |
+| `price_cache_write` | 实数，可空 | 缓存写单价，同上 |
+| `updated_at` | 整数，默认 0 | 这一行最后一次写入的 Unix 秒 |
+
+### account_models
+
+一个账号在一个模型上的可达性与覆盖值。
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `account_id` | 整数，主键之一 | |
+| `model` | 文本，主键之一 | |
+| `access` | 文本 | `allowed` / `forbidden` / `missing` / `error`（见 5.13） |
+| `http_status` | 整数，默认 0 | 探活时上游返回的状态码 |
+| `error` | 文本，默认空串 | 探活的失败原因 |
+| `checked_at` | 整数，默认 0 | 探活时间的 Unix 秒 |
+| `protocol` | 文本，默认空串 | 账号级的协议覆盖（探活发现），空串表示按目录与厂商默认协议算 |
+| `context_window` | 整数，可空 | NULL 表示继承目录 |
+| `max_output` | 整数，可空 | NULL 表示继承目录 |
+| `price_in` | 实数，可空 | 账号级覆盖值，NULL 表示继承目录 |
+| `price_out` | 实数，可空 | 同上 |
+| `price_cache_read` | 实数，可空 | 同上 |
+| `price_cache_write` | 实数，可空 | 同上 |
+
+### providers
+
+一家上游。行里没有凭据，只有地址与路径。
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `name` | 文本，主键 | 厂商名 |
+| `base_url` | 文本 | 账号兜底的地址，路由写相对路径时靠它拼 |
+| `note` | 文本，默认空串 | 备注 |
+| `default_protocol` | 文本，默认空串 | 空串表示没有显式默认协议，按固定顺序回退（见 5.8） |
+| `models_path` | 文本，默认空串 | 厂商级模型列表覆盖，相对路径或整条地址，空串表示不覆盖 |
+
+### provider_routes
+
+一家厂商的一条线协议落在哪个地址上。
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `provider` | 文本，主键之一 | |
+| `protocol` | 文本，主键之一 | 线协议名，含 `openai-embeddings` |
+| `path` | 文本 | 相对 `base_url` 的路径，或整条地址（含 `://`），可含 `{model}` 占位符 |
+| `models_path` | 文本，默认空串 | 同上，空串表示回退到同厂商其它协议 |
+
+### provider_headers
+
+一行厂商附加请求头声明（见 5.10）。`provider` 外键指向 `providers(name)`，带 `ON DELETE CASCADE`：删厂商行时它的头一起走。
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `provider` | 文本，主键之一 | 外键 → `providers.name` |
+| `protocol` | 文本，主键之一 | 空串表示整个厂商，非空只加给这条协议 |
+| `name` | 文本，主键之一 | HTTP 头名，落库归一成小写 |
+| `value` | 文本 | 字面量，或 `{env:…}`、`{session}`、`{model}` 占位符 |
+
+### model_aliases
+
+别名到真实模型名的映射（见 5.12）。
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `alias` | 文本，主键 | 客户端请求时用的名字 |
+| `target` | 文本 | 真实模型名，或另一个别名 |
+| `created_at` | 整数 | Unix 秒，覆盖改目标时不动 |
+
+种子数据由 `store.seed` 在 `AutoMigrate` 之后写入，写法与 `INSERT OR IGNORE` 等价（冲突就跳过，已存在的行一个字段都不动）：9 家厂商（`0006` 的 8 家加 `google-gemini`）与 14 条路由（`0006` 的 11 条、gemini 的 1 条、`openai` 与 `ollama` 各 1 条向量化路由）。`0006` 与 `0007` 的默认协议按厂商逐行写进种子：`anthropic` 是 `anthropic`，其余七家是 `openai-chat`，`google-gemini` 是 `gemini`。种子只在厂商行不存在时插入，用户自己建过的同名厂商原样保留。
 
 `account_models` 由迁移 `0003` 建立，迁移 `0015` 把它改成上表的形状：`status` 那一列换成了 `access`（取值 `allowed`、`forbidden`、`missing`、`error`，见 5.13），并加上账号侧的覆盖值列。`accounts.fail_streak` 由迁移 `0004` 加入，只用于冷却翻倍，写入口只有 `RecordFailure`（加一）、`ClearFailure`（清零）与 `RotateKey`（换凭据时清零，见 5.6）。删除账号时 `DeleteAccount` 在同一个事务里删掉它的 `account_models` 行：SQLite 的 rowid 会被复用，遗留子行会让新账号继承旧账号的探活状态。目录 `provider_models` 是按厂商共享的，删账号不动它：另一个账号可能还在用同一批模型事实。
 
@@ -959,7 +1020,7 @@ CREATE TABLE model_aliases (
 
 旧的状态词表（`synced`、`usable`、`forbidden`、`notfound`、`auth`、`error`）库里已经不再存，只在 `store` 里留了一层过渡视图：`store.ModelUsable` 一类的常量、`AccountModel.Status` 与写入口 `SetModelStatus` 还在，读出来的 `Status` 由 `access` 与 `checked_at` 反推（`allowed` 且探过是 `usable`、没探过是 `synced`），写进去的旧词表由 `accessFromStatus` 映射回来。`auth` 与新词表没有对应，两个方向都落到 `error`。这层只为尚未改完的 `internal/gateway` 与 `internal/cli` 保留，两边改完就删掉。
 
-`accounts.base_url` 与 `accounts.protocol` 由迁移 `0014` 删掉（见 5.8）：地址、默认协议与路由都只留在厂商行上。迁移先给「`provider` 不在 `providers` 表里」的账号补一行厂商——名字取账号的 `provider`，`base_url` 取该账号的地址（同名账号有多个地址时取最小的那个，结果与行序、与重跑都无关），`note` 写「由迁移 0014 从账号地址补建」，`default_protocol` 取账号的 `protocol` 但只认四条线协议（别的值留空，回到固定顺序回退）；已有厂商一律 `INSERT OR IGNORE` 跳过，账号上的历史协议不会覆盖 `0007` 种好的默认协议。删列用的是 `ALTER TABLE … DROP COLUMN`：本仓库依赖的 `modernc.org/sqlite` 内置 SQLite 3.54.1 支持它（自 3.35 起），因此不走「建新表 + 搬数据 + 重建索引 + 改引用」那一套；两列不在任何索引、外键、视图与触发器里，索引不必重建。迁移之后 `Account.BaseURL` 与 `Account.Protocol` 是只读派生值：读账号的 `ListAccounts`、`GetAccount`、`ListAccountsByProvider` 共用 `queryAccounts`，写入的 `CreateAccount` 不再碰这两列。
+`accounts` 不存地址与协议：`provider` 只留厂商名，地址、默认协议与路由全在 `providers` 与 `provider_routes` 上（见 5.8）。`Account.BaseURL` 与 `Account.Protocol` 是只读派生值：读账号的 `ListAccounts`、`GetAccount`、`ListAccountsByProvider` 共用 `queryAccounts`，写入的 `CreateAccount` 不碰这两列。从旧版数据库搬迁时会为「`provider` 不在 `providers` 表里」的账号补一行厂商：名字取账号的 `provider`，`base_url` 取该账号的历史地址（同名账号有多个地址时取最小的那个，结果与行序、与重跑都无关），`note` 写「由旧库搬迁从账号地址补建」，`default_protocol` 取账号的历史 `protocol` 但只认四条线协议（别的值留空，回到固定顺序回退），已有厂商一律跳过。
 
 `accounts.price_cache_read`、`accounts.price_cache_write` 与 `requests.in_tokens_uncached` 由迁移 `0011` 加入。两列缓存单价可空，空表示没填：估算花费按输入价回退，老账号升上来两列都是 NULL，金额与只有输入输出价时一致。`in_tokens_uncached` 是入账时按出站协议归一化之后的输入 token（纯规则 `store.UncachedInTokens`，见 5.5），`in_tokens` 保持上游原值；历史行没有区分能力，迁移按当时的 `in_tokens` 回填，不写 0——写 0 会让历史花费凭空变成只算输出。花费的公式只有一份，在 `store.Usage` 的 SQL 里：`in_tokens_uncached × price_in + cache_read × COALESCE(price_cache_read, price_in, 0) + cache_write × COALESCE(price_cache_write, price_in, 0) + out_tokens × price_out + reasoning_tokens_extra × price_out`，五项之和再除以 1e6。
 
@@ -969,13 +1030,13 @@ CREATE TABLE model_aliases (
 
 这个列只有一个写入口 `SetAccountModelProtocol`（旧名 `SetModelProtocol` 是兼容包装），由探活发现协议后调用（见 5.7）。`SetAccountModelAccess` 只改可达性与探活那几列，不动 `protocol` 与覆盖值；`ReplaceModels` 也不动它，同步不会覆盖已发现的协议。旧库升上来时整列默认空串，也就是全部由目录与厂商默认协议算。
 
-`providers` 与 `provider_routes` 由迁移 `0006` 建立并种入已知厂商，`providers.default_protocol` 由迁移 `0007` 加入并显式种入升级前的默认协议，`providers.models_path` 由迁移 `0008` 加入（老行一律空串，表示不覆盖），行里没有凭据，只有地址与路径。`providers` 一行只提供 `base_url`、备注、默认协议与模型列表覆盖，协议细节全在 `provider_routes` 的 `(厂商, 协议)` 上；两者之间没有外键，所以删厂商行时必须连带删它的路由行，`DeleteProvider` 在一个事务里一起做（`provider rm --force` 走 `DeleteProviderForce`，同一个事务里还要停用指向它的账号，见 5.8）。`providers` 表为空不算错误：种子行可以被用户删光，此时所有账号回退到后缀猜测。账号行不存地址，`Account.BaseURL` 与 `Account.Protocol` 都是读的时候从厂商行派生出来的只读值（见 5.8），改厂商表立刻影响所有引用它的账号。写入口是 `CreateProvider`（`provider add`，名称已存在时报 `ErrProviderExists`，不隐式更新）与 `SetProvider`（`provider set` 与 `provider unset` 的共同入口：patch 里为 nil 的字段不动，`Routes` 里传空串表示删掉那条路由——`provider unset <名称> <协议>` 就是这么调的；命令面上空值仍是用法错误）：两者都在一个事务里写厂商行与路由，`CreateProvider` 至少要一条路由，`SetProvider` 删到一条不剩时报错，另有一个 `AddProvider`（upsert，允许零路由），它是第二条 upsert 入口：`cli` 不走它，生产代码里也没有其它调用者，现在只有 `store` 自己的用例在用；新建与改仍分别走 `CreateProvider`、`SetProvider`。读路由只有 `LookupProviderRoute` 一个入口，转发、模型同步与探活都经过它。
+`providers` 一行只提供 `base_url`、备注、默认协议与模型列表覆盖，协议细节全在 `provider_routes` 的 `(厂商, 协议)` 上，行里没有凭据，只有地址与路径；两者之间没有外键，所以删厂商行时必须连带删它的路由行，`DeleteProvider` 在一个事务里一起做（`provider rm --force` 走 `DeleteProviderForce`，同一个事务里还要停用指向它的账号，见 5.8）。`providers` 表为空不算错误：种子行可以被用户删光，此时所有账号回退到后缀猜测。账号行不存地址，`Account.BaseURL` 与 `Account.Protocol` 都是读的时候从厂商行派生出来的只读值（见 5.8），改厂商表立刻影响所有引用它的账号。写入口是 `CreateProvider`（`provider add`，名称已存在时报 `ErrProviderExists`，不隐式更新）与 `SetProvider`（`provider set` 与 `provider unset` 的共同入口：patch 里为 nil 的字段不动，`Routes` 里传空串表示删掉那条路由——`provider unset <名称> <协议>` 就是这么调的；命令面上空值仍是用法错误）：两者都在一个事务里写厂商行与路由，`CreateProvider` 至少要一条路由，`SetProvider` 删到一条不剩时报错，另有一个 `AddProvider`（upsert，允许零路由），它是第二条 upsert 入口：`cli` 不走它，生产代码里也没有其它调用者，现在只有 `store` 自己的用例在用；新建与改仍分别走 `CreateProvider`、`SetProvider`。读路由只有 `LookupProviderRoute` 一个入口，转发、模型同步与探活都经过它。
 
 `provider_routes.models_path` 是写入侧的默认值，不是读取侧的唯一来源：`CreateProvider`/`SetProvider` 写一条没有模型列表地址的路由时按 `DeriveModelsPath` 补（只给 openai-chat 补，尾部 `/chat/completions` 换成 `/models`），其它协议留空表示「这条协议没有自己的列表接口」。空串在读取时回退到同厂商其它协议的非空值，纯规则在 `store.ResolveModelsPath`：厂商级覆盖 → 账号协议那条路由 → 协议名排序的第一条非空值，返回路径时一并返回这条路径所属的协议，模型同步按它选凭据头。推导不放在读取侧，因为内置 `anthropic` 厂商只有 anthropic 一条路由，读时推导会让 anthropic 型账号彻底失去模型列表来源。
 
 `providers.default_protocol` **空字符串表示这家没有显式默认协议**：有效默认协议按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 回退到第一条已声明的路由（用户自建的厂商通常不填）。纯规则在 `store.ResolveDefaultProtocol`：显式值必须落在已声明的路由上才用它，指不到时同样按固定顺序回退——历史脏数据因此不会静默交给后缀猜测。读库入口是 `store.EffectiveProviderProtocol(provider)`：厂商不存在返回 `ErrProviderNotFound`，厂商在但一条路由都没有时返回空串与 `ErrProviderNoRoutes`，文案留给调用方。写入侧保证不产生悬空值：`CreateProvider` 的默认协议必须落在这次声明的路由上，`SetProvider` 改完之后必须仍指向一条存在的路由，否则整笔事务拒绝；`SetProvider` 收到空的 `DefaultProtocol` 表示清掉显式值、回到固定顺序，这一条只由 `provider unset <名称> default-protocol` 触发。旧库升上来时 8 家种子厂商由 `0007` 拿到显式默认协议，用户自建的厂商保持空串。
 
-gemini 的两行由迁移 `0009` 种入，逐字段照下表：
+gemini 的两行由种子写入，逐字段照下表：
 
 | 表 | 键 | 值 |
 | --- | --- | --- |
@@ -986,15 +1047,17 @@ gemini 路由的 `models_path` 必须显式给：写入侧的默认值只推导 
 
 `provider_routes.path` 里的 `{model}` 是出站模型名占位符（见 5.9）：规整只合并斜杠，花括号与冒号原样保留，替换发生在网关拼好地址之后。协议取值的白名单只有一份 `store.IsWireProtocol`（四条线协议），厂商路由、默认协议、账号的 `--protocol` 与探活候选都读它。
 
-`model_aliases` 由迁移 `0013` 建立：`alias` 是主键，`target` 是真实模型名（或另一个别名），`created_at` 是 Unix 秒（覆盖改目标时不动它）。写入口只有两处：`SetModelAlias` 是覆盖语义（同一个别名再写一次就是改目标，UPSERT，不报错），校验全部在事务里做完再落库：别名与目标去空白后不能为空、不能含控制字符、别名不等于目标，别名也不能与任何账号可达的真实模型名同名（区分大小写，比的是该账号 `access='allowed'` 的行，也就是迁移 `0015` 之后 `accounts.models` 的等价物，见 5.13），否则报 `ErrModelAliasShadow` 并列出声明了那个名字的账号（最多三个）；`DeleteModelAlias` 删不到时按情况报 `ErrModelAliasNotFound`。读入口也只有两处：`ModelAliases` 按别名升序返回全表（SQLite 的 TEXT 默认二进制序，也就是区分大小写），`ResolveModelAlias` 把入站名字解析成真实名字——它先把全表一次读出来，再在内存里沿链走，不按跳查库，因此不会出现链走到一半表被改掉、前半段用旧目标后半段用新目标；名字不是别名时返回 `("", false, nil)`，成环报 `ErrModelAliasCycle`、超过 8 跳报 `ErrModelAliasTooDeep`，两种错误都把串起来的名字写进文案。别名与真实名字的冲突只在写入时判定，读取不做二次校验（见 5.12）。
+`model_aliases` 一行是一条别名映射：`alias` 是主键，`target` 是真实模型名（或另一个别名），`created_at` 是 Unix 秒（覆盖改目标时不动它）。写入口只有两处：`SetModelAlias` 是覆盖语义（同一个别名再写一次就是改目标，UPSERT，不报错），校验全部在事务里做完再落库：别名与目标去空白后不能为空、不能含控制字符、别名不等于目标，别名也不能与任何账号可达的真实模型名同名（区分大小写，比的是该账号 `access='allowed'` 的行，见 5.13），否则报 `ErrModelAliasShadow` 并列出声明了那个名字的账号（最多三个）；`DeleteModelAlias` 删不到时按情况报 `ErrModelAliasNotFound`。读入口也只有两处：`ModelAliases` 按别名升序返回全表（SQLite 的 TEXT 默认二进制序，也就是区分大小写），`ResolveModelAlias` 把入站名字解析成真实名字——它先把全表一次读出来，再在内存里沿链走，不按跳查库，因此不会出现链走到一半表被改掉、前半段用旧目标后半段用新目标；名字不是别名时返回 `("", false, nil)`，成环报 `ErrModelAliasCycle`、超过 8 跳报 `ErrModelAliasTooDeep`，两种错误都把串起来的名字写进文案。别名与真实名字的冲突只在写入时判定，读取不做二次校验（见 5.12）。
 
-`provider_headers` 由迁移 `0010` 建立（见 5.10），一行是一条 `(厂商, 协议, 头名)` 的附加请求头声明：`protocol` 空串表示整个厂商的每条路由都加，非空表示只加给这条协议。`provider` 外键指向 `providers(name)` 并带 `ON DELETE CASCADE`，`store.Open` 的连接串带 `_pragma=foreign_keys(1)`，所以删厂商行时它的头由 SQLite 一起删掉；`provider_routes` 建于 `0006`、没有外键，才要在 `DeleteProvider` 里手删。写入口只有两处：`SetProviderHeader` 是覆盖语义（同一个 `(厂商, 协议, 头名)` 再写一次就是改值，UPSERT，不报错），`DeleteProviderHeader` 删不到时按情况报 `ErrProviderHeaderNotFound`（厂商在、头不在）或 `ErrProviderNotFound`（厂商不在）。两个写入口都先校验再进事务，并在事务里确认厂商行还在：外键虽然会拦住指向不存在厂商的写入，但报数据库的外键错误说不清下一步该干什么。头名按 HTTP `token` 校验（大小写不敏感，落库归一成小写），值不能是空白串、也不能带 CR/LF/NUL（那样拼进请求头会把一条头拆成两条），`protocol` 只能是空串或 `IsWireProtocol` 认的四种。读有两个入口：`ProviderHeaders` 返回这家厂商的全部声明（按 `protocol`、`name` 升序，厂商级在最前），`EffectiveProviderHeaders(厂商, 协议)` 返回那次请求真正要加的那一份——先铺厂商级，再用这个协议自己的声明按同名覆盖，返回时也是按 `name` 升序。转发侧只读后者，不在调用方拼覆盖规则。附加头不进 `requests`，日志只在没发时记头名与原因，正常发送不记；`ProviderHeader.String`（值截断到前四位）只给 `provider header ls` 与错误文案用。
+`provider_headers`（见 5.10）一行是一条 `(厂商, 协议, 头名)` 的附加请求头声明：`protocol` 空串表示整个厂商的每条路由都加，非空表示只加给这条协议。`provider` 外键指向 `providers(name)` 并带 `ON DELETE CASCADE`：SQLite 的连接串带 `foreign_keys(1)`，PostgreSQL 与 MySQL 的外键约束默认启用，所以删厂商行时它的头由数据库一起删掉；`provider_routes` 没有外键，才要在 `DeleteProvider` 里手删。写入口只有两处：`SetProviderHeader` 是覆盖语义（同一个 `(厂商, 协议, 头名)` 再写一次就是改值，UPSERT，不报错），`DeleteProviderHeader` 删不到时按情况报 `ErrProviderHeaderNotFound`（厂商在、头不在）或 `ErrProviderNotFound`（厂商不在）。两个写入口都先校验再进事务，并在事务里确认厂商行还在：外键虽然会拦住指向不存在厂商的写入，但报数据库的外键错误说不清下一步该干什么。头名按 HTTP `token` 校验（大小写不敏感，落库归一成小写），值不能是空白串、也不能带 CR/LF/NUL（那样拼进请求头会把一条头拆成两条），`protocol` 只能是空串或 `IsWireProtocol` 认的四种。读有两个入口：`ProviderHeaders` 返回这家厂商的全部声明（按 `protocol`、`name` 升序，厂商级在最前），`EffectiveProviderHeaders(厂商, 协议)` 返回那次请求真正要加的那一份——先铺厂商级，再用这个协议自己的声明按同名覆盖，返回时也是按 `name` 升序。转发侧只读后者，不在调用方拼覆盖规则。附加头不进 `requests`，日志只在没发时记头名与原因，正常发送不记；`ProviderHeader.String`（值截断到前四位）只给 `provider header ls` 与错误文案用。
 
 `providers` 的三个写入口（`CreateProvider`、`SetProvider`、`AddProvider`）都在 `store` 里校验 `base_url` 的 scheme 与主机名并规整（只合并路径里的重复斜杠、去尾斜杠，查询串与 `#` 之后的内容不动，`store.NormalizeBaseURL`），`cli` 那层不再是唯一防线。`path` 与 `models_path` 三列同样在写入侧经 `store.NormalizeEndpoint` 解释后落库：相对路径只规整（路径写法不拒绝，`v1/chat/completions` 与 `/v1/chat/completions/` 落成同一个值），整条地址（含 `://`）校验 scheme 与主机名后按整条地址落库，读取侧拼地址时再用同一个入口过一遍，历史库里的不规整写法因此也拼得出正确地址。两列因此可能存整条地址，也可能存相对路径，判定只看有没有 `://`（`store.IsFullAddress`）。
 
 一次尝试的账与它的结论在同一个事务里落库：`RecordAttempt` 先写 `requests` 一行，再按 `AttemptState` 记冷却（`fail_streak` 加一）、清冷却（清零）或停用账号，中途失败整笔回滚。冷却、清零与停用的 SQL 只在 `recordFailureTx`、`clearFailureTx`、`setEnabledTx` 里，`RecordFailure`、`ClearFailure`、`SetEnabled` 与 `RecordAttempt` 都调它们，写入口仍然只有一处。
 
-迁移用 `internal/store/migrations/*.sql`，按文件名前缀解析出的版本号升序执行，`PRAGMA user_version` 记录已执行版本；版本号来自文件名而不是文件在排序结果里的下标，改名或删文件不会让老库的升级整体错位。
+建表与加列只走 `AutoMigrate`，没有版本号。旧版数据库（带 `PRAGMA user_version`、由已退场的 `migrations/*.sql` 建出来的库）在 `store.Open` 里自动搬迁：读出八张表的全部行，按最终语义转换（`status` → `access`、孤儿账号补厂商、`default_protocol` 补齐、`accounts.models` 拆进目录与可达性、账号级价搬进覆盖列、`in_tokens_uncached` 回填），用 `AutoMigrate` 建新库写回，最后把原文件改名为 `.bak`、新文件改名为原路径。不能直接让 `AutoMigrate` 接管旧库：旧 DDL 里的行内注释会让它的列解析出错，实测会重建表并丢列数据（`provider_models.context_window`）。
+
+`migrations/` 目录留在仓库里但**不参与构建**（没有 `go:embed`），只作为搬迁用例的旧库样本：`TestMigrationChainFrom0001ToLatest` 用 `0001_init.sql` 到 `0008_provider_models_path.sql` 建一个真正的老库，再验证搬迁结果。新增或修改表结构不再写迁移文件，改 `model.go` 的 row 定义。
 
 ## 7 里程碑
 
@@ -1054,7 +1117,7 @@ M0 到 M15 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkel
 cmd/lax/                main，只做 os.Exit(cli.Run(...))
 internal/cli/           子命令分发、参数解析、输出格式
 internal/config/        路径解析与配置读写
-internal/store/         SQLite 连接、迁移、账号与请求记录的读写
+internal/store/         数据库连接、建表与加列、账号与请求记录的读写
 internal/secret/        凭据加解密
 internal/account/       账号池、冷却、选号
 internal/gateway/       HTTP 入站处理、上游转发、错误映射（`embeddings.go` 放向量化的路径、最少校验与用量读取）
@@ -1066,7 +1129,7 @@ internal/usage/         用量汇总与花费估算
 
 包之间的依赖：`store` 为协议常量（`translate.ProtocolAnthropic`、`translate.ProtocolChat`、`translate.ProtocolResponses`、`translate.ProtocolGemini`）import `internal/translate`，只取常量，不调用编解码；`gateway`、`cli`、`account` 都经 `store` 与 `translate` 拿协议取值，不各自复制一份字符串。
 
-外部依赖：只有 `modernc.org/sqlite`（纯 Go 实现，不需要 cgo，交叉编译不受影响），其余全部用标准库。命令行解析用 `flag`，不引入第三方 CLI 框架。
+外部依赖：`gorm.io/gorm` 与三个 driver（`github.com/glebarez/sqlite`、`gorm.io/driver/postgres`、`gorm.io/driver/mysql`）。引 ORM 是为了三件事：三后端方言差异（占位符、UPSERT、自增主键、列类型）由它翻译，建表与加列由 `AutoMigrate` 从 model 定义推导，DSN 与连接池按后端分别设。SQLite 选 glebarez 而不是官方的 `gorm.io/driver/sqlite`：后者依赖 `mattn/go-sqlite3`（cgo），交叉编译 `linux/arm64` 需要额外的交叉工具链，`CGO_ENABLED=0` 时还会得到一个能构建但一跑就报 `requires cgo` 的二进制。glebarez 是 modernc 的薄封装（非测试代码 712 行），保持纯 Go。其余全部用标准库，命令行解析用 `flag`，不引入第三方 CLI 框架。
 
 ## 9 非目标
 
@@ -1074,13 +1137,13 @@ internal/usage/         用量汇总与花费估算
 - 网页后台与桌面菜单栏。
 - 逆向接口、把订阅网页版包装成 API。
 - 改写其它客户端的配置文件，不论带不带备份。
-- 跨机部署与集群。
+- 集群编排：不做多副本、主从、分库分表、自动迁移与服务发现。只支持连接一个已存在的外部数据库，部署形态仍是一个进程。
 - 插件运行时（内置 JS 引擎、任意请求改写与执行第三方插件）：已知需要注入的厂商头用 5.10 的声明式附加头表达。
 - systemone 与对话协议之间的转换：决策请求没有消息序列，也产不出文本，5.14 只做同协议直通。
 
 ## 10 需要外部信息才能定的点
 
-- 各家上游的默认 base-url 与各协议的路径不再需要外部信息：迁移 `0006` 把已知厂商种进 `providers` 与 `provider_routes`，以后用 `provider ls|add|set|rm` 维护，新增厂商不必改代码重编译。新厂商的 `path` 要以它的文档为准：它是完整路径，程序只在 `base_url` 去掉末尾斜杠后直接拼接，不做补全；也可以写整条地址（含 `://`），此时直接用它、不再拼 `base_url`，同一厂商的不同协议因此可以落在不同域名上；模型列表路径没给时只给 openai-chat 路由按 `/chat/completions` → `/models` 推导；写法不同的上游用 `provider set --models-path` 给厂商级覆盖，路由级的值只由写入时推导产生，命令面不提供手工写入口。
+- 各家上游的默认 base-url 与各协议的路径不再需要外部信息：种子把已知厂商写进 `providers` 与 `provider_routes`，以后用 `provider ls|add|set|rm` 维护，新增厂商不必改代码重编译。新厂商的 `path` 要以它的文档为准：它是完整路径，程序只在 `base_url` 去掉末尾斜杠后直接拼接，不做补全；也可以写整条地址（含 `://`），此时直接用它、不再拼 `base_url`，同一厂商的不同协议因此可以落在不同域名上；模型列表路径没给时只给 openai-chat 路由按 `/chat/completions` → `/models` 推导；写法不同的上游用 `provider set --models-path` 给厂商级覆盖，路由级的值只由写入时推导产生，命令面不提供手工写入口。
 - 各家模型名清单，以及某家是否兼容 `openai-chat`。
 - gemini 的两处形状要在拿到真实 key 后确认：`functionResponse.response` 我们固定写成 `{"result": <文本>}`（5.9 的取舍），真实上游是否按这个键名理解语义还没实测；`fileData.fileUri` 只接受 Files API 给出的 URI，把普通 http(s) 图片地址写进去很可能被拒。这两条都不影响已覆盖的文本与工具调用映射，改起来只动 `gemini.go`。
 - 各家价格，用于估算花费。缺价格就记 null。

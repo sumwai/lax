@@ -96,7 +96,7 @@ func TestMigration0014MovesOrphanAddressToProvider(t *testing.T) {
 		t.Fatalf("孤儿账号没有补出厂商: %v", err)
 	}
 	if self.BaseURL != "https://a.example.com" || self.DefaultProtocol != "anthropic" ||
-		self.Note != "由迁移 0014 从账号地址补建" {
+		self.Note != "由旧库搬迁从账号地址补建" {
 		t.Fatalf("补出来的 selfco = %+v", self)
 	}
 

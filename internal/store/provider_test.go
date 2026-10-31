@@ -11,7 +11,7 @@ import (
 
 	"lax/internal/store"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/glebarez/go-sqlite"
 )
 
 // seedRoutes 是迁移种入的全部路由，逐行写死。migration 记的是哪一次迁移种下它：
@@ -743,16 +743,29 @@ func latestMigrationVersion(t *testing.T) int {
 	return latest
 }
 
-// assertLatestVersion 确认库的 user_version 已经推到迁移目录里的最大版本。
-// 不写死数字：新增一个迁移不该让每条升级用例都来改一遍，它们要钉的是「升到最新」。
+// assertLatestVersion 确认库已经是最新形状。
+//
+// 迁移链已经不存在（表结构由 AutoMigrate 从 model 定义推导），所以不再验 user_version 等于
+// 目录里的最大编号，而是验两件事：八张表一张不少，且旧版迁移器留下的版本号已经归零。
 func assertLatestVersion(t *testing.T, st *store.Store) {
 	t.Helper()
 	var version int
 	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatalf("读 user_version: %v", err)
 	}
-	if want := latestMigrationVersion(t); version != want {
-		t.Fatalf("user_version = %d，期望 %d（迁移链要走到最新）", version, want)
+	if version != 0 {
+		t.Fatalf("user_version = %d，期望 0（旧版迁移器已被 AutoMigrate 取代）", version)
+	}
+	for _, table := range []string{
+		"accounts", "requests", "providers", "provider_routes",
+		"provider_headers", "provider_models", "account_models", "model_aliases",
+	} {
+		var name string
+		err := st.DB().QueryRow(
+			"SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", table).Scan(&name)
+		if err != nil {
+			t.Fatalf("表 %s 不存在: %v", table, err)
+		}
 	}
 }
 
@@ -801,14 +814,7 @@ func TestMigrationChainFrom0001ToLatest(t *testing.T) {
 	}
 	defer st.Close()
 
-	want := latestMigrationVersion(t)
-	var version int
-	if err := st.DB().QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		t.Fatalf("读 user_version: %v", err)
-	}
-	if version != want {
-		t.Fatalf("user_version = %d，期望 %d（从 0001 一路升到最新）", version, want)
-	}
+	assertLatestVersion(t, st)
 
 	// providers：种子都在，默认协议逐行对上。
 	providers, err := st.ListProviders()

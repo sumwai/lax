@@ -14,7 +14,7 @@ import (
 
 	"lax/internal/store"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/glebarez/go-sqlite"
 )
 
 // newHeaderProvider 建一家只有一条 chat 路由的厂商，附加头的用例都从它开始。

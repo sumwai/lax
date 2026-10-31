@@ -9,7 +9,7 @@ import (
 
 	"lax/internal/store"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/glebarez/go-sqlite"
 )
 
 // TestMigration0008UpgradesOldDatabase 模拟一个停在 0007 的库：升级只给 providers 加一列

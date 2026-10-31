@@ -8,7 +8,7 @@ import (
 
 	"lax/internal/store"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/glebarez/go-sqlite"
 )
 
 // TestReasoningExtra 钉住思考 token 的判定：按上报的数字判，不按协议猜。

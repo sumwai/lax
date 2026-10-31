@@ -1,30 +1,40 @@
-// Package store 负责 SQLite 连接、迁移与账号、请求记录、客户端状态的读写。
+// Package store 负责数据库连接、建表与加列、账号与请求记录的读写。
+//
+// 支持三种后端：SQLite（缺省，单文件）、PostgreSQL 与 MySQL。后端差异由 GORM 的 dialector
+// 负责：占位符、UPSERT 语法、自增主键与列类型都不在调用方出现。表结构的唯一来源是
+// model.go 里的 row 定义，建表与加列走 AutoMigrate，没有迁移文件与版本号。
 package store
 
 import (
 	"database/sql"
-	"embed"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
-	"strconv"
-	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	glebarez "github.com/glebarez/sqlite"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 
 	"lax/internal/translate"
 )
 
-//go:embed migrations/*.sql
-var migrationsFS embed.FS
+// 后端名，与配置文件里的 driver 取值一致。
+const (
+	DriverSQLite   = "sqlite"
+	DriverPostgres = "postgres"
+	DriverMySQL    = "mysql"
+)
 
-// Store 是数据库句柄。写入串行化，连接数固定为 1。
+// Store 是数据库句柄。
+//
+// SQLite 后端只有一个连接：单文件只有一个写者，多连接会撞 database is locked。
+// PostgreSQL 与 MySQL 不设上限，用驱动默认的连接池。
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	gorm *gorm.DB
 }
 
 // Account 是一行账号。
@@ -87,26 +97,124 @@ type RequestRecord struct {
 	Error                string
 }
 
-// Open 打开数据库，按需建目录并执行迁移。
+// Options 是打开数据库的选项。
+//
+// Path 只给 SQLite 用：DSN 为空时由它拼出 file:… 的连接串。外部后端的 DSN 必须显式给。
+type Options struct {
+	Driver string
+	DSN    string
+	Path   string
+}
+
+// Open 按 SQLite 单文件打开数据库，按需建目录并建表。
 func Open(path string) (*Store, error) {
-	if dir := filepath.Dir(path); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
+	return OpenWith(Options{Path: path})
+}
+
+// OpenWith 按指定后端打开数据库，按需搬迁旧库、建表并写种子。
+func OpenWith(o Options) (*Store, error) {
+	driver := o.Driver
+	if driver == "" {
+		driver = DriverSQLite
+	}
+	if driver == DriverSQLite && o.DSN == "" {
+		if err := upgradeIfLegacy(o.Path); err != nil {
 			return nil, err
 		}
 	}
-	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
-	db, err := sql.Open("sqlite", dsn)
+	dialector, err := dialectorFor(driver, o)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
+	gdb, err := gorm.Open(dialector, &gorm.Config{})
+	if err != nil {
+		return nil, fmt.Errorf("连接 %s 数据库: %w", driver, err)
+	}
+	sqlDB, err := gdb.DB()
+	if err != nil {
+		return nil, fmt.Errorf("取 %s 连接池: %w", driver, err)
+	}
+	if driver == DriverSQLite {
+		sqlDB.SetMaxOpenConns(1)
+	}
 
-	s := &Store{db: db}
-	if err := s.migrate(); err != nil {
-		db.Close()
+	s := &Store{db: sqlDB, gorm: gdb}
+	if err := migrate(gdb); err != nil {
+		_ = sqlDB.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// dialectorFor 按后端名给出 GORM 的 dialector。
+func dialectorFor(driver string, o Options) (gorm.Dialector, error) {
+	switch driver {
+	case DriverSQLite:
+		if o.DSN != "" {
+			return glebarez.Open(o.DSN), nil
+		}
+		if o.Path == "" {
+			return nil, errors.New("打开 SQLite 需要文件路径")
+		}
+		if dir := filepath.Dir(o.Path); dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return nil, err
+			}
+		}
+		return glebarez.Open(sqliteDSN(o.Path)), nil
+	case DriverPostgres:
+		if o.DSN == "" {
+			return nil, errors.New("postgres 后端需要在配置里写 dsn：连接串为空")
+		}
+		return postgres.Open(o.DSN), nil
+	case DriverMySQL:
+		if o.DSN == "" {
+			return nil, errors.New("mysql 后端需要在配置里写 dsn：连接串为空")
+		}
+		return mysql.Open(o.DSN), nil
+	}
+	return nil, fmt.Errorf("不支持的数据库后端 %q，可用 %s、%s、%s", driver, DriverSQLite, DriverPostgres, DriverMySQL)
+}
+
+// sqliteDSN 拼 SQLite 的连接串。
+//
+// busy_timeout 让并发写入等锁而不是立刻报 database is locked；WAL 让读不挡写；
+// foreign_keys 打开外键约束（provider_headers 的 ON DELETE CASCADE 靠它）。
+func sqliteDSN(path string) string {
+	return "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+}
+
+// upgradeIfLegacy 在库里还留着旧版版本号（PRAGMA user_version > 0）时先把它搬成新形状。
+// 搬迁失败不碰原库，错误直接抛给调用方。
+func upgradeIfLegacy(path string) error {
+	version, err := legacyVersion(path)
+	if err != nil {
+		return err
+	}
+	if version == 0 {
+		return nil
+	}
+	if _, err := upgradeLegacy(path); err != nil {
+		return fmt.Errorf("搬迁旧版数据库: %w", err)
+	}
+	return nil
+}
+
+// legacyVersion 读出旧版迁移器留下的版本号。文件不存在或读不出来都当 0 处理。
+func legacyVersion(path string) (int, error) {
+	if _, err := os.Stat(path); err != nil {
+		return 0, nil
+	}
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		return 0, fmt.Errorf("探测旧库版本: %w", err)
+	}
+	defer db.Close()
+	var version int
+	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return 0, nil
+	}
+	return version, nil
 }
 
 // Close 关闭数据库。
@@ -114,94 +222,6 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // DB 暴露底层连接，供测试与统计使用。
 func (s *Store) DB() *sql.DB { return s.db }
-
-func (s *Store) migrate() error {
-	var version int
-	if err := s.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		return err
-	}
-
-	names, err := fs.Glob(migrationsFS, "migrations/*.sql")
-	if err != nil {
-		return err
-	}
-
-	files := make([]migrationFile, 0, len(names))
-	for _, name := range names {
-		v, err := migrationVersion(name)
-		if err != nil {
-			return err
-		}
-		files = append(files, migrationFile{version: v, name: name})
-	}
-	sort.Slice(files, func(i, j int) bool {
-		if files[i].version != files[j].version {
-			return files[i].version < files[j].version
-		}
-		return files[i].name < files[j].name
-	})
-
-	for i, f := range files {
-		if i > 0 && f.version == files[i-1].version {
-			return fmt.Errorf("迁移版本 %d 重复：%s 与 %s", f.version, files[i-1].name, f.name)
-		}
-		if f.version <= version {
-			continue
-		}
-		b, err := migrationsFS.ReadFile(f.name)
-		if err != nil {
-			return err
-		}
-		if err := s.execScript(string(b), f.version); err != nil {
-			return fmt.Errorf("%s: %w", f.name, err)
-		}
-	}
-	return nil
-}
-
-// migrationFile 是一个待执行的迁移：版本号从文件名前缀解析，不再用它在下标里的位置。
-// 早先按下标当版本号，改个文件名或删掉一个文件就会让后面的版本整体错位，老库升级时
-// 会被静默跳过——那些迁移的 SQL 一条都不会执行，却已经把 user_version 推到了「最新」。
-type migrationFile struct {
-	version int
-	name    string
-}
-
-// migrationVersion 从 <序号>_<名字>.sql 里取出版本号。
-func migrationVersion(name string) (int, error) {
-	base := strings.TrimSuffix(filepath.Base(name), ".sql")
-	prefix, _, ok := strings.Cut(base, "_")
-	if !ok {
-		return 0, fmt.Errorf("迁移文件名 %q 不是 <序号>_<名字>.sql", name)
-	}
-	v, err := strconv.Atoi(prefix)
-	if err != nil || v <= 0 {
-		return 0, fmt.Errorf("迁移文件名 %q 的序号 %q 不是正整数", name, prefix)
-	}
-	return v, nil
-}
-
-func (s *Store) execScript(script string, version int) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	for _, stmt := range strings.Split(script, ";") {
-		stmt = strings.TrimSpace(stmt)
-		if stmt == "" {
-			continue
-		}
-		if _, err := tx.Exec(stmt); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
 
 // accountSelect 是读账号的唯一列清单：账号自己的列，加上厂商行上的地址。
 // Protocol 不在这里取：它是这家厂商路由算出来的有效默认协议，一条 JOIN 算不出来，

@@ -57,7 +57,12 @@ func cmdInit(e *Env, args []string) error {
 		}
 	}
 
-	st, err := store.Open(paths.DB)
+	// 用配置里的后端建库：--force 之外可能指向一个外部数据库，那一步不在 init 里做。
+	cfg, err := config.Load(paths)
+	if err != nil {
+		return fmt.Errorf("读取配置 %s 失败: %w", paths.Config, err)
+	}
+	st, err := store.OpenWith(store.Options{Driver: cfg.Driver, DSN: cfg.DSN, Path: paths.DB})
 	if err != nil {
 		return fmt.Errorf("创建数据库失败: %w", err)
 	}
@@ -274,8 +279,9 @@ func cmdDoctor(e *Env, args []string) error {
 	// 判断放在打开数据库之后用「账号数为 0」而不是「新库文件不存在」：doctor 自己就会把
 	// 新库建出来，按文件存在与否判，第一次运行之后提示就永久消失了，而用户看到的一直是空账号。
 
-	if cfg, loadErr := config.Load(paths); loadErr != nil {
-		add("配置解析", false, loadErr.Error())
+	cfg, cfgErr := config.Load(paths)
+	if cfgErr != nil {
+		add("配置解析", false, cfgErr.Error())
 	} else {
 		add("配置解析", true, cfg.Addr)
 		if ln, lerr := net.Listen("tcp", cfg.Addr); lerr != nil {
@@ -286,7 +292,7 @@ func cmdDoctor(e *Env, args []string) error {
 		}
 	}
 
-	if st, openErr := store.Open(paths.DB); openErr != nil {
+	if st, openErr := store.OpenWith(store.Options{Driver: cfg.Driver, DSN: cfg.DSN, Path: paths.DB}); openErr != nil {
 		add("数据库", false, openErr.Error())
 	} else {
 		accounts, listErr := st.ListAccounts()

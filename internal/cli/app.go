@@ -38,9 +38,10 @@ func openApp(e *Env, requireInit bool) (*app, error) {
 			return nil, errors.New("数据库不存在，先运行 lax init")
 		}
 	}
-	st, err := store.Open(paths.DB)
+	// Path 用 paths.DB 而不是 cfg.DB：--db 覆盖的是 paths，配置里的 db 字段只在 init 时写入。
+	st, err := store.OpenWith(store.Options{Driver: cfg.Driver, DSN: cfg.DSN, Path: paths.DB})
 	if err != nil {
-		return nil, fmt.Errorf("打开数据库 %s 失败: %w", paths.DB, err)
+		return nil, fmt.Errorf("打开数据库失败: %w", err)
 	}
 	key, err := secret.LoadOrCreateKey(filepath.Join(filepath.Dir(paths.DB), "secret.key"))
 	if err != nil {
