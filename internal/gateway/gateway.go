@@ -544,7 +544,7 @@ func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store
 	}
 
 	if req.Stream {
-		return s.streamSuccess(w, resp, inbound, outbound, req, string(key))
+		return s.streamSuccess(ctx, w, resp, inbound, outbound, req, string(key))
 	}
 	return s.jsonSuccess(w, resp, inbound, outbound, req)
 }
@@ -689,7 +689,7 @@ func (s *Server) jsonSuccess(w http.ResponseWriter, resp *http.Response,
 	}
 }
 
-func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
+func (s *Server) streamSuccess(ctx context.Context, w http.ResponseWriter, resp *http.Response,
 	inbound, outbound string, req *translate.Request, secretValue string) attempt {
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -704,7 +704,7 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 	}
 
 	if inbound == outbound {
-		return s.passthroughStream(w, resp, outbound, flush, secretValue)
+		return s.passthroughStream(ctx, w, resp, outbound, flush, secretValue)
 	}
 
 	dec, err := translate.NewStreamDecoder(outbound)
@@ -733,6 +733,18 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 	// gemini 的 {"error":{…}} 是新增入口，上游把凭据回显在 message 里时不能落库（DESIGN 5.6）。
 	// 四个出站协议的错误增量都走这一个分支，脱敏只在这一处做。
 	var upstreamErr string
+	// finished 记「收尾事件已经写到客户端了」。客户端拿到收尾之后自己断开（codex 收到
+	// response.completed 就关连接）与断流是两回事：这一次请求对客户端已经完成（DESIGN 5.2 第 6 条）。
+	var finished bool
+	// gone 把「客户端不在了」翻译成记账结论：收尾前断开是没送完的请求，收尾后断开不算失败。
+	gone := func() attempt {
+		if finished {
+			return attempt{status: http.StatusOK, wrote: true,
+				inTok: usage.In, outTok: usage.Out, cacheRead: usage.CacheRead,
+				cacheWrite: usage.CacheWrite, reasoning: usage.Reasoning, total: usage.Total}
+		}
+		return attempt{status: http.StatusOK, wrote: true, message: clientGoneMessage, err: errClientGone}
+	}
 	emit := func(deltas []translate.Delta) error {
 		for _, d := range deltas {
 			if d.Usage != nil {
@@ -748,12 +760,15 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 			if err := write(enc.Emit(d)); err != nil {
 				return err
 			}
+			if d.Kind == translate.DeltaStop {
+				finished = true
+			}
 		}
 		return nil
 	}
 
 	if err := write(enc.Start()); err != nil {
-		return attempt{status: http.StatusOK, wrote: true, message: "客户端断开", err: err}
+		return gone()
 	}
 
 	// ended 记「上游把收尾帧发过来了」：收尾帧没到就是断流，判据与直通路径一致
@@ -773,8 +788,16 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 		return emit(deltas)
 	})
 
+	// 客户端自己断开时，上游的读也会跟着醒：Go 把请求上下文的取撤销到上游连接上，
+	// 读错误就是 context canceled。这不是上游的问题（DESIGN 5.2 第 6 条）：收尾已经发出就是
+	// 一次完成的请求，没收尾就是没送完，两种都不写「上游流式响应中断」。
+	clientGone := ctx.Err() != nil || errors.Is(scanErr, context.Canceled)
 	failure := ""
 	switch {
+	case clientGone && !finished:
+		failure = clientGoneMessage
+	case clientGone:
+		// 收尾已写出，客户端随后挂断：上游剩下的只有用量帧与收尾帧，不记失败。
 	case scanErr != nil:
 		failure = "上游流式响应中断: " + scanErr.Error()
 	case !ended && upstreamErr != "":
@@ -782,7 +805,7 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 	case !ended:
 		failure = truncatedMessage
 	}
-	if failure != "" && upstreamErr == "" {
+	if failure != "" && upstreamErr == "" && !clientGone {
 		// 错误增量走编码器，不另写一帧：入站协议是 responses 时它就是 error 加
 		// response.failed，是 anthropic 时是 event: error——形状跟入站协议走，与非 2xx 响应用的是
 		// 同一份映射（DESIGN 5.2 的错误体一节）。
@@ -804,6 +827,10 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 		if scanErr != nil {
 			res.err = scanErr
 		}
+		if clientGone {
+			// 客户端不在了与上游断流不是一回事：记账用的错误也不蹭上游那一条。
+			res.err = errClientGone
+		}
 	}
 	return res
 }
@@ -813,7 +840,7 @@ func (s *Server) streamSuccess(w http.ResponseWriter, resp *http.Response,
 // 上游没发到收尾帧就断开时，已写出的字节一个不动，只在末尾追加该协议的合法结尾
 // （见 passthroughTail）：直通与转换两条路径对断流的处理一致，客户端总能拿到一个
 // 结束了的流，而不是戛然而止的半截字节（DESIGN 5.2 第 6 条、5.4）。
-func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, protocol string,
+func (s *Server) passthroughStream(ctx context.Context, w http.ResponseWriter, resp *http.Response, protocol string,
 	flush func(), secretValue string) attempt {
 	scanner, err := translate.NewUsageScanner(protocol)
 	if err != nil {
@@ -842,11 +869,22 @@ func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, p
 		}
 	}
 
+	// gone 把「写不出去了」翻译成记账结论：收尾帧已经转发就是完成的请求，否则是没送完。
+	gone := func() attempt {
+		if ended {
+			scanned := scanner.Usage()
+			return attempt{status: http.StatusOK, wrote: true,
+				inTok: scanned.In, outTok: scanned.Out, cacheRead: scanned.CacheRead,
+				cacheWrite: scanned.CacheWrite, reasoning: scanned.Reasoning, total: scanned.Total}
+		}
+		return attempt{status: http.StatusOK, wrote: true, message: clientGoneMessage, err: errClientGone}
+	}
+
 	for {
 		line, err := buf.ReadBytes('\n')
 		if len(line) > 0 {
 			if _, werr := w.Write(line); werr != nil {
-				return attempt{status: http.StatusOK, wrote: true, message: "客户端断开", err: werr}
+				return gone()
 			}
 			tail = append(tail, line...)
 			if len(tail) > 4 {
@@ -883,11 +921,18 @@ func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, p
 	res := attempt{status: http.StatusOK, wrote: true, inTok: in, outTok: out,
 		cacheRead: scanned.CacheRead, cacheWrite: scanned.CacheWrite,
 		reasoning: scanned.Reasoning, total: scanned.Total}
-	if readErr != nil {
+	// 客户端断开时上游的读会以 context canceled 醒来，与转换路径同一个判据：
+	// 收尾帧已经转发就是完整的流，没收尾只是没送完，两者都不是上游失败（DESIGN 5.2 第 6 条）。
+	clientGone := ctx.Err() != nil || errors.Is(readErr, context.Canceled)
+	switch {
+	case readErr != nil && clientGone && !ended:
+		res.message = clientGoneMessage
+		res.err = errClientGone
+	case readErr != nil && !clientGone:
 		res.message = "上游流式响应中断: " + readErr.Error()
 		res.err = readErr
 	}
-	if !ended {
+	if !ended && !clientGone {
 		if res.err == nil {
 			// 干净的 EOF 也可能断在半路：收尾帧没到就是断流，与转换路径同一个判据。
 			res.message = truncatedMessage
@@ -903,6 +948,13 @@ func (s *Server) passthroughStream(w http.ResponseWriter, resp *http.Response, p
 
 // errStreamTruncated 表示上游在收尾帧之前就结束了连接（干净的 EOF，读不出别的错）。
 var errStreamTruncated = errors.New("上游流式响应在收尾帧之前结束")
+
+// errClientGone 表示客户端自己关了连接、上游的读跟着被撤销。它不是上游失败：
+// 收尾前断开记失败的请求，收尾后断开直接算完成（DESIGN 5.2 第 6 条）。
+var errClientGone = errors.New("客户端提前断开")
+
+// clientGoneMessage 是客户端提前断开时写进 requests.error 的说明。
+const clientGoneMessage = "客户端提前断开"
 
 // truncatedMessage 是断流记在 requests 里的说明，也是发给客户端的错误帧正文。
 // 直通与转换两条路径用同一句话，客户端看到的与账上记的对得上。

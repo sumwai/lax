@@ -199,6 +199,8 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 4. 解密凭据，按该账号该模型的有效出站协议构造上游请求：入站协议与有效出站协议相同则直通，否则经中间表示转换（见 5.4）。上游路径、凭据头、请求体编码都跟有效出站协议走。上游请求头不从零开始也不照抄入站：先放 `Content-Type` 与流式时的 `Accept`，再用 `setAuth` 按出站协议设凭据头，再透传客户端白名单头（见 5.11），最后叠厂商附加头（5.10）。
 5. 发上游请求，读响应头。上游返回 429、5xx，或一条 HTTP 响应都没拿到（连接建立失败、请求发不出去、响应体没读完），且尚未向客户端写出任何字节时，把该账号打入冷却（档位见 5.3）并换下一个候选。
 6. 已开始向客户端输出后不再换号；上游中断则向客户端发一个错误事件并结束本次请求。直通与转换两条路径在这里行为一致，判据同为「有没有见到上游的收尾帧」：收尾帧没到（读到这里就干净 EOF 也算）就是断流，两条路径都补一个错误帧加该入站协议的合法结尾，并把这一次请求记成失败；收尾帧到齐的完整流不追加任何字节。收尾帧按帧里的 `type` 字段或 SSE 的 `event` 名判定，不按字节子串（见 5.4）。
+
+   客户端自己挂断不算上游失败。Go 把请求上下文的取消透到上游连接上，客户端一关连接，读上游响应体就以 `context canceled` 醒来；不区分的话每次「客户端读够就关连接」都会在账上留一条上游错误。判据是收尾事件有没有发出去：已经发出（转换路径的 `stop` 增量或 `Finish`，直通路径的收尾帧已转发）就记 `ok=1`、`error` 为空；还没发就记 `ok=0`、`error` 写「客户端提前断开」，两种都不补错误帧（客户端不在了，写了也是白写）、也不冷却账号。codex 收到 `response.completed` 就关连接，因此它的大量请求会走到前一条。
 7. 解析响应里的用量字段，写一行请求记录。
 8. 所有候选账号都失败（上游报错、都在冷却、都被停用），返回 503，响应体带最后一次上游错误的摘要；这与第 2 步的 404 不是一回事：404 是清单里没有账号提供这个模型，503 是提供了但这一次全都打不通。
 
@@ -320,7 +322,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 
 两条路径判定断流用的是同一个判据：有没有见到上游的收尾帧。收尾帧按帧里的 `type` 字段或 SSE 的 `event` 名解析判定，不按字节子串——`{"type": "message_stop"}` 这种带空格、或者缩进成多行 `data` 行的合法帧同样是收尾帧。anthropic 认 `message_stop`，openai-chat 认 `[DONE]`，openai-responses 认 `response.completed`、`response.incomplete`、`response.failed`，gemini 认带 `candidates[].finishReason` 的帧（它没有单独的结束事件；只有 `promptFeedback.blockReason` 的帧不算收尾，那是上游拒了提示词）。
 
-收尾帧到齐的完整流不追加任何字节，直通的字节仍与上游逐字节相同。收尾帧没到（包括帧边界上干净 EOF）就是断流，已写出的字节一个不动，只在末尾追加该入站协议的合法结尾：anthropic 补 `event: error` 再补 `message_delta`（带已读到的 usage）与 `message_stop`，openai-chat 补一帧 `data: {"error":…}` 再补 `data: [DONE]`，openai-responses 补 `error` 与 `response.failed`，gemini 补一帧 `data: {"error":…}` 再补一帧带 `finishReason` 与 `usageMetadata` 的候选（它没有单独的结束事件）。转换路径的错误帧走编码器，形状跟着入站协议走：入站是 responses 时终态是 `response.failed`（`status=failed`），不是 `response.completed`——上游出错却告诉客户端「已完成」会与 `requests` 里的 `ok=0` 自相矛盾；正常结束仍发 `response.completed`。这一次请求在两条路径上都记成失败，`error` 写明收尾帧没到或解码出错；上游自己已经发过错误帧时，转换路径不再重复补一条，`error` 写上游的原话。追加之前判断帧边界时两种行尾都认（`\n\n` 与 CRLF 流的 `\r\n\r\n`），已经结束了一帧就不再补空行。
+收尾帧到齐的完整流不追加任何字节，直通的字节仍与上游逐字节相同。收尾帧没到（包括帧边界上干净 EOF）就是断流，已写出的字节一个不动，只在末尾追加该入站协议的合法结尾：anthropic 补 `event: error` 再补 `message_delta`（带已读到的 usage）与 `message_stop`，openai-chat 补一帧 `data: {"error":…}` 再补 `data: [DONE]`，openai-responses 补 `error` 与 `response.failed`，gemini 补一帧 `data: {"error":…}` 再补一帧带 `finishReason` 与 `usageMetadata` 的候选（它没有单独的结束事件）。转换路径的错误帧走编码器，形状跟着入站协议走：入站是 responses 时终态是 `response.failed`（`status=failed`），不是 `response.completed`——上游出错却告诉客户端「已完成」会与 `requests` 里的 `ok=0` 自相矛盾；正常结束仍发 `response.completed`。这一次请求在两条路径上都记成失败，`error` 写明收尾帧没到或解码出错；上游自己已经发过错误帧时，转换路径不再重复补一条，`error` 写上游的原话。客户端自己断开是例外，判据与记账见 5.2 第 6 条：收尾事件已发出时不补任何结尾、不记失败，没收尾时记「客户端提前断开」也不追加字节。追加之前判断帧边界时两种行尾都认（`\n\n` 与 CRLF 流的 `\r\n\r\n`），已经结束了一帧就不再补空行。
 
 两个协议之间的常见映射示例（anthropic 入 → openai-chat 出）。完整规则在编解码器与 `internal/translate` 的用例里，这里只列常看到的几行：
 
