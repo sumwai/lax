@@ -1,0 +1,14 @@
+{
+  "max_tokens": 64,
+  "messages": [
+    {
+      "content": "几点了",
+      "role": "user"
+    },
+    {
+      "content": "12:00",
+      "role": "assistant"
+    }
+  ],
+  "model": "deepseek-flash"
+}

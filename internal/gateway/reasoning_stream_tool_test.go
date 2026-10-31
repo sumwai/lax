@@ -39,7 +39,7 @@ func TestChatReasoningThenToolArgsStreamToAnthropicClient(t *testing.T) {
 	// 事件序列：思考块、工具块各一对 start/stop，收尾只有一条 message_delta 与一条 message_stop。
 	want := []string{
 		"message_start",
-		"content_block_start", "content_block_delta", "content_block_stop",
+		"content_block_start", "content_block_delta", "content_block_delta", "content_block_stop",
 		"content_block_start", "content_block_delta", "content_block_delta", "content_block_stop",
 		"message_delta", "message_stop",
 	}
@@ -52,9 +52,6 @@ func TestChatReasoningThenToolArgsStreamToAnthropicClient(t *testing.T) {
 	}
 	if strings.Contains(got, "event: error") {
 		t.Fatalf("完整流不该出现错误帧:\n%s", tail(got, 200))
-	}
-	if strings.Contains(got, "signature") {
-		t.Fatalf("chat 上游给不出签名，流里不该出现 signature:\n%s", tail(got, 300))
 	}
 
 	// 逐帧检查块的开合：delta 只能落在开着的块上，stop 之后同一个块号不能再收到 delta。
@@ -74,6 +71,7 @@ func TestChatReasoningThenToolArgsStreamToAnthropicClient(t *testing.T) {
 			Delta struct {
 				Type        string `json:"type"`
 				Thinking    string `json:"thinking"`
+				Signature   string `json:"signature"`
 				PartialJSON string `json:"partial_json"`
 			} `json:"delta"`
 		}
@@ -99,8 +97,12 @@ func TestChatReasoningThenToolArgsStreamToAnthropicClient(t *testing.T) {
 				thinking += payload.Delta.Thinking
 			case "input_json_delta":
 				toolJSON += payload.Delta.PartialJSON
+			case "signature_delta":
+				if !strings.HasPrefix(payload.Delta.Signature, "lax-replay:") {
+					t.Fatalf("第 %d 帧的签名 = %q，期望带 lax-replay: 前缀的回执签名", i+1, payload.Delta.Signature)
+				}
 			default:
-				t.Fatalf("第 %d 帧的增量类型 = %q，期望 thinking_delta 或 input_json_delta", i+1, payload.Delta.Type)
+				t.Fatalf("第 %d 帧的增量类型 = %q，期望 thinking_delta、signature_delta 或 input_json_delta", i+1, payload.Delta.Type)
 			}
 		case "content_block_stop":
 			if !open[payload.Index] {

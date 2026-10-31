@@ -1,0 +1,17 @@
+{
+  "from": "anthropic",
+  "to": "openai-chat",
+  "kind": "request",
+  "model": "deepseek-flash",
+  "body": {
+    "model": "deepseek-flash",
+    "max_tokens": 64,
+    "messages": [
+      {"role": "user", "content": "几点了"},
+      {"role": "assistant", "content": [
+        {"type": "thinking", "thinking": "先算 6×7。", "signature": "lax-replay:02nts8fyLxLthRcupwiDIw"},
+        {"type": "text", "text": "12:00"}
+      ]}
+    ]
+  }
+}

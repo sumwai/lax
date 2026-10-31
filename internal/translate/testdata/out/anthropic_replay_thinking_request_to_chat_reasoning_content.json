@@ -1,0 +1,42 @@
+{
+  "max_tokens": 64,
+  "messages": [
+    {
+      "content": "几点了",
+      "role": "user"
+    },
+    {
+      "reasoning_content": "先算 6×7。",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{}",
+            "name": "now"
+          },
+          "id": "call_1",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "12:00",
+      "role": "tool",
+      "tool_call_id": "call_1"
+    }
+  ],
+  "model": "deepseek-flash",
+  "tools": [
+    {
+      "function": {
+        "description": "取当前时间",
+        "name": "now",
+        "parameters": {
+          "properties": {},
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ]
+}

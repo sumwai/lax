@@ -17,3 +17,4 @@ commit in the row so a later reader can tell whether the note still applies.
 | 2026-10-29 | "Input tokens" does not mean the same thing in every protocol | [lessons/2026-10-29-input-token-semantics.md](lessons/2026-10-29-input-token-semantics.md) | fixed in 8700e1c |
 | 2026-10-29 | A dropped column must not be the same change that introduces its replacement | [lessons/2026-10-29-drop-column-sequencing.md](lessons/2026-10-29-drop-column-sequencing.md) | 0014 / 0015 |
 | 2026-10-31 | Clients send `role: "system"` turns mid-conversation, and unknown model names enable them | [lessons/2026-10-31-mid-conversation-system.md](lessons/2026-10-31-mid-conversation-system.md) | fixed in 43eb3a2 |
+| 2026-10-31 | Reasoning upstreams require their own CoT back when the request carries tools | [lessons/2026-10-31-reasoning-replay.md](lessons/2026-10-31-reasoning-replay.md) | fix in progress |

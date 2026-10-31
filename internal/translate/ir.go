@@ -1,8 +1,11 @@
 package translate
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // 线协议名称。入站按路径区分，出站按账号的 protocol 字段区分。
@@ -34,6 +37,21 @@ const (
 	RoleAssistant Role = "assistant"
 	RoleTool      Role = "tool"
 )
+
+// replaySignaturePrefix 标记本网关自己盖的思考签名（DESIGN 5.4）。chat 与 responses 没
+// 有签名这个字段，而 anthropic 客户端只回传带签名的 thinking 块；上游要求把上一轮 CoT
+// 原样回传时（DeepSeek 的 thinking 模式带 tools 就是这样），网关靠这个签名让 CoT 经客户
+// 端往返一圈。签名是正文的子迹：同一段正文得到同一个签名，客户端改过正文就对不上。
+const replaySignaturePrefix = "lax-replay:"
+
+func replaySignature(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return replaySignaturePrefix + base64.RawURLEncoding.EncodeToString(sum[:16])
+}
+
+func isReplaySignature(sig string) bool {
+	return strings.HasPrefix(sig, replaySignaturePrefix)
+}
 
 // BlockKind 是内容块的种类。
 type BlockKind string

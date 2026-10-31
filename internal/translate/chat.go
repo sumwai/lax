@@ -127,7 +127,7 @@ func EncodeChatRequest(r *Request, model string) ([]byte, error) {
 	}
 
 	for i, m := range r.Messages {
-		msgs, err := chatMessagesFor(m)
+		msgs, err := chatMessagesFor(m, len(r.Tools) > 0)
 		if err != nil {
 			return nil, fmt.Errorf("第 %d 条消息: %w", i+1, err)
 		}
@@ -684,7 +684,9 @@ func chatAssistantBlocks(m ChatMessage) ([]Block, error) {
 
 // chatMessagesFor 把一条 IR 消息展开成若干条 chat 消息。
 // user 里的 tool_result 块必须先变成独立的 tool 消息，其后才是同一条消息里的文本与图片。
-func chatMessagesFor(m Message) ([]ChatMessage, error) {
+// keepReasoning 表示这次请求带 tools：只有这时才把本网关回执签名的思考写回
+// reasoning_content，推理模型的 thinking 模式也是在这个条件下要求回传（DESIGN 5.4）。
+func chatMessagesFor(m Message, keepReasoning bool) ([]ChatMessage, error) {
 	switch m.Role {
 	case RoleSystem:
 		text := chatJoinText(m.Blocks)
@@ -745,14 +747,23 @@ func chatMessagesFor(m Message) ([]ChatMessage, error) {
 
 	case RoleAssistant:
 		var text strings.Builder
+		var reasoning strings.Builder
 		var calls []ChatToolCall
 		for i, b := range m.Blocks {
 			switch b.Kind {
 			case BlockText:
 				text.WriteString(b.Text)
 			case BlockThinking:
-				// 请求方向不回填思考内容：chat 的 reasoning_content 是上游自己产生的字段，
-				// 客户端回填它在主流推理模型上会被以 400 拒掉整条请求（DESIGN 5.4）。
+				// 只在带 tools 的请求里回填带本网关回执签名的块：推理模型的 thinking 模式正是
+				// 在这个条件下要求把上一轮 CoT 原样传回，缺了直接 400（DESIGN 5.4）。
+				// 客户端自己带来的 reasoning_content 没有签名，回填它只会在主流推理模型上
+				// 换回一个 400，仍然丢弃。
+				if keepReasoning && b.Thinking != nil && b.Thinking.Text != "" && isReplaySignature(b.Thinking.Signature) {
+					if reasoning.Len() > 0 {
+						reasoning.WriteString("\n")
+					}
+					reasoning.WriteString(b.Thinking.Text)
+				}
 				continue
 			case BlockToolUse:
 				if b.ToolUse == nil {
@@ -781,6 +792,9 @@ func chatMessagesFor(m Message) ([]ChatMessage, error) {
 		msg := ChatMessage{Role: "assistant", ToolCalls: calls}
 		if t := text.String(); t != "" {
 			msg.Content = t
+		}
+		if r := reasoning.String(); r != "" {
+			msg.ReasoningContent = r
 		}
 		return []ChatMessage{msg}, nil
 

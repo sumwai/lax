@@ -4,6 +4,9 @@ Found: 2026-10-29, during the read-only review of `b4d690a` (thinking content ca
 protocols).
 Fix: `8a54abd`, which stopped writing reasoning content back on the request side of both
 `openai-chat` and `openai-responses` encoders.
+Scope: refined by `lessons/2026-10-31-reasoning-replay.md`. The field is required back when the
+request carries `tools` and the upstream cannot recognise the tool-call turn on its own; the
+backfill is limited there to blocks the gateway itself signed.
 
 ## Symptom
 

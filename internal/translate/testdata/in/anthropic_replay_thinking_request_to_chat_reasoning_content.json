@@ -1,0 +1,21 @@
+{
+  "from": "anthropic",
+  "to": "openai-chat",
+  "kind": "request",
+  "model": "deepseek-flash",
+  "body": {
+    "model": "deepseek-flash",
+    "max_tokens": 64,
+    "tools": [
+      {"name": "now", "description": "取当前时间", "input_schema": {"type": "object", "properties": {}}}
+    ],
+    "messages": [
+      {"role": "user", "content": "几点了"},
+      {"role": "assistant", "content": [
+        {"type": "thinking", "thinking": "先算 6×7。", "signature": "lax-replay:02nts8fyLxLthRcupwiDIw"},
+        {"type": "tool_use", "id": "call_1", "name": "now", "input": {}}
+      ]},
+      {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "12:00"}]}
+    ]
+  }
+}

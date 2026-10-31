@@ -256,7 +256,14 @@ func EncodeAnthropicResponse(r *Response) ([]byte, error) {
 			if b.Thinking == nil {
 				continue
 			}
-			if blk, ok := anthropicThinkingBlock(*b.Thinking); ok {
+			// chat 与 responses 的思考没有签名，而 anthropic 客户端只回传带签名的块：
+			// 没有签名时盖一个回执签名，客户端下一轮原样带回时才能把 CoT 还给上游
+			// （DESIGN 5.4）。
+			t := *b.Thinking
+			if t.Redacted == "" && t.Text != "" && t.Signature == "" {
+				t.Signature = replaySignature(t.Text)
+			}
+			if blk, ok := anthropicThinkingBlock(t); ok {
 				wire.Content = append(wire.Content, blk)
 			}
 		case BlockToolUse:
@@ -388,6 +395,11 @@ type anthropicStreamEncoder struct {
 	// closedBlocks 记哪些块号已经发过 content_block_stop：收过 stop 的块不能再收
 	// content_block_delta，需要重开一个新块（DESIGN 5.4）。
 	closedBlocks map[int]bool
+	// openThinking 记当前思考块的正文，openSigned 记它是否已经发过签名增量：
+	// 收尾时没发过签名的块要盖一个回执签名补上去（chat 与 responses 的思考没有签名，
+	// anthropic 客户端只回传带签名的块，DESIGN 5.4）。
+	openThinking strings.Builder
+	openSigned   bool
 	// toolBlocks 是上游块号 → 最近一次开的 anthropic 块号，toolSpecs 记重开时要写的
 	// id 与 name，两个并行工具各自映射到自己的块。
 	toolBlocks map[int]int
@@ -433,6 +445,7 @@ func (e *anthropicStreamEncoder) Emit(d Delta) []SSEEvent {
 		}
 		idx := e.ensureOpen(&events, BlockThinking, ContentBlock{Type: "thinking"})
 		if d.Text != "" {
+			e.openThinking.WriteString(d.Text)
 			events = append(events, e.event("content_block_delta", map[string]any{
 				"type":  "content_block_delta",
 				"index": idx,
@@ -440,6 +453,7 @@ func (e *anthropicStreamEncoder) Emit(d Delta) []SSEEvent {
 			}))
 		}
 		if d.Signature != "" {
+			e.openSigned = true
 			events = append(events, e.event("content_block_delta", map[string]any{
 				"type":  "content_block_delta",
 				"index": idx,
@@ -561,6 +575,8 @@ func (e *anthropicStreamEncoder) startBlock(events *[]SSEEvent, tmpl ContentBloc
 	e.nextIndex++
 	e.openIndex = idx
 	e.openKind = BlockKind(tmpl.Type)
+	e.openThinking.Reset()
+	e.openSigned = false
 	var payload any = tmpl
 	switch tmpl.Type {
 	case "text":
@@ -580,6 +596,19 @@ func (e *anthropicStreamEncoder) startBlock(events *[]SSEEvent, tmpl ContentBloc
 func (e *anthropicStreamEncoder) closeBlock(events *[]SSEEvent) {
 	if e.openIndex < 0 {
 		return
+	}
+	// 思考块收尾前把缺的签名补上：没有签名增量的 thinking 块，客户端不会把它带回下一轮，
+	// 上游要 CoT 时就拿不到了。
+	if e.openKind == BlockThinking && !e.openSigned && e.openThinking.Len() > 0 {
+		*events = append(*events, e.event("content_block_delta", map[string]any{
+			"type":  "content_block_delta",
+			"index": e.openIndex,
+			"delta": map[string]string{
+				"type":      "signature_delta",
+				"signature": replaySignature(e.openThinking.String()),
+			},
+		}))
+		e.openSigned = true
 	}
 	*events = append(*events, e.event("content_block_stop", map[string]any{
 		"type":  "content_block_stop",
@@ -699,8 +728,13 @@ func toAnthropicMessage(m Message) (AnthropicMessage, error) {
 			if b.Thinking == nil {
 				continue
 			}
+			// 带本网关回执签名的块只属于客户端手里的对话：真正的 anthropic 上游只认
+			// 它自己签的块，转发过去只会换回 400（DESIGN 5.4）。
+			if isReplaySignature(b.Thinking.Signature) {
+				continue
+			}
 			// anthropic 是唯一认签名的协议，带签名的思考块回填给它才是它要求的样子；
-			// 没有签名的块由 anthropicThinkingBlock 丢弃（DESIGN 5.4）。
+			// 没有签名的块由 anthropicThinkingBlock 丢弃。
 			if blk, ok := anthropicThinkingBlock(*b.Thinking); ok {
 				blocks = append(blocks, blk)
 			}

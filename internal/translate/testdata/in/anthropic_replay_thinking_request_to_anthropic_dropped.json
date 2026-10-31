@@ -1,0 +1,17 @@
+{
+  "from": "anthropic",
+  "to": "anthropic",
+  "kind": "request",
+  "model": "claude-x",
+  "body": {
+    "model": "claude-x",
+    "max_tokens": 64,
+    "messages": [
+      {"role": "user", "content": "几点了"},
+      {"role": "assistant", "content": [
+        {"type": "thinking", "thinking": "先算 6×7。", "signature": "lax-replay:02nts8fyLxLthRcupwiDIw"},
+        {"type": "text", "text": "12:00"}
+      ]}
+    ]
+  }
+}

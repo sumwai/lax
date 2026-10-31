@@ -72,6 +72,17 @@
   },
   {
     "data": {
+      "delta": {
+        "signature": "lax-replay:lJQi8uDlE5CPldpYj46VWA",
+        "type": "signature_delta"
+      },
+      "index": 1,
+      "type": "content_block_delta"
+    },
+    "event": "content_block_delta"
+  },
+  {
+    "data": {
       "index": 1,
       "type": "content_block_stop"
     },

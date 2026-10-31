@@ -1,0 +1,24 @@
+{
+  "max_tokens": 64,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "几点了",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": [
+        {
+          "text": "12:00",
+          "type": "text"
+        }
+      ],
+      "role": "assistant"
+    }
+  ],
+  "model": "claude-x"
+}

@@ -14,7 +14,8 @@ import (
 // responses 的 reasoning item 两个方向都还在。
 
 // TestChatReasoningStreamToAnthropicClient 覆盖 chat 上游的 reasoning_content 到 anthropic
-// 客户端：思考正文编成 thinking 块，签名一个都没有（上游给不出），流照常收尾、不报错。
+// 客户端：思考正文编成 thinking 块，收尾前补一个网关自己的回执签名（上游给不出签名），
+// 流照常收尾、不报错。
 func TestChatReasoningStreamToAnthropicClient(t *testing.T) {
 	f := newFixture(t)
 	upstream := "" +
@@ -33,7 +34,8 @@ func TestChatReasoningStreamToAnthropicClient(t *testing.T) {
 	}
 
 	want := []string{
-		"message_start", "content_block_start", "content_block_delta", "content_block_stop",
+		"message_start", "content_block_start", "content_block_delta", "content_block_delta",
+		"content_block_stop",
 		"content_block_start", "content_block_delta", "content_block_stop",
 		"message_delta", "message_stop",
 	}
@@ -78,9 +80,27 @@ func TestChatReasoningStreamToAnthropicClient(t *testing.T) {
 	if thinking != "先想一下" {
 		t.Fatalf("思考正文 = %q，期望 先想一下", thinking)
 	}
-	// chat 上游给不出签名：不该凭空造一个 signature_delta 出来。
-	if strings.Contains(got, "signature") {
-		t.Fatalf("chat 上游转出来的流里不该有签名:\n%s", got)
+	// chat 上游给不出签名，但思考块必须带一个网关回执签名，客户端下一轮才会把它带回来。
+	var signature string
+	for _, fr := range frames {
+		if fr.event != "content_block_delta" {
+			continue
+		}
+		var delta struct {
+			Delta struct {
+				Type      string `json:"type"`
+				Signature string `json:"signature"`
+			} `json:"delta"`
+		}
+		if err := json.Unmarshal([]byte(fr.data), &delta); err != nil {
+			t.Fatalf("content_block_delta 的 data 不是合法 JSON: %v", err)
+		}
+		if delta.Delta.Type == "signature_delta" {
+			signature = delta.Delta.Signature
+		}
+	}
+	if !strings.HasPrefix(signature, "lax-replay:") {
+		t.Fatalf("思考块的签名 = %q，期望带 lax-replay: 前缀的回执签名", signature)
 	}
 	if strings.Contains(got, "event: error") {
 		t.Fatalf("完整流不该出现错误帧:\n%s", tail(got, 200))

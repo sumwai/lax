@@ -1,6 +1,11 @@
 {
   "content": [
     {
+      "signature": "lax-replay:02nts8fyLxLthRcupwiDIw",
+      "thinking": "先算 6×7。",
+      "type": "thinking"
+    },
+    {
       "text": "42",
       "type": "text"
     }
