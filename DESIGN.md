@@ -866,7 +866,9 @@ TypeSafe 的 System One（Jev）不是对话：输入一个 `state` 加一组带
 
 支持三种后端，由配置文件的 `driver` 与 `dsn` 决定，缺省是 SQLite 单文件：
 
-**当前范围**：连接、建表、加列、旧库搬迁已经与后端无关；查询层仍在改写中，仍按 SQLite 方言写（`?` 占位符、`INSERT OR IGNORE`、`date(ts,'unixepoch')`、布尔当整数相加）。因此 `postgres` 与 `mysql` 现在连得上、建得出表，但查询会在方言差异处报错。查询层全部改成 GORM 链式之后，这两个后端才可用。
+查询层已全部改成 GORM 链式调用：单表读写、条件查询、复合主键 UPSERT、简单 JOIN 都用 `Create`、`Where`、`Updates` 与 `clause.OnConflict`，占位符、UPSERT 语法、自增主键与列类型差异都由 GORM 翻译，调用方一律写 `?` 占位符。
+
+唯一保留原始 SQL 的是 `store.Usage` 的嵌套聚合（五个 `COALESCE` 聚合加条件求和）：链式写法只会把它拆成 `.Select()` 的一段字符串，可读性反而下降。它的两处方言残留单独处理：按天分组的日期函数在 `store.dateExpr` 里按后端分支（SQLite 的 `date(…,'unixepoch','localtime')`、PostgreSQL 的 `to_char(to_timestamp(…) AT TIME ZONE …)`、MySQL 的 `DATE(FROM_UNIXTIME(…))`），布尔相加改成三方言通用的 `CASE WHEN … THEN 1 ELSE 0 END`。
 
 | `driver` | 包 | 说明 |
 | --- | --- | --- |

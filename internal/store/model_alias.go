@@ -1,12 +1,13 @@
 package store
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 	"unicode"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // ErrModelAliasNotFound 表示库里没有这个别名。`model alias unset` 用 errors.Is 判它，
@@ -62,30 +63,25 @@ func (s *Store) SetModelAlias(alias, target string) error {
 		return fmt.Errorf("别名 %q 与目标相同：别名要指向一个真实模型名，同名不会带来任何解析，还会挡住以后给这个名字加别名", a)
 	}
 
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
+	return s.gorm.Transaction(func(tx *gorm.DB) error {
+		providers, err := aliasCatalogProvidersTx(tx, a)
+		if err != nil {
+			return err
+		}
+		accounts, err := aliasShadowingAccountsTx(tx, a)
+		if err != nil {
+			return err
+		}
+		if len(providers) > 0 || len(accounts) > 0 {
+			return aliasShadowErr(a, providers, accounts)
+		}
 
-	providers, err := aliasCatalogProvidersTx(tx, a)
-	if err != nil {
-		return err
-	}
-	accounts, err := aliasShadowingAccountsTx(tx, a)
-	if err != nil {
-		return err
-	}
-	if len(providers) > 0 || len(accounts) > 0 {
-		return aliasShadowErr(a, providers, accounts)
-	}
-
-	if _, err := tx.Exec(`INSERT INTO model_aliases (alias, target, created_at) VALUES (?, ?, ?)
-		ON CONFLICT (alias) DO UPDATE SET target = excluded.target`,
-		a, t, time.Now().Unix()); err != nil {
-		return err
-	}
-	return tx.Commit()
+		// 同一个别名再写一次就是改目标，created_at 不动。
+		return tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "alias"}},
+			DoUpdates: clause.AssignmentColumns([]string{"target"}),
+		}).Create(&modelAliasRow{Alias: a, Target: t, CreatedAt: unixNow()}).Error
+	})
 }
 
 // DeleteModelAlias 删掉一条别名，是这张表的唯一删除入口。
@@ -95,15 +91,11 @@ func (s *Store) DeleteModelAlias(alias string) error {
 	if err != nil {
 		return err
 	}
-	res, err := s.db.Exec(`DELETE FROM model_aliases WHERE alias = ?`, a)
-	if err != nil {
-		return err
+	res := s.gorm.Where("alias = ?", a).Delete(&modelAliasRow{})
+	if res.Error != nil {
+		return res.Error
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		return fmt.Errorf("%w：%q，用 lax model alias ls 看已配置的别名", ErrModelAliasNotFound, a)
 	}
 	return nil
@@ -112,21 +104,15 @@ func (s *Store) DeleteModelAlias(alias string) error {
 // ModelAliases 按别名升序返回全部别名（SQLite 的 TEXT 默认二进制序，也就是区分大小写）。
 // 表是空的就返回空切片，不算错误：一条别名都没有是正常状态，请求全按真实名字走。
 func (s *Store) ModelAliases() ([]ModelAlias, error) {
-	rows, err := s.db.Query(`SELECT alias, target, created_at FROM model_aliases ORDER BY alias`)
-	if err != nil {
+	var rows []modelAliasRow
+	if err := s.gorm.Order("alias").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
 	out := []ModelAlias{}
-	for rows.Next() {
-		var m ModelAlias
-		if err := rows.Scan(&m.Alias, &m.Target, &m.CreatedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, m)
+	for _, r := range rows {
+		out = append(out, ModelAlias{Alias: r.Alias, Target: r.Target, CreatedAt: r.CreatedAt})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // ResolveModelAlias 把入站模型名解析成真实模型名，是走链的唯一入口：
@@ -137,7 +123,7 @@ func (s *Store) ModelAliases() ([]ModelAlias, error) {
 // 表很小（别名是手工维护的），一次读出全表比按跳查库省事：一趟查询、不重不漏，也不会出现
 // 链走到一半表被改掉、前半段用旧目标后半段用新目标。
 func (s *Store) ResolveModelAlias(name string) (string, bool, error) {
-	targets, err := aliasTargets(s.db)
+	targets, err := aliasTargets(s.gorm)
 	if err != nil {
 		return "", false, err
 	}
@@ -145,22 +131,16 @@ func (s *Store) ResolveModelAlias(name string) (string, bool, error) {
 }
 
 // aliasTargets 读出「别名 → 目标」全表，解析与成环判定都在内存里做。
-func aliasTargets(db *sql.DB) (map[string]string, error) {
-	rows, err := db.Query(`SELECT alias, target FROM model_aliases`)
-	if err != nil {
+func aliasTargets(db *gorm.DB) (map[string]string, error) {
+	var rows []modelAliasRow
+	if err := db.Select("alias", "target").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	targets := map[string]string{}
-	for rows.Next() {
-		var alias, target string
-		if err := rows.Scan(&alias, &target); err != nil {
-			return nil, err
-		}
-		targets[alias] = target
+	targets := make(map[string]string, len(rows))
+	for _, r := range rows {
+		targets[r.Alias] = r.Target
 	}
-	return targets, rows.Err()
+	return targets, nil
 }
 
 // resolveAliasChain 是 ResolveModelAlias 的纯逻辑部分：输入全表的「别名 → 目标」，输出解析结果。
@@ -201,23 +181,11 @@ func resolveAliasChain(targets map[string]string, name string) (string, bool, er
 // 目录（provider_models）是真名的事实来源：一家厂商能看到的模型与「眼下有没有
 // 账号能用它」是两件事，实测 bigmodel 的清单里就有某个 key 无权访问的模型。目录里的名字因此
 // 与当前可达性无关，仍然是会被别名遮蔽的真名。
-func aliasCatalogProvidersTx(tx *sql.Tx, alias string) ([]string, error) {
-	rows, err := tx.Query(`SELECT DISTINCT provider FROM provider_models
-		WHERE model = ? ORDER BY provider`, alias)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
+func aliasCatalogProvidersTx(tx *gorm.DB, alias string) ([]string, error) {
 	var hits []string
-	for rows.Next() {
-		var provider string
-		if err := rows.Scan(&provider); err != nil {
-			return nil, err
-		}
-		hits = append(hits, provider)
-	}
-	return hits, rows.Err()
+	err := tx.Model(&providerModelRow{}).Where("model = ?", alias).
+		Distinct().Order("provider").Pluck("provider", &hits).Error
+	return hits, err
 }
 
 // aliasShadowErr 把两处命中的结果合成一句话：目录与账号各说一半，两处都命中时也只报一次。
@@ -244,24 +212,13 @@ func aliasShadowErr(alias string, providers, accounts []string) error {
 // 比的是该账号 access='allowed' 的模型名集合——迁移 0015 之后它就是「这个账号现在能用哪些
 // 真实模型名」的那份清单（原来是 accounts.models 那一列 JSON），区分大小写的精确匹配：
 // 名字发给上游时不会做大小写归一，`GLM-4.6` 与 `glm-4.6` 在上游看来是两个名字。
-func aliasShadowingAccountsTx(tx *sql.Tx, alias string) ([]string, error) {
-	rows, err := tx.Query(`SELECT DISTINCT a.name FROM accounts a
-		JOIN account_models m ON m.account_id = a.id
-		WHERE m.access = ? AND m.model = ? ORDER BY a.name`, AccessAllowed, alias)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
+func aliasShadowingAccountsTx(tx *gorm.DB, alias string) ([]string, error) {
 	var hits []string
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return nil, err
-		}
-		hits = append(hits, name)
-	}
-	return hits, rows.Err()
+	err := tx.Table("accounts AS a").
+		Joins("JOIN account_models m ON m.account_id = a.id").
+		Where("m.access = ? AND m.model = ?", AccessAllowed, alias).
+		Distinct().Order("a.name").Pluck("a.name", &hits).Error
+	return hits, err
 }
 
 // shadowNames 把一组名字列成文案里的一截：最多列三个，其余的只报个数，

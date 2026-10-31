@@ -1,12 +1,14 @@
 package store
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"net/url"
 	"sort"
 	"strings"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"lax/internal/translate"
 )
@@ -92,58 +94,64 @@ type ProviderPatch struct {
 
 const providerColumns = `name, base_url, note, default_protocol, models_path`
 
+// providersFromRows 把行形状转成对外的 Provider。
+func providersFromRows(rows []providerRow) []Provider {
+	out := make([]Provider, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, Provider{
+			Name:            r.Name,
+			BaseURL:         r.BaseURL,
+			Note:            r.Note,
+			DefaultProtocol: r.DefaultProtocol,
+			ModelsPath:      r.ModelsPath,
+		})
+	}
+	return out
+}
+
+// providerRoutesFromRows 把行形状转成对外的 ProviderRoute。
+func providerRoutesFromRows(rows []providerRouteRow) []ProviderRoute {
+	out := make([]ProviderRoute, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, ProviderRoute{
+			Provider:   r.Provider,
+			Protocol:   r.Protocol,
+			Path:       r.Path,
+			ModelsPath: r.ModelsPath,
+		})
+	}
+	return out
+}
+
 // ListProviders 按名称升序返回全部厂商。表为空时返回空切片，不算错误。
 func (s *Store) ListProviders() ([]Provider, error) {
-	rows, err := s.db.Query(`SELECT ` + providerColumns + ` FROM providers ORDER BY name`)
-	if err != nil {
+	var rows []providerRow
+	if err := s.gorm.Order("name").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	out := []Provider{}
-	for rows.Next() {
-		var p Provider
-		if err := rows.Scan(&p.Name, &p.BaseURL, &p.Note, &p.DefaultProtocol, &p.ModelsPath); err != nil {
-			return nil, err
-		}
-		out = append(out, p)
-	}
-	return out, rows.Err()
+	return providersFromRows(rows), nil
 }
 
 // GetProvider 按名称取厂商。
 func (s *Store) GetProvider(name string) (Provider, error) {
-	var p Provider
-	err := s.db.QueryRow(`SELECT `+providerColumns+` FROM providers WHERE name = ?`, name).
-		Scan(&p.Name, &p.BaseURL, &p.Note, &p.DefaultProtocol, &p.ModelsPath)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Provider{}, fmt.Errorf("%w：%q，用 lax provider ls 看已配置的厂商", ErrProviderNotFound, name)
-	}
-	if err != nil {
+	var row providerRow
+	if err := s.gorm.Where("name = ?", name).Limit(1).Find(&row).Error; err != nil {
 		return Provider{}, err
 	}
-	return p, nil
+	if row.Name == "" {
+		return Provider{}, fmt.Errorf("%w：%q，用 lax provider ls 看已配置的厂商", ErrProviderNotFound, name)
+	}
+	return providersFromRows([]providerRow{row})[0], nil
 }
 
 // ProviderRoutes 返回一个厂商的全部路由，按协议名升序（顺序固定，回退取第一条时结果稳定）。
 // 厂商不存在时返回空切片：这是「没配过路由」，不是错误。
 func (s *Store) ProviderRoutes(provider string) ([]ProviderRoute, error) {
-	rows, err := s.db.Query(`SELECT provider, protocol, path, models_path
-		FROM provider_routes WHERE provider = ? ORDER BY protocol`, provider)
-	if err != nil {
+	var rows []providerRouteRow
+	if err := s.gorm.Where("provider = ?", provider).Order("protocol").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	out := []ProviderRoute{}
-	for rows.Next() {
-		var r ProviderRoute
-		if err := rows.Scan(&r.Provider, &r.Protocol, &r.Path, &r.ModelsPath); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
+	return providerRoutesFromRows(rows), nil
 }
 
 // LookupProviderRoute 按 (厂商, 协议) 取一条路由，是读路由的唯一入口：转发、模型同步与探活都走它。
@@ -152,17 +160,16 @@ func (s *Store) LookupProviderRoute(provider, protocol string) (ProviderRoute, b
 	if provider == "" || protocol == "" {
 		return ProviderRoute{}, false, nil
 	}
-	var r ProviderRoute
-	err := s.db.QueryRow(`SELECT provider, protocol, path, models_path
-		FROM provider_routes WHERE provider = ? AND protocol = ?`, provider, protocol).
-		Scan(&r.Provider, &r.Protocol, &r.Path, &r.ModelsPath)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ProviderRoute{}, false, nil
-	}
+	var row providerRouteRow
+	err := s.gorm.Where("provider = ? AND protocol = ?", provider, protocol).
+		Limit(1).Find(&row).Error
 	if err != nil {
 		return ProviderRoute{}, false, err
 	}
-	return r, true, nil
+	if row.Provider == "" {
+		return ProviderRoute{}, false, nil
+	}
+	return providerRoutesFromRows([]providerRouteRow{row})[0], true, nil
 }
 
 // ProviderProtocols 返回该厂商声明过路由的协议，按协议名升序。
@@ -444,28 +451,32 @@ func prepareRoutes(provider string, in []ProviderRoute) ([]ProviderRoute, error)
 // 改一条路由的路径会顺带把推导出来的列表路径换成新路径推出来的那个，而手工填的值不动
 // （内置 anthropic 厂商那条 /v1/models 因此不会因为重写 anthropic 路由而消失）。
 // 要改厂商级的列表地址就用 ProviderPatch.ModelsPath 覆盖。
-func upsertRoutes(tx *sql.Tx, routes []ProviderRoute) error {
+func upsertRoutes(tx *gorm.DB, routes []ProviderRoute) error {
 	for _, r := range routes {
 		modelsPath := r.ModelsPath
 		if r.modelsAuto {
-			var oldPath, oldModels string
-			err := tx.QueryRow(`SELECT path, models_path FROM provider_routes WHERE provider = ? AND protocol = ?`,
-				r.Provider, r.Protocol).Scan(&oldPath, &oldModels)
-			switch {
-			case errors.Is(err, sql.ErrNoRows):
-				// 新行：就用这次推出来的值。
-			case err != nil:
+			var old providerRouteRow
+			if err := tx.Where("provider = ? AND protocol = ?", r.Provider, r.Protocol).
+				Limit(1).Find(&old).Error; err != nil {
 				return err
-			case oldModels != "" && oldModels != DeriveModelsPath(r.Protocol, oldPath):
+			}
+			switch {
+			case old.Provider == "":
+				// 新行：就用这次推出来的值。
+			case old.ModelsPath != "" && old.ModelsPath != DeriveModelsPath(r.Protocol, old.Path):
 				// 库里是手工填的值：留着，不跟着路径改。
-				modelsPath = oldModels
+				modelsPath = old.ModelsPath
 			}
 		}
-		if _, err := tx.Exec(`INSERT INTO provider_routes (provider, protocol, path, models_path)
-			VALUES (?, ?, ?, ?)
-			ON CONFLICT(provider, protocol) DO UPDATE SET
-				path = excluded.path, models_path = excluded.models_path`,
-			r.Provider, r.Protocol, r.Path, modelsPath); err != nil {
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "provider"}, {Name: "protocol"}},
+			DoUpdates: clause.AssignmentColumns([]string{"path", "models_path"}),
+		}).Create(&providerRouteRow{
+			Provider:   r.Provider,
+			Protocol:   r.Protocol,
+			Path:       r.Path,
+			ModelsPath: modelsPath,
+		}).Error; err != nil {
 			return err
 		}
 	}
@@ -529,29 +540,26 @@ func (s *Store) CreateProvider(p Provider, routes []ProviderRoute) error {
 			name, def, routeProtocols(prepared))
 	}
 
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
+	return s.gorm.Transaction(func(tx *gorm.DB) error {
+		var count int64
+		if err := tx.Model(&providerRow{}).Where("name = ?", name).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			return fmt.Errorf("%w：%q，改这家厂商用 lax provider set %s", ErrProviderExists, name, name)
+		}
 
-	var one int
-	err = tx.QueryRow(`SELECT 1 FROM providers WHERE name = ?`, name).Scan(&one)
-	switch {
-	case err == nil:
-		return fmt.Errorf("%w：%q，改这家厂商用 lax provider set %s", ErrProviderExists, name, name)
-	case !errors.Is(err, sql.ErrNoRows):
-		return err
-	}
-
-	if _, err := tx.Exec(`INSERT INTO providers (name, base_url, note, default_protocol, models_path)
-		VALUES (?, ?, ?, ?, ?)`, name, base, strings.TrimSpace(p.Note), def, modelsPath); err != nil {
-		return err
-	}
-	if err := upsertRoutes(tx, prepared); err != nil {
-		return err
-	}
-	return tx.Commit()
+		if err := tx.Create(&providerRow{
+			Name:            name,
+			BaseURL:         base,
+			Note:            strings.TrimSpace(p.Note),
+			DefaultProtocol: def,
+			ModelsPath:      modelsPath,
+		}).Error; err != nil {
+			return err
+		}
+		return upsertRoutes(tx, prepared)
+	})
 }
 
 // SetProvider 增量修改一家厂商，是 `provider set` 的唯一写入口：patch 里为 nil 的字段一律不动。
@@ -566,107 +574,103 @@ func (s *Store) SetProvider(name string, patch ProviderPatch) error {
 		return errors.New("厂商名不能为空")
 	}
 
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
+	return s.gorm.Transaction(func(tx *gorm.DB) error {
+		var row providerRow
+		if err := tx.Where("name = ?", name).Limit(1).Find(&row).Error; err != nil {
+			return err
+		}
+		if row.Name == "" {
+			return fmt.Errorf("%w：%q，新建厂商用 lax provider add，用 lax provider ls 看已配置的厂商", ErrProviderNotFound, name)
+		}
+		p := providersFromRows([]providerRow{row})[0]
 
-	var p Provider
-	err = tx.QueryRow(`SELECT `+providerColumns+` FROM providers WHERE name = ?`, name).
-		Scan(&p.Name, &p.BaseURL, &p.Note, &p.DefaultProtocol, &p.ModelsPath)
-	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("%w：%q，新建厂商用 lax provider add，用 lax provider ls 看已配置的厂商", ErrProviderNotFound, name)
-	}
-	if err != nil {
-		return err
-	}
+		if patch.BaseURL != nil {
+			base, err := NormalizeBaseURL(*patch.BaseURL)
+			if err != nil {
+				return fmt.Errorf("厂商 %s：%w", name, err)
+			}
+			p.BaseURL = base
+		}
+		if patch.Note != nil {
+			p.Note = strings.TrimSpace(*patch.Note)
+		}
+		if patch.ModelsPath != nil {
+			// 空值表示回到按路由取（`provider unset <名称> models-path` 就是这么调的）。
+			// 取值可以是相对路径，也可以是整条地址（见 NormalizeEndpoint）。
+			modelsPath, err := NormalizeEndpoint(*patch.ModelsPath)
+			if err != nil {
+				return fmt.Errorf("厂商 %s 的 models_path：%w", name, err)
+			}
+			p.ModelsPath = modelsPath
+		}
+		if patch.DefaultProtocol != nil {
+			def := strings.TrimSpace(*patch.DefaultProtocol)
+			if def != "" && !IsWireProtocol(def) {
+				return fmt.Errorf("厂商 %s 的默认协议 %q 不认识，只能是 %s；清掉显式值、回到按固定顺序取第一条用 lax provider unset %s default-protocol",
+					name, def, wireProtocolNames(), name)
+			}
+			p.DefaultProtocol = def
+		}
 
-	if patch.BaseURL != nil {
-		base, err := NormalizeBaseURL(*patch.BaseURL)
+		// 改之前的形状：用来区分「这次把路由删光了」与「本来就没有路由」。
+		before, err := providerRoutesTx(tx, name)
 		if err != nil {
-			return fmt.Errorf("厂商 %s：%w", name, err)
+			return err
 		}
-		p.BaseURL = base
-	}
-	if patch.Note != nil {
-		p.Note = strings.TrimSpace(*patch.Note)
-	}
-	if patch.ModelsPath != nil {
-		// 空值表示回到按路由取（`provider unset <名称> models-path` 就是这么调的）。
-		// 取值可以是相对路径，也可以是整条地址（见 NormalizeEndpoint）。
-		modelsPath, err := NormalizeEndpoint(*patch.ModelsPath)
-		if err != nil {
-			return fmt.Errorf("厂商 %s 的 models_path：%w", name, err)
-		}
-		p.ModelsPath = modelsPath
-	}
-	if patch.DefaultProtocol != nil {
-		def := strings.TrimSpace(*patch.DefaultProtocol)
-		if def != "" && !IsWireProtocol(def) {
-			return fmt.Errorf("厂商 %s 的默认协议 %q 不认识，只能是 %s；清掉显式值、回到按固定顺序取第一条用 lax provider unset %s default-protocol",
-				name, def, wireProtocolNames(), name)
-		}
-		p.DefaultProtocol = def
-	}
 
-	// 改之前的形状：用来区分「这次把路由删光了」与「本来就没有路由」。
-	before, err := providerRoutesTx(tx, name)
-	if err != nil {
-		return err
-	}
-
-	// 路由改动：空串删掉这条，其余覆盖或新增。协议名排序后处理，报错顺序因此固定。
-	protocols := make([]string, 0, len(patch.Routes))
-	for protocol := range patch.Routes {
-		protocols = append(protocols, protocol)
-	}
-	sort.Strings(protocols)
-	for _, protocol := range protocols {
-		path := strings.TrimSpace(patch.Routes[protocol])
-		if path == "" {
-			if _, err := tx.Exec(`DELETE FROM provider_routes WHERE provider = ? AND protocol = ?`,
-				name, protocol); err != nil {
+		// 路由改动：空串删掉这条，其余覆盖或新增。协议名排序后处理，报错顺序因此固定。
+		protocols := make([]string, 0, len(patch.Routes))
+		for protocol := range patch.Routes {
+			protocols = append(protocols, protocol)
+		}
+		sort.Strings(protocols)
+		for _, protocol := range protocols {
+			path := strings.TrimSpace(patch.Routes[protocol])
+			if path == "" {
+				if err := tx.Where("provider = ? AND protocol = ?", name, protocol).
+					Delete(&providerRouteRow{}).Error; err != nil {
+					return err
+				}
+				continue
+			}
+			prepared, err := prepareRoutes(name, []ProviderRoute{{Protocol: protocol, Path: path}})
+			if err != nil {
 				return err
 			}
-			continue
+			if err := upsertRoutes(tx, prepared); err != nil {
+				return err
+			}
 		}
-		prepared, err := prepareRoutes(name, []ProviderRoute{{Protocol: protocol, Path: path}})
+
+		routes, err := providerRoutesTx(tx, name)
 		if err != nil {
 			return err
 		}
-		if err := upsertRoutes(tx, prepared); err != nil {
+		// 删到一条不剩要拒绝；本来就没有路由的厂商（过渡期 AddProvider 能造出来）不因此挡住改备注这类操作。
+		if len(routes) == 0 && len(before) > 0 {
+			return fmt.Errorf("厂商 %s 至少要保留一条协议路由；不想再要这家厂商就用 lax provider rm %s", name, name)
+		}
+		// 改完之后地址与路由必须自洽：库里地址为空时，改完的路由与 models_path 都得是整条地址。
+		// 把一条路由从整条地址改成相对路径、又没给 base_url、库里也没有时，整笔拒绝：
+		// 这种行落库之后拼出来的是一个没有 scheme 的相对地址，请求直接失败。
+		if err := requireBaseURLCoverage(name, p.BaseURL, routes, p.ModelsPath); err != nil {
 			return err
 		}
-	}
+		// 只有这次动了路由或默认协议时才校验指向：历史库里遗留的悬空默认协议由读取侧按固定顺序回退，
+		// 不该挡住一次只改备注或地址的调用。
+		touchedRouting := len(patch.Routes) > 0 || patch.DefaultProtocol != nil
+		if touchedRouting && p.DefaultProtocol != "" && !hasRoute(routes, p.DefaultProtocol) {
+			return fmt.Errorf("厂商 %s 的默认协议 %q 对应的路由不存在（现有：%s）；先补上这条路由（lax provider set %s --%s <路径>），或把默认协议改成已声明的其中一个（lax provider set %s --default-protocol <协议>），也可以清掉显式值回到按固定顺序取第一条（lax provider unset %s default-protocol）",
+				name, p.DefaultProtocol, routeProtocols(routes), name, protocolFlagName(p.DefaultProtocol), name, name)
+		}
 
-	routes, err := providerRoutesTx(tx, name)
-	if err != nil {
-		return err
-	}
-	// 删到一条不剩要拒绝；本来就没有路由的厂商（过渡期 AddProvider 能造出来）不因此挡住改备注这类操作。
-	if len(routes) == 0 && len(before) > 0 {
-		return fmt.Errorf("厂商 %s 至少要保留一条协议路由；不想再要这家厂商就用 lax provider rm %s", name, name)
-	}
-	// 改完之后地址与路由必须自洽：库里地址为空时，改完的路由与 models_path 都得是整条地址。
-	// 把一条路由从整条地址改成相对路径、又没给 base_url、库里也没有时，整笔拒绝：
-	// 这种行落库之后拼出来的是一个没有 scheme 的相对地址，请求直接失败。
-	if err := requireBaseURLCoverage(name, p.BaseURL, routes, p.ModelsPath); err != nil {
-		return err
-	}
-	// 只有这次动了路由或默认协议时才校验指向：历史库里遗留的悬空默认协议由读取侧按固定顺序回退，
-	// 不该挡住一次只改备注或地址的调用。
-	touchedRouting := len(patch.Routes) > 0 || patch.DefaultProtocol != nil
-	if touchedRouting && p.DefaultProtocol != "" && !hasRoute(routes, p.DefaultProtocol) {
-		return fmt.Errorf("厂商 %s 的默认协议 %q 对应的路由不存在（现有：%s）；先补上这条路由（lax provider set %s --%s <路径>），或把默认协议改成已声明的其中一个（lax provider set %s --default-protocol <协议>），也可以清掉显式值回到按固定顺序取第一条（lax provider unset %s default-protocol）",
-			name, p.DefaultProtocol, routeProtocols(routes), name, protocolFlagName(p.DefaultProtocol), name, name)
-	}
-
-	if _, err := tx.Exec(`UPDATE providers SET base_url = ?, note = ?, default_protocol = ?, models_path = ?
-		WHERE name = ?`, p.BaseURL, p.Note, p.DefaultProtocol, p.ModelsPath, name); err != nil {
-		return err
-	}
-	return tx.Commit()
+		return tx.Model(&providerRow{}).Where("name = ?", name).Updates(map[string]any{
+			"base_url":         p.BaseURL,
+			"note":             p.Note,
+			"default_protocol": p.DefaultProtocol,
+			"models_path":      p.ModelsPath,
+		}).Error
+	})
 }
 
 // protocolFlagName 把协议名换成 `provider set` 上对应的那个 flag，错误文案直接给出下一步能敲的命令。
@@ -692,23 +696,12 @@ func protocolFlagName(protocol string) string {
 }
 
 // providerRoutesTx 是事务里读路由的版本，供 SetProvider 校验改完之后的形状。
-func providerRoutesTx(tx *sql.Tx, provider string) ([]ProviderRoute, error) {
-	rows, err := tx.Query(`SELECT provider, protocol, path, models_path
-		FROM provider_routes WHERE provider = ? ORDER BY protocol`, provider)
-	if err != nil {
+func providerRoutesTx(tx *gorm.DB, provider string) ([]ProviderRoute, error) {
+	var rows []providerRouteRow
+	if err := tx.Where("provider = ?", provider).Order("protocol").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	out := []ProviderRoute{}
-	for rows.Next() {
-		var r ProviderRoute
-		if err := rows.Scan(&r.Provider, &r.Protocol, &r.Path, &r.ModelsPath); err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, rows.Err()
+	return providerRoutesFromRows(rows), nil
 }
 
 // AddProvider 是第二条 upsert 写入口：厂商已存在时更新 base_url 与备注，路由按 (厂商, 协议)
@@ -737,62 +730,68 @@ func (s *Store) AddProvider(p Provider, routes []ProviderRoute) error {
 		return fmt.Errorf("厂商 %s 的 models_path：%w", name, err)
 	}
 
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	// models_path 传空串时不覆盖已存的值：这条兼容入口的调用方还不知道有这个字段。
-	if _, err := tx.Exec(`INSERT INTO providers (name, base_url, note, models_path) VALUES (?, ?, ?, ?)
-		ON CONFLICT(name) DO UPDATE SET
-			base_url = excluded.base_url, note = excluded.note,
-			models_path = CASE WHEN excluded.models_path = '' THEN models_path ELSE excluded.models_path END`,
-		name, base, p.Note, modelsPath); err != nil {
-		return err
-	}
-
-	if err := upsertRoutes(tx, prepared); err != nil {
-		return err
-	}
-
-	// 校验放在路由写完之后：「这次传入的路由」也算数，所以先落路由再查有没有这条。
-	def := strings.TrimSpace(p.DefaultProtocol)
-	if def != "" {
-		if err := requireDeclaredProtocol(tx, name, def); err != nil {
+	return s.gorm.Transaction(func(tx *gorm.DB) error {
+		// models_path 传空串时不覆盖已存的值：这条兼容入口的调用方还不知道有这个字段。
+		// 分两步写，不用 `CASE WHEN excluded…`：那是 SQLite/PostgreSQL 的写法，MySQL 不认。
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "name"}},
+			DoUpdates: clause.AssignmentColumns([]string{"base_url", "note"}),
+		}).Create(&providerRow{
+			Name:       name,
+			BaseURL:    base,
+			Note:       p.Note,
+			ModelsPath: modelsPath,
+		}).Error; err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE providers SET default_protocol = ? WHERE name = ?`, def, name); err != nil {
+		if modelsPath != "" {
+			if err := tx.Model(&providerRow{}).Where("name = ?", name).
+				Update("models_path", modelsPath).Error; err != nil {
+				return err
+			}
+		}
+
+		if err := upsertRoutes(tx, prepared); err != nil {
 			return err
 		}
-	}
 
-	// 地址覆盖同样放在路由写完之后：已有的路由与这次传入的路由都要算进「是不是全是整条地址」。
-	finalRoutes, err := providerRoutesTx(tx, name)
-	if err != nil {
-		return err
-	}
-	var finalModels string
-	if err := tx.QueryRow(`SELECT models_path FROM providers WHERE name = ?`, name).Scan(&finalModels); err != nil {
-		return err
-	}
-	if err := requireBaseURLCoverage(name, base, finalRoutes, finalModels); err != nil {
-		return err
-	}
-	return tx.Commit()
+		// 校验放在路由写完之后：「这次传入的路由」也算数，所以先落路由再查有没有这条。
+		def := strings.TrimSpace(p.DefaultProtocol)
+		if def != "" {
+			if err := requireDeclaredProtocol(tx, name, def); err != nil {
+				return err
+			}
+			if err := tx.Model(&providerRow{}).Where("name = ?", name).
+				Update("default_protocol", def).Error; err != nil {
+				return err
+			}
+		}
+
+		// 地址覆盖同样放在路由写完之后：已有的路由与这次传入的路由都要算进「是不是全是整条地址」。
+		finalRoutes, err := providerRoutesTx(tx, name)
+		if err != nil {
+			return err
+		}
+		var finalModels string
+		if err := tx.Model(&providerRow{}).Where("name = ?", name).
+			Limit(1).Pluck("models_path", &finalModels).Error; err != nil {
+			return err
+		}
+		return requireBaseURLCoverage(name, base, finalRoutes, finalModels)
+	})
 }
 
 // requireDeclaredProtocol 确认默认协议能指向这家厂商的一条已声明路由。
 // 指不到时返回可行动的错误：要么先把这条路由加上，要么把默认协议改成已声明的其中一个。
-func requireDeclaredProtocol(tx *sql.Tx, provider, protocol string) error {
-	var one int
-	err := tx.QueryRow(`SELECT 1 FROM provider_routes WHERE provider = ? AND protocol = ?`,
-		provider, protocol).Scan(&one)
-	if err == nil {
-		return nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+func requireDeclaredProtocol(tx *gorm.DB, provider, protocol string) error {
+	var count int64
+	if err := tx.Model(&providerRouteRow{}).
+		Where("provider = ? AND protocol = ?", provider, protocol).
+		Count(&count).Error; err != nil {
 		return err
+	}
+	if count > 0 {
+		return nil
 	}
 
 	declared, err := declaredProtocols(tx, provider)
@@ -808,22 +807,11 @@ func requireDeclaredProtocol(tx *sql.Tx, provider, protocol string) error {
 }
 
 // declaredProtocols 是事务里读这家厂商已声明协议的版本，按协议名升序，与 ProviderRoutes 一致。
-func declaredProtocols(tx *sql.Tx, provider string) ([]string, error) {
-	rows, err := tx.Query(`SELECT protocol FROM provider_routes WHERE provider = ? ORDER BY protocol`, provider)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
+func declaredProtocols(tx *gorm.DB, provider string) ([]string, error) {
 	var out []string
-	for rows.Next() {
-		var proto string
-		if err := rows.Scan(&proto); err != nil {
-			return nil, err
-		}
-		out = append(out, proto)
-	}
-	return out, rows.Err()
+	err := tx.Model(&providerRouteRow{}).Where("provider = ?", provider).
+		Order("protocol").Pluck("protocol", &out).Error
+	return out, err
 }
 
 // ResolveDefaultProtocol 是有效默认协议的纯规则：
@@ -905,12 +893,21 @@ func (s *Store) providerDefaultProtocol(name string) (string, error) {
 		return "", nil
 	}
 	var explicit string
-	err := s.db.QueryRow(`SELECT default_protocol FROM providers WHERE name = ?`, name).Scan(&explicit)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
+	err := s.gorm.Model(&providerRow{}).Where("name = ?", name).
+		Limit(1).Pluck("default_protocol", &explicit).Error
 	if err != nil {
 		return "", err
+	}
+	if explicit == "" {
+		// 厂商不存在与显式值为空串在这里不必区分：两种都算不出来。
+		var count int64
+		if err := s.gorm.Model(&providerRow{}).Where("name = ?", name).
+			Count(&count).Error; err != nil {
+			return "", err
+		}
+		if count == 0 {
+			return "", nil
+		}
 	}
 	routes, err := s.ProviderRoutes(name)
 	if err != nil {
@@ -936,36 +933,32 @@ func (s *Store) DeleteProviderForce(name string) error {
 }
 
 func (s *Store) deleteProvider(name string, force bool) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
+	return s.gorm.Transaction(func(tx *gorm.DB) error {
+		res := tx.Where("name = ?", name).Delete(&providerRow{})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return fmt.Errorf("%w：%q", ErrProviderNotFound, name)
+		}
 
-	res, err := tx.Exec(`DELETE FROM providers WHERE name = ?`, name)
-	if err != nil {
-		return err
-	}
-	if n, err := res.RowsAffected(); err == nil && n == 0 {
-		return fmt.Errorf("%w：%q", ErrProviderNotFound, name)
-	}
-
-	if _, err := tx.Exec(`DELETE FROM provider_routes WHERE provider = ?`, name); err != nil {
-		return err
-	}
-
-	if force {
-		ids, err := accountIDsByProviderTx(tx, name)
-		if err != nil {
+		if err := tx.Where("provider = ?", name).Delete(&providerRouteRow{}).Error; err != nil {
 			return err
 		}
-		for _, id := range ids {
-			if err := setEnabledTx(tx, id, false, providerDeletedReason); err != nil {
+
+		if force {
+			ids, err := accountIDsByProviderTx(tx, name)
+			if err != nil {
 				return err
 			}
+			for _, id := range ids {
+				if err := setEnabledTx(tx, id, false, providerDeletedReason); err != nil {
+					return err
+				}
+			}
 		}
-	}
-	return tx.Commit()
+		return nil
+	})
 }
 
 // providerDeletedReason 是 `provider rm --force` 停用账号时写进 last_error 的话：
@@ -973,26 +966,15 @@ func (s *Store) deleteProvider(name string, force bool) error {
 const providerDeletedReason = "厂商已删除，请 provider add 重建或修改账号的厂商"
 
 // accountIDsByProviderTx 是事务里列指向某家厂商的账号，按 id 升序，结果与行序无关。
-func accountIDsByProviderTx(tx *sql.Tx, name string) ([]int64, error) {
-	rows, err := tx.Query(`SELECT id FROM accounts WHERE provider = ? ORDER BY id`, name)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
+func accountIDsByProviderTx(tx *gorm.DB, name string) ([]int64, error) {
 	var out []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
+	err := tx.Model(&accountRow{}).Where("provider = ?", name).
+		Order("id").Pluck("id", &out).Error
+	return out, err
 }
 
 // ListAccountsByProvider 返回 provider 字段等于 name 的账号，按 priority、id 升序。
 // `provider rm` 用它列出还在用的账号（不带 --force 时先列出再拒绝）。
 func (s *Store) ListAccountsByProvider(name string) ([]Account, error) {
-	return s.queryAccounts("WHERE a.provider = ?", name)
+	return s.queryAccounts("a.provider = ?", name)
 }

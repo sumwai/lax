@@ -1,11 +1,13 @@
 package store
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // 模型单价的写入口与花费的取值链。
@@ -179,21 +181,28 @@ func (s *Store) SetProviderModelPrices(provider, model string, prices ModelPrice
 		return err
 	}
 
-	return s.withTx(func(tx *sql.Tx) error {
+	return s.withTx(func(tx *gorm.DB) error {
 		if err := requireProviderModelTx(tx, provider, model); err != nil {
 			return err
 		}
-		_, err := tx.Exec(`UPDATE provider_models SET
-			price_in = COALESCE(?, price_in),
-			price_out = COALESCE(?, price_out),
-			price_cache_read = COALESCE(?, price_cache_read),
-			price_cache_write = COALESCE(?, price_cache_write),
-			updated_at = ?
-			WHERE provider = ? AND model = ?`,
-			prices.In, prices.Out, prices.CacheRead, prices.CacheWrite,
-			time.Now().Unix(), provider, model)
-		return err
+		return tx.Model(&providerModelRow{}).
+			Where("provider = ? AND model = ?", provider, model).
+			Updates(map[string]any{
+				"price_in":          coalescePrice("price_in", prices.In),
+				"price_out":         coalescePrice("price_out", prices.Out),
+				"price_cache_read":  coalescePrice("price_cache_read", prices.CacheRead),
+				"price_cache_write": coalescePrice("price_cache_write", prices.CacheWrite),
+				"updated_at":        time.Now().Unix(),
+			}).Error
 	})
+}
+
+// coalescePrice 拼一个「传了值就改、nil 就不动」的赋值。
+//
+// COALESCE(?, col) 三方言通用（SQLite、PostgreSQL 与 MySQL 都有这个函数），
+// 因此不需要为「只改部分列」写三套代码。
+func coalescePrice(column string, v *float64) clause.Expr {
+	return gorm.Expr("COALESCE(?, "+column+")", v)
 }
 
 // SetAccountModelPrices 写该账号在这个模型上的覆盖价。account 是账号名。
@@ -215,7 +224,7 @@ func (s *Store) SetAccountModelPrices(account, model string, prices ModelPrices)
 		return err
 	}
 
-	return s.withTx(func(tx *sql.Tx) error {
+	return s.withTx(func(tx *gorm.DB) error {
 		accountID, err := accountIDByNameTx(tx, account)
 		if err != nil {
 			return err
@@ -223,14 +232,14 @@ func (s *Store) SetAccountModelPrices(account, model string, prices ModelPrices)
 		if err := requireAccountModelTx(tx, accountID, account, model); err != nil {
 			return err
 		}
-		_, err = tx.Exec(`UPDATE account_models SET
-			price_in = COALESCE(?, price_in),
-			price_out = COALESCE(?, price_out),
-			price_cache_read = COALESCE(?, price_cache_read),
-			price_cache_write = COALESCE(?, price_cache_write)
-			WHERE account_id = ? AND model = ?`,
-			prices.In, prices.Out, prices.CacheRead, prices.CacheWrite, accountID, model)
-		return err
+		return tx.Model(&accountModelRow{}).
+			Where("account_id = ? AND model = ?", accountID, model).
+			Updates(map[string]any{
+				"price_in":          coalescePrice("price_in", prices.In),
+				"price_out":         coalescePrice("price_out", prices.Out),
+				"price_cache_read":  coalescePrice("price_cache_read", prices.CacheRead),
+				"price_cache_write": coalescePrice("price_cache_write", prices.CacheWrite),
+			}).Error
 	})
 }
 
@@ -250,13 +259,12 @@ func (s *Store) ClearProviderModelPrices(provider, model string, fields []string
 		return err
 	}
 
-	return s.withTx(func(tx *sql.Tx) error {
+	return s.withTx(func(tx *gorm.DB) error {
 		if err := requireProviderModelTx(tx, provider, model); err != nil {
 			return err
 		}
-		_, err := tx.Exec(`UPDATE provider_models SET `+clearPriceSet(parsed)+`
+		return execSQL(tx, `UPDATE provider_models SET `+clearPriceSet(parsed)+`
 			WHERE provider = ? AND model = ?`, provider, model)
-		return err
 	})
 }
 
@@ -276,23 +284,22 @@ func (s *Store) ClearAccountModelPrices(account, model string, fields []string) 
 		return err
 	}
 
-	return s.withTx(func(tx *sql.Tx) error {
+	return s.withTx(func(tx *gorm.DB) error {
 		accountID, err := accountIDByNameTx(tx, account)
 		if err != nil {
 			return err
 		}
-		var exists int
-		err = tx.QueryRow(`SELECT 1 FROM account_models WHERE account_id = ? AND model = ?`,
-			accountID, model).Scan(&exists)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
+		var exists int64
+		if err := tx.Model(&accountModelRow{}).
+			Where("account_id = ? AND model = ?", accountID, model).
+			Count(&exists).Error; err != nil {
 			return err
 		}
-		_, err = tx.Exec(`UPDATE account_models SET `+clearPriceSet(parsed)+`
+		if exists == 0 {
+			return nil
+		}
+		return execSQL(tx, `UPDATE account_models SET `+clearPriceSet(parsed)+`
 			WHERE account_id = ? AND model = ?`, accountID, model)
-		return err
 	})
 }
 
@@ -307,38 +314,46 @@ func clearPriceSet(fields []PriceField) string {
 }
 
 // requireProviderModelTx 确认目录里有这一行，没有就按「先同步或探活」报错。
-func requireProviderModelTx(tx *sql.Tx, provider, model string) error {
-	var exists int
-	err := tx.QueryRow(`SELECT 1 FROM provider_models WHERE provider = ? AND model = ?`,
-		provider, model).Scan(&exists)
-	if errors.Is(err, sql.ErrNoRows) {
+func requireProviderModelTx(tx *gorm.DB, provider, model string) error {
+	var count int64
+	if err := tx.Model(&providerModelRow{}).
+		Where("provider = ? AND model = ?", provider, model).
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
 		return fmt.Errorf("厂商 %q 的目录里没有模型 %q，%w：先 lax model sync --provider %s 或 lax model probe --model %s",
 			provider, model, ErrModelNotInCatalog, provider, model)
 	}
-	return err
+	return nil
 }
 
 // requireAccountModelTx 确认这个账号在这个模型上有可达性行，没有就按「先同步或探活」报错。
-func requireAccountModelTx(tx *sql.Tx, accountID int64, account, model string) error {
-	var exists int
-	err := tx.QueryRow(`SELECT 1 FROM account_models WHERE account_id = ? AND model = ?`,
-		accountID, model).Scan(&exists)
-	if errors.Is(err, sql.ErrNoRows) {
+func requireAccountModelTx(tx *gorm.DB, accountID int64, account, model string) error {
+	var count int64
+	if err := tx.Model(&accountModelRow{}).
+		Where("account_id = ? AND model = ?", accountID, model).
+		Count(&count).Error; err != nil {
+		return err
+	}
+	if count == 0 {
 		return fmt.Errorf("账号 %q 还没有模型 %q 的可达性行，%w：先 lax model sync --account %s 或 lax model probe --account %s",
 			account, model, ErrAccountModelNotRegistered, account, account)
 	}
-	return err
+	return nil
 }
 
 // accountIDByNameTx 在事务里把账号名解析成 id：价格写入口收的是命令行给的账号名，
 // 表里存的是 id。
-func accountIDByNameTx(tx *sql.Tx, account string) (int64, error) {
-	var id int64
-	err := tx.QueryRow(`SELECT id FROM accounts WHERE name = ?`, account).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
+func accountIDByNameTx(tx *gorm.DB, account string) (int64, error) {
+	var row accountRow
+	if err := tx.Where("name = ?", account).Limit(1).Find(&row).Error; err != nil {
+		return 0, err
+	}
+	if row.ID == 0 {
 		return 0, fmt.Errorf("账号 %q 不存在：先用 lax account add 建它", account)
 	}
-	return id, err
+	return row.ID, nil
 }
 
 // 花费公式里单价的取值链。顺序只有这一处：这一行请求的账号 + 这一行的

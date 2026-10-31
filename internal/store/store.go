@@ -35,6 +35,8 @@ const (
 type Store struct {
 	db   *sql.DB
 	gorm *gorm.DB
+	// driver 是后端名，少数几处方言分支（目前只有 Usage 的按天分组）用它选表达式。
+	driver string
 }
 
 // Account 是一行账号。
@@ -138,7 +140,7 @@ func OpenWith(o Options) (*Store, error) {
 		sqlDB.SetMaxOpenConns(1)
 	}
 
-	s := &Store{db: sqlDB, gorm: gdb}
+	s := &Store{db: sqlDB, gorm: gdb, driver: driver}
 	if err := migrate(gdb); err != nil {
 		_ = sqlDB.Close()
 		return nil, err
@@ -223,17 +225,24 @@ func (s *Store) Close() error { return s.db.Close() }
 // DB 暴露底层连接，供测试与统计使用。
 func (s *Store) DB() *sql.DB { return s.db }
 
-// accountSelect 是读账号的唯一列清单：账号自己的列，加上厂商行上的地址。
-// Protocol 不在这里取：它是这家厂商路由算出来的有效默认协议，一条 JOIN 算不出来，
-// 由 fillDerivedProtocols 填（规则只有 ResolveDefaultProtocol 一份）。
-const accountSelect = `SELECT a.id, a.name, a.provider, a.key_cipher,
-	a.priority, a.enabled, COALESCE(a.cooldown_until, 0), COALESCE(a.last_error, ''), a.fail_streak,
-	a.created_at, COALESCE(p.base_url, '')
-	FROM accounts a LEFT JOIN providers p ON p.name = a.provider`
+// accountJoinRow 是账号与它的厂商地址的联合行，供 queryAccounts 扫描。
+// 列名与 accountSelect 的别名一一对应。
+type accountJoinRow struct {
+	ID            int64
+	Name          string
+	Provider      string
+	KeyCipher     []byte
+	Priority      int
+	Enabled       bool
+	CooldownUntil int64
+	LastError     string
+	FailStreak    int
+	CreatedAt     int64
+	BaseURL       string
+}
 
 // CreateAccount 插入账号，名称重复时返回错误。
-// 只写账号自己的列：地址与默认协议在厂商行上（迁移 0014 把这两列从账号表里删了），
-// 传进来的 BaseURL 与 Protocol 不落库，读回来的是派生值。
+// 只写账号自己的列：地址与默认协议在厂商行上，传进来的 BaseURL 与 Protocol 不落库，读回来的是派生值。
 // a.Models 是「这个账号要声明哪些模型」（`account add --models`）：名字去空白去重之后落成
 // provider_models 的 manual 行与该账号 access='allowed' 的可达性行，与账号本身同一个事务：
 // 拆开写会出现「账号建好了但没有模型」或「模型可达但账号不存在」的半截状态。
@@ -245,17 +254,20 @@ func (s *Store) CreateAccount(a *Account) error {
 	if a.Priority == 0 {
 		a.Priority = 100
 	}
-	return s.withTx(func(tx *sql.Tx) error {
-		res, err := tx.Exec(`INSERT INTO accounts
-			(name, provider, key_cipher, priority, enabled, cooldown_until, last_error, created_at)
-			VALUES (?, ?, ?, ?, ?, NULL, '', ?)`,
-			a.Name, a.Provider, a.KeyCipher, a.Priority, boolInt(a.Enabled), a.CreatedAt)
-		if err != nil {
+	return s.withTx(func(tx *gorm.DB) error {
+		row := accountRow{
+			Name:      a.Name,
+			Provider:  a.Provider,
+			KeyCipher: a.KeyCipher,
+			Priority:  a.Priority,
+			Enabled:   a.Enabled,
+			LastError: ptrStr(""),
+			CreatedAt: a.CreatedAt,
+		}
+		if err := tx.Create(&row).Error; err != nil {
 			return err
 		}
-		if a.ID, err = res.LastInsertId(); err != nil {
-			return err
-		}
+		a.ID = row.ID
 		return declareModelsTx(tx, a.ID, a.Provider, a.Models)
 	})
 }
@@ -269,19 +281,19 @@ func (s *Store) ListAccounts() ([]Account, error) {
 // ListAccountsByProvider）都走它，派生规则因此只有一份。
 // where 是附加的筛选条件（不含 ORDER BY，带 WHERE 关键字），空串表示全表。
 func (s *Store) queryAccounts(where string, args ...any) ([]Account, error) {
-	q := accountSelect
+	q := s.gorm.Table("accounts AS a").
+		Select(`a.id, a.name, a.provider, a.key_cipher, a.priority, a.enabled,
+			COALESCE(a.cooldown_until, 0) AS cooldown_until, COALESCE(a.last_error, '') AS last_error,
+			a.fail_streak, a.created_at, COALESCE(p.base_url, '') AS base_url`).
+		Joins("LEFT JOIN providers p ON p.name = a.provider")
 	if where != "" {
-		q += " " + where
+		q = q.Where(where, args...)
 	}
-	rows, err := s.db.Query(q+" ORDER BY a.priority ASC, a.id ASC", args...)
-	if err != nil {
+	var rows []accountJoinRow
+	if err := q.Order("a.priority ASC").Order("a.id ASC").Scan(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	list, err := scanAccounts(rows)
-	if err != nil {
-		return nil, err
-	}
+	list := scanAccounts(rows)
 	if err := s.fillDerivedProtocols(list); err != nil {
 		return nil, err
 	}
@@ -291,21 +303,26 @@ func (s *Store) queryAccounts(where string, args ...any) ([]Account, error) {
 	return list, nil
 }
 
-// scanAccounts 把一行账号读成 Account，账号列表的几个查询共用它。
+// scanAccounts 把联合行转成 Account，账号列表的几个查询共用它。
 // Protocol 与 Models 此时还是零值，由 fillDerivedProtocols 与 fillDerivedModels 填。
-func scanAccounts(rows *sql.Rows) ([]Account, error) {
-	var out []Account
-	for rows.Next() {
-		var a Account
-		var enabled int
-		if err := rows.Scan(&a.ID, &a.Name, &a.Provider, &a.KeyCipher,
-			&a.Priority, &enabled, &a.CooldownUntil, &a.LastError, &a.FailStreak, &a.CreatedAt, &a.BaseURL); err != nil {
-			return nil, err
-		}
-		a.Enabled = enabled == 1
-		out = append(out, a)
+func scanAccounts(rows []accountJoinRow) []Account {
+	out := make([]Account, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, Account{
+			ID:            r.ID,
+			Name:          r.Name,
+			Provider:      r.Provider,
+			KeyCipher:     r.KeyCipher,
+			Priority:      r.Priority,
+			Enabled:       r.Enabled,
+			CooldownUntil: r.CooldownUntil,
+			LastError:     r.LastError,
+			FailStreak:    r.FailStreak,
+			CreatedAt:     r.CreatedAt,
+			BaseURL:       r.BaseURL,
+		})
 	}
-	return out, rows.Err()
+	return out
 }
 
 // fillDerivedProtocols 填上派生的 Protocol：账号所属厂商的有效默认协议。
@@ -330,7 +347,7 @@ func (s *Store) fillDerivedProtocols(list []Account) error {
 
 // GetAccount 按名称取账号。不存在时返回 sql.ErrNoRows。
 func (s *Store) GetAccount(name string) (Account, error) {
-	list, err := s.queryAccounts("WHERE a.name = ?", name)
+	list, err := s.queryAccounts("a.name = ?", name)
 	if err != nil {
 		return Account{}, err
 	}
@@ -368,31 +385,23 @@ func (s *Store) DeleteAccount(name string) error {
 }
 
 // withTx 跑一个事务：状态写入只有这一个形状，中途失败一律回滚。
-func (s *Store) withTx(fn func(*sql.Tx) error) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if err := fn(tx); err != nil {
-		return err
-	}
-	return tx.Commit()
+func (s *Store) withTx(fn func(*gorm.DB) error) error {
+	return s.gorm.Transaction(fn)
 }
 
 // RecordFailure 记录一次失败：冷却截止时间、最近一次错误，并把连续失败次数加一。
 func (s *Store) RecordFailure(id int64, until int64, lastErr string) error {
-	return s.withTx(func(tx *sql.Tx) error { return recordFailureTx(tx, id, until, lastErr) })
+	return s.withTx(func(tx *gorm.DB) error { return recordFailureTx(tx, id, until, lastErr) })
 }
 
 // ClearFailure 清掉冷却、最近一次错误与连续失败次数。
 func (s *Store) ClearFailure(id int64) error {
-	return s.withTx(func(tx *sql.Tx) error { return clearFailureTx(tx, id) })
+	return s.withTx(func(tx *gorm.DB) error { return clearFailureTx(tx, id) })
 }
 
 // SetEnabled 启用或停用账号。
 func (s *Store) SetEnabled(id int64, enabled bool, lastErr string) error {
-	return s.withTx(func(tx *sql.Tx) error { return setEnabledTx(tx, id, enabled, lastErr) })
+	return s.withTx(func(tx *gorm.DB) error { return setEnabledTx(tx, id, enabled, lastErr) })
 }
 
 // RotateKey 换掉一个账号的凭据，并在同一个事务里清掉旧凭据留下的结论：
@@ -401,8 +410,9 @@ func (s *Store) SetEnabled(id int64, enabled bool, lastErr string) error {
 // 干净的凭据应该从干净的账号状态开始。冷却、清零与启停的 SQL 复用 clearFailureTx 与 setEnabledTx，
 // 不另拼一份；`account_models` 的可达性、协议发现与覆盖值一个字不动，只换凭据与失败状态。
 func (s *Store) RotateKey(id int64, cipher []byte) error {
-	return s.withTx(func(tx *sql.Tx) error {
-		if _, err := tx.Exec(`UPDATE accounts SET key_cipher = ? WHERE id = ?`, cipher, id); err != nil {
+	return s.withTx(func(tx *gorm.DB) error {
+		if err := tx.Model(&accountRow{}).Where("id = ?", id).
+			Update("key_cipher", cipher).Error; err != nil {
 			return err
 		}
 		if err := clearFailureTx(tx, id); err != nil {
@@ -413,25 +423,29 @@ func (s *Store) RotateKey(id int64, cipher []byte) error {
 }
 
 // recordFailureTx 是冷却的写入口（加一），只给事务内部用。
-func recordFailureTx(tx *sql.Tx, id int64, until int64, lastErr string) error {
-	_, err := tx.Exec(`UPDATE accounts
-		SET cooldown_until = ?, last_error = ?, fail_streak = fail_streak + 1
-		WHERE id = ?`, until, lastErr, id)
-	return err
+func recordFailureTx(tx *gorm.DB, id int64, until int64, lastErr string) error {
+	return tx.Model(&accountRow{}).Where("id = ?", id).Updates(map[string]any{
+		"cooldown_until": until,
+		"last_error":     lastErr,
+		"fail_streak":    gorm.Expr("fail_streak + 1"),
+	}).Error
 }
 
 // clearFailureTx 是清冷却的写入口，只给事务内部用。
-func clearFailureTx(tx *sql.Tx, id int64) error {
-	_, err := tx.Exec(`UPDATE accounts
-		SET cooldown_until = NULL, last_error = '', fail_streak = 0
-		WHERE id = ?`, id)
-	return err
+func clearFailureTx(tx *gorm.DB, id int64) error {
+	return tx.Model(&accountRow{}).Where("id = ?", id).Updates(map[string]any{
+		"cooldown_until": nil,
+		"last_error":     "",
+		"fail_streak":    0,
+	}).Error
 }
 
 // setEnabledTx 是启停的写入口，只给事务内部用。
-func setEnabledTx(tx *sql.Tx, id int64, enabled bool, lastErr string) error {
-	_, err := tx.Exec(`UPDATE accounts SET enabled = ?, last_error = ? WHERE id = ?`, boolInt(enabled), lastErr, id)
-	return err
+func setEnabledTx(tx *gorm.DB, id int64, enabled bool, lastErr string) error {
+	return tx.Model(&accountRow{}).Where("id = ?", id).Updates(map[string]any{
+		"enabled":    enabled,
+		"last_error": lastErr,
+	}).Error
 }
 
 // AttemptState 是一次上游尝试对账号状态的改动。三者互斥，零值表示什么都不改。
@@ -451,7 +465,7 @@ type AttemptState struct {
 // 分开写在中途失败时会留下「有请求行但没设冷却」或者反过来，事后对不上账。
 // 冷却、清零与停用的 SQL 只在 recordFailureTx、clearFailureTx、setEnabledTx 里，这里不另拼。
 func (s *Store) RecordAttempt(rec *RequestRecord, state AttemptState) error {
-	return s.withTx(func(tx *sql.Tx) error {
+	return s.withTx(func(tx *gorm.DB) error {
 		if err := insertRequestTx(tx, rec); err != nil {
 			return err
 		}
@@ -469,23 +483,34 @@ func (s *Store) RecordAttempt(rec *RequestRecord, state AttemptState) error {
 
 // InsertRequest 写一行请求记录。与账号状态一起写的场合用 RecordAttempt。
 func (s *Store) InsertRequest(r *RequestRecord) error {
-	return s.withTx(func(tx *sql.Tx) error { return insertRequestTx(tx, r) })
+	return s.withTx(func(tx *gorm.DB) error { return insertRequestTx(tx, r) })
 }
 
-func insertRequestTx(tx *sql.Tx, r *RequestRecord) error {
-	res, err := tx.Exec(`INSERT INTO requests
-		(ts, inbound, outbound, model_requested, model_used, account_id, http_status, ok,
-		 in_tokens, in_tokens_uncached, out_tokens, cache_read, cache_write,
-		 reasoning_tokens, reasoning_tokens_extra, latency_ms, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.TS, r.Inbound, r.Outbound, r.ModelRequested, r.ModelUsed, r.AccountID, r.HTTPStatus, boolInt(r.OK),
-		r.InTokens, r.InTokensUncached, r.OutTokens, r.CacheRead, r.CacheWrite,
-		r.ReasoningTokens, r.ReasoningTokensExtra, r.LatencyMS, r.Error)
-	if err != nil {
+func insertRequestTx(tx *gorm.DB, r *RequestRecord) error {
+	row := requestRow{
+		TS:                   r.TS,
+		Inbound:              r.Inbound,
+		Outbound:             r.Outbound,
+		ModelRequested:       r.ModelRequested,
+		ModelUsed:            r.ModelUsed,
+		AccountID:            ptrInt64(r.AccountID),
+		HTTPStatus:           r.HTTPStatus,
+		OK:                   r.OK,
+		InTokens:             r.InTokens,
+		InTokensUncached:     r.InTokensUncached,
+		OutTokens:            r.OutTokens,
+		CacheRead:            r.CacheRead,
+		CacheWrite:           r.CacheWrite,
+		ReasoningTokens:      r.ReasoningTokens,
+		ReasoningTokensExtra: r.ReasoningTokensExtra,
+		LatencyMS:            r.LatencyMS,
+		Error:                ptrStr(r.Error),
+	}
+	if err := tx.Create(&row).Error; err != nil {
 		return err
 	}
-	r.ID, err = res.LastInsertId()
-	return err
+	r.ID = row.ID
+	return nil
 }
 
 // RecentRequests 返回最近的请求记录，按时间倒序。
@@ -493,28 +518,58 @@ func (s *Store) RecentRequests(limit int) ([]RequestRecord, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := s.db.Query(`SELECT id, ts, inbound, outbound, model_requested, model_used, COALESCE(account_id, 0),
-		http_status, ok, in_tokens, in_tokens_uncached, out_tokens, cache_read, cache_write,
-		reasoning_tokens, reasoning_tokens_extra, latency_ms, COALESCE(error, '')
-		FROM requests ORDER BY ts DESC, id DESC LIMIT ?`, limit)
-	if err != nil {
+	var rows []requestRow
+	if err := s.gorm.Order("ts DESC").Order("id DESC").Limit(limit).
+		Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var out []RequestRecord
-	for rows.Next() {
-		var r RequestRecord
-		var ok int
-		if err := rows.Scan(&r.ID, &r.TS, &r.Inbound, &r.Outbound, &r.ModelRequested, &r.ModelUsed, &r.AccountID,
-			&r.HTTPStatus, &ok, &r.InTokens, &r.InTokensUncached, &r.OutTokens, &r.CacheRead, &r.CacheWrite,
-			&r.ReasoningTokens, &r.ReasoningTokensExtra, &r.LatencyMS, &r.Error); err != nil {
-			return nil, err
-		}
-		r.OK = ok == 1
-		out = append(out, r)
+	out := make([]RequestRecord, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, RequestRecord{
+			ID:                   r.ID,
+			TS:                   r.TS,
+			Inbound:              r.Inbound,
+			Outbound:             r.Outbound,
+			ModelRequested:       r.ModelRequested,
+			ModelUsed:            r.ModelUsed,
+			AccountID:            derefInt64(r.AccountID),
+			HTTPStatus:           r.HTTPStatus,
+			OK:                   r.OK,
+			InTokens:             r.InTokens,
+			InTokensUncached:     r.InTokensUncached,
+			OutTokens:            r.OutTokens,
+			CacheRead:            r.CacheRead,
+			CacheWrite:           r.CacheWrite,
+			ReasoningTokens:      r.ReasoningTokens,
+			ReasoningTokensExtra: r.ReasoningTokensExtra,
+			LatencyMS:            r.LatencyMS,
+			Error:                derefStr(r.Error),
+		})
 	}
-	return out, rows.Err()
+	return out, nil
+}
+
+// ptrInt64 把零值写进可空列。写入侧沿用旧行为：没有账号写 0、没有错误写空串，
+// 而不是写 NULL——读侧用 COALESCE 把两者看成同一个值，但库里的行保持一致更好查。
+func ptrInt64(v int64) *int64 { return &v }
+
+// ptrStr 同上，用于可空文本列。
+func ptrStr(v string) *string { return &v }
+
+// derefInt64 把可空列读成零值：调用方拿到的 RequestRecord 里没有「未设置」这个区分。
+func derefInt64(p *int64) int64 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+// derefStr 同上，用于可空文本列。
+func derefStr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 // UncachedInTokens 把上游报的输入 token 归一成「没命中缓存的那部分」，入账时只算这一列的花费。
@@ -600,7 +655,7 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 	case "model":
 		expr = "r.model_used"
 	case "day":
-		expr = "date(r.ts, 'unixepoch', 'localtime')"
+		expr = s.dateExpr("r.ts")
 	default:
 		return nil, fmt.Errorf("不支持的维度 %q，可用 account、model、day", dimension)
 	}
@@ -610,8 +665,11 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 	q := fmt.Sprintf(`SELECT k, COUNT(*), COALESCE(SUM(in_tokens),0), COALESCE(SUM(out_tokens),0),
 		COALESCE(SUM(reasoning_tokens),0),
 		COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_write),0),
-		CASE WHEN SUM((c_in IS NOT NULL) + (c_cache_read IS NOT NULL) + (c_cache_write IS NOT NULL)
-		              + (c_out IS NOT NULL) + (c_reasoning IS NOT NULL)) = 0
+		CASE WHEN SUM(CASE WHEN c_in IS NOT NULL THEN 1 ELSE 0 END
+		              + CASE WHEN c_cache_read IS NOT NULL THEN 1 ELSE 0 END
+		              + CASE WHEN c_cache_write IS NOT NULL THEN 1 ELSE 0 END
+		              + CASE WHEN c_out IS NOT NULL THEN 1 ELSE 0 END
+		              + CASE WHEN c_reasoning IS NOT NULL THEN 1 ELSE 0 END) = 0
 		     THEN NULL
 		     ELSE SUM(COALESCE(c_in,0) + COALESCE(c_cache_read,0) + COALESCE(c_cache_write,0)
 		              + COALESCE(c_out,0) + COALESCE(c_reasoning,0)) / 1e6
@@ -650,6 +708,22 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 		out = append(out, u)
 	}
 	return out, rows.Err()
+}
+
+// dateExpr 把一个 Unix 秒列分成本地日期。
+//
+// 三个后端没有共同的日期函数，这一处只能按后端分支。PostgreSQL 的 to_timestamp 需要显式时区，
+// 用会话的 TimeZone 才与 SQLite 的 'localtime' 同义；MySQL 的 FROM_UNIXTIME 按会话时区解释。
+// 只有 `usage --by day` 会走到它，其余维度与后端无关。
+func (s *Store) dateExpr(col string) string {
+	switch s.driver {
+	case DriverPostgres:
+		return "to_char(to_timestamp(" + col + ") AT TIME ZONE current_setting('TimeZone'), 'YYYY-MM-DD')"
+	case DriverMySQL:
+		return "DATE(FROM_UNIXTIME(" + col + "))"
+	default:
+		return "date(" + col + ", 'unixepoch', 'localtime')"
+	}
 }
 
 func boolInt(b bool) int {

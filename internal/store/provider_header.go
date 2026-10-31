@@ -1,11 +1,13 @@
 package store
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"lax/internal/secret"
 )
@@ -64,22 +66,20 @@ func (s *Store) SetProviderHeader(provider, protocol, name, value string) error 
 		return fmt.Errorf("厂商 %s 的头 %s：%w", provider, hname, err)
 	}
 
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if err := requireProviderTx(tx, provider); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`INSERT INTO provider_headers (provider, protocol, name, value)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT (provider, protocol, name) DO UPDATE SET value = excluded.value`,
-		provider, proto, hname, hvalue); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return s.gorm.Transaction(func(tx *gorm.DB) error {
+		if err := requireProviderTx(tx, provider); err != nil {
+			return err
+		}
+		return tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "provider"}, {Name: "protocol"}, {Name: "name"}},
+			DoUpdates: clause.AssignmentColumns([]string{"value"}),
+		}).Create(&providerHeaderRow{
+			Provider: provider,
+			Protocol: proto,
+			Name:     hname,
+			Value:    hvalue,
+		}).Error
+	})
 }
 
 // DeleteProviderHeader 删掉一条声明，是这张表的唯一删除入口。
@@ -100,16 +100,12 @@ func (s *Store) DeleteProviderHeader(provider, protocol, name string) error {
 		return fmt.Errorf("厂商 %s：%w", provider, err)
 	}
 
-	res, err := s.db.Exec(`DELETE FROM provider_headers WHERE provider = ? AND protocol = ? AND name = ?`,
-		provider, proto, hname)
-	if err != nil {
-		return err
+	res := s.gorm.Where("provider = ? AND protocol = ? AND name = ?", provider, proto, hname).
+		Delete(&providerHeaderRow{})
+	if res.Error != nil {
+		return res.Error
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
+	if res.RowsAffected == 0 {
 		if _, err := s.GetProvider(provider); err != nil {
 			return err
 		}
@@ -123,7 +119,7 @@ func (s *Store) DeleteProviderHeader(provider, protocol, name string) error {
 // 按 protocol、name 升序。厂商不存在或一条头都没声明时返回空切片，不算错误——
 // 与 ProviderRoutes 的读法一致，这里问的是「声明了什么」，不是「这家厂商在不在」。
 func (s *Store) ProviderHeaders(provider string) ([]ProviderHeader, error) {
-	return providerHeadersQuery(s.db, provider)
+	return providerHeadersQuery(s.gorm, provider)
 }
 
 // EffectiveProviderHeaders 返回 (厂商, 协议) 这次请求真正要加的头，按 name 升序，是转发侧读头的
@@ -136,7 +132,7 @@ func (s *Store) EffectiveProviderHeaders(provider, protocol string) ([]ProviderH
 	if err != nil {
 		return nil, err
 	}
-	rows, err := providerHeadersQuery(s.db, provider)
+	rows, err := providerHeadersQuery(s.gorm, provider)
 	if err != nil {
 		return nil, err
 	}
@@ -166,34 +162,29 @@ func (s *Store) EffectiveProviderHeaders(provider, protocol string) ([]ProviderH
 
 // providerHeadersQuery 按厂商读全部声明，按 protocol、name 升序（空串的厂商级排在最前）。
 // 两个读入口共用它：合并只发生在 EffectiveProviderHeaders 里，查询只有一份。
-func providerHeadersQuery(db *sql.DB, provider string) ([]ProviderHeader, error) {
-	rows, err := db.Query(`SELECT protocol, name, value FROM provider_headers
-		WHERE provider = ? ORDER BY protocol, name`, provider)
-	if err != nil {
+func providerHeadersQuery(db *gorm.DB, provider string) ([]ProviderHeader, error) {
+	var rows []providerHeaderRow
+	if err := db.Where("provider = ?", provider).
+		Order("protocol").Order("name").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
 	out := []ProviderHeader{}
-	for rows.Next() {
-		var h ProviderHeader
-		if err := rows.Scan(&h.Protocol, &h.Name, &h.Value); err != nil {
-			return nil, err
-		}
-		out = append(out, h)
+	for _, r := range rows {
+		out = append(out, ProviderHeader{Protocol: r.Protocol, Name: r.Name, Value: r.Value})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // requireProviderTx 在事务里确认厂商行还在，不在时报 ErrProviderNotFound。
 // 附加头有外键兜底，但外键报出来的是一句 SQL 错误，说不清下一步该做什么。
-func requireProviderTx(tx *sql.Tx, provider string) error {
+func requireProviderTx(tx *gorm.DB, provider string) error {
 	var one int
-	err := tx.QueryRow(`SELECT 1 FROM providers WHERE name = ?`, provider).Scan(&one)
+	err := tx.Model(&providerRow{}).Select("1").Where("name = ?", provider).
+		Limit(1).Scan(&one).Error
 	switch {
-	case err == nil:
+	case err == nil && one == 1:
 		return nil
-	case errors.Is(err, sql.ErrNoRows):
+	case err == nil:
 		return fmt.Errorf("%w：%q，用 lax provider ls 看已配置的厂商", ErrProviderNotFound, provider)
 	default:
 		return err

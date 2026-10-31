@@ -7,6 +7,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // 模型事实与账号可达性分两张表存（迁移 0015）：
@@ -252,7 +255,7 @@ func (s *Store) UpsertProviderModels(provider string, models []ProviderModel) er
 	if provider == "" {
 		return fmt.Errorf("写模型目录需要厂商名，空厂商名无法定位是哪家上游的模型事实")
 	}
-	return s.withTx(func(tx *sql.Tx) error {
+	return s.withTx(func(tx *gorm.DB) error {
 		for _, m := range models {
 			m.Provider = provider
 			if err := upsertProviderModelTx(tx, m); err != nil {
@@ -263,7 +266,20 @@ func (s *Store) UpsertProviderModels(provider string, models []ProviderModel) er
 	})
 }
 
-func upsertProviderModelTx(tx *sql.Tx, m ProviderModel) error {
+// execSQL 在事务里执行一条原始 SQL，返回错误。
+//
+// 占位符由 GORM 按方言转换（PostgreSQL 的 $1、MySQL 与 SQLite 的 ?），调用方一律写 ?。
+// 这里保留原始 SQL 的只有「多列 UPSERT + 表达式」这一类，其余读写已经走链式调用。
+func execSQL(tx *gorm.DB, query string, args ...any) error {
+	return tx.Exec(query, args...).Error
+}
+
+// rowSQL 在事务里跑一条单行查询，交给调用方 Scan。
+func rowSQL(tx *gorm.DB, query string, args ...any) *sql.Row {
+	return tx.Raw(query, args...).Row()
+}
+
+func upsertProviderModelTx(tx *gorm.DB, m ProviderModel) error {
 	m.Model = strings.TrimSpace(m.Model)
 	if m.Model == "" {
 		return fmt.Errorf("厂商 %q 的模型名不能为空：目录以 (厂商, 模型) 为主键", m.Provider)
@@ -277,10 +293,9 @@ func upsertProviderModelTx(tx *sql.Tx, m ProviderModel) error {
 	if m.UpdatedAt == 0 {
 		m.UpdatedAt = time.Now().Unix()
 	}
-	_, err := tx.Exec(providerModelUpsert, m.Provider, m.Model, m.Source,
+	return execSQL(tx, providerModelUpsert, m.Provider, m.Model, m.Source,
 		m.ContextWindow, m.MaxOutput, joinList(m.Protocols), joinList(m.Capabilities),
 		m.PriceIn, m.PriceOut, m.PriceCacheRead, m.PriceCacheWrite, m.UpdatedAt)
-	return err
 }
 
 // providerModelInsertOnly 只插新行，已存在的行一个字段都不动。
@@ -309,7 +324,7 @@ func (s *Store) ProviderModelProtocols(provider, model string) ([]string, error)
 // 可达性表里把该账号的这些名字标成 allowed。`account add --models` 用它。
 // 厂商名为空时什么都不写（见 CreateAccount 的说明）；目录里已有的行不会被这份手填清单改写事实
 // （只插新行，见 providerModelInsertOnly）。
-func declareModelsTx(tx *sql.Tx, accountID int64, provider string, models []string) error {
+func declareModelsTx(tx *gorm.DB, accountID int64, provider string, models []string) error {
 	names := normalizeModelNames(models)
 	if len(names) == 0 || provider == "" {
 		return nil
@@ -317,13 +332,17 @@ func declareModelsTx(tx *sql.Tx, accountID int64, provider string, models []stri
 	for _, name := range names {
 		// 目录里没有的名字补一行 manual；已有的行一个字段都不动：名字只说明「这个名字存在」，
 		// 长度、价格与协议集合得由同步或探活写，手填清单不该把它们冲成空。
-		if _, err := tx.Exec(providerModelInsertOnly, provider, name, SourceManual, time.Now().Unix()); err != nil {
+		if err := execSQL(tx, providerModelInsertOnly, provider, name, SourceManual, time.Now().Unix()); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO account_models (account_id, model, access, http_status, error, checked_at)
-			VALUES (?, ?, ?, 0, '', 0)
-			ON CONFLICT (account_id, model) DO UPDATE SET access = excluded.access`,
-			accountID, name, AccessAllowed); err != nil {
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "account_id"}, {Name: "model"}},
+			DoUpdates: clause.AssignmentColumns([]string{"access"}),
+		}).Create(&accountModelRow{
+			AccountID: accountID,
+			Model:     name,
+			Access:    AccessAllowed,
+		}).Error; err != nil {
 			return err
 		}
 	}
@@ -370,10 +389,10 @@ func (s *Store) DeclareAccountModel(accountID int64, model, protocol string) (De
 	}
 
 	res := DeclareModelResult{Model: model, Access: AccessAllowed, Protocol: protocol}
-	err := s.withTx(func(tx *sql.Tx) error {
+	err := s.withTx(func(tx *gorm.DB) error {
 		// 厂商只从账号行上取：模型目录的主键是 (厂商, 模型)，账号不存在就没有可写的目录行。
 		var provider string
-		err := tx.QueryRow(`SELECT provider FROM accounts WHERE id = ?`, accountID).Scan(&provider)
+		err := rowSQL(tx, `SELECT provider FROM accounts WHERE id = ?`, accountID).Scan(&provider)
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("账号 id %d 不存在，先 lax account add", accountID)
 		}
@@ -408,15 +427,15 @@ func (s *Store) DeclareAccountModel(accountID int64, model, protocol string) (De
 // declareProviderModelProtocolTx 写目录那一行，第二个返回值表示这个协议是不是这次新并进
 // 协议集合。新行的协议集合就是 joinList([]string{protocol})：没给协议时是空串，
 // 也就是「上游没声明」（见迁移 0015 的列注释）。
-func declareProviderModelProtocolTx(tx *sql.Tx, provider, model, protocol string) (bool, error) {
+func declareProviderModelProtocolTx(tx *gorm.DB, provider, model, protocol string) (bool, error) {
 	var existing string
-	err := tx.QueryRow(`SELECT protocols FROM provider_models WHERE provider = ? AND model = ?`,
+	err := rowSQL(tx, `SELECT protocols FROM provider_models WHERE provider = ? AND model = ?`,
 		provider, model).Scan(&existing)
 	now := time.Now().Unix()
 	if errors.Is(err, sql.ErrNoRows) {
 		// 新行的其余元数据列走列默认值（长度与价格 NULL、能力位空串）：手写一条可达性
 		// 不等于知道上下文长度与价格，猜一个数比留空更糟。
-		if _, err := tx.Exec(`INSERT INTO provider_models (provider, model, source, protocols, updated_at)
+		if err := execSQL(tx, `INSERT INTO provider_models (provider, model, source, protocols, updated_at)
 			VALUES (?, ?, ?, ?, ?)`, provider, model, SourceManual, joinList([]string{protocol}), now); err != nil {
 			return false, err
 		}
@@ -433,7 +452,7 @@ func declareProviderModelProtocolTx(tx *sql.Tx, provider, model, protocol string
 		protocols = append(protocols, protocol)
 	}
 	// 只更新协议集合、来源与时间：长度、最大输出、能力位与四个价格不归这里改。
-	if _, err := tx.Exec(`UPDATE provider_models SET protocols = ?, source = ?, updated_at = ?
+	if err := execSQL(tx, `UPDATE provider_models SET protocols = ?, source = ?, updated_at = ?
 		WHERE provider = ? AND model = ?`, joinList(protocols), SourceManual, now, provider, model); err != nil {
 		return false, err
 	}
@@ -442,76 +461,81 @@ func declareProviderModelProtocolTx(tx *sql.Tx, provider, model, protocol string
 
 // declareAccountModelAllowedTx 写可达性那一行，第二个返回值表示这一行是不是这次新建的。
 // 先插一次（冲突就不动）只为数清新增的行：upsert 的 RowsAffected 分不出新增与更新。
-func declareAccountModelAllowedTx(tx *sql.Tx, accountID int64, model, protocol string) (bool, error) {
-	res, err := tx.Exec(`INSERT INTO account_models
-		(account_id, model, access, http_status, error, checked_at, protocol)
-		VALUES (?, ?, ?, 0, '', 0, ?)
-		ON CONFLICT (account_id, model) DO NOTHING`, accountID, model, AccessAllowed, protocol)
-	if err != nil {
+func declareAccountModelAllowedTx(tx *gorm.DB, accountID int64, model, protocol string) (bool, error) {
+	var prev accountModelRow
+	found := false
+	if err := tx.Where("account_id = ? AND model = ?", accountID, model).
+		Limit(1).Find(&prev).Error; err != nil {
 		return false, err
 	}
-	added, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	if added > 0 {
-		// 新行已经就是目标状态：allowed、没探过、协议按参数。
+	found = prev.AccountID != 0
+	if !found {
+		// 新行就是目标状态：allowed、没探过、协议按参数。
+		if err := tx.Create(&accountModelRow{
+			AccountID: accountID,
+			Model:     model,
+			Access:    AccessAllowed,
+			Protocol:  protocol,
+		}).Error; err != nil {
+			return false, err
+		}
 		return true, nil
 	}
 
-	// 已有一行：先把原来的状态读出来，再在 Go 里算目标值。不写成一条靠 SET 右值
-	// 引用旧列的 UPDATE——「哪些列要清、哪些要留」摆在代码里比藏在 SQL 求值顺序里好读。
-	var (
-		prevAccess, prevError, prevProtocol string
-		prevHTTP                            int
-		prevChecked                         int64
-	)
-	if err := tx.QueryRow(`SELECT access, http_status, error, checked_at, protocol
-		FROM account_models WHERE account_id = ? AND model = ?`, accountID, model).
-		Scan(&prevAccess, &prevHTTP, &prevError, &prevChecked, &prevProtocol); err != nil {
-		return false, err
-	}
-	httpStatus, msg, checkedAt := prevHTTP, prevError, prevChecked
-	if prevAccess != AccessAllowed {
+	// 已有一行：目标值在 Go 里算。往上看「哪些列要清、哪些要留」摆在代码里
+	// 比藏在 SQL 求值顺序里好读。
+	httpStatus, msg, checkedAt := prev.HTTPStatus, prev.Error, prev.CheckedAt
+	if prev.Access != AccessAllowed {
 		// 旧的 forbidden / missing / error 结论不再作数：清掉三项，下一轮照常重探。
 		httpStatus, msg, checkedAt = 0, "", 0
 	}
+	targetProtocol := prev.Protocol
 	if protocol != "" {
-		prevProtocol = protocol
+		targetProtocol = protocol
 	}
-	if _, err := tx.Exec(`UPDATE account_models
-		SET access = ?, http_status = ?, error = ?, checked_at = ?, protocol = ?
-		WHERE account_id = ? AND model = ?`,
-		AccessAllowed, httpStatus, msg, checkedAt, prevProtocol, accountID, model); err != nil {
+	if err := tx.Model(&accountModelRow{}).
+		Where("account_id = ? AND model = ?", accountID, model).
+		Updates(map[string]any{
+			"access":      AccessAllowed,
+			"http_status": httpStatus,
+			"error":       msg,
+			"checked_at":  checkedAt,
+			"protocol":    targetProtocol,
+		}).Error; err != nil {
 		return false, err
 	}
 	return false, nil
 }
 
+// providerModelsFromRows 把目录行转成对外结构，逗号分隔的列拆成切片。
+func providerModelsFromRows(rows []providerModelRow) []ProviderModel {
+	out := make([]ProviderModel, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, ProviderModel{
+			Provider:        r.Provider,
+			Model:           r.Model,
+			Source:          r.Source,
+			ContextWindow:   r.ContextWindow,
+			MaxOutput:       r.MaxOutput,
+			Protocols:       splitList(r.Protocols),
+			Capabilities:    splitList(r.Capabilities),
+			PriceIn:         r.PriceIn,
+			PriceOut:        r.PriceOut,
+			PriceCacheRead:  r.PriceCacheRead,
+			PriceCacheWrite: r.PriceCacheWrite,
+			UpdatedAt:       r.UpdatedAt,
+		})
+	}
+	return out
+}
+
 // ProviderModels 返回一家厂商的目录，按模型名升序。
 func (s *Store) ProviderModels(provider string) ([]ProviderModel, error) {
-	rows, err := s.db.Query(`SELECT provider, model, source, context_window, max_output,
-		protocols, capabilities, price_in, price_out, price_cache_read, price_cache_write, updated_at
-		FROM provider_models WHERE provider = ? ORDER BY model`, provider)
-	if err != nil {
+	var rows []providerModelRow
+	if err := s.gorm.Where("provider = ?", provider).Order("model").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var out []ProviderModel
-	for rows.Next() {
-		var m ProviderModel
-		var protocols, capabilities string
-		if err := rows.Scan(&m.Provider, &m.Model, &m.Source, &m.ContextWindow, &m.MaxOutput,
-			&protocols, &capabilities, &m.PriceIn, &m.PriceOut, &m.PriceCacheRead, &m.PriceCacheWrite,
-			&m.UpdatedAt); err != nil {
-			return nil, err
-		}
-		m.Protocols = splitList(protocols)
-		m.Capabilities = splitList(capabilities)
-		out = append(out, m)
-	}
-	return out, rows.Err()
+	return providerModelsFromRows(rows), nil
 }
 
 // ProviderModel 是 providerModel 的导出版本：网关探活要看这个模型的能力位才知道打对话还是打向量化。读不到行不是错误，第二个返回值为假。
@@ -525,23 +549,16 @@ func (s *Store) providerModel(provider, model string) (ProviderModel, bool, erro
 	if provider == "" {
 		return ProviderModel{}, false, nil
 	}
-	var m ProviderModel
-	var protocols, capabilities string
-	err := s.db.QueryRow(`SELECT provider, model, source, context_window, max_output,
-		protocols, capabilities, price_in, price_out, price_cache_read, price_cache_write, updated_at
-		FROM provider_models WHERE provider = ? AND model = ?`, provider, model).Scan(
-		&m.Provider, &m.Model, &m.Source, &m.ContextWindow, &m.MaxOutput,
-		&protocols, &capabilities, &m.PriceIn, &m.PriceOut, &m.PriceCacheRead, &m.PriceCacheWrite,
-		&m.UpdatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ProviderModel{}, false, nil
-	}
+	var row providerModelRow
+	err := s.gorm.Where("provider = ? AND model = ?", provider, model).
+		Limit(1).Find(&row).Error
 	if err != nil {
 		return ProviderModel{}, false, err
 	}
-	m.Protocols = splitList(protocols)
-	m.Capabilities = splitList(capabilities)
-	return m, true, nil
+	if row.Provider == "" {
+		return ProviderModel{}, false, nil
+	}
+	return providerModelsFromRows([]providerModelRow{row})[0], true, nil
 }
 
 // accountModelSelect 是读可达性行的唯一列清单，几个读入口共用它。
@@ -551,57 +568,53 @@ const accountModelSelect = `SELECT account_id, model, access, http_status, error
 
 // AccountModels 返回一个账号的模型行，按模型名升序。
 func (s *Store) AccountModels(accountID int64) ([]AccountModel, error) {
-	rows, err := s.db.Query(accountModelSelect+` WHERE account_id = ? ORDER BY model`, accountID)
-	if err != nil {
+	var rows []accountModelRow
+	if err := s.gorm.Where("account_id = ?", accountID).Order("model").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return scanAccountModels(rows)
+	return scanAccountModels(rows), nil
 }
 
 // AllAccountModels 返回全部账号的模型行，按模型名升序。
 func (s *Store) AllAccountModels() ([]AccountModel, error) {
-	rows, err := s.db.Query(accountModelSelect + ` ORDER BY model, account_id`)
-	if err != nil {
+	var rows []accountModelRow
+	if err := s.gorm.Order("model").Order("account_id").Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return scanAccountModels(rows)
+	return scanAccountModels(rows), nil
 }
 
-func scanAccountModels(rows *sql.Rows) ([]AccountModel, error) {
-	var out []AccountModel
-	for rows.Next() {
-		var m AccountModel
-		if err := rows.Scan(&m.AccountID, &m.Model, &m.Access, &m.HTTPStatus, &m.Error, &m.CheckedAt,
-			&m.Protocol, &m.ContextWindow, &m.MaxOutput, &m.PriceIn, &m.PriceOut,
-			&m.PriceCacheRead, &m.PriceCacheWrite); err != nil {
-			return nil, err
+func scanAccountModels(rows []accountModelRow) []AccountModel {
+	out := make([]AccountModel, 0, len(rows))
+	for _, r := range rows {
+		m := AccountModel{
+			AccountID:       r.AccountID,
+			Model:           r.Model,
+			Access:          r.Access,
+			HTTPStatus:      r.HTTPStatus,
+			Error:           r.Error,
+			CheckedAt:       r.CheckedAt,
+			Protocol:        r.Protocol,
+			ContextWindow:   r.ContextWindow,
+			MaxOutput:       r.MaxOutput,
+			PriceIn:         r.PriceIn,
+			PriceOut:        r.PriceOut,
+			PriceCacheRead:  r.PriceCacheRead,
+			PriceCacheWrite: r.PriceCacheWrite,
 		}
 		m.Status = LegacyStatus(m.Access, m.CheckedAt)
 		out = append(out, m)
 	}
-	return out, rows.Err()
+	return out
 }
 
 // AllowedModels 返回一个账号能用的模型名，按名字升序：选号与 `/v1/models` 都读这一份。
 func (s *Store) AllowedModels(accountID int64) ([]string, error) {
-	rows, err := s.db.Query(`SELECT model FROM account_models
-		WHERE account_id = ? AND access = ? ORDER BY model`, accountID, AccessAllowed)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
 	var out []string
-	for rows.Next() {
-		var m string
-		if err := rows.Scan(&m); err != nil {
-			return nil, err
-		}
-		out = append(out, m)
-	}
-	return out, rows.Err()
+	err := s.gorm.Model(&accountModelRow{}).
+		Where("account_id = ? AND access = ?", accountID, AccessAllowed).
+		Order("model").Pluck("model", &out).Error
+	return out, err
 }
 
 // fillDerivedModels 给账号列表填上派生字段 Models（access='allowed' 的名字集合）。
@@ -611,24 +624,19 @@ func (s *Store) fillDerivedModels(list []Account) error {
 	if len(list) == 0 {
 		return nil
 	}
-	rows, err := s.db.Query(`SELECT account_id, model FROM account_models
-		WHERE access = ? ORDER BY account_id, model`, AccessAllowed)
-	if err != nil {
+	var names []struct {
+		AccountID int64
+		Model     string
+	}
+	if err := s.gorm.Model(&accountModelRow{}).Select("account_id, model").
+		Where("access = ?", AccessAllowed).
+		Order("account_id").Order("model").Scan(&names).Error; err != nil {
 		return err
 	}
-	defer rows.Close()
 
 	byID := make(map[int64][]string, len(list))
-	for rows.Next() {
-		var id int64
-		var model string
-		if err := rows.Scan(&id, &model); err != nil {
-			return err
-		}
-		byID[id] = append(byID[id], model)
-	}
-	if err := rows.Err(); err != nil {
-		return err
+	for _, n := range names {
+		byID[n.AccountID] = append(byID[n.AccountID], n.Model)
 	}
 	for i := range list {
 		list[i].Models = byID[list[i].ID]
@@ -752,13 +760,19 @@ func (s *Store) SetAccountModelAccess(accountID int64, model, access string, htt
 	if !validAccess(access) {
 		return fmt.Errorf("模型 %q 的可达性是 %q，只能是 %s", model, access, strings.Join(accessValues(), "、"))
 	}
-	_, err := s.db.Exec(`INSERT INTO account_models (account_id, model, access, http_status, error, checked_at)
-		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT (account_id, model) DO UPDATE SET
-			access = excluded.access, http_status = excluded.http_status,
-			error = excluded.error, checked_at = excluded.checked_at`,
-		accountID, model, access, httpStatus, msg, checkedAt)
-	return err
+	return s.gorm.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "account_id"}, {Name: "model"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"access", "http_status", "error", "checked_at",
+		}),
+	}).Create(&accountModelRow{
+		AccountID:  accountID,
+		Model:      model,
+		Access:     access,
+		HTTPStatus: httpStatus,
+		Error:      msg,
+		CheckedAt:  checkedAt,
+	}).Error
 }
 
 // SetAccountModelProtocol 记录协议发现的结果，是 account_models.protocol 唯一的写入口。
@@ -773,11 +787,15 @@ func (s *Store) SetAccountModelProtocol(accountID int64, model, protocol string)
 	if protocol != "" && !IsWireProtocol(protocol) {
 		return fmt.Errorf("模型 %q 的协议是 %q，只能是空串或 %s", model, protocol, wireProtocolNames())
 	}
-	_, err := s.db.Exec(`INSERT INTO account_models (account_id, model, access, http_status, error, checked_at, protocol)
-		VALUES (?, ?, ?, 0, '', 0, ?)
-		ON CONFLICT (account_id, model) DO UPDATE SET protocol = excluded.protocol`,
-		accountID, model, AccessAllowed, protocol)
-	return err
+	return s.gorm.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "account_id"}, {Name: "model"}},
+		DoUpdates: clause.AssignmentColumns([]string{"protocol"}),
+	}).Create(&accountModelRow{
+		AccountID: accountID,
+		Model:     model,
+		Access:    AccessAllowed,
+		Protocol:  protocol,
+	}).Error
 }
 
 // AccountModelOverride 是账号侧的覆盖值：nil 表示这一项继承目录（库里存 NULL）。
@@ -800,20 +818,23 @@ func (s *Store) SetAccountModelOverride(accountID int64, model string, o Account
 	if model == "" {
 		return fmt.Errorf("记录模型覆盖值需要模型名：账号 %d 的哪一行都定位不了", accountID)
 	}
-	_, err := s.db.Exec(`INSERT INTO account_models
-		(account_id, model, access, http_status, error, checked_at,
-		 context_window, max_output, price_in, price_out, price_cache_read, price_cache_write)
-		VALUES (?, ?, ?, 0, '', 0, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (account_id, model) DO UPDATE SET
-			context_window = excluded.context_window,
-			max_output = excluded.max_output,
-			price_in = excluded.price_in,
-			price_out = excluded.price_out,
-			price_cache_read = excluded.price_cache_read,
-			price_cache_write = excluded.price_cache_write`,
-		accountID, model, AccessAllowed,
-		o.ContextWindow, o.MaxOutput, o.PriceIn, o.PriceOut, o.PriceCacheRead, o.PriceCacheWrite)
-	return err
+	return s.gorm.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "account_id"}, {Name: "model"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"context_window", "max_output", "price_in", "price_out",
+			"price_cache_read", "price_cache_write",
+		}),
+	}).Create(&accountModelRow{
+		AccountID:       accountID,
+		Model:           model,
+		Access:          AccessAllowed,
+		ContextWindow:   o.ContextWindow,
+		MaxOutput:       o.MaxOutput,
+		PriceIn:         o.PriceIn,
+		PriceOut:        o.PriceOut,
+		PriceCacheRead:  o.PriceCacheRead,
+		PriceCacheWrite: o.PriceCacheWrite,
+	}).Error
 }
 
 // ResolveProtocol 是有效出站协议的纯规则：模型行上有协议就用它，否则用厂商的有效默认协议
@@ -828,16 +849,12 @@ func ResolveProtocol(providerProtocol, modelProtocol string) string {
 // ModelProtocol 读一个模型行的协议发现结果。没有这一行时返回空字符串（也就是继承），
 // 不当作错误。
 func (s *Store) ModelProtocol(accountID int64, model string) (string, error) {
-	var protocol string
-	err := s.db.QueryRow(`SELECT protocol FROM account_models WHERE account_id = ? AND model = ?`,
-		accountID, model).Scan(&protocol)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	if err != nil {
+	var row accountModelRow
+	if err := s.gorm.Where("account_id = ? AND model = ?", accountID, model).
+		Limit(1).Find(&row).Error; err != nil {
 		return "", err
 	}
-	return protocol, nil
+	return row.Protocol, nil
 }
 
 // EffectiveProtocol 返回账号在某个模型上的有效出站协议，转发与展示共用这一次读。
@@ -883,29 +900,26 @@ func (s *Store) EffectiveProtocol(accountID int64, model string, legacyAccountPr
 // accountProvider 读账号的厂商名。账号不存在时返回空串、不报错：有效协议的契约是
 // 「算不出来就是空串」，不因为一行不存在或读不到而中断转发。
 func (s *Store) accountProvider(accountID int64) (string, error) {
-	var provider string
-	err := s.db.QueryRow(`SELECT provider FROM accounts WHERE id = ?`, accountID).Scan(&provider)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	if err != nil {
+	var row accountRow
+	if err := s.gorm.Select("id", "provider").Where("id = ?", accountID).
+		Limit(1).Find(&row).Error; err != nil {
 		return "", err
 	}
-	return provider, nil
+	return row.Provider, nil
 }
 
 // accountProviderStrict 与 accountProvider 不同：账号不存在时报错。写目录行时不能拿空厂商名
 // 凑数——那会造出一批谁也读不到的 provider_models 行。
 func (s *Store) accountProviderStrict(accountID int64) (string, error) {
-	var provider string
-	err := s.db.QueryRow(`SELECT provider FROM accounts WHERE id = ?`, accountID).Scan(&provider)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("账号 %d 不存在：读不到它的厂商，模型目录无从落库", accountID)
-	}
-	if err != nil {
+	var row accountRow
+	if err := s.gorm.Select("id", "provider").Where("id = ?", accountID).
+		Limit(1).Find(&row).Error; err != nil {
 		return "", err
 	}
-	return provider, nil
+	if row.ID == 0 {
+		return "", fmt.Errorf("账号 %d 不存在：读不到它的厂商，模型目录无从落库", accountID)
+	}
+	return row.Provider, nil
 }
 
 // ReplaceModels 把这些名字标成 allowed，其余模型行一行都不动，返回新增的行数。
@@ -925,26 +939,33 @@ func (s *Store) ReplaceModels(accountID int64, models []string) (int, error) {
 	}
 	names := normalizeModelNames(models)
 	added := 0
-	err = s.withTx(func(tx *sql.Tx) error {
+	err = s.withTx(func(tx *gorm.DB) error {
 		for _, name := range names {
 			// 目录里没有的名字补一行 manual，已有的行一个字段都不动（含 source）：
 			// 同步写进来的元数据归同步刷新，一次清单不该把它降级成手填行（见 providerModelInsertOnly）。
-			if _, err := tx.Exec(providerModelInsertOnly, provider, name, SourceManual, time.Now().Unix()); err != nil {
+			if err := execSQL(tx, providerModelInsertOnly, provider, name, SourceManual, time.Now().Unix()); err != nil {
 				return err
 			}
-			// 先按「不覆盖已有行」插一次，只为数清新增了几个名字；
-			// 再把这一行标成 allowed。分两步是因为 upsert 的 RowsAffected 数不出新增与更新的区别。
-			res, err := tx.Exec(`INSERT INTO account_models (account_id, model, access, http_status, error, checked_at)
-				VALUES (?, ?, ?, 0, '', 0)
-				ON CONFLICT (account_id, model) DO NOTHING`, accountID, name, AccessAllowed)
-			if err != nil {
+			// 先看这一行在不在，只为数清新增了几个名字。
+			var existing accountModelRow
+			if err := tx.Where("account_id = ? AND model = ?", accountID, name).
+				Limit(1).Find(&existing).Error; err != nil {
 				return err
 			}
-			if n, err := res.RowsAffected(); err == nil && n > 0 {
+			if existing.AccountID == 0 {
+				if err := tx.Create(&accountModelRow{
+					AccountID: accountID,
+					Model:     name,
+					Access:    AccessAllowed,
+				}).Error; err != nil {
+					return err
+				}
 				added++
+				continue
 			}
-			if _, err := tx.Exec(`UPDATE account_models SET access = ? WHERE account_id = ? AND model = ?`,
-				AccessAllowed, accountID, name); err != nil {
+			if err := tx.Model(&accountModelRow{}).
+				Where("account_id = ? AND model = ?", accountID, name).
+				Update("access", AccessAllowed).Error; err != nil {
 				return err
 			}
 		}
