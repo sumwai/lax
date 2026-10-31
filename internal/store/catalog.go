@@ -330,6 +330,164 @@ func declareModelsTx(tx *sql.Tx, accountID int64, provider string, models []stri
 	return nil
 }
 
+// DeclareModelResult 是 DeclareAccountModel 写完之后的事实，供 CLI 输出用。
+type DeclareModelResult struct {
+	Model    string
+	Provider string
+	Access   string
+	// Protocol 是这次写进账号级的协议，没给就是空串（表示协议没动）。
+	Protocol string
+	// Created 表示 account_models 这一行是不是这次新建的。
+	Created bool
+	// ProtocolDeclared 表示这个协议是不是这次新并进目录的协议集合。
+	ProtocolDeclared bool
+}
+
+// DeclareAccountModel 手写一条「这个账号能用这个模型」，在同一个事务里写
+// provider_models 与 account_models 两张表。`model add` 的写入口只有这一份，cli 不拼 SQL。
+//
+// 目录行：没有就补一行 source='manual'，其余元数据列留空；已有就只改 protocols、source 与
+// updated_at，上下文长度、最大输出、能力位与价格一个字段都不动——手写一条可达性不是对这些
+// 事实的结论。source 升到 manual 是有意的：manual 是最强来源，此后 `model sync` 不会把这行
+// 手写的协议集合冲掉。
+//
+// 可达性行：access 一律写成 allowed，checked_at 保持 0（手写不是探活结论，`model ls` 因此
+// 写「待探活」）。原本就是 allowed 的行保留 http_status、error 与 checked_at，重复执行不清掉
+// 探活历史；从 forbidden / missing / error 翻回 allowed 时把这三项清成 0 / 空串 / 0，旧结论
+// 不再作数，下一轮照常重探。
+//
+// protocol 为空表示只写可达性、不动协议；给值时同时并进目录的协议集合（追加到末尾，已有顺序
+// 与去重都不变）并写进账号级的 protocol。参数校验在动库之前做完，事务里任何一步失败整笔回滚。
+func (s *Store) DeclareAccountModel(accountID int64, model, protocol string) (DeclareModelResult, error) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return DeclareModelResult{}, fmt.Errorf("声明模型需要模型名：目录以 (厂商, 模型) 为主键，空名字定位不到任何一行")
+	}
+	protocol = strings.TrimSpace(protocol)
+	if protocol != "" && !IsWireProtocol(protocol) {
+		return DeclareModelResult{}, fmt.Errorf("模型 %q 的协议是 %q，只能是空串（只写可达性、不动协议）或 %s",
+			model, protocol, wireProtocolNames())
+	}
+
+	res := DeclareModelResult{Model: model, Access: AccessAllowed, Protocol: protocol}
+	err := s.withTx(func(tx *sql.Tx) error {
+		// 厂商只从账号行上取：模型目录的主键是 (厂商, 模型)，账号不存在就没有可写的目录行。
+		var provider string
+		err := tx.QueryRow(`SELECT provider FROM accounts WHERE id = ?`, accountID).Scan(&provider)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("账号 id %d 不存在，先 lax account add", accountID)
+		}
+		if err != nil {
+			return err
+		}
+		provider = strings.TrimSpace(provider)
+		if provider == "" {
+			return fmt.Errorf("账号 id %d 的厂商为空：目录以 (厂商, 模型) 为主键，没有厂商就没有可写的目录行", accountID)
+		}
+		res.Provider = provider
+
+		declared, err := declareProviderModelProtocolTx(tx, provider, model, protocol)
+		if err != nil {
+			return err
+		}
+		res.ProtocolDeclared = declared
+
+		created, err := declareAccountModelAllowedTx(tx, accountID, model, protocol)
+		if err != nil {
+			return err
+		}
+		res.Created = created
+		return nil
+	})
+	if err != nil {
+		return DeclareModelResult{}, err
+	}
+	return res, nil
+}
+
+// declareProviderModelProtocolTx 写目录那一行，第二个返回值表示这个协议是不是这次新并进
+// 协议集合。新行的协议集合就是 joinList([]string{protocol})：没给协议时是空串，
+// 也就是「上游没声明」（见迁移 0015 的列注释）。
+func declareProviderModelProtocolTx(tx *sql.Tx, provider, model, protocol string) (bool, error) {
+	var existing string
+	err := tx.QueryRow(`SELECT protocols FROM provider_models WHERE provider = ? AND model = ?`,
+		provider, model).Scan(&existing)
+	now := time.Now().Unix()
+	if errors.Is(err, sql.ErrNoRows) {
+		// 新行的其余元数据列走列默认值（长度与价格 NULL、能力位空串）：手写一条可达性
+		// 不等于知道上下文长度与价格，猜一个数比留空更糟。
+		if _, err := tx.Exec(`INSERT INTO provider_models (provider, model, source, protocols, updated_at)
+			VALUES (?, ?, ?, ?, ?)`, provider, model, SourceManual, joinList([]string{protocol}), now); err != nil {
+			return false, err
+		}
+		return protocol != "", nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	protocols := splitList(existing)
+	declared := protocol != "" && !containsString(protocols, protocol)
+	if declared {
+		// 追加到末尾：已有顺序不动，新声明的协议排在后面，结果与执行次数无关。
+		protocols = append(protocols, protocol)
+	}
+	// 只更新协议集合、来源与时间：长度、最大输出、能力位与四个价格不归这里改。
+	if _, err := tx.Exec(`UPDATE provider_models SET protocols = ?, source = ?, updated_at = ?
+		WHERE provider = ? AND model = ?`, joinList(protocols), SourceManual, now, provider, model); err != nil {
+		return false, err
+	}
+	return declared, nil
+}
+
+// declareAccountModelAllowedTx 写可达性那一行，第二个返回值表示这一行是不是这次新建的。
+// 先插一次（冲突就不动）只为数清新增的行：upsert 的 RowsAffected 分不出新增与更新。
+func declareAccountModelAllowedTx(tx *sql.Tx, accountID int64, model, protocol string) (bool, error) {
+	res, err := tx.Exec(`INSERT INTO account_models
+		(account_id, model, access, http_status, error, checked_at, protocol)
+		VALUES (?, ?, ?, 0, '', 0, ?)
+		ON CONFLICT (account_id, model) DO NOTHING`, accountID, model, AccessAllowed, protocol)
+	if err != nil {
+		return false, err
+	}
+	added, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if added > 0 {
+		// 新行已经就是目标状态：allowed、没探过、协议按参数。
+		return true, nil
+	}
+
+	// 已有一行：先把原来的状态读出来，再在 Go 里算目标值。不写成一条靠 SET 右值
+	// 引用旧列的 UPDATE——「哪些列要清、哪些要留」摆在代码里比藏在 SQL 求值顺序里好读。
+	var (
+		prevAccess, prevError, prevProtocol string
+		prevHTTP                            int
+		prevChecked                         int64
+	)
+	if err := tx.QueryRow(`SELECT access, http_status, error, checked_at, protocol
+		FROM account_models WHERE account_id = ? AND model = ?`, accountID, model).
+		Scan(&prevAccess, &prevHTTP, &prevError, &prevChecked, &prevProtocol); err != nil {
+		return false, err
+	}
+	httpStatus, msg, checkedAt := prevHTTP, prevError, prevChecked
+	if prevAccess != AccessAllowed {
+		// 旧的 forbidden / missing / error 结论不再作数：清掉三项，下一轮照常重探。
+		httpStatus, msg, checkedAt = 0, "", 0
+	}
+	if protocol != "" {
+		prevProtocol = protocol
+	}
+	if _, err := tx.Exec(`UPDATE account_models
+		SET access = ?, http_status = ?, error = ?, checked_at = ?, protocol = ?
+		WHERE account_id = ? AND model = ?`,
+		AccessAllowed, httpStatus, msg, checkedAt, prevProtocol, accountID, model); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
 // ProviderModels 返回一家厂商的目录，按模型名升序。
 func (s *Store) ProviderModels(provider string) ([]ProviderModel, error) {
 	rows, err := s.db.Query(`SELECT provider, model, source, context_window, max_output,
