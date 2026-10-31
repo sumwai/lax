@@ -30,6 +30,7 @@ lax log tail                                        # 看请求记录
 | `model probe` | 逐个模型探活，把能用的写进账号，可按厂商与账号筛选；`--protocol` 只探指定的那一条协议 |
 | `model alias set\|unset\|ls` | 模型别名：把客户端写死的模型名指到真实模型名上，只影响请求方向 |
 | `model price set\|unset\|ls` | 模型单价：目录里的厂商级标价与某账号的覆盖价，`usage` 与 `model ls` 都读它 |
+| `model capability add\|set\|unset\|ls` | 模型能力声明：能力位（`speech` / `transcription`）、音色与音频格式；语音端点只打声明过对应能力的模型，`/v1/models` 也输出这些声明 |
 | `usage` | 按账号、模型或日期汇总用量，含输入、输出与缓存读写 token |
 | `log tail` | 最近的请求记录 |
 | `call` | 手工打一条请求，打印选号过程；默认 anthropic 入站，`--protocol` 可切换四种入站，gemini 也支持 `--stream` |
@@ -206,28 +207,54 @@ lax provider set openai openai-embeddings=/v1/embeddings
 
 ## 语音
 
-语音有两条线协议，报文都按 OpenAI 的形状：`openai-speech`（文本转语音，`POST /v1/audio/speech`）与 `openai-transcriptions`（语音转文本，`POST /v1/audio/transcriptions`）。它们与对话、决策、向量化都不相通，只做同协议直通：合成请求只换 `model`，音频字节与响应头原样返回；转写请求是 `multipart/form-data`，只重写 `model` 那个 part（boundary 重生成），音频与其它字段原样，响应字节也原样。
+语音有两条线协议，报文都按 OpenAI 的形状：`openai-speech`（文本转语音，`POST /v1/audio/speech`）与 `openai-transcriptions`（语音转文本，`POST /v1/audio/transcriptions`）。出站有两种：厂商声明了语音路由就同协议直通（只换 `model`，音频或 JSON 字节原样）；厂商只有 chat 路由时，可以用 chat 适配把语音请求编成 chat completions 方言（MiMo 的 `mimo-v2.5-tts` / `mimo-v2.5-asr` 就是这种形状）。
 
-协议是路由事实，跟向量化一样要在厂商上声明（`openai` 已内置两条）：
+**先声明能力，再调接口。** 能力位决定一个模型能不能用于语音端点：没声明的模型（例如一个普通对话模型）在本地就回 400，一条上游调用都不会发。音色与音频格式同样要声明，`/v1/models` 会把它们带出去：
 
 ```bash
+# 真正的 OpenAI audio 厂商：声明路由
 lax provider set openai openai-speech=/v1/audio/speech
 lax provider set openai openai-transcriptions=/v1/audio/transcriptions
 lax model add gpt-4o-mini-tts --account openai1
-lax speak --model gpt-4o-mini-tts --text "今天风很大" --out hi.mp3
-lax transcribe hi.mp3 --model gpt-4o-mini-transcribe
+lax model capability set gpt-4o-mini-tts --capability speech --voices alloy,nova --audio-formats mp3,wav
+
+# MiMo：只有 chat 路由，靠能力声明走 chat 适配
+lax provider add mimo --base-url https://api.xiaomimimo.com \
+    --openai /v1/chat/completions --models-path /v1/models --default-protocol openai-chat
+lax account add mimo1 --provider mimo --key -
+lax model capability set mimo-v2.5-tts --provider mimo --capability speech \
+    --voices "mimo_default,冰糖,茉莉,苏打,白桦,Mia,Chloe,Milo,Dean" --audio-formats mp3,wav,pcm16
+lax model capability set mimo-v2.5-asr --provider mimo --capability transcription --audio-formats wav,mp3
 ```
 
-| 项 | TTS | ASR |
-| --- | --- | --- |
-| 请求体 | JSON：只换 `model`，`input`、`voice`、`response_format`、`speed`、`instructions`、`stream_format` 原样 | multipart：只换 `model` part，其余 part 与音频字节原样 |
-| 最少校验 | `model` 非空、`input` 是字符串或非空字符串数组 | 必须是 `multipart/form-data` 且有 `model` 与 `file` |
-| 响应 | 音频字节原样，`Content-Type` 跟上游 | JSON 或 SSE 原样 |
-| 用量 | 记入参字符数（`requests.tts_chars`） | 记上游报的音频秒数（`requests.audio_seconds`） |
-| 计价 | `model price set` 的 `--tts-char`（每百万字符） | `--audio-second`（每秒） |
-| 探活 | 发一条 `input` 为 null 的应错请求 | 发一条只带 `model`、不带 `file` 的应错请求 |
+```python
+from openai import OpenAI
+c = OpenAI(base_url="http://127.0.0.1:4567/v1", api_key="lax-local")
 
-探活不发真实任务，靠上游错误码判可达性：`400` / `422` 判 `allowed`（请求到了业务层）、`404` 判 `missing`、`401` 停止探活并停用账号、连接层失败不改可达性。代价是不校验 key 的上游对任何请求都回 `400`，这个 `400` 只证明路由存在、证明不了凭据有效——`model show` 的备注会写「端点可达，凭据未验证」，验凭据仍是 `account test`。
+c.audio.speech.create(model="mimo-v2.5-tts", voice="Mia", input="今天风很大", response_format="mp3") \
+    .stream_to_file("hi.mp3")
+print(c.audio.transcriptions.create(model="mimo-v2.5-asr", file=open("hi.mp3", "rb"), language="zh").text)
+```
+
+chat 适配的映射：
+
+| 入站 | 出站 |
+| --- | --- |
+| TTS `input` | `messages` 里 assistant 的正文（数组按换行拼接） |
+| TTS `instructions` | `messages` 里 user 的风格指令（没有就省略） |
+| TTS `voice` | `audio.voice` 原样；空则省略 |
+| TTS `response_format` | `audio.format`：mp3→mp3、wav→wav、pcm→pcm16 |
+| TTS `speed` | 丢弃（上游没有这个参数） |
+| ASR `file` | `messages[0].content` 里唯一的 `input_audio`（data URL + base64） |
+| ASR `language` | `asr_options.language`（auto / zh / en） |
+| ASR `prompt`、`temperature` | 丢弃（上游拒绝 text part） |
+| ASR `response_format` | 只影响本地包装：json → `{"text":…}`、text → 纯文本、verbose_json → 带 `task`、`language`、`duration` |
+
+本版不做转码、不做流式：ogg/opus、SILK 输入与 `opus`/`aac`/`flac` 输出都回 400，`stream_format: "sse"` 与 ASR 的 `stream: true` 也回 400，`srt`/`vtt` 与 `auto`/`zh`/`en` 以外的语言同样拒。这些都在本地拒，不会变成一次上游调用。
+
+计费分两条：直通按字符（`tts_chars`）× `--tts-char` 与音频秒（`audio_seconds`）× `--audio-second`；chat 适配按上游报的 token 计（`in_tokens` / `out_tokens` / 缓存读），`tts_chars` 与 `audio_seconds` 只记录展示、不进花费。`/v1/models` 的条目会带 `capabilities`、`voices` 与 `audio_formats`，不确定能传什么时先查它。
+
+语音模型的探活仍按对话请求打，因此声明了能力的模型用 `model add` 手写可达性（`model ls` 显示「待探活」，不影响选号）；对这类模型跑 `model probe` 会因为对话请求返回 400 把 `allowed` 改写成 `forbidden`。直通路由上的应错探活规则见 DESIGN 5.16：`400` / `422` 判可达、`404` 判不存在、`401` 停用账号，而 `400` 只证明端点存在、不证明凭据有效。
 
 ## 决策请求：lax decide
 
