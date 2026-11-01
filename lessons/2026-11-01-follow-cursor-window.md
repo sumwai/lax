@@ -35,5 +35,5 @@ wins over the extra reads, and `--to` still stops the loop.
 
 ## Fix
 
-`fix in progress`: the query and follow changes are in the working tree; fill in the commit hash
-once they land.
+Fixed in `ad03c2b`, which moved both follow loops to ascending cursor reads and carried the
+`since` bound into every poll.

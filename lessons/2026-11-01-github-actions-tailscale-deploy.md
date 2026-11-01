@@ -38,5 +38,4 @@ published `v0.1.0` Linux amd64 archive. The remote script verified the archive v
 
 ## Fix
 
-`fix in progress`: the workflow and deployment scripts are in the working tree; fill in the
-commit hash once they land.
+Fixed in `5015185`, which added the public-host deploy job and both deployment scripts.
