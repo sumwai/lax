@@ -306,6 +306,27 @@ lax model dialect ls mimo-v2.5-tts             # 看模型绑了哪条方言
 lax model dialect set mimo-v2.5-tts chat.complete@1 com.example.echo/chat@1
 ```
 
+本机插件包放在 `plugins/<插件名>/`，默认不进版本库（见 `plugins/README.md`）。下面以本机的 `doubao-seed-tts` 为例，它同时提供豆包 Seed-TTS 2.0 与 Seed-ASR 极速版：
+
+```bash
+lax plugin install ./plugins/doubao-seed-tts --trust sandboxed --yes
+printf '%s' "$DOUBAO_API_KEY" \
+    | lax account add doubao --provider doubao-seed --models seed-tts-2.0,bigmodel --key -
+lax model speak --model doubao-seed-tts --voice zh_female_xiaohe_uranus_bigtts \
+    --format mp3 --text '你好' --out hello.mp3
+lax model transcribe hello.mp3 --model doubao-seed-asr --language zh --format verbose_json
+
+curl -s http://127.0.0.1:6543/v1/audio/speech \
+    -H 'Content-Type: application/json' \
+    -d '{"model":"doubao-seed-tts","input":"你好","voice":"zh_female_xiaohe_uranus_bigtts","instructions":"请用轻快、开心的语气"}' \
+    --output happy.mp3
+curl -s http://127.0.0.1:6543/v1/audio/transcriptions \
+    -F model=doubao-seed-asr -F language=zh -F response_format=json \
+    -F file=@hello.mp3
+```
+
+客户端模型名分别是 `doubao-seed-tts` 与 `doubao-seed-asr`，插件把它们解析成上游 `seed-tts-2.0` 与 `bigmodel`；路由、`X-Api-Key` 与逐请求的 `X-Api-Resource-Id` / `X-Api-Request-Id` 都由插件声明。TTS 支持 mp3 / wav / pcm，`speed` 会换算成豆包的 `speech_rate`，`instructions` 会作为 `additions.context_texts` 传给上游，用来控制语气、节奏与音量。ASR 只收 wav / mp3，返回 `json`、`text` 或 `verbose_json`，`language` 只认 `auto` / `zh` / `en`；沙箱把音频内联进请求，单文件上限 8 MiB。两条都只做非流式。插件包的目录结构与安装方式见 `plugins/README.md`，具体限制见插件包自己的 README。
+
 安装流水线是固定的：解析并严格校验 manifest、方言文件、模型目录与三者之间的引用 → 定信任级别 → 拒掉声明式方言承载非语音操作 → 算包目录哈希 → 版本冲突（同一版本不能覆盖）→ 方言冲突（内置方言与其余已装插件一起试登记，`lax/` 前缀不许冒用）→ 复制到 `<数据目录>/plugins/installed/<插件 ID>/<版本>/`（先落 `staging/` 再整目录改名，符号链接一律拒）→ 逐家厂商一个事务写目录（厂商、路由、模型、方言绑定、别名，冲突整包回滚）→ 写 `plugin_versions`（记下安装时的 `runtime`）与 `plugins`。`--dry-run` 停在复制之前，`--no-enable` 只装不用，装第二个版本要 `--yes`。
 
 `--trust` 只有两个取值：`declarative` 与 `sandboxed`。`runtime: "declarative"` 的包只能按声明式装，`runtime: "moejs"` 的包只能按沙箱装；对不上、或写 `trusted-worker`，都是用法错误（退出码 2）。`plugin update` 没有这个参数，按新包的 runtime 重新推断。
