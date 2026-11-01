@@ -799,6 +799,12 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound str
 	// contentType 默认 JSON；语音转写要改成带新 boundary 的 multipart。
 	contentType := "application/json"
 	switch {
+	case speechUsesDialect(inbound, dialect):
+		// 语音入站 + 插件方言：入站形状解成 Input，上游请求由方言从零构建。
+		// 能力校验已经在上游调用之前做过（见 checkSpeechInbound）。
+		// 这一支必须排在转写直通之前：豆包 ASR 的出站线协议与入站同为
+		// openai-transcriptions，但上游要的是 JSON，不是改写后的 multipart。
+		body, planHeaders, err = s.encodeSpeechDialect(dialect, inbound, raw, req.Model, inboundHeaders.Get("Content-Type"))
 	case outbound == ProtocolTranscriptions && inboundHeaders != nil:
 		// 语音转写换 model 那个 part：不能走 patchModel（请求体不是 JSON），
 		// 也不能直接发 raw（model 还是客户端的名字，别名没解析）。
@@ -807,10 +813,6 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound str
 		body, contentType, err = rewriteTranscriptionsBody(raw, inboundHeaders.Get("Content-Type"), req.Model)
 	case outbound == ProtocolTranscriptions:
 		body = raw
-	case speechUsesDialect(inbound, dialect):
-		// 语音入站 + 插件方言：入站形状解成 Input，上游请求由方言从零构建。
-		// 能力校验已经在上游调用之前做过（见 checkSpeechInbound）。
-		body, planHeaders, err = s.encodeSpeechDialect(dialect, inbound, raw, req.Model, inboundHeaders.Get("Content-Type"))
 	case outbound == ProtocolSpeech:
 		// 语音合成是 JSON，与其余直通协议一样只换 model。
 		body, err = patchModel(raw, req.Model)

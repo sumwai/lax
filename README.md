@@ -226,7 +226,7 @@ lax provider set openai openai-embeddings=/v1/embeddings
 
 ## 语音
 
-语音有两条线协议，报文都按 OpenAI 的形状：`openai-speech`（文本转语音，`POST /v1/audio/speech`）与 `openai-transcriptions`（语音转文本，`POST /v1/audio/transcriptions`）。出站形状由模型绑定的**方言**决定：方言的 `upstream_wire` 与入站协议相同就同协议直通（只换 `model`，音频或 JSON 字节原样），是 `openai-chat` 就由方言把语音请求编成 chat completions、再把响应解回音频字节或转写结果。内置方言四条：`lax/openai-speech@1` 与 `lax/openai-transcriptions@1`（直通，宿主原样转发）、`lax/mimo-chat-speech@1` 与 `lax/mimo-chat-asr@1`（MiMo 的 chat 形状）。
+语音有两条线协议，报文都按 OpenAI 的形状：`openai-speech`（文本转语音，`POST /v1/audio/speech`）与 `openai-transcriptions`（语音转文本，`POST /v1/audio/transcriptions`）。出站形状由模型绑定的**方言**决定：绑到宿主直通方言 `lax/openai-speech@1` / `lax/openai-transcriptions@1` 才同协议直通（只换 `model`，音频或 JSON 字节原样）；插件方言即使 `upstream_wire` 与入站协议相同，也由它的 `Prepare` / `Decode` 从零编解码，所以豆包这类“同线协议、不同报文”的厂商仍能接入。绑到 `lax/mimo-chat-speech@1` / `lax/mimo-chat-asr@1` 时由内置 chat 方言把语音请求编成 chat completions、再把响应解回音频字节或转写结果。
 
 **先声明能力，再绑方言，再调接口。** 能力位决定一个模型能不能用于语音端点：没声明的模型（例如一个普通对话模型）在本地就回 400，一条上游调用都不会发。音色与音频格式同样要声明，`/v1/models` 会把它们带出去。方言绑定决定上游形状：没有绑定也是 400，文案给出带 `--dialect` 的下一步命令；绑定的方言没注册（插件被停用或删掉）同样 400，且不回落。
 

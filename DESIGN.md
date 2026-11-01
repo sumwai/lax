@@ -954,7 +954,7 @@ TypeSafe 的 System One（Jev）不是对话：输入一个 `state` 加一组带
 
 1. 入站协议换成操作名（`plugin.OperationForInbound`），读 `store.ModelOperation(厂商, 模型, 操作)`。厂商取候选账号的 `provider`，模型名取解析别名后的名字。
 2. 绑的是宿主直通方言（`lax/openai-speech@1`、`lax/openai-transcriptions@1`）→ 同协议直通：只换 `model`，请求体其余字节与响应字节原样（TTS 的 JSON 只改一个字段，ASR 的 multipart 只重写 `model` 那个 part 并重生成 boundary）。判定的特征是「宿主方言且 `upstream_wire` 等于入站协议」两条同时成立，不是只看 `lax/` 前缀：MiMo 那两条内置方言也是 `lax/` 开头，但它们靠 `Prepare`/`Decode` 把语音做成 chat 的形状。
-3. 其余方言（插件方言，含 MiMo 的两条内置方言）→ 由方言 `Prepare` 编上游请求、`Decode` 解上游响应。**不再要求它的 `upstream_wire` 必须是 `openai-chat`**：豆包的 TTS 入站是 `openai-speech`、出站也是 `openai-speech`，只是路径、请求体与响应形状都是它自己的，这类方言照样走这一条（以前会被当成直通，把客户端报文原样发到豆包的路径上）。`Plan.Headers` 与 `Plan.Path` 的区别在这里：头生效，路径不生效（地址按厂商路由走）。双向翻译的例子（chat 形状）：
+3. 其余方言（插件方言，含 MiMo 的两条内置方言）→ 由方言 `Prepare` 编上游请求、`Decode` 解上游响应。**不再要求它的 `upstream_wire` 必须是 `openai-chat`**：豆包的 TTS 入站是 `openai-speech`、出站也是 `openai-speech`，只是路径、请求体与响应形状都是它自己的，这类方言照样走这一条（以前会被当成直通，把客户端报文原样发到豆包的路径上）。豆包 ASR 同样是 `openai-transcriptions` 进、`openai-transcriptions` 出，但上游要 JSON 而不是 multipart；因此 `buildRequest` 必须先判方言、再判转写直通，否则 multipart 重写会抢在方言之前执行，把 `--boundary` 当成 JSON 发给上游。`Plan.Headers` 与 `Plan.Path` 的区别在这里：头生效，路径不生效（地址按厂商路由走）。双向翻译的例子（chat 形状）：
 
 ```
 用户 → POST /v1/audio/speech (openai-speech) → 方言 Prepare → POST /v1/chat/completions (openai-chat) → 上游
@@ -1018,7 +1018,7 @@ TTS 的 `choices[0].message.audio.data` 解 base64 后作为音频字节写出�
 
 边界之外的转换要写 hook 方言（`runtime: "moejs"`，见 5.17）。由此有三条现在就要写清的取舍：
 
-- 同协议直通不经过声明式映射。入站协议与方言的 `upstream_wire` 相同时走第 2 条路，`request` 与 `response` 的声明不执行；声明式方言在这种组合里提供的是厂商路由、绑定与能力位。
+- 同协议直通只适用于宿主直通方言（`lax/openai-speech@1` 与 `lax/openai-transcriptions@1`）。插件声明的方言即使 `upstream_wire` 与入站协议相同，也按 `request` / `response` 执行 `Prepare` 与 `Decode`；声明式方言因此能改写豆包那种同线协议、不同报文的形状。ASR 的这条分支必须排在 multipart 直通改写之前，理由见 5.16「按绑定分发」第 3 条。
 - 对话操作没有声明式映射的节点：`input` 白名单只有语音那八项，给非语音操作绑声明式方言会在安装时被拒。
 - 对话操作有 `Input.Body`：宿主编好出站报文后交给 hook 方言打补丁，方言也能从零构建报文；`Input.Messages` 还空着（宿主没填），要读消息只能解析 `ctx.body`。响应侧约定见 5.17。
 
