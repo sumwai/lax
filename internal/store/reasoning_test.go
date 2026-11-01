@@ -72,7 +72,7 @@ func TestUsageCostCountsIndependentReasoning(t *testing.T) {
 		t.Fatalf("记一次尝试: %v", err)
 	}
 
-	rows, err := st.Usage("account", time.Now().Add(-time.Hour).Unix())
+	rows, err := st.Usage("account", time.Now().Add(-time.Hour).Unix(), 0)
 	if err != nil {
 		t.Fatalf("汇总: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestUsageCostIgnoresSubsetReasoning(t *testing.T) {
 		t.Fatalf("写请求记录: %v", err)
 	}
 
-	rows, err := st.Usage("account", time.Now().Add(-time.Hour).Unix())
+	rows, err := st.Usage("account", time.Now().Add(-time.Hour).Unix(), 0)
 	if err != nil {
 		t.Fatalf("汇总: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestMigration0012KeepsHistoryAtZero(t *testing.T) {
 	}
 
 	// 历史花费与升级前一致：7 × 2 / 1e6 + 1 × 8 / 1e6，思考两列是 0 不改金额。
-	rows, err := st.Usage("account", 0)
+	rows, err := st.Usage("account", 0, 0)
 	if err != nil {
 		t.Fatalf("汇总: %v", err)
 	}

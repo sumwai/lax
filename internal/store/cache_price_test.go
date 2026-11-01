@@ -77,7 +77,7 @@ func TestUsageCostUsesCachePrices(t *testing.T) {
 		t.Fatalf("写请求记录: %v", err)
 	}
 
-	rows, err := st.Usage("account", time.Now().Add(-time.Hour).Unix())
+	rows, err := st.Usage("account", time.Now().Add(-time.Hour).Unix(), 0)
 	if err != nil {
 		t.Fatalf("按账号汇总: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestUsageCostFallsBackToInputPrice(t *testing.T) {
 	if err := st.InsertRequest(&plain); err != nil {
 		t.Fatalf("写请求记录: %v", err)
 	}
-	rows, err := st.Usage("account", time.Now().Add(-time.Hour).Unix())
+	rows, err := st.Usage("account", time.Now().Add(-time.Hour).Unix(), 0)
 	if err != nil {
 		t.Fatalf("汇总: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestUsageCostFallsBackToInputPrice(t *testing.T) {
 	if err := st.InsertRequest(&cached); err != nil {
 		t.Fatalf("写第二条请求记录: %v", err)
 	}
-	rows, err = st.Usage("account", time.Now().Add(-time.Hour).Unix())
+	rows, err = st.Usage("account", time.Now().Add(-time.Hour).Unix(), 0)
 	if err != nil {
 		t.Fatalf("再汇总: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestUsageCostWithoutAnyPrice(t *testing.T) {
 	if err := st.InsertRequest(&rec); err != nil {
 		t.Fatalf("写请求记录: %v", err)
 	}
-	rows, err := st.Usage("account", time.Now().Add(-time.Hour).Unix())
+	rows, err := st.Usage("account", time.Now().Add(-time.Hour).Unix(), 0)
 	if err != nil {
 		t.Fatalf("汇总: %v", err)
 	}
@@ -324,7 +324,7 @@ func TestMigration0011BackfillsUncachedTokens(t *testing.T) {
 	if err := st.InsertRequest(&rec); err != nil {
 		t.Fatalf("写新行: %v", err)
 	}
-	rows, err := st.Usage("account", time.Now().Add(-time.Hour).Unix())
+	rows, err := st.Usage("account", time.Now().Add(-time.Hour).Unix(), 0)
 	if err != nil {
 		t.Fatalf("汇总: %v", err)
 	}

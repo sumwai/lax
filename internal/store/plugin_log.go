@@ -48,8 +48,9 @@ func (s *Store) AppendPluginLog(entry PluginLog) error {
 		Delete(&pluginLogRow{}).Error
 }
 
-// PluginLogs 按时间倒序返回日志。level 非空时只取该级别，since 非 0 时只取之后的。
-func (s *Store) PluginLogs(pluginID string, limit int, level string, since int64) ([]PluginLog, error) {
+// PluginLogs 按时间倒序返回日志。level 非空时只取该级别；since 非 0 时只取
+// at >= since 的行，until 非 0 时只取 at < until 的行。
+func (s *Store) PluginLogs(pluginID string, limit int, level string, since int64, until ...int64) ([]PluginLog, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -60,17 +61,48 @@ func (s *Store) PluginLogs(pluginID string, limit int, level string, since int64
 	if since > 0 {
 		query = query.Where("at >= ?", since)
 	}
+	if len(until) > 0 && until[0] > 0 {
+		query = query.Where("at < ?", until[0])
+	}
 	var rows []pluginLogRow
 	if err := query.Order("at desc, id desc").Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
+	return pluginLogsFromRows(rows), nil
+}
+
+// PluginLogsAfter 返回 [since, until) 内 id 大于 afterID 的日志，按 id 升序，最多 limit 条。
+// `plugin logs --follow` 用它按写入顺序追赶新行；取最新 N 条再按 id 过滤时，
+// 一轮突发超过 N 条会把前面那些永久跳过。since 或 until 为 0 表示那一端不设限。
+func (s *Store) PluginLogsAfter(pluginID string, afterID int64, limit int, level string, since, until int64) ([]PluginLog, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	query := s.gorm.Where("plugin_id = ? AND id > ?", pluginID, afterID)
+	if level != "" {
+		query = query.Where("level = ?", level)
+	}
+	if since > 0 {
+		query = query.Where("at >= ?", since)
+	}
+	if until > 0 {
+		query = query.Where("at < ?", until)
+	}
+	var rows []pluginLogRow
+	if err := query.Order("id ASC").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return pluginLogsFromRows(rows), nil
+}
+
+func pluginLogsFromRows(rows []pluginLogRow) []PluginLog {
 	out := make([]PluginLog, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, PluginLog{
 			ID: r.ID, PluginID: r.PluginID, Level: r.Level, Hook: r.Hook, Message: r.Message, At: r.At,
 		})
 	}
-	return out, nil
+	return out
 }
 
 // SetActivePluginVersion 把活动版本切到一个已安装的版本。版本行不存在时报错，

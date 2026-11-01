@@ -252,6 +252,17 @@ func (f *flagSet) Arg(i int) string {
 
 func (f *flagSet) Args() []string { return f.pos }
 
+// Changed 判断某个参数在命令行上显式出现过，用来区分默认值与用户写入。
+func (f *flagSet) Changed(name string) bool {
+	changed := false
+	f.Visit(func(fl *flag.Flag) {
+		if fl.Name == name {
+			changed = true
+		}
+	})
+	return changed
+}
+
 func (e *Env) printJSON(v any) error {
 	enc := json.NewEncoder(e.Stdout)
 	enc.SetIndent("", "  ")

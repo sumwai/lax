@@ -215,7 +215,7 @@ func exerciseBackend(t *testing.T, st *Store) {
 		t.Fatalf("写目录价: %v", err)
 	}
 	for _, dim := range []string{"account", "model", "day"} {
-		usage, err := st.Usage(dim, 0)
+		usage, err := st.Usage(dim, 0, 0)
 		if err != nil {
 			t.Fatalf("按 %s 汇总: %v", dim, err)
 		}

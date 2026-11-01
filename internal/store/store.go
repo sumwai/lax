@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	glebarez "github.com/glebarez/sqlite"
@@ -530,14 +531,55 @@ func insertRequestTx(tx *gorm.DB, r *RequestRecord) error {
 
 // RecentRequests 返回最近的请求记录，按时间倒序。
 func (s *Store) RecentRequests(limit int) ([]RequestRecord, error) {
+	return s.RecentRequestsBetween(limit, 0, 0)
+}
+
+// RecentRequestsBetween 返回 [since, until) 内最近的请求记录，按时间倒序。
+// since 或 until 为 0 表示那一端不设限。
+func (s *Store) RecentRequestsBetween(limit int, since, until int64) ([]RequestRecord, error) {
 	if limit <= 0 {
 		limit = 20
 	}
+	query := s.gorm
+	if since > 0 {
+		query = query.Where("ts >= ?", since)
+	}
+	if until > 0 {
+		query = query.Where("ts < ?", until)
+	}
 	var rows []requestRow
-	if err := s.gorm.Order("ts DESC").Order("id DESC").Limit(limit).
+	if err := query.Order("ts DESC").Order("id DESC").Limit(limit).
 		Find(&rows).Error; err != nil {
 		return nil, err
 	}
+	return requestRecordsFromRows(rows), nil
+}
+
+// RequestsAfter 返回 [since, until) 内 id 大于 afterID 的请求记录，按 id 升序，最多 limit 条。
+// since 或 until 为 0 表示那一端不设限。`log tail --follow` 用它按写入顺序追赶新行，
+// 不依赖按时间倒序的 RecentRequests：一轮突发超过一次抓取上限时，倒序取最新 N 条会把
+// 前面那些永久跳过。
+func (s *Store) RequestsAfter(afterID int64, limit int, since, until int64) ([]RequestRecord, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	query := s.gorm.Where("id > ?", afterID)
+	if since > 0 {
+		query = query.Where("ts >= ?", since)
+	}
+	if until > 0 {
+		query = query.Where("ts < ?", until)
+	}
+	var rows []requestRow
+	if err := query.Order("id ASC").Limit(limit).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return requestRecordsFromRows(rows), nil
+}
+
+// requestRecordsFromRows 把数据库行转成对外的请求记录，两个读取入口共用一份字段映射。
+func requestRecordsFromRows(rows []requestRow) []RequestRecord {
 	out := make([]RequestRecord, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, RequestRecord{
@@ -563,7 +605,7 @@ func (s *Store) RecentRequests(limit int) ([]RequestRecord, error) {
 			Error:                derefStr(r.Error),
 		})
 	}
-	return out, nil
+	return out
 }
 
 // ptrInt64 把零值写进可空列。写入侧沿用旧行为：没有账号写 0、没有错误写空串，
@@ -661,14 +703,34 @@ type UsageRow struct {
 	Cost *float64
 }
 
-// Usage 按 dimension 汇总 since 之后的请求。dimension 取 account、model 或 day。
+// UsageFilter 是 usage 汇总的附加筛选。空串表示这一项不过滤。
+// Account 按账号名匹配，Model 按解析别名后的 model_used 匹配，Provider 按账号所属厂商匹配。
+type UsageFilter struct {
+	Account  string
+	Model    string
+	Provider string
+}
+
+// Usage 按 dimension 汇总 [since, until) 内的请求；until 为 0 表示不设上界。
+// dimension 取 account、model 或 day。
 // 每行花费按它自己的账号与 model_used 现算单价，见 usagePriceIn 那一组常量。
 //
 // 花费分两层算：内层按行把每一项折成金额，单价缺的那一项整项是 NULL（不计，
 // 而不是按 0 元算）；外层只把非 NULL 的项加起来，并数一遍有没有任何一项拿到价——
 // 一项价都没拿到时整组是 NULL（未定价），拿到过就是那些项的和（部分缺项照算）。
-func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
+func (s *Store) Usage(dimension string, since, until int64, filters ...UsageFilter) ([]UsageRow, error) {
+	var filter UsageFilter
+	if len(filters) > 1 {
+		return nil, fmt.Errorf("用量汇总最多接受一个筛选条件组")
+	}
+	if len(filters) == 1 {
+		filter = filters[0]
+	}
+	if until != 0 && until <= since {
+		return nil, fmt.Errorf("用量区间不对：结束时间必须晚于起始时间")
+	}
 	var expr string
+	order := "ORDER BY 2 DESC"
 	switch dimension {
 	case "account":
 		expr = "COALESCE(a.name, '(停用)')"
@@ -676,8 +738,24 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 		expr = "r.model_used"
 	case "day":
 		expr = s.dateExpr("r.ts")
+		order = "ORDER BY k ASC"
 	default:
 		return nil, fmt.Errorf("不支持的维度 %q，可用 account、model、day", dimension)
+	}
+
+	conditions := []string{"r.ts >= ?", "(? = 0 OR r.ts < ?)"}
+	args := []any{since, until, until}
+	if filter.Account != "" {
+		conditions = append(conditions, "a.name = ?")
+		args = append(args, filter.Account)
+	}
+	if filter.Model != "" {
+		conditions = append(conditions, "r.model_used = ?")
+		args = append(args, filter.Model)
+	}
+	if filter.Provider != "" {
+		conditions = append(conditions, "a.provider = ?")
+		args = append(args, filter.Provider)
 	}
 
 	// 单价按行现算：账号覆盖 → 目录标价（见 usagePriceIn 与 usagePriceJoin）。
@@ -711,14 +789,14 @@ func (s *Store) Usage(dimension string, since int64) ([]UsageRow, error) {
 				r.reasoning_tokens_extra * (%s) / 1e6 AS c_reasoning,
 				r.tts_chars * (%s) / 1e6 AS c_tts,
 				r.audio_seconds * (%s) AS c_audio
-			FROM requests r %s WHERE r.ts >= ?
-		) AS t GROUP BY k ORDER BY 2 DESC`,
+			FROM requests r %s WHERE %s
+		) AS t GROUP BY k %s`,
 		expr, usagePriceIn, usagePriceCacheRead, usagePriceCacheWrite, usagePriceOut, usagePriceOut,
-		usagePriceTTSChar, usagePriceAudioSecond, usagePriceJoin)
+		usagePriceTTSChar, usagePriceAudioSecond, usagePriceJoin, strings.Join(conditions, " AND "), order)
 
 	// 走 GORM 的 Raw 而不是底层 *sql.DB：查询里的 ? 占位符要由 dialector 转成 PostgreSQL
 	// 的 $1，直接用 *sql.DB 会把这个问号原样发给 PG。
-	rows, err := s.gorm.Raw(q, since).Rows()
+	rows, err := s.gorm.Raw(q, args...).Rows()
 	if err != nil {
 		return nil, err
 	}

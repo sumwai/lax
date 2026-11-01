@@ -330,7 +330,7 @@ func insertUsageRow(t *testing.T, st *store.Store, accountID int64, model string
 // 多出来的行说明 join 把一行请求乘成了多行。
 func oneUsage(t *testing.T, st *store.Store, dimension, key string) store.UsageRow {
 	t.Helper()
-	rows, err := st.Usage(dimension, time.Now().Add(-time.Hour).Unix())
+	rows, err := st.Usage(dimension, time.Now().Add(-time.Hour).Unix(), 0)
 	if err != nil {
 		t.Fatalf("汇总用量: %v", err)
 	}
@@ -471,7 +471,7 @@ func TestUsageCostGroupNullOnlyWhenEveryRequestUnpriced(t *testing.T) {
 		}
 	}
 
-	rows, err := st.Usage("account", time.Now().Add(-time.Hour).Unix())
+	rows, err := st.Usage("account", time.Now().Add(-time.Hour).Unix(), 0)
 	if err != nil {
 		t.Fatalf("汇总: %v", err)
 	}
@@ -480,7 +480,7 @@ func TestUsageCostGroupNullOnlyWhenEveryRequestUnpriced(t *testing.T) {
 	}
 	wantCost(t, rows[0].Cost, 4)
 	// m2 自己那一组一项价都没有 → null，与它所在的账号组不同。
-	byModel, err := st.Usage("model", time.Now().Add(-time.Hour).Unix())
+	byModel, err := st.Usage("model", time.Now().Add(-time.Hour).Unix(), 0)
 	if err != nil {
 		t.Fatalf("按模型汇总: %v", err)
 	}

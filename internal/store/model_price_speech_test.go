@@ -101,7 +101,7 @@ func TestUsageTTSAndAudioCost(t *testing.T) {
 		t.Fatalf("写 ASR 记录: %v", err)
 	}
 
-	rows, err := st.Usage("model", time.Now().Add(-time.Hour).Unix())
+	rows, err := st.Usage("model", time.Now().Add(-time.Hour).Unix(), 0)
 	if err != nil {
 		t.Fatalf("汇总用量: %v", err)
 	}

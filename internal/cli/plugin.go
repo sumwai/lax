@@ -1661,6 +1661,7 @@ func verifyPlugin(st *store.Store, dataDir string, p store.Plugin) pluginDoctorR
 type pluginLogQuery struct {
 	Level string
 	Since int64
+	Until int64
 	Limit int
 }
 
@@ -1670,14 +1671,14 @@ const pluginFollowInterval = time.Second
 func cmdPluginLogs(e *Env, args []string) error {
 	fs := newFlagSet(e, "plugin logs", "查看插件的运行日志")
 	level := fs.String("level", "", "只显示某个级别：debug | info | warn | error")
-	since := fs.String("since", "", "只看这个时间之后的：RFC3339（2025-01-02T15:04:05Z）或时长（1h、30m）")
+	timeRange := addTimeRangeFlags(fs, "")
 	limit := fs.Int("limit", 50, "最多显示多少条")
 	follow := fs.Bool("follow", false, "持续输出新日志，Ctrl-C 退出")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 || strings.TrimSpace(fs.Arg(0)) == "" {
-		return usagef("用法：lax plugin logs <插件 ID> [--level <级别>] [--since <时间或时长>] [--limit N] [--follow]\n插件 ID 用 lax plugin ls 看")
+		return usagef("用法：lax plugin logs <插件 ID> [--level <级别>] [--since <时长或时间> | --from <时间> --to <时间>] [--limit N] [--follow]\n插件 ID 用 lax plugin ls 看；时间参数含空格时要加引号，例如 --from '-1d 11:00'")
 	}
 	id := strings.TrimSpace(fs.Arg(0))
 	if *level != "" && !knownPluginLogLevel(*level) {
@@ -1686,11 +1687,11 @@ func cmdPluginLogs(e *Env, args []string) error {
 	if *limit <= 0 {
 		return usagef("--limit 是 %d：要一个正数", *limit)
 	}
-	sinceTS, err := parsePluginLogSince(*since, time.Now())
+	window, err := timeRange.parse(fs, time.Now())
 	if err != nil {
 		return err
 	}
-	query := pluginLogQuery{Level: *level, Since: sinceTS, Limit: *limit}
+	query := pluginLogQuery{Level: *level, Since: window.Since, Until: window.Until, Limit: *limit}
 
 	a, err := openApp(e, true)
 	if err != nil {
@@ -1713,7 +1714,7 @@ func cmdPluginLogs(e *Env, args []string) error {
 		defer stop()
 	}
 
-	rows, err := a.st.PluginLogs(id, query.Limit, query.Level, query.Since)
+	rows, err := a.st.PluginLogs(id, query.Limit, query.Level, query.Since, query.Until)
 	if err != nil {
 		return err
 	}
@@ -1731,21 +1732,6 @@ func cmdPluginLogs(e *Env, args []string) error {
 	return followPluginLogs(ctx, e, a.st, id, query, lastID)
 }
 
-// parsePluginLogSince 把 --since 换成起始时间戳。空串表示不过滤。
-func parsePluginLogSince(text string, now time.Time) (int64, error) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return 0, nil
-	}
-	if ts, err := time.Parse(time.RFC3339, text); err == nil {
-		return ts.Unix(), nil
-	}
-	if d, err := time.ParseDuration(text); err == nil && d > 0 {
-		return now.Add(-d).Unix(), nil
-	}
-	return 0, usagef("--since 是 %q：写成 RFC3339 时间（2025-01-02T15:04:05Z）或时长（1h、30m、90s）", text)
-}
-
 // pluginFollowFetch 是一次轮询取多少条：比 --limit 宽得多，
 // 免得两次轮询之间的突发只留下最后一个窗口，中间那几行谁也没看见。
 const pluginFollowFetch = 200
@@ -1760,24 +1746,25 @@ func followPluginLogs(ctx context.Context, e *Env, st *store.Store, id string, q
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			fresh, err := st.PluginLogs(id, fetch, query.Level, query.Since)
-			if err != nil {
-				return err
+			if query.Until > 0 && time.Now().Unix() >= query.Until {
+				return nil
 			}
-			// 查询按时间倒序：倒着扫，按写入顺序打出来。
-			newOnes := make([]store.PluginLog, 0, len(fresh))
-			for i := len(fresh) - 1; i >= 0; i-- {
-				if fresh[i].ID > lastID {
-					newOnes = append(newOnes, fresh[i])
+			for {
+				fresh, err := st.PluginLogsAfter(id, lastID, fetch, query.Level, query.Since, query.Until)
+				if err != nil {
+					return err
+				}
+				if len(fresh) == 0 {
+					break
+				}
+				if err := printPluginLogs(e, fresh); err != nil {
+					return err
+				}
+				lastID = fresh[len(fresh)-1].ID
+				if len(fresh) < fetch {
+					break
 				}
 			}
-			if len(newOnes) == 0 {
-				continue
-			}
-			if err := printPluginLogs(e, newOnes); err != nil {
-				return err
-			}
-			lastID = newOnes[len(newOnes)-1].ID
 		}
 	}
 }

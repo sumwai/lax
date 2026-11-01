@@ -382,3 +382,192 @@ func TestUsageCacheFallbackToInputPrice(t *testing.T) {
 		t.Fatalf("缓存单价缺失时的估算花费 = %v，期望 10（缓存读写按输入价回退）", got.Cost)
 	}
 }
+
+// TestUsageAbsoluteRange 覆盖 --from/--to 的过滤与边界：
+// 只给 --from 时上界不限，只给 --to 时下界不限，与 --since 同给是用法错误。
+func TestUsageAbsoluteRange(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+	if code, _, stderr := addAccount(t, "ds1", "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-1", "--models", "m1"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	id := accountID(t, "ds1")
+
+	now := time.Now().Truncate(time.Second)
+	for _, rec := range []struct {
+		at     time.Time
+		tokens int64
+	}{
+		{now.Add(-2 * time.Hour), 100},
+		{now.Add(-1 * time.Hour), 200},
+		{now.Add(-10 * time.Minute), 300},
+	} {
+		addRecord(t, store.RequestRecord{
+			TS: rec.at.Unix(), Inbound: "anthropic", Outbound: "anthropic",
+			ModelRequested: "m1", ModelUsed: "m1", AccountID: id,
+			HTTPStatus: 200, OK: true, InTokens: rec.tokens,
+		})
+	}
+
+	from := now.Add(-90 * time.Minute).Format(time.RFC3339)
+	to := now.Add(-30 * time.Minute).Format(time.RFC3339)
+	rows := mustUsageRows(t, "--by", "model", "--from", from, "--to", to)
+	if got := rows["m1"]; got.Requests != 1 || got.InTokens != 200 {
+		t.Fatalf("--from/--to 汇总 = %+v，期望只保留中间那条 200 token", got)
+	}
+
+	rows = mustUsageRows(t, "--by", "model", "--from", from)
+	if got := rows["m1"]; got.Requests != 2 || got.InTokens != 500 {
+		t.Fatalf("只给 --from 的汇总 = %+v，期望包含现在仍在区间内的两条", got)
+	}
+
+	rows = mustUsageRows(t, "--by", "model", "--to", to)
+	if got := rows["m1"]; got.Requests != 2 || got.InTokens != 300 {
+		t.Fatalf("只给 --to 的汇总 = %+v，期望从头到 --to 的两条", got)
+	}
+
+	for _, args := range [][]string{
+		{"usage", "--since", "nope"},
+		{"usage", "--since", "1d", "--from", from},
+		{"usage", "--from", "昨天"},
+		{"usage", "--from", to, "--to", from},
+		{"usage", "--from", "-1d", "11:00"},
+	} {
+		code, _, stderr := run(t, args...)
+		if code != 2 {
+			t.Fatalf("%v 退出码 = %d，期望用法错误 2，stderr = %s", args, code, stderr)
+		}
+	}
+}
+
+// TestUsageFiltersAndDayOrder 覆盖 usage 的三个筛选参数与 --by day 的日期升序：
+// 筛选走 SQL 而不是取完再筛，日期分组按 key 升序，不再按请求数降序。
+func TestUsageFiltersAndDayOrder(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+	if code, _, stderr := addAccount(t, "a1", "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-1", "--models", "m1,m2"); code != 0 {
+		t.Fatalf("account add a1 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := addAccount(t, "a2", "other", "http://127.0.0.1:9", "openai-chat", "--key", "sk-2", "--models", "m1"); code != 0 {
+		t.Fatalf("account add a2 退出码 = %d，stderr = %s", code, stderr)
+	}
+	a1 := accountID(t, "a1")
+	a2 := accountID(t, "a2")
+
+	now := time.Now().Truncate(time.Second)
+	day1 := time.Date(now.Year(), now.Month(), now.Day()-2, 12, 0, 0, 0, time.Local)
+	day2 := time.Date(now.Year(), now.Month(), now.Day()-1, 12, 0, 0, 0, time.Local)
+	for _, rec := range []store.RequestRecord{
+		{TS: day1.Unix(), Inbound: "anthropic", Outbound: "anthropic", ModelRequested: "m1", ModelUsed: "m1", AccountID: a1, HTTPStatus: 200, OK: true, InTokens: 10},
+		{TS: day1.Add(time.Hour).Unix(), Inbound: "anthropic", Outbound: "anthropic", ModelRequested: "m1", ModelUsed: "m1", AccountID: a2, HTTPStatus: 200, OK: true, InTokens: 20},
+		{TS: day2.Unix(), Inbound: "anthropic", Outbound: "anthropic", ModelRequested: "m2", ModelUsed: "m2", AccountID: a1, HTTPStatus: 200, OK: true, InTokens: 30},
+	} {
+		addRecord(t, rec)
+	}
+
+	code, out, stderr := run(t, "usage", "--by", "day", "--since", "7d", "--json")
+	if code != 0 {
+		t.Fatalf("usage --by day 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var days []usageRowJSON
+	mustJSON(t, out, &days)
+	if len(days) != 2 || days[0].Key != day1.Format("2006-01-02") || days[1].Key != day2.Format("2006-01-02") {
+		t.Fatalf("--by day 顺序 = %+v，期望日期升序 %s、%s", days, day1.Format("2006-01-02"), day2.Format("2006-01-02"))
+	}
+
+	if got := mustUsageRows(t, "--by", "account", "--account", "a1", "--since", "7d"); len(got) != 1 || got["a1"].Requests != 2 {
+		t.Fatalf("--account a1 = %+v，期望只有 a1 的两条", got)
+	}
+	if got := mustUsageRows(t, "--by", "model", "--model", "m1", "--since", "7d"); len(got) != 1 || got["m1"].Requests != 2 {
+		t.Fatalf("--model m1 = %+v，期望只有 m1 的两条", got)
+	}
+	if got := mustUsageRows(t, "--by", "account", "--provider", "other", "--since", "7d"); len(got) != 1 || got["a2"].Requests != 1 {
+		t.Fatalf("--provider other = %+v，期望只有 a2 的一条", got)
+	}
+	if got := mustUsageRows(t, "--by", "model", "--account", "a1", "--model", "m2", "--since", "7d"); len(got) != 1 || got["m2"].Requests != 1 {
+		t.Fatalf("--account a1 --model m2 = %+v，期望只有 m2 的一条", got)
+	}
+}
+
+// TestUsageLightweightTimeRange 覆盖 usage 对共享时间写法的复用：
+// 11:00 是当天 11:00，-1d 11:00 是昨天 11:00，区间仍是 [from, to)。
+func TestUsageLightweightTimeRange(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+	if code, _, stderr := addAccount(t, "ds1", "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-1", "--models", "m-yesterday,m-before,m-at,m-after"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	id := accountID(t, "ds1")
+
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+	yesterday := today.AddDate(0, 0, -1)
+	for model, at := range map[string]time.Time{
+		"m-yesterday": yesterday.Add(11*time.Hour + 30*time.Minute),
+		"m-before":    today.Add(10*time.Hour + 59*time.Minute),
+		"m-at":        today.Add(11 * time.Hour),
+		"m-after":     today.Add(11*time.Hour + 30*time.Minute),
+	} {
+		addRecord(t, store.RequestRecord{
+			TS: at.Unix(), Inbound: "anthropic", Outbound: "anthropic",
+			ModelRequested: model, ModelUsed: model, AccountID: id,
+			HTTPStatus: 200, OK: true, InTokens: 10,
+		})
+	}
+
+	rows := mustUsageRows(t, "--by", "model", "--from", "11:00")
+	if len(rows) != 2 || rows["m-at"].Requests != 1 || rows["m-after"].Requests != 1 {
+		t.Fatalf("--from 11:00 = %+v，期望只有当天 11:00 及之后的 m-at、m-after", rows)
+	}
+
+	rows = mustUsageRows(t, "--by", "model", "--from", "-1d 11:00", "--to", "11:00")
+	if len(rows) != 2 || rows["m-yesterday"].Requests != 1 || rows["m-before"].Requests != 1 {
+		t.Fatalf("--from -1d 11:00 --to 11:00 = %+v，期望昨天 11:00 到今天 11:00 的两条", rows)
+	}
+}
+
+// TestLogTailLightweightTimeRange 钉住 log tail 与 usage 共用同一套轻量时间写法，
+// 并且 --since 与 --from/--to 同时出现是用法错误。
+func TestLogTailLightweightTimeRange(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+	if code, _, stderr := addAccount(t, "ds1", "mine", "http://127.0.0.1:9", "openai-chat", "--key", "sk-1", "--models", "m-yesterday,m-before,m-at,m-after"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	id := accountID(t, "ds1")
+
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+	yesterday := today.AddDate(0, 0, -1)
+	for model, at := range map[string]time.Time{
+		"m-yesterday": yesterday.Add(11*time.Hour + 30*time.Minute),
+		"m-before":    today.Add(10*time.Hour + 59*time.Minute),
+		"m-at":        today.Add(11 * time.Hour),
+		"m-after":     today.Add(11*time.Hour + 30*time.Minute),
+	} {
+		addRecord(t, store.RequestRecord{
+			TS: at.Unix(), Inbound: "anthropic", Outbound: "anthropic",
+			ModelRequested: model, ModelUsed: model, AccountID: id,
+			HTTPStatus: 200, OK: true,
+		})
+	}
+
+	rows := mustLogRows(t, "-n", "10", "--from", "11:00")
+	if len(rows) != 2 || rows["m-at"].Model != "m-at" || rows["m-after"].Model != "m-after" {
+		t.Fatalf("log tail --from 11:00 = %+v，期望只有当天 11:00 及之后的记录", rows)
+	}
+
+	rows = mustLogRows(t, "-n", "10", "--from", "-1d 11:00", "--to", "11:00")
+	if len(rows) != 2 || rows["m-yesterday"].Model != "m-yesterday" || rows["m-before"].Model != "m-before" {
+		t.Fatalf("log tail --from -1d 11:00 --to 11:00 = %+v，期望昨天 11:00 到今天 11:00 的两条", rows)
+	}
+
+	code, _, stderr := run(t, "log", "tail", "--since", "1d", "--from", "11:00")
+	if code != 2 || !strings.Contains(stderr, "--since") {
+		t.Fatalf("--since 与 --from 同给时 code=%d stderr=%s，期望用法错误 2", code, stderr)
+	}
+	code, _, stderr = run(t, "log", "tail", "--from", "-1d", "11:00")
+	if code != 2 || !strings.Contains(stderr, "加引号") {
+		t.Fatalf("未加引号的相对日期 code=%d stderr=%s，期望用法错误 2", code, stderr)
+	}
+}

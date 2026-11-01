@@ -51,7 +51,7 @@ func TestUsageAndAccountOutputsCarryNoCredential(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读账号: %v", err)
 	}
-	rows, err := st.Usage("account", 0)
+	rows, err := st.Usage("account", 0, 0)
 	if err != nil {
 		t.Fatalf("汇总: %v", err)
 	}

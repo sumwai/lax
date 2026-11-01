@@ -22,10 +22,16 @@ import (
 
 func cmdUsage(e *Env, args []string) error {
 	fs := newFlagSet(e, "usage", "按账号、模型或日期汇总用量")
-	since := fs.String("since", "7d", "时间范围，如 24h、7d、3w")
+	timeRange := addTimeRangeFlags(fs, "7d")
 	by := fs.String("by", "account", "维度：account | model | day")
+	account := fs.String("account", "", "只统计这个账号")
+	model := fs.String("model", "", "只统计这个真实模型（别名已解析）")
+	provider := fs.String("provider", "", "只统计这家厂商的账号")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if fs.NArg() != 0 {
+		return usagef("用法：lax usage [--by account|model|day] [--account 账号] [--model 模型] [--provider 厂商] [--since 时间 | --from 时间 --to 时间]\n时间参数含空格时要加引号，例如 --from '-1d 11:00'")
 	}
 
 	switch *by {
@@ -34,7 +40,7 @@ func cmdUsage(e *Env, args []string) error {
 		return usagef("不支持的维度 %q，可用 account、model、day", *by)
 	}
 
-	sinceTS, err := usage.ParseSince(*since, time.Now())
+	window, err := timeRange.parse(fs, time.Now())
 	if err != nil {
 		return err
 	}
@@ -45,7 +51,11 @@ func cmdUsage(e *Env, args []string) error {
 	}
 	defer a.Close()
 
-	rows, err := a.st.Usage(*by, sinceTS)
+	rows, err := a.st.Usage(*by, window.Since, window.Until, store.UsageFilter{
+		Account:  strings.TrimSpace(*account),
+		Model:    strings.TrimSpace(*model),
+		Provider: strings.TrimSpace(*provider),
+	})
 	if err != nil {
 		return err
 	}
@@ -70,7 +80,7 @@ func cmdUsage(e *Env, args []string) error {
 	}
 
 	if len(rows) == 0 {
-		fmt.Fprintf(e.Stdout, "最近 %s 没有请求记录\n", *since)
+		fmt.Fprintf(e.Stdout, "%s 没有请求记录\n", window.Text)
 		return nil
 	}
 
@@ -175,7 +185,15 @@ func cmdLog(e *Env, args []string) error {
 	fs := newFlagSet(e, "log tail", "查看最近的请求记录")
 	n := fs.Int("n", 20, "条数")
 	follow := fs.Bool("follow", false, "持续输出新记录")
+	timeRange := addTimeRangeFlags(fs, "")
 	if err := fs.Parse(args[1:]); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return usagef("用法：lax log tail [-n N] [--follow] [--since 时间 | --from 时间 --to 时间]\n时间参数含空格时要加引号，例如 --from '-1d 11:00'")
+	}
+	window, err := timeRange.parse(fs, time.Now())
+	if err != nil {
 		return err
 	}
 
@@ -190,11 +208,15 @@ func cmdLog(e *Env, args []string) error {
 		return err
 	}
 
-	records, err := a.st.RecentRequests(*n)
+	records, err := a.st.RecentRequestsBetween(*n, window.Since, window.Until)
 	if err != nil {
 		return err
 	}
-	if err := printRecords(e, records, names); err != nil {
+	emptyText := "还没有请求记录"
+	if window.Text != "" {
+		emptyText = window.Text + " 没有请求记录"
+	}
+	if err := printRecords(e, records, names, emptyText); err != nil {
 		return err
 	}
 	if !*follow {
@@ -205,10 +227,13 @@ func cmdLog(e *Env, args []string) error {
 	defer stop()
 
 	lastID := int64(0)
-	if len(records) > 0 {
-		lastID = records[0].ID
+	for _, r := range records {
+		if r.ID > lastID {
+			lastID = r.ID
+		}
 	}
 
+	const followBatch = 500
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -216,25 +241,23 @@ func cmdLog(e *Env, args []string) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			fresh, err := a.st.RecentRequests(100)
-			if err != nil {
-				return err
+			if window.Until > 0 && time.Now().Unix() >= window.Until {
+				return nil
 			}
-			var newOnes []store.RequestRecord
-			for i := len(fresh) - 1; i >= 0; i-- {
-				if fresh[i].ID > lastID {
-					newOnes = append(newOnes, fresh[i])
+			for {
+				fresh, err := a.st.RequestsAfter(lastID, followBatch, window.Since, window.Until)
+				if err != nil {
+					return err
 				}
-			}
-			if len(newOnes) == 0 {
-				continue
-			}
-			if err := printRecords(e, newOnes, names); err != nil {
-				return err
-			}
-			for _, r := range newOnes {
-				if r.ID > lastID {
-					lastID = r.ID
+				if len(fresh) == 0 {
+					break
+				}
+				if err := printRecords(e, fresh, names, ""); err != nil {
+					return err
+				}
+				lastID = fresh[len(fresh)-1].ID
+				if len(fresh) < followBatch {
+					break
 				}
 			}
 		}
@@ -253,7 +276,7 @@ func accountNames(st *store.Store) (map[int64]string, error) {
 	return out, nil
 }
 
-func printRecords(e *Env, records []store.RequestRecord, names map[int64]string) error {
+func printRecords(e *Env, records []store.RequestRecord, names map[int64]string, emptyText string) error {
 	if e.JSON {
 		out := make([]map[string]any, 0, len(records))
 		for _, r := range records {
@@ -281,7 +304,9 @@ func printRecords(e *Env, records []store.RequestRecord, names map[int64]string)
 	}
 
 	if len(records) == 0 {
-		fmt.Fprintln(e.Stdout, "还没有请求记录")
+		if emptyText != "" {
+			fmt.Fprintln(e.Stdout, emptyText)
+		}
 		return nil
 	}
 

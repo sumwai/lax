@@ -37,12 +37,14 @@ lax log tail                                        # 看请求记录
 | `model decide` | 手工发一条 systemone 决策请求（`--state` 加一组问题），打印每个问题的答案与概率；`--json` 给脚本用 |
 | `model speak` | 手工发一条语音合成请求：`--model` 加 `--text`，音频写标准输出或 `--out <文件>`，`--voice` 与 `--format` 可选 |
 | `model transcribe` | 手工发一条语音转写请求：`<音频文件或 ->` 加 `--model`，`--language`、`--prompt` 与 `--format` 可选，响应体原样输出 |
-| `usage` | 按账号、模型或日期汇总用量，含输入、输出与缓存读写 token |
-| `log tail` | 最近的请求记录 |
+| `usage` | 按账号、模型或日期汇总用量；`--account` / `--model` / `--provider` 过滤，`--since` 或 `--from`/`--to` 限定时间，含输入、输出与缓存读写 token |
+| `log tail` | 最近的请求记录；`--since` 或 `--from`/`--to` 限定时间，`--follow` 跟进新记录 |
 | `doctor` | 自检配置、目录、密钥、端口、数据库 |
 | `version` | 打印版本号；`--json` 给出 `name` 与 `version` |
 
 每个命令都支持 `--json`，结果走 stdout，错误走 stderr。不带子命令等同 `--help`：`lax`、`lax model`、`lax plugin` 这类组都打印帮助到 stdout、退出码 0。退出码：0 成功、1 运行失败、2 用法错误。
+
+`usage`、`log tail` 与 `plugin logs` 共用时间参数：`--since 30m` 表示最近 30 分钟（支持 s/m/h/d/w）；`--from 11:00` 是当天 11:00，`--from '-1d 11:00' --to 11:00` 是昨天 11:00 到今天 11:00（左闭右开，`--to` 只写日期时包含当天）。`--since` 不能和 `--from`/`--to` 同时用；带空格的相对日期要加引号，否则 shell 会拆成两个参数。
 
 ## 入站协议
 
@@ -443,6 +445,16 @@ git push origin master v0.1.0
 ```
 
 推送 tag 后 `.github/workflows/release.yml` 会交叉编译 Linux 与 macOS 的 amd64 / arm64 并创建 Release；普通提交由 CI 跑 `make check`。`make dist` 可以在本地复现同一组发布包。Windows 不在发布范围：`serve` 与 `plugin reload` 依赖 Unix 信号。
+
+Release 创建成功后，同一工作流的 `deploy` job 会把 `linux/amd64` 包自动部署到 `aliyun-hongkong`：下载并校验 `checksums.txt`，替换 `~/.local/bin/lax`，重启 `lax.service`，并轮询本机 `/healthz`；30 秒内不通过会回滚到 `~/deploy/lax.previous`。只有不带 `-` 预发布后缀的正式 tag 会部署，`-rc` 一类验收 tag 不碰生产。部署只动二进制，不改 `~/.config/lax/config.json`、`~/.local/share/lax` 和 systemd unit。仓库需要以下 secrets：
+
+| Secret | 内容 |
+| --- | --- |
+| `DEPLOY_HOST` | 公网 SSH 主机 `larkax.com` |
+| `DEPLOY_USER` | `sumwai` |
+| `DEPLOY_PORT` | `22` |
+| `DEPLOY_SSH_KEY` | 专用部署私钥 |
+| `DEPLOY_KNOWN_HOSTS` | `larkax.com` 的固定 SSH 主机公钥 |
 
 ## 数据在哪
 

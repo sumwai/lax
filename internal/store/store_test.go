@@ -142,7 +142,7 @@ func TestRequestRecordsAndUsage(t *testing.T) {
 		t.Fatalf("记录 = %+v", recs)
 	}
 
-	rows, err := st.Usage("account", now-60)
+	rows, err := st.Usage("account", now-60, 0)
 	if err != nil {
 		t.Fatalf("按账号汇总: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestRequestRecordsAndUsage(t *testing.T) {
 		t.Fatalf("花费 = %v，期望 6（1M 输入 2 元 + 1M 输出 4 元）", rows[0].Cost)
 	}
 
-	rows, err = st.Usage("model", now-60)
+	rows, err = st.Usage("model", now-60, 0)
 	if err != nil {
 		t.Fatalf("按模型汇总: %v", err)
 	}
@@ -164,16 +164,150 @@ func TestRequestRecordsAndUsage(t *testing.T) {
 		t.Fatalf("按模型汇总 = %+v", rows)
 	}
 
-	if _, err := st.Usage("nope", now-60); err == nil {
+	if _, err := st.Usage("nope", now-60, 0); err == nil {
 		t.Fatal("不支持的维度应报错")
 	}
 
-	rows, err = st.Usage("day", now-60*60*24*2)
+	rows, err = st.Usage("day", now-60*60*24*2, 0)
 	if err != nil {
 		t.Fatalf("按日期汇总: %v", err)
 	}
 	if len(rows) != 1 || len(rows[0].Key) != 10 {
 		t.Fatalf("按日期汇总 = %+v", rows)
+	}
+}
+
+// TestUsageRangeUpperBoundIsExclusive 钉住 [since, until) 的边界：
+// 起始时刻算在内，结束时刻不算；until 为 0 时不设上界。
+func TestUsageRangeUpperBoundIsExclusive(t *testing.T) {
+	st := openTemp(t)
+	acc := store.Account{
+		Name: "range", Provider: "deepseek", Protocol: "openai-chat",
+		BaseURL: "u", KeyCipher: []byte{1}, Models: []string{"m-range"}, Enabled: true,
+	}
+	if err := st.CreateAccount(&acc); err != nil {
+		t.Fatalf("新增账号: %v", err)
+	}
+
+	base := time.Now().Unix()
+	for i, ts := range []int64{base - 5400, base - 3600, base - 1800} {
+		rec := store.RequestRecord{
+			TS: ts, Inbound: "anthropic", Outbound: "anthropic",
+			ModelRequested: "m-range", ModelUsed: "m-range", AccountID: acc.ID,
+			HTTPStatus: 200, OK: true, InTokens: int64(10 * (i + 1)),
+		}
+		if err := st.InsertRequest(&rec); err != nil {
+			t.Fatalf("写第 %d 条记录: %v", i+1, err)
+		}
+	}
+
+	rows, err := st.Usage("model", base-5400, base-1800)
+	if err != nil {
+		t.Fatalf("按区间汇总: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Requests != 2 || rows[0].InTokens != 30 {
+		t.Fatalf("区间内汇总 = %+v，期望 2 条、输入 30（起点计入，终点不计）", rows)
+	}
+
+	rows, err = st.Usage("model", base-5400, 0)
+	if err != nil {
+		t.Fatalf("不设上界汇总: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Requests != 3 {
+		t.Fatalf("不设上界的汇总 = %+v，期望 3 条", rows)
+	}
+
+	if _, err := st.Usage("model", base-1800, base-1800); err == nil {
+		t.Fatal("结束时间等于起始时间应报错")
+	}
+}
+
+// TestRequestsAfterReturnsEveryNewRow 钉住跟随读取按 id 升序分批，
+// 不会因为一次只取最新 N 条而永久跳过突发里的旧行。
+func TestRequestsAfterReturnsEveryNewRow(t *testing.T) {
+	st := openTemp(t)
+	acc := store.Account{
+		Name: "follow", Provider: "deepseek", Protocol: "openai-chat",
+		BaseURL: "u", KeyCipher: []byte{1}, Models: []string{"m-follow"}, Enabled: true,
+	}
+	if err := st.CreateAccount(&acc); err != nil {
+		t.Fatalf("新增账号: %v", err)
+	}
+
+	base := time.Now().Unix()
+	ids := make([]int64, 0, 3)
+	for i := 0; i < 3; i++ {
+		rec := store.RequestRecord{
+			TS: base - int64(2-i)*60, Inbound: "anthropic", Outbound: "anthropic",
+			ModelRequested: "m-follow", ModelUsed: "m-follow", AccountID: acc.ID,
+			HTTPStatus: 200, OK: true, InTokens: int64(i + 1),
+		}
+		if err := st.InsertRequest(&rec); err != nil {
+			t.Fatalf("写第 %d 条记录: %v", i+1, err)
+		}
+		ids = append(ids, rec.ID)
+	}
+
+	first, err := st.RequestsAfter(ids[0], 2, 0, 0)
+	if err != nil {
+		t.Fatalf("读第一批: %v", err)
+	}
+	if len(first) != 2 || first[0].ID != ids[1] || first[1].ID != ids[2] {
+		t.Fatalf("第一批 = %+v，期望按 id 升序的 %d、%d", first, ids[1], ids[2])
+	}
+
+	second, err := st.RequestsAfter(first[len(first)-1].ID, 2, 0, 0)
+	if err != nil {
+		t.Fatalf("读第二批: %v", err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("第二批应没有新行，实际 %+v", second)
+	}
+
+	// 起始时间也算过滤：只看最后两分钟时，第一条更早的记录不应出现。
+	recent, err := st.RequestsAfter(ids[0], 10, base-60, 0)
+	if err != nil {
+		t.Fatalf("按时间过滤: %v", err)
+	}
+	if len(recent) != 2 || recent[0].ID != ids[1] || recent[1].ID != ids[2] {
+		t.Fatalf("按时间过滤 = %+v，期望只保留 %d、%d", recent, ids[1], ids[2])
+	}
+}
+
+// TestPluginLogsAfterReturnsEveryNewRow 钉住 plugin logs --follow 的分批读取：
+// 按 id 升序返回，一轮突发超过抓取上限时分批追完，不会漏中间行。
+func TestPluginLogsAfterReturnsEveryNewRow(t *testing.T) {
+	st := openTemp(t)
+	ids := make([]int64, 0, 3)
+	for i := 0; i < 3; i++ {
+		entry := store.PluginLog{
+			PluginID: "com.example.echo", Level: "info",
+			Message: "line", At: time.Now().Add(time.Duration(i) * time.Second).Unix(),
+		}
+		if err := st.AppendPluginLog(entry); err != nil {
+			t.Fatalf("写第 %d 条日志: %v", i+1, err)
+		}
+		rows, err := st.PluginLogs("com.example.echo", 3, "", 0)
+		if err != nil {
+			t.Fatalf("读第 %d 条日志 ID: %v", i+1, err)
+		}
+		ids = append(ids, rows[0].ID)
+	}
+
+	first, err := st.PluginLogsAfter("com.example.echo", ids[0], 2, "", 0, 0)
+	if err != nil {
+		t.Fatalf("读第一批: %v", err)
+	}
+	if len(first) != 2 || first[0].ID != ids[1] || first[1].ID != ids[2] {
+		t.Fatalf("第一批 = %+v，期望按 id 升序的 %d、%d", first, ids[1], ids[2])
+	}
+
+	second, err := st.PluginLogsAfter("com.example.echo", first[len(first)-1].ID, 2, "", 0, 0)
+	if err != nil {
+		t.Fatalf("读第二批: %v", err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("第二批应没有新行，实际 %+v", second)
 	}
 }
 

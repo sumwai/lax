@@ -315,6 +315,66 @@ func TestPluginLogs(t *testing.T) {
 	}
 }
 
+// TestPluginLogsLightweightTimeRange 钉住 plugin logs 复用同一套时间参数：
+// 11:00 是当天 11:00，-1d 11:00 是昨天 11:00，--since 与 --from 互斥。
+func TestPluginLogsLightweightTimeRange(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+	mustInstall(t, writePluginVersion(t, "1.0.0", "1"))
+
+	db := storetest.Open(t)
+	now := time.Now()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local)
+	yesterday := today.AddDate(0, 0, -1)
+	for message, at := range map[string]time.Time{
+		"昨天 11:30": yesterday.Add(11*time.Hour + 30*time.Minute),
+		"今天 10:59": today.Add(10*time.Hour + 59*time.Minute),
+		"今天 11:30": today.Add(11*time.Hour + 30*time.Minute),
+	} {
+		if err := db.AppendPluginLog(store.PluginLog{
+			PluginID: "com.example.echo", Level: "info", Message: message, At: at.Unix(),
+		}); err != nil {
+			t.Fatalf("写日志 %s: %v", message, err)
+		}
+	}
+
+	messages := func(args ...string) map[string]bool {
+		t.Helper()
+		code, out, stderr := run(t, append([]string{"plugin", "logs", "com.example.echo", "--json"}, args...)...)
+		if code != 0 {
+			t.Fatalf("plugin logs %v 退出码 = %d，stderr = %s", args, code, stderr)
+		}
+		var rows []struct {
+			Message string `json:"message"`
+		}
+		mustJSON(t, out, &rows)
+		got := make(map[string]bool, len(rows))
+		for _, row := range rows {
+			got[row.Message] = true
+		}
+		return got
+	}
+
+	got := messages("--from", "11:00")
+	if len(got) != 1 || !got["今天 11:30"] {
+		t.Fatalf("--from 11:00 = %+v，期望只有今天 11:30", got)
+	}
+
+	got = messages("--from", "-1d 11:00", "--to", "11:00")
+	if len(got) != 2 || !got["昨天 11:30"] || !got["今天 10:59"] {
+		t.Fatalf("--from -1d 11:00 --to 11:00 = %+v，期望昨天 11:30 与今天 10:59", got)
+	}
+
+	code, _, stderr := run(t, "plugin", "logs", "com.example.echo", "--since", "1d", "--from", "11:00")
+	if code != 2 || !strings.Contains(stderr, "--since") {
+		t.Fatalf("--since 与 --from 同给时 code=%d stderr=%s，期望用法错误 2", code, stderr)
+	}
+	code, _, stderr = run(t, "plugin", "logs", "com.example.echo", "--from", "-1d", "11:00")
+	if code != 2 || !strings.Contains(stderr, "加引号") {
+		t.Fatalf("未加引号的相对日期 code=%d stderr=%s，期望用法错误 2", code, stderr)
+	}
+}
+
 // TestPluginReloadRequiresServe 钉住 reload 的两种失败：没有 pid 文件、有 pid 文件但进程不在。
 func TestPluginReloadRequiresServe(t *testing.T) {
 	sandbox(t)

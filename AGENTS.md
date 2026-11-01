@@ -14,7 +14,8 @@
 | `internal/account` | 账号池、冷却、选号 | 选号是纯逻辑，输入是候选集与时间 |
 | `internal/gateway` | 入站 HTTP、上游转发 | 唯一发上游请求的地方 |
 | `internal/translate` | 协议编解码 | 纯函数，不读环境、不发网络 |
-| `internal/usage` | 汇总与花费估算 | 不写请求记录 |
+| `internal/timerange` | 命令行时间范围解析 | 不读配置、不连数据库 |
+| `internal/usage` | 用量金额格式化 | 不读环境、不写请求记录 |
 
 ## 代码
 
@@ -29,6 +30,17 @@
 - 上游一律用 `httptest` 假服务，测试不连真实厂商。
 - 改数据库结构必须新增迁移文件，不改已提交的迁移。
 - 交付前跑 `make check`。
+
+## 发版
+
+远程 `origin` 是公开仓库 `https://github.com/sumwai/lax`。发版信息的事实来源是 `v*` tag，详细规则见 `DESIGN.md` 5.18 与 `README.md`「构建」。
+
+- 版本用 SemVer，tag 写成 annotated tag `vMAJOR.MINOR.PATCH`（例如 `v0.1.0`）。1.0 之前破坏性改动升 MINOR，其余升 PATCH。
+- 只有 `v*` tag 参与版本推导。`backup-*` 是本地备份标记，不是发布版本，不要推送，也不要拿来发版。
+- 版本号在构建时由 `-X lax/internal/cli.version=<版本>` 注入，源码里的 `0.1.0-dev` 只是默认值；不要手工改这个默认值来发版。`make build` 用 `git describe --tags --match 'v*' --always --dirty` 推导版本。
+- 发版前确认工作区干净并跑过 `make check`。本地先用 `make dist VERSION=vX.Y.Z` 验证四个发布包与 `dist/checksums.txt`，再打 tag：`git tag -a vX.Y.Z -m "lax vX.Y.Z"`，推送 `git push origin master vX.Y.Z`。
+- `.github/workflows/ci.yml` 在 `master` 与 pull request 上跑 `make check`；推送 `v*` tag 会触发 `.github/workflows/release.yml`，由 `make dist` 生成 Linux/macOS 的 amd64、arm64 包并创建 GitHub Release，随后把正式 tag 的 Linux amd64 包自动部署到 `aliyun-hongkong`（带 `-` 的预发布 tag 不部署）。发布不覆盖 Windows：`serve` 与 `plugin reload` 依赖 Unix 信号。
+- 已推送的 tag 不移动、不删除、不重打。发错了就发新的 PATCH 版本。Release 完成后下载产物，核对 `checksums.txt` 与 `lax version` 输出。
 
 ## 提交
 
