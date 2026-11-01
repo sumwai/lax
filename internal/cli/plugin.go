@@ -268,6 +268,7 @@ type pluginPlanProvider struct {
 	ID       string            `json:"id"`
 	Name     string            `json:"name"`
 	BaseURL  string            `json:"base_url"`
+	Auth     string            `json:"auth,omitempty"`
 	Routes   []string          `json:"routes"`
 	Models   []pluginPlanModel `json:"models"`
 	Dialects []string          `json:"dialects"`
@@ -298,16 +299,41 @@ type pluginRoute struct {
 	Path     string
 }
 
-// dialectRoutes 列出一家厂商要建的端点：插件方言按它的 request.path，宿主方言按
-// plugin.DefaultRoutePath 推。同一家厂商的两条方言落在同一条线协议上时只留第一条，
-// 因为地址按厂商路由走，多建的路由没地方生效。
-func dialectRoutes(pkg plugin.Plugin, providerID string) []pluginRoute {
+// dialectRoutes 列出一家厂商要建的端点。
+//
+// 优先级只有两级：manifest 里写了 routes 就以它为准（顺序与内容原样落库），
+// 没写才按方言推导——插件方言按它的 request.path，宿主方言按 plugin.DefaultRoutePath，
+// hook 方言没有声明式 request，也只能按线协议的默认路径建。推导时同一家厂商的两条方言落在
+// 同一条线协议上只留第一条，因为地址按厂商路由走，多建的路由没地方生效。
+func dialectRoutes(pkg plugin.Plugin, decl plugin.ProviderDecl) []pluginRoute {
+	if len(decl.Routes) > 0 {
+		out := make([]pluginRoute, 0, len(decl.Routes))
+		for _, r := range decl.Routes {
+			out = append(out, pluginRoute{
+				Protocol: strings.TrimSpace(r.Protocol),
+				Path:     strings.TrimSpace(r.Path),
+			})
+		}
+		return out
+	}
+
+	providerID := decl.ID
+	var out []pluginRoute
+	for _, route := range derivedDialectRoutes(pkg, providerID) {
+		out = append(out, route)
+	}
+	return out
+}
+
+// derivedDialectRoutes 是 manifest 没写 routes 时的推导：从方言与目录反推每一条协议。
+func derivedDialectRoutes(pkg plugin.Plugin, providerID string) []pluginRoute {
 	decls := make(map[string]plugin.DialectDecl, len(pkg.Dialects))
 	for _, d := range pkg.Dialects {
 		decls[d.ID] = d
 	}
 
 	// 按目录里引用的方言收集，而不是按 dialects 文件：目录可以只引用宿主方言。
+	// 保留 pluginRoute 上的方言 ID 只为报错与排查方便，落库不用它。
 	order := make([]string, 0, len(pkg.DialectsByProvider[providerID]))
 	seenDialect := map[string]bool{}
 	add := func(id string) {
@@ -415,9 +441,15 @@ func buildInstallPlan(pkg plugin.Plugin, trust string) (pluginInstallPlan, []sto
 	for _, decl := range m.Providers {
 		item := pluginPlanProvider{ID: decl.ID, Name: decl.Name, BaseURL: decl.BaseURL}
 		catalog := store.PluginCatalog{Provider: decl.ID, Name: decl.Name, BaseURL: decl.BaseURL}
+		// 凭据头声明：manifest 已经校验过，这里只把规整后的值带进安装计划，
+		// dry-run 因此能看到「真装会写进 providers 的两列」。
+		if header, scheme, err := decl.NormalizedAuth(); err == nil && header != "" {
+			catalog.AuthHeader, catalog.AuthScheme = header, scheme
+			item.Auth = header + " " + scheme
+		}
 
 		item.Dialects = append(item.Dialects, pkg.DialectsByProvider[decl.ID]...)
-		for _, route := range dialectRoutes(pkg, decl.ID) {
+		for _, route := range dialectRoutes(pkg, decl) {
 			item.Routes = append(item.Routes, route.Protocol+" "+route.Path)
 			catalog.Routes = append(catalog.Routes, store.ProviderRoute{
 				Provider: decl.ID, Protocol: route.Protocol, Path: route.Path,
@@ -1275,7 +1307,7 @@ func cmdPluginShow(e *Env, args []string) error {
 		for _, prov := range pkg.Manifest.Providers {
 			item := pluginShowProviderJSON{ID: prov.ID, Name: prov.Name, BaseURL: prov.BaseURL}
 			item.Dialects = append(item.Dialects, pkg.DialectsByProvider[prov.ID]...)
-			for _, route := range dialectRoutes(pkg, prov.ID) {
+			for _, route := range dialectRoutes(pkg, prov) {
 				item.Routes = append(item.Routes, route.Protocol+" "+route.Path)
 			}
 			for _, model := range pkg.Catalogs[prov.ID].Models {

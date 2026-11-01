@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"lax/internal/gateway"
+	"lax/internal/plugin"
 	"lax/internal/store"
 )
 
@@ -16,8 +17,8 @@ import (
 var providerSubs = []groupItem{
 	{"ls", "列厂商、地址、默认协议、各协议路由与模型列表路径"},
 	{"add", "新建一家厂商与它的协议路由"},
-	{"set", "改一家厂商的地址、路由、默认协议或备注"},
-	{"unset", "删掉一条路由，或清掉模型列表覆盖、默认协议、备注"},
+	{"set", "改一家厂商的地址、路由、默认协议、凭据头或备注"},
+	{"unset", "删掉一条路由，或清掉凭据头声明、模型列表覆盖、默认协议、备注"},
 	{"rm", "删除厂商与它的全部路由，账号还在用时要求 --force"},
 	{"header", "声明上游除凭据头之外还要的附加请求头：set / unset / ls"},
 }
@@ -36,9 +37,9 @@ var providerSubs = []groupItem{
 // `--base-url` 在 add 里是可选的：每条路由与 models_path 都写成整条地址时，它拼不进任何地址，
 // 这一项确实无处可用，给了也只过一遍本机校验、不参与拼地址。
 const (
-	providerAddUsage   = "用法：lax provider add <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--embeddings <路径>] [--speech <路径>] [--transcriptions <路径>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]"
-	providerSetUsage   = "用法：lax provider set <名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--embeddings <路径>] [--speech <路径>] [--transcriptions <路径>] [--models-path <路径>] [--default-protocol <协议>] [--note <备注>]"
-	providerUnsetUsage = "用法：lax provider unset <名称> <字段> [<字段>...]\n可用字段：anthropic、openai、responses、gemini、systemone、embeddings、speech、transcriptions、models-path、default-protocol、note"
+	providerAddUsage   = "用法：lax provider add <名称> [--base-url <地址>] [--auth-header <头名>] [--auth-scheme raw|bearer|bearer-semicolon] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--embeddings <路径>] [--speech <路径>] [--transcriptions <路径>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]"
+	providerSetUsage   = "用法：lax provider set <名称> [--base-url <地址>] [--auth-header <头名>] [--auth-scheme raw|bearer|bearer-semicolon] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--embeddings <路径>] [--speech <路径>] [--transcriptions <路径>] [--models-path <路径>] [--default-protocol <协议>] [--note <备注>]"
+	providerUnsetUsage = "用法：lax provider unset <名称> <字段> [<字段>...]\n可用字段：anthropic、openai、responses、gemini、systemone、embeddings、speech、transcriptions、auth-header、auth-scheme、models-path、default-protocol、note"
 )
 
 // providerUnsetField 是一个可以被 `provider unset` 清掉的字段。字段名用 flag 名，
@@ -59,6 +60,8 @@ var providerUnsetFields = []providerUnsetField{
 	{"embeddings", "openai-embeddings 路由", gateway.ProtocolEmbeddings},
 	{"speech", "openai-speech 路由", gateway.ProtocolSpeech},
 	{"transcriptions", "openai-transcriptions 路由", gateway.ProtocolTranscriptions},
+	{"auth-header", "凭据头声明", ""},
+	{"auth-scheme", "凭据写法", ""},
 	{"models-path", "模型列表覆盖", ""},
 	{"default-protocol", "显式默认协议", ""},
 	{"note", "备注", ""},
@@ -103,6 +106,8 @@ type providerJSON struct {
 	BaseURL         string              `json:"base_url"`
 	DefaultProtocol string              `json:"default_protocol"`
 	ModelsPath      string              `json:"models_path"`
+	AuthHeader      string              `json:"auth_header"`
+	AuthScheme      string              `json:"auth_scheme"`
 	Protocols       []providerRouteJSON `json:"protocols"`
 	Note            string              `json:"note"`
 }
@@ -214,6 +219,8 @@ func readProvider(st *store.Store, name string) (providerSnapshot, error) {
 			BaseURL:         p.BaseURL,
 			DefaultProtocol: def,
 			ModelsPath:      p.ModelsPath,
+			AuthHeader:      p.AuthHeader,
+			AuthScheme:      p.AuthScheme,
 			Protocols:       routeJSONs(routes),
 			Note:            p.Note,
 		},
@@ -379,6 +386,31 @@ func checkModelsPathFlag(value string, setCmd bool, usageLine string) error {
 	return checkEndpoint(value, usageLine)
 }
 
+// checkAuthHeaderFlag 校验 --auth-header 的取值：与 manifest 的 auth.header 同一套规则
+// （小写化、HTTP token、长度上限），两份规则都在 plugin.NormalizeAuthHeader 里。
+func checkAuthHeaderFlag(raw string, setCmd bool, usageLine string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", emptyValueError(setCmd, "auth-header", usageLine)
+	}
+	name, err := plugin.NormalizeAuthHeader(raw)
+	if err != nil {
+		return "", usagef("--auth-header %q 不能用：%v\n%s", raw, err, usageLine)
+	}
+	return name, nil
+}
+
+// checkAuthSchemeFlag 校验 --auth-scheme 的取值。跨字段的判定（有写法没头）在写入侧做：
+// 只给 --auth-scheme 时头可能在库里，命令面看不到它。
+func checkAuthSchemeFlag(raw string, setCmd bool, usageLine string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", emptyValueError(setCmd, "auth-scheme", usageLine)
+	}
+	if !plugin.IsAuthScheme(raw) {
+		return "", usagef("--auth-scheme %q 不认识：只能是 raw、bearer 或 bearer-semicolon（raw 直接写 key，bearer 写 \"Bearer <key>\"，bearer-semicolon 写 \"Bearer;<key>\"）\n%s", raw, usageLine)
+	}
+	return strings.ToLower(strings.TrimSpace(raw)), nil
+}
+
 // protocolFromCLI 把 --default-protocol 的取值换成线协议。命令行写法是 anthropic、openai、responses、
 // gemini、systemone，线协议全名（anthropic、openai-chat、openai-responses、gemini、systemone）也认：
 // 输入 openai 就是 chat，gemini 与 systemone 两种写法同形。
@@ -467,6 +499,8 @@ func cmdProviderAdd(e *Env, args []string) error {
 	paths := newProviderPathFlags(fs)
 	defProtocol := fs.String("default-protocol", "", "这家的默认协议：anthropic | openai | responses | gemini | systemone，必须落在这次声明的路由上；不给按 openai → responses → anthropic 取第一条")
 	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖，相对 --base-url 的路径（如 /v1/models）或整条地址；不给按各路由的 models_path 取（相对路径的斜杠写法由程序规整）")
+	authHeader := fs.String("auth-header", "", "凭据头的头名（如 X-Api-Key）：声明之后上游只收这一个头，不再发协议默认的 Authorization / x-api-key；不给表示按线协议推导")
+	authScheme := fs.String("auth-scheme", "", "凭据头的写法：raw（头值就是 key）| bearer（Bearer <key>）| bearer-semicolon（Bearer;<key>）；不给按 raw")
 	note := fs.String("note", "", "备注")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -497,6 +531,25 @@ func cmdProviderAdd(e *Env, args []string) error {
 		if err := checkRoutePathFlag(f, false, providerAddUsage); err != nil {
 			return err
 		}
+	}
+	// 凭据头与写法：可以只给头（写法按 raw 落库），不能只给写法。
+	authHeadName, authSchemeName := "", ""
+	if flagWasSet(fs, "auth-header") {
+		name, err := checkAuthHeaderFlag(*authHeader, false, providerAddUsage)
+		if err != nil {
+			return err
+		}
+		authHeadName = name
+	}
+	if flagWasSet(fs, "auth-scheme") {
+		scheme, err := checkAuthSchemeFlag(*authScheme, false, providerAddUsage)
+		if err != nil {
+			return err
+		}
+		authSchemeName = scheme
+	}
+	if authSchemeName != "" && authHeadName == "" {
+		return usagef("--auth-scheme 要跟 --auth-header 一起给：没有头就没有地方写凭据，例如 --auth-header X-Api-Key --auth-scheme raw\n%s", providerAddUsage)
 	}
 	if flagWasSet(fs, "default-protocol") && strings.TrimSpace(*defProtocol) == "" {
 		return emptyValueError(false, "default-protocol", providerAddUsage)
@@ -539,7 +592,8 @@ func cmdProviderAdd(e *Env, args []string) error {
 	}
 	defer a.Close()
 
-	p := store.Provider{Name: name, BaseURL: *baseURL, Note: *note, DefaultProtocol: def, ModelsPath: models}
+	p := store.Provider{Name: name, BaseURL: *baseURL, Note: *note, DefaultProtocol: def, ModelsPath: models,
+		AuthHeader: authHeadName, AuthScheme: authSchemeName}
 	// 默认协议指不到这次声明的路由、或有相对路径而缺 base_url 时 store 整笔拒绝，
 	// 错误文案已经写清缺哪条、下一步敲什么；缺 base_url 是命令写法的问题，包成用法错误（退出码 2）。
 	switch err := a.st.CreateProvider(p, routes); {
@@ -570,6 +624,8 @@ func cmdProviderSet(e *Env, args []string) error {
 	baseURL := fs.String("base-url", "", "改厂商的默认地址（带主机名的完整地址；每条路由都是整条地址时不需要它）")
 	paths := newProviderPathFlags(fs)
 	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖，相对 --base-url 的路径（如 /v1/models）或整条地址（相对路径的斜杠写法由程序规整）")
+	authHeader := fs.String("auth-header", "", "改凭据头的头名（如 X-Api-Key）；只给头时写法保持不动")
+	authScheme := fs.String("auth-scheme", "", "改凭据头的写法：raw | bearer | bearer-semicolon；只给写法时头必须在库里已有")
 	defProtocol := fs.String("default-protocol", "", "这家的默认协议：anthropic | openai | responses | gemini | systemone，必须落在已声明的路由上")
 	note := fs.String("note", "", "改备注")
 	if err := fs.Parse(args); err != nil {
@@ -605,6 +661,22 @@ func cmdProviderSet(e *Env, args []string) error {
 		}
 		patch.ModelsPath = modelsPath
 		changed = append(changed, "models-path")
+	}
+	if flagWasSet(fs, "auth-header") {
+		name, err := checkAuthHeaderFlag(*authHeader, true, providerSetUsage)
+		if err != nil {
+			return err
+		}
+		patch.AuthHeader = &name
+		changed = append(changed, "auth-header")
+	}
+	if flagWasSet(fs, "auth-scheme") {
+		scheme, err := checkAuthSchemeFlag(*authScheme, true, providerSetUsage)
+		if err != nil {
+			return err
+		}
+		patch.AuthScheme = &scheme
+		changed = append(changed, "auth-scheme")
 	}
 	if flagWasSet(fs, "default-protocol") {
 		if strings.TrimSpace(*defProtocol) == "" {
@@ -753,6 +825,11 @@ func unsetPresent(s providerSnapshot, f providerUnsetField) bool {
 		return false
 	case f.name == "models-path":
 		return s.row.ModelsPath != ""
+	case f.name == "auth-header":
+		return s.row.AuthHeader != ""
+	case f.name == "auth-scheme":
+		// 写法只跟着头存在；已经是 raw（与缺省相同）时不算有一项可清。
+		return s.row.AuthHeader != "" && s.row.AuthScheme != plugin.AuthSchemeRaw
 	case f.name == "default-protocol":
 		return s.row.DefaultProtocol != ""
 	case f.name == "note":
@@ -770,6 +847,12 @@ func applyUnset(patch *store.ProviderPatch, f providerUnsetField) {
 		patch.Routes[f.protocol] = empty
 	case f.name == "models-path":
 		patch.ModelsPath = &empty
+	case f.name == "auth-header":
+		// 清头的同时写法一并清空（写入侧会做，这里只把头传空）。
+		patch.AuthHeader = &empty
+	case f.name == "auth-scheme":
+		// 只清写法：头还在，写入侧会归一到 raw。
+		patch.AuthScheme = &empty
 	case f.name == "default-protocol":
 		patch.DefaultProtocol = &empty
 	case f.name == "note":

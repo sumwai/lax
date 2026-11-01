@@ -24,6 +24,8 @@ type providerRow struct {
 	BaseURL         string             `json:"base_url"`
 	DefaultProtocol string             `json:"default_protocol"`
 	ModelsPath      string             `json:"models_path"`
+	AuthHeader      string             `json:"auth_header"`
+	AuthScheme      string             `json:"auth_scheme"`
 	Protocols       []providerRouteRow `json:"protocols"`
 	Note            string             `json:"note"`
 }
@@ -341,6 +343,54 @@ func TestProviderAddCreates(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("provider add 输出缺 %q: %s", want, out)
 		}
+	}
+}
+
+// TestProviderAuthFlags 钉住命令面上的凭据头声明：add 写入并归一成小写、set 只改写法、
+// unset auth-header 把头与写法一起清掉、只给写法是用法错误。
+func TestProviderAuthFlags(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	code, out, stderr := run(t, "provider", "add", "doubao-voice",
+		"--base-url", "https://openspeech.bytedance.com",
+		"--auth-header", "X-Api-Key", "--auth-scheme", "raw",
+		"--speech", "/api/v3/tts/unidirectional", "--json")
+	if code != 0 {
+		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var added providerRow
+	mustJSON(t, out, &added)
+	if added.AuthHeader != "x-api-key" || added.AuthScheme != "raw" {
+		t.Fatalf("凭据头 = %q/%q，期望 x-api-key/raw", added.AuthHeader, added.AuthScheme)
+	}
+
+	code, out, stderr = run(t, "provider", "set", "doubao-voice", "--auth-scheme", "bearer", "--json")
+	if code != 0 {
+		t.Fatalf("provider set 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var updated providerRow
+	mustJSON(t, out, &updated)
+	if updated.AuthHeader != "x-api-key" || updated.AuthScheme != "bearer" {
+		t.Fatalf("改写法后 = %q/%q，期望只改写法", updated.AuthHeader, updated.AuthScheme)
+	}
+
+	code, out, stderr = run(t, "provider", "unset", "doubao-voice", "auth-header", "--json")
+	if code != 0 {
+		t.Fatalf("provider unset 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var cleared providerRow
+	mustJSON(t, out, &cleared)
+	if cleared.AuthHeader != "" || cleared.AuthScheme != "" {
+		t.Fatalf("清头后 = %q/%q，期望两项都是空串", cleared.AuthHeader, cleared.AuthScheme)
+	}
+
+	// 只给写法：没有头就没有地方写值，是用法错误。
+	code, _, stderr = run(t, "provider", "add", "noheader",
+		"--base-url", "https://api.example.com", "--openai", "/v1/chat/completions",
+		"--auth-scheme", "raw")
+	if code != 2 || !strings.Contains(stderr, "--auth-header") {
+		t.Fatalf("只给 --auth-scheme 应是用法错误（退出码 2），实际 %d：%s", code, stderr)
 	}
 }
 
@@ -1295,7 +1345,7 @@ func TestProviderUnsetErrors(t *testing.T) {
 		args []string
 		want []string
 	}{
-		{"未知字段", []string{"cohere"}, []string{"cohere", "不认识", "anthropic、openai、responses、gemini、systemone、embeddings、speech、transcriptions、models-path、default-protocol、note"}},
+		{"未知字段", []string{"cohere"}, []string{"cohere", "不认识", "anthropic、openai、responses、gemini、systemone、embeddings、speech、transcriptions、auth-header、auth-scheme、models-path、default-protocol、note"}},
 		{"带 -- 前缀", []string{"--", "--openai"}, []string{"不要带 -- 前缀", "可用："}},
 		{"大小写不符", []string{"OpenAI"}, []string{"大小写不符", "openai"}},
 		{"base-url", []string{"base-url"}, []string{"不能 unset", "--base-url"}},
