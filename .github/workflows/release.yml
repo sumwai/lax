@@ -23,6 +23,65 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: make dist VERSION="${GITHUB_REF_NAME}"
-      - env:
+      - name: 创建 Release
+        env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME 已存在，复用已有产物"
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+          fi
+
+  deploy:
+    name: deploy aliyun-hongkong
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: production
+      url: https://larkax.com
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: 下载并校验发布包
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          version="${VERSION#v}"
+          mkdir -p "$RUNNER_TEMP/release"
+          gh release download "$VERSION" \
+            --dir "$RUNNER_TEMP/release" \
+            --pattern "lax_${version}_linux_amd64.tar.gz" \
+            --pattern checksums.txt
+          cd "$RUNNER_TEMP/release"
+          checksum=$(grep -F " lax_${version}_linux_amd64.tar.gz" checksums.txt)
+          : "${checksum:?checksums.txt 里没有 lax_${version}_linux_amd64.tar.gz}"
+          printf '%s\n' "$checksum" | sha256sum -c -
+      - name: 写入部署凭据
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          : "${DEPLOY_SSH_KEY:?缺少 DEPLOY_SSH_KEY secret}"
+          : "${DEPLOY_KNOWN_HOSTS:?缺少 DEPLOY_KNOWN_HOSTS secret}"
+          install -m 700 -d "$RUNNER_TEMP/ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$RUNNER_TEMP/ssh/deploy"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$RUNNER_TEMP/ssh/known_hosts"
+          chmod 600 "$RUNNER_TEMP/ssh/deploy" "$RUNNER_TEMP/ssh/known_hosts"
+          {
+            echo "DEPLOY_SSH_KEY=$RUNNER_TEMP/ssh/deploy"
+            echo "DEPLOY_KNOWN_HOSTS=$RUNNER_TEMP/ssh/known_hosts"
+          } >> "$GITHUB_ENV"
+      - name: 部署到 aliyun-hongkong
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          version="${VERSION#v}"
+          ./scripts/deploy.sh "$RUNNER_TEMP/release/lax_${version}_linux_amd64.tar.gz" "$version"
