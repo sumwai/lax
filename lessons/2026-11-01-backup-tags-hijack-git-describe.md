@@ -2,7 +2,7 @@
 
 Found: 2026-11-01, while setting up release versioning for the public repository.
 
-Fix: in progress. The build rule in `Makefile` uses
+Fix: 7105ba4. The build rule in `Makefile` uses
 `git describe --tags --match 'v*'`, and the release workflow passes the pushed tag explicitly.
 
 ## Symptom
