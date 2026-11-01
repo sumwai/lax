@@ -76,7 +76,11 @@ type providerRow struct {
 	Note            string `gorm:"column:note;not null;default:''"`
 	DefaultProtocol string `gorm:"column:default_protocol;not null;default:''"`
 	ModelsPath      string `gorm:"column:models_path;not null;default:''"`
-	PluginID        string `gorm:"column:plugin_id;not null;default:''"`
+	// AuthHeader 与 AuthScheme 是凭据头的声明：头名小写，scheme 取 raw、bearer、
+	// bearer-semicolon。两项都为空表示按线协议推导（见 gateway.setAuth）。
+	AuthHeader string `gorm:"column:auth_header;size:191;not null;default:''"`
+	AuthScheme string `gorm:"column:auth_scheme;size:32;not null;default:''"`
+	PluginID   string `gorm:"column:plugin_id;not null;default:''"`
 }
 
 func (providerRow) TableName() string { return "providers" }

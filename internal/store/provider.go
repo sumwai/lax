@@ -10,6 +10,7 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
+	"lax/internal/plugin"
 	"lax/internal/translate"
 )
 
@@ -62,6 +63,11 @@ type Provider struct {
 	Note            string
 	DefaultProtocol string
 	ModelsPath      string
+	// AuthHeader 与 AuthScheme 是凭据头的声明（见 DESIGN 5.8）：AuthHeader 是头名（小写），
+	// AuthScheme 取 raw、bearer 或 bearer-semicolon。两项都为空表示按线协议推导，
+	// 与没有这一项的老版本行为一致。凭据本身不在这里：key 在账号行上，加密存放。
+	AuthHeader string
+	AuthScheme string
 }
 
 // ProviderRoute 是一行 (厂商, 协议) 的路由。Path 有两种写法（见 NormalizeEndpoint）：相对路径
@@ -89,10 +95,15 @@ type ProviderPatch struct {
 	Note            *string
 	ModelsPath      *string
 	DefaultProtocol *string
-	Routes          map[string]string
+	// AuthHeader 与 AuthScheme 一起构成凭据头声明：能写 AuthHeader 就能写 AuthScheme，
+	// 但只有头、没有写法时按 raw 落库（见 plugin.NormalizeAuthScheme）。
+	// 清掉头的那一刻写法一并清空：只有写法没有头的行写不出任何东西。
+	AuthHeader *string
+	AuthScheme *string
+	Routes     map[string]string
 }
 
-const providerColumns = `name, base_url, note, default_protocol, models_path`
+const providerColumns = `name, base_url, note, default_protocol, models_path, auth_header, auth_scheme`
 
 // providersFromRows 把行形状转成对外的 Provider。
 func providersFromRows(rows []providerRow) []Provider {
@@ -104,9 +115,30 @@ func providersFromRows(rows []providerRow) []Provider {
 			Note:            r.Note,
 			DefaultProtocol: r.DefaultProtocol,
 			ModelsPath:      r.ModelsPath,
+			AuthHeader:      r.AuthHeader,
+			AuthScheme:      r.AuthScheme,
 		})
 	}
 	return out
+}
+
+// normalizeAuth 规整一次写入的凭据头声明。空头是合法的（表示按线协议推导），
+// 但头为空时写法必须也为空，头非空而写法为空时归一到 raw。规则本身在 plugin 包里，
+// manifest 的 auth 声明与 provider 子命令走的是同一份。
+func normalizeAuth(header, scheme string) (string, string, error) {
+	h := ""
+	if strings.TrimSpace(header) != "" {
+		var err error
+		h, err = plugin.NormalizeAuthHeader(header)
+		if err != nil {
+			return "", "", err
+		}
+	}
+	s, err := plugin.NormalizeAuthScheme(scheme, h)
+	if err != nil {
+		return "", "", err
+	}
+	return h, s, nil
 }
 
 // providerRoutesFromRows 把行形状转成对外的 ProviderRoute。
@@ -533,6 +565,10 @@ func (s *Store) CreateProvider(p Provider, routes []ProviderRoute) error {
 	if err != nil {
 		return fmt.Errorf("厂商 %s 的 models_path：%w", name, err)
 	}
+	authHeader, authScheme, err := normalizeAuth(p.AuthHeader, p.AuthScheme)
+	if err != nil {
+		return fmt.Errorf("厂商 %s 的凭据头：%w", name, err)
+	}
 	// 缺 base_url 只在一个前提下算错：有相对路径要拼它。拒绝时一个字段都不落库。
 	if err := requireBaseURLCoverage(name, base, prepared, modelsPath); err != nil {
 		return err
@@ -558,6 +594,8 @@ func (s *Store) CreateProvider(p Provider, routes []ProviderRoute) error {
 			Note:            strings.TrimSpace(p.Note),
 			DefaultProtocol: def,
 			ModelsPath:      modelsPath,
+			AuthHeader:      authHeader,
+			AuthScheme:      authScheme,
 		}).Error; err != nil {
 			return err
 		}
@@ -614,6 +652,22 @@ func (s *Store) SetProvider(name string, patch ProviderPatch) error {
 			}
 			p.DefaultProtocol = def
 		}
+		if patch.AuthHeader != nil {
+			p.AuthHeader = strings.TrimSpace(*patch.AuthHeader)
+			if p.AuthHeader == "" {
+				// 头清掉的那一刻写法一并清掉：只有写法没有头的行写不出任何凭据，
+				// 留着它只会在下一次改头时静默复活一个旧写法。
+				p.AuthScheme = ""
+			}
+		}
+		if patch.AuthScheme != nil {
+			p.AuthScheme = strings.TrimSpace(*patch.AuthScheme)
+		}
+		authHeader, authScheme, err := normalizeAuth(p.AuthHeader, p.AuthScheme)
+		if err != nil {
+			return fmt.Errorf("厂商 %s 的凭据头：%w", name, err)
+		}
+		p.AuthHeader, p.AuthScheme = authHeader, authScheme
 
 		// 改之前的形状：用来区分「这次把路由删光了」与「本来就没有路由」。
 		before, err := providerRoutesTx(tx, name)
@@ -672,6 +726,8 @@ func (s *Store) SetProvider(name string, patch ProviderPatch) error {
 			"note":             p.Note,
 			"default_protocol": p.DefaultProtocol,
 			"models_path":      p.ModelsPath,
+			"auth_header":      p.AuthHeader,
+			"auth_scheme":      p.AuthScheme,
 		}).Error
 	})
 }
@@ -732,6 +788,10 @@ func (s *Store) AddProvider(p Provider, routes []ProviderRoute) error {
 	if err != nil {
 		return fmt.Errorf("厂商 %s 的 models_path：%w", name, err)
 	}
+	authHeader, authScheme, err := normalizeAuth(p.AuthHeader, p.AuthScheme)
+	if err != nil {
+		return fmt.Errorf("厂商 %s 的凭据头：%w", name, err)
+	}
 
 	return s.gorm.Transaction(func(tx *gorm.DB) error {
 		// models_path 传空串时不覆盖已存的值：这条兼容入口的调用方还不知道有这个字段。
@@ -744,6 +804,8 @@ func (s *Store) AddProvider(p Provider, routes []ProviderRoute) error {
 			BaseURL:    base,
 			Note:       p.Note,
 			ModelsPath: modelsPath,
+			AuthHeader: authHeader,
+			AuthScheme: authScheme,
 		}).Error; err != nil {
 			return err
 		}

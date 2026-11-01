@@ -53,8 +53,12 @@ type Account struct {
 	// Protocol 派生自这家厂商的有效默认协议（ResolveDefaultProtocol 的结果：显式值落在已声明的
 	// 路由上才用它，否则按固定顺序取第一条，没有路由时为空串），厂商行不存在时同样是空串。
 	// 逐模型的协议覆盖仍在 account_models.protocol，见 EffectiveProtocol。
-	Protocol  string
-	KeyCipher []byte
+	Protocol string
+	// AuthHeader 与 AuthScheme 派生自 providers 的同名两列，规则与 BaseURL、Protocol 一样：
+	// 账号行不存它们，改写厂商行立即对所有引用它的账号生效。两项都为空表示按线协议推导凭据头。
+	AuthHeader string
+	AuthScheme string
+	KeyCipher  []byte
 	// Models 是运行期派生的字段：读账号时它等于该账号 access='allowed' 的模型行集合
 	// （迁移 0015 删掉了 accounts.models 列），按模型名升序。
 	// 写账号时（CreateAccount）它表示「这个账号要声明哪些模型」：这些名字会被落成
@@ -243,6 +247,8 @@ type accountJoinRow struct {
 	FailStreak    int
 	CreatedAt     int64
 	BaseURL       string
+	AuthHeader    string
+	AuthScheme    string
 }
 
 // CreateAccount 插入账号，名称重复时返回错误。
@@ -288,7 +294,8 @@ func (s *Store) queryAccounts(where string, args ...any) ([]Account, error) {
 	q := s.gorm.Table("accounts AS a").
 		Select(`a.id, a.name, a.provider, a.key_cipher, a.priority, a.enabled,
 			COALESCE(a.cooldown_until, 0) AS cooldown_until, COALESCE(a.last_error, '') AS last_error,
-			a.fail_streak, a.created_at, COALESCE(p.base_url, '') AS base_url`).
+			a.fail_streak, a.created_at, COALESCE(p.base_url, '') AS base_url,
+			COALESCE(p.auth_header, '') AS auth_header, COALESCE(p.auth_scheme, '') AS auth_scheme`).
 		Joins("LEFT JOIN providers p ON p.name = a.provider")
 	if where != "" {
 		q = q.Where(where, args...)
@@ -324,6 +331,8 @@ func scanAccounts(rows []accountJoinRow) []Account {
 			FailStreak:    r.FailStreak,
 			CreatedAt:     r.CreatedAt,
 			BaseURL:       r.BaseURL,
+			AuthHeader:    r.AuthHeader,
+			AuthScheme:    r.AuthScheme,
 		})
 	}
 	return out

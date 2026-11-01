@@ -24,6 +24,8 @@ type PluginCatalog struct {
 	Provider   string          // 厂商 ID，插件内唯一
 	Name       string          // 展示名，落库到 providers.note
 	BaseURL    string          // 厂商地址，http(s) 绝对地址
+	AuthHeader string          // 凭据头名，空表示按线协议推导
+	AuthScheme string          // 凭据写法：raw、bearer 或 bearer-semicolon
 	ModelsPath string          // 模型列表接口路径，可空
 	Routes     []ProviderRoute // 插件声明的路由（Protocol + Path）
 	Models     []PluginModelEntry
@@ -68,6 +70,10 @@ func (s *Store) ApplyPluginCatalog(pluginID string, catalog PluginCatalog, sourc
 	if err != nil {
 		return fmt.Errorf("厂商 %s 的模型列表地址：%w", provider, err)
 	}
+	authHeader, authScheme, err := normalizeAuth(catalog.AuthHeader, catalog.AuthScheme)
+	if err != nil {
+		return fmt.Errorf("厂商 %s 的凭据头声明：%w", provider, err)
+	}
 	// 路由走与 CreateProvider / SetProvider 同一套规整：斜杠写法不拒绝，路径为空与协议名不认识当场报错。
 	routes, err := prepareRoutes(provider, catalog.Routes)
 	if err != nil {
@@ -80,7 +86,7 @@ func (s *Store) ApplyPluginCatalog(pluginID string, catalog PluginCatalog, sourc
 
 	now := unixNow()
 	return s.withTx(func(tx *gorm.DB) error {
-		if err := applyCatalogProviderTx(tx, pluginID, provider, catalog.Name, base, modelsPath); err != nil {
+		if err := applyCatalogProviderTx(tx, pluginID, provider, catalog.Name, base, authHeader, authScheme, modelsPath); err != nil {
 			return err
 		}
 		if err := applyCatalogRoutesTx(tx, provider, routes); err != nil {
@@ -125,11 +131,11 @@ func normalizePluginModels(provider string, in []PluginModelEntry) ([]PluginMode
 	return out, nil
 }
 
-// applyCatalogProviderTx 建厂商行，已存在时只补 plugin_id。
+// applyCatalogProviderTx 建厂商行，已存在时只补 plugin_id 与凭据头声明。
 //
-// base_url 是地址的唯一来源，插件与库里不一致就不写：改哪一边都是人的决定，
-// 这里只说明两边各是什么、下一步能敲什么。
-func applyCatalogProviderTx(tx *gorm.DB, pluginID, provider, name, base, modelsPath string) error {
+// base_url 与凭据头是厂商事实，插件与库里不一致就不写：改哪一边都是人的决定，
+// 这里只说明两边各是什么、下一步能敲什么。插件没声明的项一律不动（空值不清掉已有设置）。
+func applyCatalogProviderTx(tx *gorm.DB, pluginID, provider, name, base, authHeader, authScheme, modelsPath string) error {
 	var row providerRow
 	if err := tx.Where("name = ?", provider).Limit(1).Find(&row).Error; err != nil {
 		return err
@@ -140,6 +146,8 @@ func applyCatalogProviderTx(tx *gorm.DB, pluginID, provider, name, base, modelsP
 			BaseURL:    base,
 			Note:       strings.TrimSpace(name),
 			ModelsPath: modelsPath,
+			AuthHeader: authHeader,
+			AuthScheme: authScheme,
 			PluginID:   pluginID,
 		}).Error
 	}
@@ -147,16 +155,39 @@ func applyCatalogProviderTx(tx *gorm.DB, pluginID, provider, name, base, modelsP
 		return fmt.Errorf("厂商 %s 已经存在，地址是 %s，插件声明的是 %s：改插件 manifest 里的 base_url 与它对齐，或先 lax provider rm %s 再把厂商交给插件管（删厂商会一并删掉它的路由与模型目录）",
 			provider, row.BaseURL, base, provider)
 	}
+	// 凭据头只在插件声明了它的时候参与比对：没声明表示「按线协议推导」，不改已有设置。
+	if authHeader != "" && row.AuthHeader != "" &&
+		(row.AuthHeader != authHeader || row.AuthScheme != authScheme) {
+		return fmt.Errorf("厂商 %s 的凭据头已经是 %s（写法 %s），插件声明的是 %s（写法 %s）：改插件 manifest 里的 auth 与它对齐，或改库里的声明（lax provider set %s --auth-header %s --auth-scheme %s）",
+			provider, row.AuthHeader, row.AuthScheme, authHeader, authScheme, provider, row.AuthHeader, row.AuthScheme)
+	}
+	fillAuth := authHeader != "" && row.AuthHeader == ""
 	if row.PluginID == pluginID {
-		return nil
+		// 同一个插件：只补缺的凭据头，不动其它列。
+		if !fillAuth {
+			return nil
+		}
+		return updateProviderAuthTx(tx, provider, authHeader, authScheme)
 	}
 	if row.PluginID != "" {
 		return fmt.Errorf("厂商 %s 已经属于插件 %s，不能再归给 %s：先 lax plugin rm %s 卸掉原来的插件，或改插件 manifest 里的厂商 ID",
 			provider, row.PluginID, pluginID, row.PluginID)
 	}
-	// 只补归属：地址与插件声明的相同，其余列是用户或同步写的，插件安装不碰。
-	return tx.Model(&providerRow{}).Where("name = ?", provider).
-		Update("plugin_id", pluginID).Error
+	// 只补归属与缺的凭据头：地址与插件声明的相同，其余列是用户或同步写的，插件安装不碰。
+	updates := map[string]any{"plugin_id": pluginID}
+	if fillAuth {
+		updates["auth_header"] = authHeader
+		updates["auth_scheme"] = authScheme
+	}
+	return tx.Model(&providerRow{}).Where("name = ?", provider).Updates(updates).Error
+}
+
+// updateProviderAuthTx 只改凭据头两列，其余列原样。
+func updateProviderAuthTx(tx *gorm.DB, provider, authHeader, authScheme string) error {
+	return tx.Model(&providerRow{}).Where("name = ?", provider).Updates(map[string]any{
+		"auth_header": authHeader,
+		"auth_scheme": authScheme,
+	}).Error
 }
 
 // applyCatalogRoutesTx 按 (厂商, 协议) 补缺失的路由。已存在但路径不同就报错：
