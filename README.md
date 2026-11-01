@@ -112,6 +112,23 @@ lax provider unset myco anthropic
 
 `provider unset` 幂等：要删的项本来就不存在时不报错，只说明一句「myco 本来就没有 anthropic 路由」。删到一条路由都不剩会被拒绝，那是不想要这家厂商了，用 `provider rm`。`--models-path <路径>` 是厂商级的模型列表覆盖，`provider unset myco models-path` 清掉它、回到按各路由取。
 
+凭据头默认按线协议推导：anthropic 用 `x-api-key`，gemini 用 `x-goog-api-key`，两条 openai 协议与 systemone 用 `Authorization: Bearer`。有的上游不是这个写法（豆包要 `X-Api-Key`），这时按厂商声明两项：
+
+```bash
+# 头名与写法一起声明：头名的落库形态是小写
+lax provider add doubao-voice --base-url https://openspeech.bytedance.com \
+    --auth-header X-Api-Key --auth-scheme raw \
+    --speech /api/v3/tts/unidirectional --transcriptions /api/v3/auc/bigmodel/recognize/flash
+
+# 只换写法（头不改）：raw 直接写 key，bearer 写 "Bearer <key>"，bearer-semicolon 写 "Bearer;<key>"
+lax provider set doubao-voice --auth-scheme bearer
+
+# 清掉声明，回到按线协议推导
+lax provider unset doubao-voice auth-header
+```
+
+声明之后上游只收这一个头，协议默认的凭据头一个不发：两个头同时出现会被上游当成两种凭据。只给 `--auth-scheme` 而不给 `--auth-header` 是用法错误（没有头就没有地方写值）；`provider ls --json` 的 `auth_header` 与 `auth_scheme` 是头名与写法，不是秘密（key 在账号行上加密存）。规则见 DESIGN 5.8。
+
 有些上游除凭据头之外还要额外的头才路由（opencode 的 Go 端点缺了 `x-opencode-session` 直接 400）。这类头按厂商声明，写进数据库、不用重编译：`--protocol` 不给就是厂商级，这家厂商的每条路由都带上它；给了就只加给那条协议，同名头协议级覆盖厂商级。值四种写法：字面量原样发出，`{env:NAME}` 取环境变量（适合不该落库的会话 token），`{session}` 取本次请求的会话键（一个对话一个稳定值），`{model}` 取本次请求的模型名，都是转发前才展开。值可能是密钥，所以 `ls` 与 `--json` 只输出脱敏后的前四位：
 
 ```bash
@@ -295,10 +312,9 @@ lax model dialect set mimo-v2.5-tts chat.complete@1 com.example.echo/chat@1
 
 插件带来的厂商记在 `providers.plugin_id` 上：删除插件会连带删掉这些厂商的路由、模型目录、方言绑定与别名，并停用指向它们的账号（`last_error` 写明原因，重新安装之后要 `account enable` 才回到选号池）。同名厂商地址不一致、同名路由路径不一致、手写绑定已指向别的方言、别名已指向别的目标，四种冲突都整笔失败并给下一步命令。
 
-对话上游可以只写方言文件、引用宿主方言：`models.json` 里把操作绑到 `lax/openai-chat@1`（另外五条是 `lax/anthropic@1`、`lax/openai-responses@1`、`lax/gemini@1`、`lax/openai-embeddings@1`、`lax/systemone@1`），安装会按线协议建默认路由、按上游名落模型目录，并在客户端名字与上游名字不同时写一条别名，请求仍走宿主编解码。要改上游报文或解一种宿主不认识的响应，就写 hook 方言（`runtime: "moejs"`，`implementation.prepare` 与 `implementation.decode` 都写 `hook`）：宿主编好报文后交给它补字段，响应返回 `ResultJSON`（上游线协议形状），宿主再解成中间表示、按客户端协议编回去。声明式方言绑非语音操作仍会在安装时被拒。
+对话与语音上游可以只写方言文件、引用宿主方言：`models.json` 里把操作绑到 `lax/openai-chat@1`（另外五条是 `lax/anthropic@1`、`lax/openai-responses@1`、`lax/gemini@1`、`lax/openai-embeddings@1`、`lax/systemone@1`），安装会按线协议建默认路由、按上游名落模型目录，并在客户端名字与上游名字不同时写一条别名，请求仍走宿主编解码。路由与凭据头可以在 manifest 里直接声明：`providers[].routes` 给每条线协议一个路径（写了就不再按方言推导，覆盖不到方言的 `upstream_wire` 会在安装时报错），`providers[].auth` 声明凭据头（`{"header":"X-Api-Key","scheme":"raw"}`，与 `provider add --auth-header/--auth-scheme` 同一套规则）。要改上游报文或解一种宿主不认识的响应，就写 hook 方言（`runtime: "moejs"`，`implementation.prepare` 与 `implementation.decode` 都写 `hook`）：宿主编好报文后交给它补字段，响应返回 `ResultJSON`（上游线协议形状），宿主再解成中间表示、按客户端协议编回去。插件方言可以声明任意一条语音线协议（不一定是 `openai-chat`）：它与入站同协议时仍由它自己编请求、解响应，只有宿主自己的两条语音直通方言才原样转发。声明式方言绑非语音操作仍会在安装时被拒。
 
 方言决定语音请求的出站形状（见上一节）。绑定也可以手工写：`model capability add|set` 的 `--dialect` 写一条，`model dialect ls|set|unset` 直接读写 `model_operations`：
-
 ```bash
 lax model capability add mimo-v2.5-tts --capability speech --dialect lax/mimo-chat-speech@1
 lax model dialect set mimo-v2.5-tts chat.complete@1 com.example.echo/chat@1 --provider mimo
@@ -313,7 +329,7 @@ lax model dialect set mimo-v2.5-tts chat.complete@1 com.example.echo/chat@1 --pr
 | API | 用途 |
 | --- | --- |
 | `lax.log([level], message)`、`console.log\|info\|warn\|error` | 写日志，落 `plugin_logs` 并打一行到 serve 输出 |
-| `lax.now()`、`lax.randomUUID()` | 时间与 v4 UUID |
+| `lax.now()`、`lax.randomUUID()` | 时间与 v4 UUID；逐请求的头（例如上游要求的请求 ID）靠它生成 |
 | `lax.base64.encode\|decode`、`lax.sha256`、`lax.hmacSHA256` | 编解码与摘要 |
 | `lax.error(code, message, {retryable?, details?})` | 造带错误码的对象，由插件 `throw` |
 | `lax.http.request({method?, url, headers?, body?, timeout_ms?})` | 控制面请求，见下 |
@@ -426,4 +442,4 @@ make check        # go vet + go test + go build
 
 gemini 的入站与出站都支持非流式与流式，模型列表可同步（`google-gemini` 内置，`GET /v1beta/models` 的清单去掉 `models/` 前缀、按 `nextPageToken` 翻页；只能做向量化的条目现在也进清单，能力位记 `embedding`，以前它们被 `supportedGenerationMethods` 过滤掉了）。gemini 的模型名在 URL 路径里，路由的 `path` 因此可以写 `{model}` 占位符（相对路径与整条地址都行，替换时按路径段转义）；入站 gemini 的错误体是 google 的形状（`error.code` 是 HTTP 状态码、`error.status` 是状态名），四条入站路径各自的形状见 DESIGN 5.2；非正常的 `finishReason`（`SAFETY` 一类）按正常结束转给客户端，原值只进网关日志；gemini 的内置工具（`googleSearch` 等）与思考内容（`thought` 标记、`thinkingConfig`）不搬。转换时搬运文本、图片、思考内容、工具调用与工具结果五类块：思考内容只在响应方向搬运，请求方向不回填——chat 的 `reasoning_content` 与 responses 的 `reasoning` item 是上游自己产生的字段，回填给推理模型会被以 400 拒掉整条请求；响应方向仍照旧搬运。签名只有 anthropic 有落点，没有签名的思考块不写进 anthropic 的请求与响应（不伪造签名，伪造会被上游以 400 拒绝），所以 chat 与 responses 的思考内容转到 anthropic 时丢弃；流式转换下发给 anthropic 客户端的思考块没有签名，客户端若把这些块回填进下一轮请求，上游会报 400。工具结果之后紧跟的追问并进同一条 user 消息，因为 anthropic 不接受两条相邻的 user 消息。思考配置参数（anthropic 的 `thinking`、chat 的 `reasoning_effort`）、`redacted_thinking` 的不透明 `data` 与 responses 的 `encrypted_content` 跨协议不搬，reasoning token 不单独记账（算进输出 token）。音频与文件类内容丢弃；anthropic 的服务端内置工具（`web_search` 等）跨协议时整条丢弃，chat 与 responses 的工具定义只认 function，编回 anthropic 时才原样保留 `type`；`tools[].strict` 不搬运，`is_error` 只有 anthropic 有落点，`allowed_tools` 降级为 `auto`。流式转换下断在工具参数中间时，已下发的参数片段撤不回来，收尾的错误帧会写明「工具调用参数在上游中断，内容不完整」，这一次记失败，程序不伪造闭合的 JSON。跨协议只搬运图片地址，没有其它多模态变换。不改写任何客户端配置文件；需要非标准请求头的上游通过 `provider header` 声明（见 DESIGN 5.10），例如 opencode 的 Go 端点要求 `x-opencode-session`，声明 `{session}` 即可路由，要求按请求计算的签名的上游仍然接不了；冷却时长按单次失败计算；探活调用不计入用量汇总；估算花费需要给模型定价（`model price set` 的 `--in` 与 `--out`，账号只在套餐不同时用 `--account` 覆盖），缓存读写按 `--cache-read` 与 `--cache-write` 折价（未填时回退到输入价，单价单位都是每百万 token）；`usage` 与 `log tail` 里仍分别显示缓存读写的 token。语音不做音频转码、不解析音频容器算时长（直通路径 TTS 按入参字符、ASR 按上游报的秒数，chat 方言按 token 记账），变化的模型名也不改写（响应里的 `model` 原样）；出站形状只由绑定的方言决定，同协议的方言不执行声明式映射，chat 形状的语音方言可以是内置的 Go 实现，也可以是插件用声明式映射或 hook 方言写的（见「插件与方言」）。
 
-插件与方言：本版落地声明式插件、内置方言与 `moejs` 沙箱，仍没有 `trusted-worker`（独立进程，以及文件、进程、环境变量权限）、Magpie/OpenCode 导入与 `plugin import`、OAuth 登录、插件市场与签名（`plugin_versions.signature_status` 一律 `unverified`、`source` 一律 `dir`）。声明式映射只能表达 `const`、`input`、`model`、`option` 四种来源加 `map`、`default`、`omit_if_empty` 三个修饰键，没有表达式、正则、循环与脚本，`input` 白名单只有语音那八项，所以声明式方言只能给语音两条操作写映射；对话、向量化与决策请求可以绑宿主方言（`lax/` 前缀）走 Go 编解码，也可以绑 hook 方言。hook 方言的边界：`Input.Body` 是宿主编好的报文（`Input.Messages` 仍为空，读消息要解析 `ctx.body`）；向量化与决策入站的响应，方言返回的 `ResultJSON` 在入站与出站同协议时原样写回（这两个协议没有中间表示，跨协议改编不支持）；要流式就得实现 `decode_stream`，否则在发上游请求之前 400；`Plan.Path` 只能改相对路径，语音路径不看它。沙箱没有内存硬上限（goja 不提供堆上限 API，只有源码 8 MiB、返回值 8 MiB、注入音频与流块 8 MiB、cache 1 MiB 四道字节闸门）；逐 hook 超时打不断在途的 `lax.http.request`，一个 100 ms 的 hook 可能占用几秒；ESM 只支持静态 `export`、`export default` 与相对 import，没有 `import *`、裸模块、动态 import 与顶层 `await`；联网只走 `lax.http.request` 的白名单 https，没有媒体通道。`plugin install` 逐家厂商一个事务，一个插件带多家厂商时第 N 家失败会让前 N-1 家留在库里（用 `lax plugin rm` 或 `lax provider rm` 清）。`plugin reload`（`SIGHUP`）只整表换方言注册表，不关旧沙箱，反复 reload 会积累旧实例；没有 `models` / `probe` 两个控制面钩子，模型清单与探活仍由 `model sync` / `model probe` 做。
+插件与方言：本版落地声明式插件、内置方言与 `moejs` 沙箱，仍没有 `trusted-worker`（独立进程，以及文件、进程、环境变量权限）、Magpie/OpenCode 导入与 `plugin import`、OAuth 登录、插件市场与签名（`plugin_versions.signature_status` 一律 `unverified`、`source` 一律 `dir`）。声明式映射只能表达 `const`、`input`、`model`、`option` 四种来源加 `map`、`default`、`omit_if_empty` 三个修饰键，没有表达式、正则、循环与脚本，`input` 白名单只有语音那八项，所以声明式方言只能给语音两条操作写映射；对话、向量化与决策请求可以绑宿主方言（`lax/` 前缀）走 Go 编解码，也可以绑 hook 方言。hook 方言的边界：`Input.Body` 是宿主编好的报文（`Input.Messages` 仍为空，读消息要解析 `ctx.body`）；向量化与决策入站的响应，方言返回的 `ResultJSON` 在入站与出站同协议时原样写回（这两个协议没有中间表示，跨协议改编不支持）；要流式就得实现 `decode_stream`，否则在发上游请求之前 400；`Plan.Path` 只能改相对路径，语音路径不看它；`Plan.Headers` 是逐请求的头（请求 ID、资源号这类），语音与非语音两条方言路径都生效，但凭据头与帧头是保留头、沙箱直接拒，凭据只由厂商的 `auth` 声明注入。沙箱没有内存硬上限（goja 不提供堆上限 API，只有源码 8 MiB、返回值 8 MiB、注入音频与流块 8 MiB、cache 1 MiB 四道字节闸门）；逐 hook 超时打不断在途的 `lax.http.request`，一个 100 ms 的 hook 可能占用几秒；ESM 只支持静态 `export`、`export default` 与相对 import，没有 `import *`、裸模块、动态 import 与顶层 `await`；联网只走 `lax.http.request` 的白名单 https，没有媒体通道。`plugin install` 逐家厂商一个事务，一个插件带多家厂商时第 N 家失败会让前 N-1 家留在库里（用 `lax plugin rm` 或 `lax provider rm` 清）。`plugin reload`（`SIGHUP`）只整表换方言注册表，不关旧沙箱，反复 reload 会积累旧实例；没有 `models` / `probe` 两个控制面钩子，模型清单与探活仍由 `model sync` / `model probe` 做。

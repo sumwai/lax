@@ -633,6 +633,8 @@ XMLHttpRequest
 | `idempotent` | 否 | 是否允许宿主在安全条件下重试 |
 | `extensions` | 否 | 宿主保留的诊断字段，不发给上游、不返回客户端 |
 
+已落地的 ABI（`lax.plugin/v1`）只实现了其中一部分：`method` 没有对应字段（给了只打一行警告），`headers` 生效但有上限与保留头（键小写、最多 32 条、单值 4096 字节、总计 16 KiB；`authorization`、`x-api-key`、`x-goog-api-key`、`host`、`content-length`、`cookie`、`x-lax-session` 与 `proxy-*` 直接拒），`url`、`auth`、`response`、`timeout_ms`、`idempotent`、`extensions` 均不支持：地址与凭据只由厂商路由与 `providers[].auth` 决定，见 `DESIGN.md` 5.8 与 5.17。
+
 ### 11.3 body 类型
 
 | `kind` | 形状 | 用途 |
