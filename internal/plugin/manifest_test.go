@@ -523,3 +523,111 @@ func TestValidateManifestTransformWithoutProviders(t *testing.T) {
 		t.Fatalf("没有 providers 的 transform 应通过，实际 %v", err)
 	}
 }
+
+// TestManifestAuthDecl 钉住厂商凭据头声明的四条规则：合法声明原样可用、头名归一成小写、
+// 没头不许有写法、写法只认三种。
+func TestManifestAuthDecl(t *testing.T) {
+	t.Run("合法声明", func(t *testing.T) {
+		doc := baseManifestDoc()
+		providerAt(t, doc, 0)["auth"] = map[string]any{"header": "X-Api-Key", "scheme": "raw"}
+		m := decodeDoc(t, doc)
+		header, scheme, err := m.Providers[0].NormalizedAuth()
+		if err != nil {
+			t.Fatalf("规整凭据头: %v", err)
+		}
+		if header != "x-api-key" || scheme != plugin.AuthSchemeRaw {
+			t.Fatalf("凭据头 = %q/%q，期望 x-api-key/raw", header, scheme)
+		}
+	})
+
+	t.Run("只有头时写法按 raw", func(t *testing.T) {
+		doc := baseManifestDoc()
+		providerAt(t, doc, 0)["auth"] = map[string]any{"header": "X-Api-Key"}
+		_, scheme, err := decodeDoc(t, doc).Providers[0].NormalizedAuth()
+		if err != nil {
+			t.Fatalf("规整凭据头: %v", err)
+		}
+		if scheme != plugin.AuthSchemeRaw {
+			t.Fatalf("scheme = %q，期望缺省成 raw", scheme)
+		}
+	})
+
+	cases := []struct {
+		name string
+		auth map[string]any
+		want []string
+	}{
+		{"头为空配了写法", map[string]any{"scheme": "bearer"}, []string{"auth.scheme 是 \"bearer\""}},
+		{"写法不认识", map[string]any{"header": "X-Api-Key", "scheme": "basic"}, []string{"auth.scheme 是 \"basic\"", "bearer-semicolon"}},
+		{"头名不是 token", map[string]any{"header": "X Api Key", "scheme": "raw"}, []string{"HTTP token"}},
+		{"头名过长", map[string]any{"header": strings.Repeat("x", 65), "scheme": "raw"}, []string{"上限 64"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			doc := baseManifestDoc()
+			providerAt(t, doc, 0)["auth"] = c.auth
+			data, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatalf("序列化用例: %v", err)
+			}
+			_, err = plugin.DecodeManifest(manifestName, data)
+			requireContains(t, err, append([]string{manifestName, "providers[0].auth"}, c.want...)...)
+		})
+	}
+}
+
+// TestManifestRouteDecl 钉住 manifest 的 routes：协议认识、不重复、路径非空。
+// 路径本身的写法（前导斜杠、整条地址的 scheme）由 store 那一份规则判，不在这里重复。
+func TestManifestRouteDecl(t *testing.T) {
+	t.Run("两条不同协议", func(t *testing.T) {
+		doc := baseManifestDoc()
+		providerAt(t, doc, 0)["routes"] = []any{
+			map[string]any{"protocol": "openai-speech", "path": "/api/v3/tts/unidirectional"},
+			map[string]any{"protocol": "openai-transcriptions", "path": "/api/v3/auc/bigmodel/recognize/flash"},
+		}
+		routes := decodeDoc(t, doc).Providers[0].Routes
+		if len(routes) != 2 || routes[0].Protocol != plugin.WireSpeech || routes[1].Protocol != plugin.WireTranscriptions {
+			t.Fatalf("routes = %+v，期望两条语音路由", routes)
+		}
+	})
+
+	cases := []struct {
+		name   string
+		routes []any
+		want   []string
+	}{
+		{"协议不认识", []any{map[string]any{"protocol": "openai-audio", "path": "/x"}}, []string{"routes[0].protocol", "openai-audio"}},
+		{"协议为空", []any{map[string]any{"path": "/x"}}, []string{"routes[0].protocol 为空"}},
+		{"路径为空", []any{map[string]any{"protocol": "openai-speech", "path": " "}}, []string{"routes[0].path 为空"}},
+		{"同协议重复", []any{
+			map[string]any{"protocol": "openai-speech", "path": "/a"},
+			map[string]any{"protocol": "openai-speech", "path": "/b"},
+		}, []string{"routes[1].protocol", "都是 \"openai-speech\""}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			doc := baseManifestDoc()
+			providerAt(t, doc, 0)["routes"] = c.routes
+			data, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatalf("序列化用例: %v", err)
+			}
+			_, err = plugin.DecodeManifest(manifestName, data)
+			requireContains(t, err, c.want...)
+		})
+	}
+}
+
+// decodeDoc 把用例改过的文档编回字节再走一遍严格的 manifest 解析，解析失败直接结束用例。
+func decodeDoc(t *testing.T, doc map[string]any) plugin.Manifest {
+	t.Helper()
+	data, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("序列化用例: %v", err)
+	}
+	m, err := plugin.DecodeManifest(manifestName, data)
+	if err != nil {
+		t.Fatalf("解析 manifest: %v", err)
+	}
+	return m
+}

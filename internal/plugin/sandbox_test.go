@@ -99,6 +99,10 @@ func TestSandboxPrepareRequestShapes(t *testing.T) {
 		if plan.JSON["model"] != "upstream-model" || plan.JSON["text"] != "你好" {
 			t.Fatalf("JSON = %v，期望带上 model 与 text", plan.JSON)
 		}
+		// headers 现在真带出去了：x-plugin 原样落进 Plan.Headers。
+		if plan.Headers["x-plugin"] != "test" {
+			t.Fatalf("headers = %v，期望把 x-plugin: test 带出来", plan.Headers)
+		}
 	})
 
 	t.Run("raw", func(t *testing.T) {
@@ -116,6 +120,66 @@ func TestSandboxPrepareRequestShapes(t *testing.T) {
 		if plan.JSON != nil {
 			t.Fatalf("字符串 body 不该同时给 JSON，得到 %v", plan.JSON)
 		}
+	})
+}
+
+// headerSandbox 打开一个把 ctx.options.headers 原样当请求头返回的沙箱。
+func headerSandbox(t *testing.T, headers string) plugin.Sandbox {
+	t.Helper()
+	opts := baseOptions("com.example.headers", "prepare-headers.js")
+	opts.Options = map[string]string{"headers": headers}
+	return openSandbox(t, opts)
+}
+
+// TestSandboxPlanHeaders 钉住插件请求头的五条规则：键名归一成小写、保留头直接拒绝（不静默丢）、
+// 值里的 CR/LF 拒绝、单条与总大小上限。上限与保留头名单都在 plugin 包里，沙箱只是执行它。
+func TestSandboxPlanHeaders(t *testing.T) {
+	t.Run("键名归一", func(t *testing.T) {
+		plan, err := headerSandbox(t, `{"X-Api-Request-Id":"abc","x-api-resource-id":"seed"}`).
+			PrepareRequest(plugin.Input{Operation: plugin.OpSpeechSynthesize})
+		if err != nil {
+			t.Fatalf("PrepareRequest：%v", err)
+		}
+		if plan.Headers["x-api-request-id"] != "abc" || plan.Headers["x-api-resource-id"] != "seed" {
+			t.Fatalf("headers = %v，期望两个头都归一成小写", plan.Headers)
+		}
+	})
+
+	t.Run("保留头", func(t *testing.T) {
+		for _, name := range []string{"Authorization", "X-Api-Key", "Proxy-Authorization", "Host", "X-Lax-Session"} {
+			_, err := headerSandbox(t, `{"`+name+`":"v"}`).PrepareRequest(plugin.Input{})
+			requireHookError(t, err, plugin.ErrorPlanInvalid, "保留头")
+		}
+	})
+
+	t.Run("值里有换行", func(t *testing.T) {
+		_, err := headerSandbox(t, `{"x-test":"a\r\nB"}`).PrepareRequest(plugin.Input{})
+		requireHookError(t, err, plugin.ErrorPlanInvalid, "CR、LF")
+	})
+
+	t.Run("值不是字符串", func(t *testing.T) {
+		_, err := headerSandbox(t, `{"x-test":5}`).PrepareRequest(plugin.Input{})
+		requireHookError(t, err, plugin.ErrorPluginError, "必须是字符串")
+	})
+
+	t.Run("条数上限", func(t *testing.T) {
+		var b strings.Builder
+		b.WriteString("{")
+		for i := 0; i <= plugin.PlanHeaderMaxCount; i++ {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, `"x-h%d":"v"`, i)
+		}
+		b.WriteString("}")
+		_, err := headerSandbox(t, b.String()).PrepareRequest(plugin.Input{})
+		requireHookError(t, err, plugin.ErrorPlanInvalid, "上限")
+	})
+
+	t.Run("单值上限", func(t *testing.T) {
+		value := strings.Repeat("a", plugin.PlanHeaderMaxValue+1)
+		_, err := headerSandbox(t, `{"x-test":"`+value+`"}`).PrepareRequest(plugin.Input{})
+		requireHookError(t, err, plugin.ErrorPlanInvalid, "上限")
 	})
 }
 

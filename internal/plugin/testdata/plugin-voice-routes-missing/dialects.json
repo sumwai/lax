@@ -1,0 +1,45 @@
+{
+  "schema": "lax.dialect/v1",
+  "dialects": [
+    {
+      "id": "com.example.voiceroutes/tts@1",
+      "operation": "speech.synthesize@1",
+      "display_name": "VoiceRoutes TTS",
+      "upstream_wire": "openai-speech",
+      "transport": {"request": "json", "response": "binary", "streaming": "none"},
+      "implementation": {"prepare": "declarative", "decode": "declarative"},
+      "request": {
+        "method": "POST",
+        "path": "/api/v3/tts/unidirectional",
+        "body": {
+          "text": {"input": "text"},
+          "speaker": {"input": "voice"}
+        }
+      },
+      "response": {
+        "mode": "passthrough",
+        "mime": {"input": "format", "map": {"mp3": "audio/mpeg", "wav": "audio/wav", "pcm": "audio/pcm"}}
+      }
+    },
+    {
+      "id": "com.example.voiceroutes/asr@1",
+      "operation": "speech.transcribe@1",
+      "display_name": "VoiceRoutes ASR",
+      "upstream_wire": "openai-transcriptions",
+      "transport": {"request": "json", "response": "json", "streaming": "none"},
+      "implementation": {"prepare": "declarative", "decode": "declarative"},
+      "request": {
+        "method": "POST",
+        "path": "/api/v3/auc/bigmodel/recognize/flash",
+        "body": {
+          "audio": {"format": {"input": "format"}, "data": {"input": "text"}}
+        }
+      },
+      "response": {
+        "mode": "json_pointer",
+        "pointer": "/result/text",
+        "encoding": "text"
+      }
+    }
+  ]
+}

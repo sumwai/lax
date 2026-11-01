@@ -32,6 +32,35 @@ func TestLoadDir(t *testing.T) {
 	}
 }
 
+// TestLoadProviderWithDeclaredRoutes 钉住 manifest 的 routes：声明了就原样留在 Manifest 里，
+// 且每条方言的 upstream_wire 都能在其中找到一条；漏一条时安装当场报错（否则装上也只能 400）。
+func TestLoadProviderWithDeclaredRoutes(t *testing.T) {
+	p, err := plugin.LoadDir(fixture("plugin-voice-routes"))
+	if err != nil {
+		t.Fatalf("加载带 routes 的插件：%v", err)
+	}
+	routes := p.Manifest.Providers[0].Routes
+	if len(routes) != 2 {
+		t.Fatalf("routes = %+v，期望两条", routes)
+	}
+	if routes[0].Protocol != plugin.WireSpeech || routes[0].Path != "/api/v3/tts/unidirectional" {
+		t.Fatalf("routes[0] = %+v", routes[0])
+	}
+	if routes[1].Protocol != plugin.WireTranscriptions {
+		t.Fatalf("routes[1] = %+v", routes[1])
+	}
+	header, scheme, err := p.Manifest.Providers[0].NormalizedAuth()
+	if err != nil {
+		t.Fatalf("规整凭据头：%v", err)
+	}
+	if header != "x-api-key" || scheme != plugin.AuthSchemeRaw {
+		t.Fatalf("凭据头 = %q/%q", header, scheme)
+	}
+
+	_, err = plugin.LoadDir(fixture("plugin-voice-routes-missing"))
+	requireContains(t, err, "routes 里却没有这条协议", "openai-transcriptions")
+}
+
 func TestRegisterPluginDialect(t *testing.T) {
 	p, err := plugin.LoadDir(echoDir)
 	if err != nil {

@@ -223,6 +223,9 @@ type Plan struct {
 	Body []byte
 	// Path 非空时覆盖厂商路由里的地址，必须是以 / 开头的相对路径。第一版不参与选地址。
 	Path string
+	// Headers 是这次请求要额外带的头（逐请求生成的值，例如请求 ID）。
+	// 键已归一成小写，保留头在沙箱层就被拒绝：凭据只能由宿主的 auth 声明注入。
+	Headers map[string]string
 }
 
 // StreamChunk 是宿主从上游读到的一块字节。块边界任意，方言自己处理半帧与多帧。
@@ -370,12 +373,37 @@ type MediaPerm struct {
 }
 
 type ProviderDecl struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	BaseURL  string `json:"base_url"`
-	Catalog  string `json:"catalog"`
-	Dialects string `json:"dialects"`
+	ID       string      `json:"id"`
+	Name     string      `json:"name"`
+	BaseURL  string      `json:"base_url"`
+	Auth     *AuthDecl   `json:"auth"`
+	Routes   []RouteDecl `json:"routes"`
+	Catalog  string      `json:"catalog"`
+	Dialects string      `json:"dialects"`
 }
+
+// AuthDecl 声明这家厂商的凭据头。空值表示按线协议推导（anthropic 用 x-api-key、
+// gemini 用 x-goog-api-key、其余用 Authorization: Bearer），与未声明这一项的老插件行为一致。
+// 声明之后凭据只写这一个头：豆包要 X-Api-Key，而 openai-speech 的默认写法是 Bearer。
+type AuthDecl struct {
+	Header string `json:"header"`
+	Scheme string `json:"scheme"`
+}
+
+// RouteDecl 声明一个线协议的上游端点。路径与 provider 子命令的取值同一套规则：
+// 相对 base_url 的路径，或整条地址。声明的路由不参与协议推导，只回答「这条协议打哪里」。
+type RouteDecl struct {
+	Protocol string `json:"protocol"`
+	Path     string `json:"path"`
+}
+
+// 凭据头的写法：raw 直接写 key，bearer 写 "Bearer <key>"，bearer-semicolon 写 "Bearer;<key>"
+// （豆包旧版 /api/v1/tts 的写法）。
+const (
+	AuthSchemeRaw             = "raw"
+	AuthSchemeBearer          = "bearer"
+	AuthSchemeBearerSemicolon = "bearer-semicolon"
+)
 
 type OptionDecl struct {
 	Type    string          `json:"type"`

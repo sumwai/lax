@@ -1,0 +1,28 @@
+{
+  "schema": "lax.plugin/v1",
+  "id": "com.example.voiceroutes",
+  "name": "VoiceRoutes",
+  "version": "1.0.0",
+  "kind": "provider",
+  "runtime": "declarative",
+  "abi": "lax.plugin/v1",
+  "requires": ["operation:speech.synthesize@1", "operation:speech.transcribe@1"],
+  "permissions": {
+    "network": {"mode": "none", "schemes": [], "hosts": [], "redirects": "none"},
+    "secrets": {"plugin": [], "account": ["api_key"], "mode": "host-inject"},
+    "filesystem": "none",
+    "process": "none",
+    "env": "none"
+  },
+  "providers": [
+    {
+      "id": "voiceroutes",
+      "name": "VoiceRoutes",
+      "base_url": "https://openspeech.example.test",
+      "routes": [
+        {"protocol": "openai-speech", "path": "/api/v3/tts/unidirectional"}
+      ],
+      "dialects": "./dialects.json"
+    }
+  ]
+}

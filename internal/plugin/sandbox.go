@@ -704,22 +704,40 @@ func (s *jsSandbox) plan(value any) (Plan, error) {
 	} else if method != "" {
 		s.warnf("%s 返回了 method=%q，Plan 没有对应字段，已忽略", hookPrepare, method)
 	}
+	plan := Plan{Path: path}
 	if raw, ok := obj["headers"]; ok && raw != nil {
 		headers, isObject := raw.(map[string]any)
 		if !isObject {
 			return Plan{}, &HookError{Code: ErrorPluginError, Message: fmt.Sprintf("%s 的 headers 必须是对象，得到%s", hookPrepare, describe(raw))}
 		}
+		plan.Headers = make(map[string]string, len(headers))
+		total := 0
 		for _, key := range slices.Sorted(maps.Keys(headers)) {
-			if _, isString := headers[key].(string); !isString {
+			value, isString := headers[key].(string)
+			if !isString {
 				return Plan{}, &HookError{Code: ErrorPluginError, Message: fmt.Sprintf("%s 的 headers.%s 必须是字符串，得到%s", hookPrepare, key, describe(headers[key]))}
 			}
+			name, err := NormalizeHeaderName(hookPrepare+" 的 headers", key)
+			if err != nil {
+				return Plan{}, &HookError{Code: ErrorPlanInvalid, Message: err.Error()}
+			}
+			if IsReservedPlanHeader(name) {
+				return Plan{}, &HookError{Code: ErrorPlanInvalid, Message: fmt.Sprintf("%s 的 headers.%s 是保留头：%s 由宿主自己写（凭据只能由厂商的 auth 声明注入），插件不能设", hookPrepare, key, name)}
+			}
+			if err := CheckPlanHeaderValue(name, value); err != nil {
+				return Plan{}, &HookError{Code: ErrorPlanInvalid, Message: fmt.Sprintf("%s：%v", hookPrepare, err)}
+			}
+			plan.Headers[name] = value
+			total += len(name) + len(value)
 		}
-		if len(headers) > 0 {
-			s.warnf("%s 返回了 %d 个 headers，Plan 没有对应字段，已忽略", hookPrepare, len(headers))
+		if len(plan.Headers) > PlanHeaderMaxCount {
+			return Plan{}, &HookError{Code: ErrorPlanInvalid, Message: fmt.Sprintf("%s 返回了 %d 个 headers，上限 %d 条", hookPrepare, len(plan.Headers), PlanHeaderMaxCount)}
+		}
+		if total > planHeaderMaxTotal {
+			return Plan{}, &HookError{Code: ErrorPlanInvalid, Message: fmt.Sprintf("%s 返回的 headers 共 %d 字节，上限 %d 字节", hookPrepare, total, planHeaderMaxTotal)}
 		}
 	}
 
-	plan := Plan{Path: path}
 	raw, ok := obj["body"]
 	if !ok || raw == nil {
 		return plan, nil

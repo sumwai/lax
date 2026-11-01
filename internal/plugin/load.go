@@ -91,7 +91,48 @@ func LoadDir(root string) (Plugin, error) {
 	if err := checkCatalogBindings(manifest, out); err != nil {
 		return Plugin{}, err
 	}
+	if err := checkRouteCoverage(manifest, out); err != nil {
+		return Plugin{}, err
+	}
 	return out, nil
+}
+
+// checkRouteCoverage 在 manifest 声明了 routes 时确认每家厂商的方言都落在其中一条上。
+// 漏一条的结果是「装得下、打不通」：没有路由的线协议拼不出地址，第一次请求就是 400。
+// 只比方言声明的 upstream_wire：目录引用宿主方言时路由按线协议推导，与这里判的是同一件事。
+func checkRouteCoverage(manifest Manifest, p Plugin) error {
+	wires := map[string]map[string]bool{}
+	for _, provider := range manifest.Providers {
+		if len(provider.Routes) == 0 {
+			continue
+		}
+		set := make(map[string]bool, len(provider.Routes))
+		for _, r := range provider.Routes {
+			set[strings.TrimSpace(r.Protocol)] = true
+		}
+		wires[provider.ID] = set
+	}
+	if len(wires) == 0 {
+		return nil
+	}
+	for _, decl := range p.Dialects {
+		var providerID string
+		for id, ids := range p.DialectsByProvider {
+			if slices.Contains(ids, decl.ID) {
+				providerID = id
+				break
+			}
+		}
+		set, ok := wires[providerID]
+		if !ok {
+			continue
+		}
+		if !set[strings.TrimSpace(decl.UpstreamWire)] {
+			return fmt.Errorf("provider %s 的方言 %s 走 %s，routes 里却没有这条协议：补一条 {\"protocol\":\"%s\",\"path\":\"…\"}，或把方言的 upstream_wire 改成已声明的协议",
+				providerID, decl.ID, decl.UpstreamWire, strings.TrimSpace(decl.UpstreamWire))
+		}
+	}
+	return nil
 }
 
 // CompileDialects 把声明式方言编成可执行的方言，并对每条再做一次注册表层面的检查。

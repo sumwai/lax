@@ -377,6 +377,63 @@ func validateProviders(kind string, providers []ProviderDecl) error {
 				return err
 			}
 		}
+		if _, _, err := p.NormalizedAuth(); err != nil {
+			return fmt.Errorf("%s.%w", field, err)
+		}
+		if err := validateRouteDecls(field+".routes", p.Routes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// NormalizedAuth 返回规整后的凭据头声明（头名小写、scheme 归一）。
+// 未声明 auth 时两项都是空串，表示按线协议推导：转发行为与没有这一项的老版本一致。
+func (p ProviderDecl) NormalizedAuth() (header, scheme string, err error) {
+	if p.Auth == nil {
+		return "", "", nil
+	}
+	if strings.TrimSpace(p.Auth.Header) == "" {
+		// 先报更具体的那一条：既没头又写了写法时，缺的是头。
+		if strings.TrimSpace(p.Auth.Scheme) != "" {
+			_, err = NormalizeAuthScheme(p.Auth.Scheme, "")
+			return "", "", err
+		}
+		return "", "", errors.New("auth.header 为空：写一个头名，例如 X-Api-Key")
+	}
+	header, err = NormalizeAuthHeader(p.Auth.Header)
+	if err != nil {
+		return "", "", err
+	}
+	scheme, err = NormalizeAuthScheme(p.Auth.Scheme, header)
+	if err != nil {
+		return "", "", err
+	}
+	return header, scheme, nil
+}
+
+// validateRouteDecls 校验 manifest 里的 routes：协议必须是已知线协议且不重复，路径非空。
+// 路径的规整与整条地址的校验不在这里做：它走 store.prepareRoutes 那一份（与 provider 子命令
+// 同一个入口），否则同一串路径在插件安装与手工声明上会有两种命运。
+func validateRouteDecls(field string, routes []RouteDecl) error {
+	seen := make(map[string]int, len(routes))
+	for i, r := range routes {
+		item := fmt.Sprintf("%s[%d]", field, i)
+		protocol := strings.TrimSpace(r.Protocol)
+		if protocol == "" {
+			return fmt.Errorf("%s.protocol 为空：写线协议全名，例如 openai-speech", item)
+		}
+		if !KnownWire(protocol) {
+			return fmt.Errorf("%s.protocol 是 %q：只能是 %s", item, r.Protocol, strings.Join(knownWireNames(), "、"))
+		}
+		if prev, dup := seen[protocol]; dup {
+			return fmt.Errorf("%s.protocol 与 %s[%d].protocol 都是 %q：一家厂商的每条协议只有一条路由（主键是厂商加协议）",
+				item, field, prev, protocol)
+		}
+		seen[protocol] = i
+		if strings.TrimSpace(r.Path) == "" {
+			return fmt.Errorf("%s.path 为空：写相对 base_url 的路径（例如 /v1/audio/speech），或整条地址", item)
+		}
 	}
 	return nil
 }
