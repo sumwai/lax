@@ -1080,6 +1080,8 @@ func TestProviderAddHelpMentionsGemini(t *testing.T) {
 	}
 	for _, want := range []string{
 		"--gemini",
+		"--speech",
+		"--transcriptions",
 		"/v1beta/models/{model}:generateContent",
 		"{model} 是占位符",
 		"lax provider add google-gemini --base-url https://generativelanguage.googleapis.com",

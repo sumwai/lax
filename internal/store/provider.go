@@ -733,9 +733,7 @@ func (s *Store) SetProvider(name string, patch ProviderPatch) error {
 }
 
 // protocolFlagName 把协议名换成 `provider set` 上对应的那个 flag，错误文案直接给出下一步能敲的命令。
-// gemini 的 `--gemini` flag 目前不在命令面上，这里照旧给出 flag 名：
-// 有了 flag 之后文案不用改；没有的时候，只靠 CLI 也写不进 gemini 路由。
-// systemone 的 flag 就是协议名 `--systemone`，与 `--default-protocol systemone` 两种写法同形。
+// systemone 与语音两条的 flag 不是线协议全名，这里逐个映射回命令行写法。
 func protocolFlagName(protocol string) string {
 	switch protocol {
 	case translate.ProtocolChat:
@@ -750,6 +748,10 @@ func protocolFlagName(protocol string) string {
 		return "systemone"
 	case translate.ProtocolEmbeddings:
 		return "embeddings"
+	case translate.ProtocolSpeech:
+		return "speech"
+	case translate.ProtocolTranscriptions:
+		return "transcriptions"
 	}
 	return protocol
 }

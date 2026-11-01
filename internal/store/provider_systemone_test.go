@@ -50,6 +50,34 @@ func TestWireProtocolsOrder(t *testing.T) {
 	}
 }
 
+// TestMissingDefaultRouteSuggestsCLIFlag 钉住错误文案里的下一步命令：
+// 线协议全名与 CLI flag 不同的几条要映射回去，不能建议 --openai-speech 这类不存在的参数。
+func TestMissingDefaultRouteSuggestsCLIFlag(t *testing.T) {
+	st := openTemp(t)
+	if err := st.CreateProvider(store.Provider{Name: "flags", BaseURL: "https://api.example.com"},
+		[]store.ProviderRoute{{Protocol: translate.ProtocolChat, Path: "/v1/chat/completions"}}); err != nil {
+		t.Fatalf("建厂商: %v", err)
+	}
+	for _, c := range []struct {
+		protocol string
+		flag     string
+	}{
+		{translate.ProtocolAnthropic, "--anthropic"},
+		{translate.ProtocolResponses, "--responses"},
+		{translate.ProtocolGemini, "--gemini"},
+		{translate.ProtocolSystemOne, "--systemone"},
+		{translate.ProtocolEmbeddings, "--embeddings"},
+		{translate.ProtocolSpeech, "--speech"},
+		{translate.ProtocolTranscriptions, "--transcriptions"},
+	} {
+		def := c.protocol
+		err := st.SetProvider("flags", store.ProviderPatch{DefaultProtocol: &def})
+		if err == nil || !strings.Contains(err.Error(), c.flag) {
+			t.Fatalf("默认协议 %s 的错误文案应给出 %s，实际 %v", c.protocol, c.flag, err)
+		}
+	}
+}
+
 // TestProviderSystemOneRouteRoundTrip 钉住 systemone 路由的写入与读回：
 // `provider add/set --systemone <路径>` 落库之后能原样读回，路径按同一套规则规整，
 // 且这条路由不推导 models_path（决策端点没有列表接口）。
