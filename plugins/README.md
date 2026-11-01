@@ -27,6 +27,28 @@ lax plugin install ./plugins/<插件名> --trust sandboxed --yes
 lax plugin reload
 ```
 
+已经发布到 GitHub 的插件可以直接从插件目录地址安装，不必先克隆仓库：
+
+```bash
+lax plugin install https://github.com/<owner>/<repo>/tree/<ref>/plugins/<插件名> \
+    --trust sandboxed --yes
+```
+
+`<ref>` 可以是分支、tag 或提交号。也可以写 `github.com/<owner>/<repo>/<path>` 或
+`github:<owner>/<repo>/<path>[@<ref>]`；省略 ref 时取仓库默认分支。远程安装只支持公开仓库。
+
+官方 `lax-plugins` 仓库里的插件还可以只写目录名：
+
+```bash
+lax plugin install doubao-seed-tts --trust sandboxed --yes
+lax plugin install doubao-seed-tts@1.2.1 --trust sandboxed --yes
+```
+
+不带 `@` 时取最新版；带 `@1.2.1` 时固定到该插件的发布 tag
+`doubao-seed-tts-v1.2.1`。当前目录有同名目录且不带 `@` 时按本地目录装；
+没有才映射到 `github:sumwai/lax-plugins/plugins/doubao-seed-tts`。本地有同名目录
+又想强制取远程最新版时写 `doubao-seed-tts@main`。
+
 `runtime: "declarative"` 的插件用 `--trust declarative`；`moejs` 插件用
 `--trust sandboxed`。安装前可以用 `--dry-run` 只看计划，不复制、不写库：
 
@@ -36,7 +58,7 @@ lax plugin install ./plugins/<插件名> --trust sandboxed --dry-run
 
 ## 测试
 
-插件目录里的 Go 测试只在当前本机存在，克隆仓库后不会带上：
+插件目录里的 Go 测试只在当前本机存在，克隆仓库后不会带上；从 GitHub 安装时测试文件会随包复制到数据目录，但不参与运行：
 
 ```bash
 go test ./plugins/<插件名>

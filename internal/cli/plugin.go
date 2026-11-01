@@ -35,7 +35,8 @@ const (
 	pluginStateFailed = "failed"
 )
 
-// plugin_versions 上两列的固定取值：来源是本地目录，没有签名，包哈希是自证的。
+// plugin_versions 上两列的固定取值：来源默认是本地目录，没有签名，包哈希是自证的。
+// 远程来源另写 github:<owner>/<repo>/<path>@<ref>。
 const (
 	pluginVersionSource   = "dir"
 	pluginSignatureStatus = "unverified"
@@ -52,12 +53,15 @@ const (
 	pluginActionUpdate  = "update"
 )
 
-const pluginInstallUsage = "用法：lax plugin install <目录> [--trust declarative|sandboxed] [--no-enable] [--dry-run] [--yes]\n" +
-	"<目录> 里要有 lax.plugin.json，例如 lax plugin install ./my-plugin"
+const pluginInstallUsage = "用法：lax plugin install <目录|GitHub 来源|插件名[@版本]> [--trust declarative|sandboxed] [--no-enable] [--dry-run] [--yes]\n" +
+	"本地目录里要有 lax.plugin.json，例如 lax plugin install ./my-plugin\n" +
+	"GitHub 来源写成 https://github.com/<owner>/<repo>/tree/<ref>/<path>\n" +
+	"裸插件名从官方插件目录安装，不写版本取最新：lax plugin install doubao-seed-tts\n" +
+	"固定版本写 @：lax plugin install doubao-seed-tts@1.2.1（tag 是 doubao-seed-tts-v1.2.1；当前目录有同名目录且不带 @ 时按本地目录装）"
 
 var pluginSubs = []groupItem{
-	{"install", "从本地目录安装一个插件：声明式映射，或跑在 moejs 沙箱里的代码"},
-	{"update", "把已装插件升到源目录里的新版本，活动版本跟着换过去"},
+	{"install", "从本地目录、GitHub 仓库或官方插件名安装一个插件：声明式映射，或跑在 moejs 沙箱里的代码"},
+	{"update", "把已装插件升到来源里的新版本，活动版本跟着换过去"},
 	{"rollback", "把活动版本切回一个已装过的旧版本"},
 	{"verify", "只做校验不改库：包哈希、manifest 哈希、方言与运行时是否与安装时一致"},
 	{"logs", "查看插件的运行日志，--follow 持续跟随"},
@@ -600,7 +604,7 @@ func resolveTrust(m plugin.Manifest, requested string) (string, error) {
 
 // cmdPluginInstall 是安装流水线：解析校验 → 查版本与方言冲突 → 复制到 installed/ → 写目录 → 写版本行 → 启停。
 func cmdPluginInstall(e *Env, args []string) error {
-	fs := newFlagSet(e, "plugin install", "从本地目录安装插件，登记它的厂商、模型与方言")
+	fs := newFlagSet(e, "plugin install", "从本地目录、GitHub 仓库或官方插件名安装插件，登记它的厂商、模型与方言")
 	noEnable := fs.Bool("no-enable", false, "只安装，不启用")
 	trust := fs.String("trust", "", "信任级别：declarative 或 sandboxed，默认按 manifest 的 runtime 推断")
 	dryRun := fs.Bool("dry-run", false, "只打印将要写入的厂商、路由、模型、方言、别名与权限，不写库也不复制文件")
@@ -615,7 +619,12 @@ func cmdPluginInstall(e *Env, args []string) error {
 
 	// 1 解析与校验：manifest、方言文件、模型目录与三者之间的引用都在这一步查完，
 	// 错误文案里带文件名与字段路径，改完直接重跑同一条命令。
-	pkg, err := plugin.LoadDir(src)
+	source, err := openPluginSource(src)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	pkg, err := plugin.LoadDir(source.Dir)
 	if err != nil {
 		return err
 	}
@@ -626,7 +635,7 @@ func cmdPluginInstall(e *Env, args []string) error {
 	if err := checkExecutableOperations(pkg); err != nil {
 		return err
 	}
-	packageSHA, err := plugin.PluginDirHash(src)
+	packageSHA, err := plugin.PluginDirHash(source.Dir)
 	if err != nil {
 		return err
 	}
@@ -674,7 +683,7 @@ func cmdPluginInstall(e *Env, args []string) error {
 	}
 
 	// 5 复制：先落 staging，再整目录 rename 到 installed/<ID>/<版本>/。
-	if err := copyPluginTree(src, plan.Target, pluginStagingRoot(dataDir)); err != nil {
+	if err := copyPluginTree(source.Dir, plan.Target, pluginStagingRoot(dataDir)); err != nil {
 		return err
 	}
 	rollback := func(cause error) error {
@@ -706,7 +715,7 @@ func cmdPluginInstall(e *Env, args []string) error {
 		PermissionsJSON: string(permissionsJSON),
 		PackageSHA256:   packageSHA,
 		ManifestSHA256:  plugin.ManifestHash(pkg.ManifestBytes),
-		Source:          pluginVersionSource,
+		Source:          source.Origin,
 		SignatureStatus: pluginSignatureStatus,
 	}, true); err != nil {
 		return rollback(err)
@@ -879,16 +888,17 @@ func cellOrNone(values []string) string {
 
 // ---------------------------------------------------------------- update
 
-const pluginUpdateUsage = "用法：lax plugin update <插件 ID> --source <目录> [--dry-run] [--yes]\n" +
-	"<目录> 里要有新版本的 lax.plugin.json，版本号要与活动版本不同；先看差异用 --dry-run"
+const pluginUpdateUsage = "用法：lax plugin update <插件 ID> --source <目录|GitHub 来源|插件名[@版本]> [--dry-run] [--yes]\n" +
+	"来源里要有新版本的 lax.plugin.json，版本号要与活动版本不同；先看差异用 --dry-run\n" +
+	"GitHub 来源写成 https://github.com/<owner>/<repo>/tree/<ref>/<path>；裸插件名与 install 用同一套官方插件目录映射，@版本固定到对应 tag"
 
-// cmdPluginUpdate 把已装插件升到源目录里的新版本。
+// cmdPluginUpdate 把已装插件升到来源里的新版本。
 //
 // 流水线与 install 是同一套：解析校验 → 版本与方言冲突 → 复制到 installed/ → 写目录与版本行。
 // 区别在失败的时候：活动版本只在最后一步（版本行入库）才切，包或目录写不进去时旧版本仍然可服务。
 func cmdPluginUpdate(e *Env, args []string) error {
-	fs := newFlagSet(e, "plugin update", "把已装插件升到源目录里的新版本")
-	source := fs.String("source", "", "新版本的包目录，目录里要有 lax.plugin.json")
+	fs := newFlagSet(e, "plugin update", "把已装插件升到来源里的新版本")
+	source := fs.String("source", "", "新版本的包目录、GitHub 来源或官方插件名，里面要有 lax.plugin.json")
 	dryRun := fs.Bool("dry-run", false, "只打印将要写入的变化，不复制也不写库")
 	yes := fs.Bool("yes", false, "确实要切换活动版本；不给时只打印将发生的变化")
 	if err := fs.Parse(args); err != nil {
@@ -901,12 +911,17 @@ func cmdPluginUpdate(e *Env, args []string) error {
 	src := strings.TrimSpace(*source)
 
 	// 1 解析与校验：用与 install 同一套，包写得不对在这里就露出来，库一个字节不动。
-	pkg, err := plugin.LoadDir(src)
+	pluginSrc, err := openPluginSource(src)
+	if err != nil {
+		return err
+	}
+	defer pluginSrc.Close()
+	pkg, err := plugin.LoadDir(pluginSrc.Dir)
 	if err != nil {
 		return err
 	}
 	if pkg.Manifest.ID != id {
-		return usagef("源目录里的插件是 %s，命令给的是 %s：一次只升一个插件，改对 ID 或换个目录", pkg.Manifest.ID, id)
+		return usagef("来源里的插件是 %s，命令给的是 %s：一次只升一个插件，改对 ID 或换个来源", pkg.Manifest.ID, id)
 	}
 	// 信任级别按新包的 runtime 推断，规则与 install 一致：带代码的只能按沙箱装。
 	trustLevel, err := resolveTrust(pkg.Manifest, "")
@@ -916,7 +931,7 @@ func cmdPluginUpdate(e *Env, args []string) error {
 	if err := checkExecutableOperations(pkg); err != nil {
 		return err
 	}
-	packageSHA, err := plugin.PluginDirHash(src)
+	packageSHA, err := plugin.PluginDirHash(pluginSrc.Dir)
 	if err != nil {
 		return err
 	}
@@ -979,7 +994,7 @@ func cmdPluginUpdate(e *Env, args []string) error {
 	}
 
 	// 4 复制：目标目录装完之前不存在，活动版本还指着旧的。
-	if err := copyPluginTree(src, plan.Target, pluginStagingRoot(dataDir)); err != nil {
+	if err := copyPluginTree(pluginSrc.Dir, plan.Target, pluginStagingRoot(dataDir)); err != nil {
 		return err
 	}
 	rollback := func(cause error) error {
@@ -1014,7 +1029,7 @@ func cmdPluginUpdate(e *Env, args []string) error {
 		PermissionsJSON: string(permissionsJSON),
 		PackageSHA256:   packageSHA,
 		ManifestSHA256:  plugin.ManifestHash(pkg.ManifestBytes),
-		Source:          pluginVersionSource,
+		Source:          pluginSrc.Origin,
 		SignatureStatus: pluginSignatureStatus,
 	}, true); err != nil {
 		return rollback(err)
@@ -1204,7 +1219,7 @@ func cmdPluginLs(e *Env, args []string) error {
 		return e.printJSON(rows)
 	}
 	if len(rows) == 0 {
-		fmt.Fprintln(e.Stdout, "还没有安装插件。装一个本地目录：lax plugin install <目录>（目录里要有 lax.plugin.json）")
+		fmt.Fprintln(e.Stdout, "还没有安装插件。装一个本地目录或 GitHub 来源：lax plugin install <目录|GitHub 来源>（本地目录里要有 lax.plugin.json）")
 		return nil
 	}
 	table := make([][]string, 0, len(rows))

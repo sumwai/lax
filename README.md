@@ -23,7 +23,7 @@ lax log tail                                        # 看请求记录
 | `serve` | 前台起网关 |
 | `account add\|ls\|set\|rm\|test\|enable\|disable` | 加账号、列账号、换凭据、删账号、探活、启用、停用 |
 | `provider ls\|add\|set\|unset\|rm` | 维护厂商默认地址、默认协议与各协议的路由；`add` 只新建，`set` 只设值，删除走 `unset` |
-| `plugin install\|update\|rollback\|verify\|logs\|reload\|config\|ls\|show\|enable\|disable\|rm\|doctor` | 装本地目录里的插件（声明式或 `moejs` 沙箱）：登记它带来的厂商、模型与方言，升版本、回滚、校验、看日志、热加载、读写配置项、启停与自检；包哈希对不上的插件不加载 |
+| `plugin install\|update\|rollback\|verify\|logs\|reload\|config\|ls\|show\|enable\|disable\|rm\|doctor` | 装本地目录或 GitHub 来源里的插件（声明式或 `moejs` 沙箱）：登记它带来的厂商、模型与方言，升版本、回滚、校验、看日志、热加载、读写配置项、启停与自检；包哈希对不上的插件不加载 |
 | `model ls` | 列出模型、可用账号与状态，可按厂商与账号筛选；`--json` 带每个账号的协议、HTTP 状态、探活时间与错误 |
 | `model show` | 按账号看一个模型的可达性事实：协议、状态、HTTP 状态、探活时间与错误；只读库，不发上游请求 |
 | `model add <模型> --account <账号> [--provider <厂商>] [--protocol <协议>]` | 手写一条「这个账号能用这个模型」，同事务写模型目录与账号可达性；可重复执行，决策模型与不在上游清单里的模型靠它声明 |
@@ -285,7 +285,7 @@ MiMo 的两条 chat 方言（`lax/mimo-chat-speech@1` 与 `lax/mimo-chat-asr@1`�
 
 ## 插件与方言
 
-插件是本地目录里的包：`lax.plugin.json` 说明插件 ID、版本、ABI、运行时、权限与它带来的厂商，`dialects.json` 说明这些厂商的上游形状，`models.json` 说明模型与「哪个操作绑哪条方言」。运行时有两种：
+插件是目录里的包：`lax.plugin.json` 说明插件 ID、版本、ABI、运行时、权限与它带来的厂商，`dialects.json` 说明这些厂商的上游形状，`models.json` 说明模型与「哪个操作绑哪条方言」。来源可以是本地目录、GitHub 仓库里的插件路径，也可以是官方 `lax-plugins` 仓库里的裸插件名。运行时有两种：
 
 - `declarative`：宿主按数据执行映射，插件不跑代码；只能承载语音两条操作。
 - `moejs`：每次 hook 在进程内 JS 沙箱里执行插件代码，可以给对话、向量化与决策请求补报文，并为对话与决策请求解响应、逐块解流。
@@ -294,6 +294,9 @@ MiMo 的两条 chat 方言（`lax/mimo-chat-speech@1` 与 `lax/mimo-chat-asr@1`�
 lax plugin install ./my-plugin --dry-run       # 只打印将写入的厂商、路由、模型、方言、别名与权限
 lax plugin install ./my-plugin                 # 解析校验 → 包哈希 → 版本与方言冲突 → 复制到数据目录 → 写厂商目录与绑定
 lax plugin install ./my-js-plugin --trust sandboxed  # 带代码的包；--trust 与 runtime 必须一致
+lax plugin install https://github.com/sumwai/lax-plugins/tree/master/plugins/doubao-seed-tts  # 直接从 GitHub 仓库装
+lax plugin install doubao-seed-tts --trust sandboxed --yes  # 官方插件目录简写，等价于上面的 URL
+lax plugin install doubao-seed-tts@1.2.1 --trust sandboxed --yes  # 固定到 1.2.1，不跟默认分支走
 lax plugin update com.example.echo --source ./echo-v2  # 升到新版本（不给 --yes 只打印计划并退出 1）
 lax plugin rollback com.example.echo --version 1.0.0   # 把活动版本切回装过的旧版本
 lax plugin verify com.example.echo             # 只读校验：哈希、运行时与方言声明，不改库、不开沙箱
@@ -309,10 +312,14 @@ lax model dialect ls mimo-v2.5-tts             # 看模型绑了哪条方言
 lax model dialect set mimo-v2.5-tts chat.complete@1 com.example.echo/chat@1
 ```
 
-本机插件包放在 `plugins/<插件名>/`，默认不进版本库（见 `plugins/README.md`）。下面以本机的 `doubao-seed-tts` 为例，它同时提供豆包 Seed-TTS 2.0 与 Seed-ASR 极速版：
+GitHub 来源支持 `https://github.com/<owner>/<repo>/tree/<ref>/<path>`、`github.com/<owner>/<repo>/<path>[@<ref>]` 与 `github:<owner>/<repo>/<path>[@<ref>]` 三种写法；省略 `<ref>` 时取默认分支。安装只下载公开仓库的 zip，归档与解压各有 64 MiB 上限，临时目录在命令结束时删掉。
+
+裸插件名（只含字母、数字与 `._-`，不以 `.` 开头）不带 `@` 时先看当前目录有没有同名目录：有就按本地目录装；没有就映射到官方插件目录 `github:sumwai/lax-plugins/plugins/<名字>@HEAD`，取默认分支的最新版。要强制取远程最新版，写 `@main` 或完整 GitHub 来源。带 `@<版本>` 时一律走官方目录：`doubao-seed-tts@1.2.1` 与 `@v1.2.1` 都映射到 tag `doubao-seed-tts-v1.2.1`；`@main` 或 `@<提交号>` 原样当 ref。`plugin update --source` 用同一套解析。
+
+本机插件包放在 `plugins/<插件名>/`，默认不进版本库（见 `plugins/README.md`）。下面以 `doubao-seed-tts` 为例，它同时提供豆包 Seed-TTS 2.0 与 Seed-ASR 极速版；本机包改成 `./plugins/doubao-seed-tts` 即可：
 
 ```bash
-lax plugin install ./plugins/doubao-seed-tts --trust sandboxed --yes
+lax plugin install doubao-seed-tts@1.2.1 --trust sandboxed --yes
 printf '%s' "$DOUBAO_API_KEY" \
     | lax account add doubao --provider doubao-seed --models seed-tts-2.0,bigmodel --key -
 lax model speak --model doubao-seed-tts --voice zh_female_xiaohe_uranus_bigtts \
@@ -330,7 +337,7 @@ curl -s http://127.0.0.1:6543/v1/audio/transcriptions \
 
 客户端模型名分别是 `doubao-seed-tts` 与 `doubao-seed-asr`，插件把它们解析成上游 `seed-tts-2.0` 与 `bigmodel`；路由、`X-Api-Key` 与逐请求的 `X-Api-Resource-Id` / `X-Api-Request-Id` 都由插件声明。TTS 支持 mp3 / wav / pcm，`speed` 会换算成豆包的 `speech_rate`，`instructions` 会作为 `additions.context_texts` 传给上游，用来控制语气、节奏与音量。ASR 只收 wav / mp3，返回 `json`、`text` 或 `verbose_json`，`language` 只认 `auto` / `zh` / `en`；沙箱把音频内联进请求，单文件上限 8 MiB。两条都只做非流式。插件包的目录结构与安装方式见 `plugins/README.md`，具体限制见插件包自己的 README。
 
-安装流水线是固定的：解析并严格校验 manifest、方言文件、模型目录与三者之间的引用 → 定信任级别 → 拒掉声明式方言承载非语音操作 → 算包目录哈希 → 版本冲突（同一版本不能覆盖）→ 方言冲突（内置方言与其余已装插件一起试登记，`lax/` 前缀不许冒用）→ 复制到 `<数据目录>/plugins/installed/<插件 ID>/<版本>/`（先落 `staging/` 再整目录改名，符号链接一律拒）→ 逐家厂商一个事务写目录（厂商、路由、模型、方言绑定、别名，冲突整包回滚）→ 写 `plugin_versions`（记下安装时的 `runtime`）与 `plugins`。`--dry-run` 停在复制之前，`--no-enable` 只装不用，装第二个版本要 `--yes`。
+安装流水线是固定的：本地目录直接读，GitHub 来源先下载 zip 并安全解到临时目录（拒绝符号链接、特殊文件、重复条目与越界路径）→ 解析并严格校验 manifest、方言文件、模型目录与三者之间的引用 → 定信任级别 → 拒掉声明式方言承载非语音操作 → 算包目录哈希 → 版本冲突（同一版本不能覆盖）→ 方言冲突（内置方言与其余已装插件一起试登记，`lax/` 前缀不许冒用）→ 复制到 `<数据目录>/plugins/installed/<插件 ID>/<版本>/`（先落 `staging/` 再整目录改名，符号链接一律拒）→ 逐家厂商一个事务写目录（厂商、路由、模型、方言绑定、别名，冲突整包回滚）→ 写 `plugin_versions`（记下安装时的 `runtime` 与来源）与 `plugins`。`--dry-run` 停在复制之前，`--no-enable` 只装不用，装第二个版本要 `--yes`。
 
 `--trust` 只有两个取值：`declarative` 与 `sandboxed`。`runtime: "declarative"` 的包只能按声明式装，`runtime: "moejs"` 的包只能按沙箱装；对不上、或写 `trusted-worker`，都是用法错误（退出码 2）。`plugin update` 没有这个参数，按新包的 runtime 重新推断。
 
@@ -487,4 +494,4 @@ Release 创建成功后，同一工作流的 `deploy` job 会把 `linux/amd64` �
 
 gemini 的入站与出站都支持非流式与流式，模型列表可同步（`google-gemini` 内置，`GET /v1beta/models` 的清单去掉 `models/` 前缀、按 `nextPageToken` 翻页；只能做向量化的条目现在也进清单，能力位记 `embedding`，以前它们被 `supportedGenerationMethods` 过滤掉了）。gemini 的模型名在 URL 路径里，路由的 `path` 因此可以写 `{model}` 占位符（相对路径与整条地址都行，替换时按路径段转义）；入站 gemini 的错误体是 google 的形状（`error.code` 是 HTTP 状态码、`error.status` 是状态名），四条入站路径各自的形状见 DESIGN 5.2；非正常的 `finishReason`（`SAFETY` 一类）按正常结束转给客户端，原值只进网关日志；gemini 的内置工具（`googleSearch` 等）与思考内容（`thought` 标记、`thinkingConfig`）不搬。转换时搬运文本、图片、思考内容、工具调用与工具结果五类块：思考内容只在响应方向搬运，请求方向不回填——chat 的 `reasoning_content` 与 responses 的 `reasoning` item 是上游自己产生的字段，回填给推理模型会被以 400 拒掉整条请求；响应方向仍照旧搬运。签名只有 anthropic 有落点，没有签名的思考块不写进 anthropic 的请求与响应（不伪造签名，伪造会被上游以 400 拒绝），所以 chat 与 responses 的思考内容转到 anthropic 时丢弃；流式转换下发给 anthropic 客户端的思考块没有签名，客户端若把这些块回填进下一轮请求，上游会报 400。工具结果之后紧跟的追问并进同一条 user 消息，因为 anthropic 不接受两条相邻的 user 消息。思考配置参数（anthropic 的 `thinking`、chat 的 `reasoning_effort`）、`redacted_thinking` 的不透明 `data` 与 responses 的 `encrypted_content` 跨协议不搬，reasoning token 不单独记账（算进输出 token）。音频与文件类内容丢弃；anthropic 的服务端内置工具（`web_search` 等）跨协议时整条丢弃，chat 与 responses 的工具定义只认 function，编回 anthropic 时才原样保留 `type`；`tools[].strict` 不搬运，`is_error` 只有 anthropic 有落点，`allowed_tools` 降级为 `auto`。流式转换下断在工具参数中间时，已下发的参数片段撤不回来，收尾的错误帧会写明「工具调用参数在上游中断，内容不完整」，这一次记失败，程序不伪造闭合的 JSON。跨协议只搬运图片地址，没有其它多模态变换。不改写任何客户端配置文件；需要非标准请求头的上游通过 `provider header` 声明（见 DESIGN 5.10），例如 opencode 的 Go 端点要求 `x-opencode-session`，声明 `{session}` 即可路由，要求按请求计算的签名的上游仍然接不了；冷却时长按单次失败计算；探活调用不计入用量汇总；估算花费需要给模型定价（`model price set` 的 `--in` 与 `--out`，账号只在套餐不同时用 `--account` 覆盖），缓存读写按 `--cache-read` 与 `--cache-write` 折价（未填时回退到输入价，单价单位都是每百万 token）；`usage` 与 `log tail` 里仍分别显示缓存读写的 token。语音不做音频转码、不解析音频容器算时长（直通路径 TTS 按入参字符、ASR 按上游报的秒数，chat 方言按 token 记账），变化的模型名也不改写（响应里的 `model` 原样）；出站形状只由绑定的方言决定，同协议的方言不执行声明式映射，chat 形状的语音方言可以是内置的 Go 实现，也可以是插件用声明式映射或 hook 方言写的（见「插件与方言」）。
 
-插件与方言：本版落地声明式插件、内置方言与 `moejs` 沙箱，仍没有 `trusted-worker`（独立进程，以及文件、进程、环境变量权限）、Magpie/OpenCode 导入与 `plugin import`、OAuth 登录、插件市场与签名（`plugin_versions.signature_status` 一律 `unverified`、`source` 一律 `dir`）。声明式映射只能表达 `const`、`input`、`model`、`option` 四种来源加 `map`、`default`、`omit_if_empty` 三个修饰键，没有表达式、正则、循环与脚本，`input` 白名单只有语音那八项，所以声明式方言只能给语音两条操作写映射；对话、向量化与决策请求可以绑宿主方言（`lax/` 前缀）走 Go 编解码，也可以绑 hook 方言。hook 方言的边界：`Input.Body` 是宿主编好的报文（`Input.Messages` 仍为空，读消息要解析 `ctx.body`）；向量化与决策入站的响应，方言返回的 `ResultJSON` 在入站与出站同协议时原样写回（这两个协议没有中间表示，跨协议改编不支持）；要流式就得实现 `decode_stream`，否则在发上游请求之前 400；`Plan.Path` 只能改相对路径，语音路径不看它；`Plan.Headers` 是逐请求的头（请求 ID、资源号这类），语音与非语音两条方言路径都生效，但凭据头与帧头是保留头、沙箱直接拒，凭据只由厂商的 `auth` 声明注入。沙箱没有内存硬上限（goja 不提供堆上限 API，只有源码 8 MiB、返回值 8 MiB、注入音频与流块 8 MiB、cache 1 MiB 四道字节闸门）；逐 hook 超时打不断在途的 `lax.http.request`，一个 100 ms 的 hook 可能占用几秒；ESM 只支持静态 `export`、`export default` 与相对 import，没有 `import *`、裸模块、动态 import 与顶层 `await`；联网只走 `lax.http.request` 的白名单 https，没有媒体通道。`plugin install` 逐家厂商一个事务，一个插件带多家厂商时第 N 家失败会让前 N-1 家留在库里（用 `lax plugin rm` 或 `lax provider rm` 清）。`plugin reload`（`SIGHUP`）只整表换方言注册表，不关旧沙箱，反复 reload 会积累旧实例；没有 `models` / `probe` 两个控制面钩子，模型清单与探活仍由 `model sync` / `model probe` 做。
+插件与方言：本版落地声明式插件、内置方言与 `moejs` 沙箱，仍没有 `trusted-worker`（独立进程，以及文件、进程、环境变量权限）、Magpie/OpenCode 导入与 `plugin import`、OAuth 登录、插件市场与签名（`plugin_versions.signature_status` 一律 `unverified`、`source` 记 `dir` 或 `github:<owner>/<repo>/<path>@<ref>`）。声明式映射只能表达 `const`、`input`、`model`、`option` 四种来源加 `map`、`default`、`omit_if_empty` 三个修饰键，没有表达式、正则、循环与脚本，`input` 白名单只有语音那八项，所以声明式方言只能给语音两条操作写映射；对话、向量化与决策请求可以绑宿主方言（`lax/` 前缀）走 Go 编解码，也可以绑 hook 方言。hook 方言的边界：`Input.Body` 是宿主编好的报文（`Input.Messages` 仍为空，读消息要解析 `ctx.body`）；向量化与决策入站的响应，方言返回的 `ResultJSON` 在入站与出站同协议时原样写回（这两个协议没有中间表示，跨协议改编不支持）；要流式就得实现 `decode_stream`，否则在发上游请求之前 400；`Plan.Path` 只能改相对路径，语音路径不看它；`Plan.Headers` 是逐请求的头（请求 ID、资源号这类），语音与非语音两条方言路径都生效，但凭据头与帧头是保留头、沙箱直接拒，凭据只由厂商的 `auth` 声明注入。沙箱没有内存硬上限（goja 不提供堆上限 API，只有源码 8 MiB、返回值 8 MiB、注入音频与流块 8 MiB、cache 1 MiB 四道字节闸门）；逐 hook 超时打不断在途的 `lax.http.request`，一个 100 ms 的 hook 可能占用几秒；ESM 只支持静态 `export`、`export default` 与相对 import，没有 `import *`、裸模块、动态 import 与顶层 `await`；联网只走 `lax.http.request` 的白名单 https，没有媒体通道。`plugin install` 逐家厂商一个事务，一个插件带多家厂商时第 N 家失败会让前 N-1 家留在库里（用 `lax plugin rm` 或 `lax provider rm` 清）。`plugin reload`（`SIGHUP`）只整表换方言注册表，不关旧沙箱，反复 reload 会积累旧实例；没有 `models` / `probe` 两个控制面钩子，模型清单与探活仍由 `model sync` / `model probe` 做。

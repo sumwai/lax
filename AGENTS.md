@@ -12,7 +12,8 @@
 | `internal/store` | SQLite、迁移、读写 | 上游凭据只在 `secret` 解密后进入这里 |
 | `internal/secret` | 凭据加解密 | 不碰数据库连接 |
 | `internal/account` | 账号池、冷却、选号 | 选号是纯逻辑，输入是候选集与时间 |
-| `internal/gateway` | 入站 HTTP、上游转发 | 唯一发上游请求的地方 |
+| `internal/gateway` | 入站 HTTP、上游转发 | 唯一发上游厂商请求的地方 |
+| `internal/pluginfetch` | 从 GitHub 下载并解出插件目录 | 不校验 manifest、不读数据库与配置、不安装 |
 | `internal/translate` | 协议编解码 | 纯函数，不读环境、不发网络 |
 | `internal/timerange` | 命令行时间范围解析 | 不读配置、不连数据库 |
 | `internal/usage` | 用量金额格式化 | 不读环境、不写请求记录 |
