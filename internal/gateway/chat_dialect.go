@@ -98,15 +98,17 @@ func dialectRelativePath(path string) bool {
 //
 // 请求头由宿主决定，不采用方言给的头（Plan 也没有这个字段）：白名单透传与凭据注入只有一份，
 // 让插件另开一个注入口，凭据的落点就变成两处。
+// applyChatDialect 把方言编好的请求头、请求体与可选路径交给调用方。
+// plan.Headers 是逐请求生成的头（请求 ID 等），调用方在附加头之后叠加。
 func (s *Server) applyChatDialect(d plugin.Dialect, operation, inbound, outbound string,
-	req *translate.Request, body []byte) ([]byte, string, error) {
+	req *translate.Request, body []byte) ([]byte, map[string]string, string, error) {
 
 	plan, err := d.Prepare(plugin.Input{
 		Operation: operation, Wire: outbound, Model: req.Model,
 		Body: body, Stream: req.Stream, Limits: dialectLimits(inbound),
 	})
 	if err != nil {
-		return nil, "", fmt.Errorf("方言 %s 编请求失败: %w", d.ID(), err)
+		return nil, nil, "", fmt.Errorf("方言 %s 编请求失败: %w", d.ID(), err)
 	}
 	switch {
 	case len(plan.Body) > 0:
@@ -114,11 +116,11 @@ func (s *Server) applyChatDialect(d plugin.Dialect, operation, inbound, outbound
 	case plan.JSON != nil:
 		packed, err := json.Marshal(plan.JSON)
 		if err != nil {
-			return nil, "", fmt.Errorf("方言 %s 编出的请求体不是 JSON: %w", d.ID(), err)
+			return nil, nil, "", fmt.Errorf("方言 %s 编出的请求体不是 JSON: %w", d.ID(), err)
 		}
 		body = packed
 	}
-	return body, plan.Path, nil
+	return body, plan.Headers, plan.Path, nil
 }
 
 // chatDialectSuccess 处理插件方言路径的成功响应。非 2xx 由调用方按既有规则处理：

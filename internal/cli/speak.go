@@ -217,7 +217,18 @@ func postVoice(e *Env, path string, body []byte, contentType string) (*http.Resp
 		return nil, err
 	}
 
-	gs, err := gateway.New(gateway.Options{Store: a.st, Key: a.key, Logf: func(string, ...any) {}})
+	// 方言注册表要跟着网关走：语音模型的绑定可能是插件方言（豆包的 TTS 走它自己的路径），
+	// 不传这张表时网关只认识内置方言，插件方言的模型会报「方言没有注册」。
+	reg, notes, err := loadRegistry(a.st, pluginDataDirOf(a.paths), nil)
+	if err != nil {
+		a.Close()
+		return nil, fmt.Errorf("读插件表失败：%w", err)
+	}
+	for _, note := range notes {
+		fmt.Fprintf(e.Stderr, "警告：%s\n", note)
+	}
+
+	gs, err := gateway.New(gateway.Options{Store: a.st, Key: a.key, Dialects: reg, Logf: func(string, ...any) {}})
 	if err != nil {
 		a.Close()
 		return nil, err

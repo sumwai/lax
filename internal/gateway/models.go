@@ -256,7 +256,7 @@ func (s *Server) fetchModelPage(ctx context.Context, pageURL, target, protocol s
 	}
 	req.Header.Set("Accept", "application/json")
 	// 凭据头跟着取到这条路径的协议走，不是厂商默认协议。
-	setAuth(req, protocol, secretValue)
+	setAuth(req, protocol, secretValue, a.AuthHeader, a.AuthScheme)
 	// 模型列表请求没有模型名（{model} 展开为空时不发那条头），会话键也没有：
 	// {session} 在这里每次请求现生成一个：模型同步没有客户端请求，没有真会话可沿，
 	// 只能给一个本次请求专用的值。

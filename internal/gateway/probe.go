@@ -137,7 +137,7 @@ func (s *Server) probeModelsEndpoint(ctx context.Context, a store.Account) (step
 	req.Header.Set("Accept", "application/json")
 	// 凭据头跟着取到这条地址的协议走，与 `model sync` 一致：deepseek 的 anthropic 账号
 	// 取到的是 chat 路由上的 /v1/models，得发 Bearer，按厂商默认协议发 x-api-key 只会换回 401。
-	setAuth(req, protocol, secretValue)
+	setAuth(req, protocol, secretValue, a.AuthHeader, a.AuthScheme)
 	// 模型列表请求也带厂商附加头。读库失败在这里算作错误而不是退回
 	// 最小请求：那是数据库或配置的故障，不是这家没有列表接口。
 	if err := s.applyProviderHeaders(req, a, protocol, "", ""); err != nil {

@@ -743,8 +743,8 @@ func (s *Server) tryUpstream(ctx context.Context, w http.ResponseWriter, a store
 		return res
 	}
 
-	if speechUsesDialect(inbound, outbound, dialect) {
-		// 语音入站走 chat 方言：把 chat completion 解成音频字节或转写结果。
+	if speechUsesDialect(inbound, dialect) {
+		// 语音入站走插件方言：把响应解成音频字节或转写结果。
 		return s.speechDialectSuccess(w, resp, inbound, req.Model, raw, inboundHeaders.Get("Content-Type"), dialect)
 	}
 	if outbound == ProtocolSpeech || outbound == ProtocolTranscriptions {
@@ -793,6 +793,9 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound str
 	}
 
 	var body []byte
+	// planHeaders 是方言逐请求生成的头（请求 ID、资源号等）。语音与对话两条方言路径都可能给，
+	// 统一在附加头之后叠加：插件头最具体，同名时它最后写。
+	var planHeaders map[string]string
 	// contentType 默认 JSON；语音转写要改成带新 boundary 的 multipart。
 	contentType := "application/json"
 	switch {
@@ -804,10 +807,10 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound str
 		body, contentType, err = rewriteTranscriptionsBody(raw, inboundHeaders.Get("Content-Type"), req.Model)
 	case outbound == ProtocolTranscriptions:
 		body = raw
-	case speechUsesDialect(inbound, outbound, dialect):
-		// 语音入站 + chat 方言：上游把语音做成 chat 的一种形状，请求要重新编。
+	case speechUsesDialect(inbound, dialect):
+		// 语音入站 + 插件方言：入站形状解成 Input，上游请求由方言从零构建。
 		// 能力校验已经在上游调用之前做过（见 checkSpeechInbound）。
-		body, err = s.encodeSpeechDialect(dialect, inbound, raw, req.Model, inboundHeaders.Get("Content-Type"))
+		body, planHeaders, err = s.encodeSpeechDialect(dialect, inbound, raw, req.Model, inboundHeaders.Get("Content-Type"))
 	case outbound == ProtocolSpeech:
 		// 语音合成是 JSON，与其余直通协议一样只换 model。
 		body, err = patchModel(raw, req.Model)
@@ -830,7 +833,7 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound str
 		// 方言只补它认得的那几个字段（例如多一个思考开关），两个职责不混。
 		var path string
 		var perr error
-		body, path, perr = s.applyChatDialect(dialect, operationFor(inbound, embedding), inbound, outbound, req, body)
+		body, planHeaders, path, perr = s.applyChatDialect(dialect, operationFor(inbound, embedding), inbound, outbound, req, body)
 		if perr != nil {
 			return nil, perr
 		}
@@ -853,9 +856,9 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound str
 	if req.Stream {
 		httpReq.Header.Set("Accept", "text/event-stream")
 	}
-	setAuth(httpReq, outbound, key)
+	setAuth(httpReq, outbound, key, a.AuthHeader, a.AuthScheme)
 	// 客户端白名单头排在 setAuth 之后、附加头之前：头名冲突的优先级由这个顺序决定，不另写判断。
-	// 优先级是 setAuth 给的默认凭据头 < 客户端头 < 厂商附加头声明。
+	// 优先级是 setAuth 给的凭据头 < 客户端头 < 厂商附加头声明 < 插件逐请求头。
 	for _, d := range applyClientHeaders(httpReq, inboundHeaders, inbound, outbound) {
 		s.logf("客户端头 %s 被丢弃：值有 %d 字节，超过 %d 字节上限，不往上游透传",
 			d.Name, d.Bytes, clientHeaderMaxBytes)
@@ -866,6 +869,9 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound str
 	if err := s.applyProviderHeaders(httpReq, a, outbound, req.Model, session); err != nil {
 		return nil, err
 	}
+	// 插件头最后叠加：它是逐请求生成的（请求 ID、资源号、序号），比静态声明更具体。
+	// 凭据头与帧头已经在沙箱层被拒，这里再挡一次：网关是最后一道，不靠上游层的自觉。
+	applyPlanHeaders(httpReq, planHeaders)
 	if s.dumpBodies {
 		s.logf("→ 上游 %s 请求体: %s", endpoint, truncateForLog(string(body)))
 	}
@@ -1577,15 +1583,38 @@ func geminiStreamEndpoint(endpoint string) string {
 // 加 anthropic-version，两条 openai 协议与 systemone 用 Bearer（TypeSafe 本家与 commandcode 的
 // 决策端点都读 Authorization）。凭据头按协议而不是按厂商选：同一家上游的不同协议
 // 也可能用不同写法，按厂商选就让分类好像同一个厂商的路径全用同一种凭据头。
-func setAuth(req *http.Request, protocol, key string) {
+//
+// 厂商声明了凭据头（authHeader 非空）时只写那个头，协议默认的凭据头一个不发：
+// 豆包要 X-Api-Key，而 openai-speech 的默认写法是 Bearer，两个头同时出现只会让它拒掉请求。
+// anthropic-version 不是凭据，照常设置。
+func setAuth(req *http.Request, protocol, key, authHeader, authScheme string) {
+	if protocol == ProtocolAnthropic {
+		req.Header.Set("anthropic-version", "2023-06-01")
+	}
+	if authHeader != "" {
+		req.Header.Set(authHeader, plugin.AuthHeaderValue(authScheme, key))
+		return
+	}
 	switch protocol {
 	case ProtocolAnthropic:
 		req.Header.Set("x-api-key", key)
-		req.Header.Set("anthropic-version", "2023-06-01")
 	case ProtocolGemini:
 		req.Header.Set("x-goog-api-key", key)
 	default:
 		req.Header.Set("Authorization", "Bearer "+key)
+	}
+}
+
+// applyPlanHeaders 把方言给的逐请求头叠上去。插件头已经在沙箱层校验过（头名、值、条数与上限，
+// 保留头直接拒绝），这里是第二道：网关是最后一道防线，不靠上层自觉。
+// 保留头一律不写，包含凭据头与帧头：凭据只能由 setAuth 按 auth 声明注入。
+func applyPlanHeaders(req *http.Request, headers map[string]string) {
+	for name, value := range headers {
+		lower := strings.ToLower(strings.TrimSpace(name))
+		if lower == "" || plugin.IsReservedPlanHeader(lower) || plugin.CheckPlanHeaderValue(lower, value) != nil {
+			continue
+		}
+		req.Header.Set(lower, value)
 	}
 }
 

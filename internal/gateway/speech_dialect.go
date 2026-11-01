@@ -14,17 +14,24 @@ import (
 // 语音请求按方言分发。
 //
 // 网关不再认识任何一家上游的语音形状：模型在 model_operations 里绑定一条方言，
-// 方言给出出站线协议，同协议就原样转发，chat 方言就由方言双向翻译。
-// 请求构成与响应解码都在 internal/plugin 的两个内置方言里。
+// 方言给出出站线协议。绑的是宿主的两条直通方言就原样转发，绑其它方言（插件方言，
+// 以及把语音做成 chat 形状的 MiMo 内置方言）就由方言双向编解码。
+// 请求构成与响应解码都在 internal/plugin 的方言里，网关只管地址、凭据与记账。
 
-// speechUsesDialect 判断这一次语音请求要不要经方言翻译（而不是同协议直通）。
+// speechUsesDialect 判断这一次语音请求要不要经方言编解码（而不是同协议直通）。
 // 只看语音两条入站：非语音入站的插件方言走 chatDialectApplies，两条路不能互相接上——
 // 语音的输入归一（文本、音频）与对话的报文补丁不是同一套。
-func speechUsesDialect(inbound, outbound string, d plugin.Dialect) bool {
+//
+// 判定不看方言的线协议是否等于入站：插件方言一律由它自己编请求、解响应，
+// 即使它与入站是同一条线协议（豆包的 TTS 就是 openai-speech 入站打自己的路径）。
+// 宿主直接透传的只有两条语音直通方言（lax/openai-speech@1、lax/openai-transcriptions@1），
+// 它们的特征是宿主方言且线协议等于入站；MiMo 那两条也是宿主方言，但它们靠 Prepare/Decode
+// 把语音做成 chat 的形状，因此仍走方言路径。
+func speechUsesDialect(inbound string, d plugin.Dialect) bool {
 	if d == nil || !voiceInbound(inbound) {
 		return false
 	}
-	return d.UpstreamWire() != inbound && outbound == ProtocolChat
+	return !plugin.IsHostDialect(d.ID()) || d.UpstreamWire() != inbound
 }
 
 // speechRoute 按库里的方言绑定给出这条语音请求的出站协议与方言。
@@ -141,25 +148,30 @@ func (s *Server) speechInputOf(inbound, model string, raw []byte, contentType st
 	return plugin.Input{}, fmt.Errorf("协议 %s 没有语音方言", inbound)
 }
 
-// encodeSpeechDialect 让方言编出上游请求体。
+// encodeSpeechDialect 让方言编出上游请求。返回请求体与逐请求头（Plan.Headers），
+// 头的叠加顺序由 buildRequest 决定。
 func (s *Server) encodeSpeechDialect(d plugin.Dialect, inbound string, raw []byte,
-	model, contentType string) ([]byte, error) {
+	model, contentType string) ([]byte, map[string]string, error) {
 
 	input, err := s.speechInputOf(inbound, model, raw, contentType)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	plan, err := d.Prepare(input)
 	if err != nil {
-		return nil, fmt.Errorf("方言 %s 编请求失败: %w", d.ID(), err)
+		return nil, nil, fmt.Errorf("方言 %s 编请求失败: %w", d.ID(), err)
 	}
 	// Plan.Path 不参与地址选择：地址按厂商路由走，路由在安装或 provider 配置时已经建好。
 	// 让方言覆写地址等于给插件一个开打任意路径的口子，而它的收益只是省一行配置。
-	body, err := json.Marshal(plan.JSON)
-	if err != nil {
-		return nil, fmt.Errorf("方言 %s 编出的请求体不是 JSON: %w", d.ID(), err)
+	// 请求体与对话方言同一套优先级：方言给了字节就用它，否则序列化 JSON。
+	body := plan.Body
+	if len(body) == 0 {
+		body, err = json.Marshal(plan.JSON)
+		if err != nil {
+			return nil, nil, fmt.Errorf("方言 %s 编出的请求体不是 JSON: %w", d.ID(), err)
+		}
 	}
-	return body, nil
+	return body, plan.Headers, nil
 }
 
 // speechDialectSuccess 处理方言路径的成功响应：媒体写字节，文本与 JSON 按结果种类写。
