@@ -28,4 +28,5 @@ commit in the row so a later reader can tell whether the note still applies.
 | 2026-10-31 | Pinning `speech.*` to the speech wire protocols makes a chat-shaped vendor impossible to declare | [lessons/2026-10-31-wire-operation-table.md](lessons/2026-10-31-wire-operation-table.md) | fixed in 5063c32 |
 | 2026-10-31 | goja has no heap cap, and Interrupt cannot stop in-flight native calls | [lessons/2026-10-31-sandbox-limits.md](lessons/2026-10-31-sandbox-limits.md) | fixed in 5063c32 |
 | 2026-11-01 | A speech dialect on its own wire protocol was silently downgraded to passthrough | [lessons/2026-11-01-speech-hook-wire.md](lessons/2026-11-01-speech-hook-wire.md) | fixed in 7bba977 |
-| 2026-11-01 | A same-wire ASR dialect was shadowed by multipart passthrough | [lessons/2026-11-01-doubao-asr-multipart-wire.md](lessons/2026-11-01-doubao-asr-multipart-wire.md) | fix in progress |
+| 2026-11-01 | A same-wire ASR dialect was shadowed by multipart passthrough | [lessons/2026-11-01-doubao-asr-multipart-wire.md](lessons/2026-11-01-doubao-asr-multipart-wire.md) | fixed in cf5f55f |
+| 2026-11-01 | Doubao TTS fragments are independently base64-encoded, and resource IDs must match the voice family | [lessons/2026-11-01-doubao-tts-wire.md](lessons/2026-11-01-doubao-tts-wire.md) | fixed locally; plugin untracked |

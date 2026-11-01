@@ -5,8 +5,7 @@ gateway. The plugin was installed, its dialect was registered, and the model was
 bound correctly.
 
 Fix: `internal/gateway/gateway.go` (`buildRequest`) and the generic regression
-test in `internal/gateway/transcriptions_dialect_test.go`. No commit hash yet;
-status is `fix in progress`.
+test in `internal/gateway/transcriptions_dialect_test.go`, fixed in `cf5f55f`.
 
 ## Symptom
 
