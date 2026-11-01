@@ -15,7 +15,7 @@ import (
 
 // providerSubs 是 provider 一组的子命令清单，组级帮助与错误提示都读它。
 var providerSubs = []groupItem{
-	{"ls", "列厂商、地址、默认协议、各协议路由与模型列表路径"},
+	{"ls", "列厂商来源、地址与路由概况；--verbose 看完整路径与模型列表"},
 	{"add", "新建一家厂商与它的协议路由"},
 	{"set", "改一家厂商的地址、路由、默认协议、凭据头或备注"},
 	{"unset", "删掉一条路由，或清掉凭据头声明、模型列表覆盖、默认协议、备注"},
@@ -103,6 +103,7 @@ type providerRouteJSON struct {
 // ModelsPath 是厂商级的模型列表路径覆盖，空串表示按各路由自己的 models_path 取。
 type providerJSON struct {
 	Name            string              `json:"name"`
+	Origin          string              `json:"origin"`
 	BaseURL         string              `json:"base_url"`
 	DefaultProtocol string              `json:"default_protocol"`
 	ModelsPath      string              `json:"models_path"`
@@ -216,6 +217,7 @@ func readProvider(st *store.Store, name string) (providerSnapshot, error) {
 		row: p,
 		json: providerJSON{
 			Name:            p.Name,
+			Origin:          p.Origin,
 			BaseURL:         p.BaseURL,
 			DefaultProtocol: def,
 			ModelsPath:      p.ModelsPath,
@@ -226,6 +228,33 @@ func readProvider(st *store.Store, name string) (providerSnapshot, error) {
 		},
 		routes: routes,
 	}, nil
+}
+
+// providerOriginCell 把库里的来源值翻成给人看的短标签。未知值按自建显示：
+// 升级前遗留的空来源由 store 在打开数据库时回填，正常读不到空串。
+func providerOriginCell(origin string) string {
+	switch origin {
+	case store.ProviderOriginBuiltin:
+		return "内置"
+	case store.ProviderOriginPlugin:
+		return "插件"
+	case store.ProviderOriginManual:
+		return "自建"
+	default:
+		return "自建"
+	}
+}
+
+// providerProtocolsCell 是精简表格的「路由」列：只列协议名，不把可能很长的路径塞进总览。
+func providerProtocolsCell(routes []store.ProviderRoute) string {
+	if len(routes) == 0 {
+		return "无路由"
+	}
+	names := make([]string, 0, len(routes))
+	for _, r := range routes {
+		names = append(names, r.Protocol)
+	}
+	return strings.Join(names, "、")
 }
 
 // defaultProtocolCell 是默认协议列：一条路由都没有时显示 -，不算错误。
@@ -254,9 +283,13 @@ func baseURLSummary(base string) string {
 }
 
 func cmdProviderLs(e *Env, args []string) error {
-	fs := newFlagSet(e, "provider ls", "列出厂商、路由与模型列表路径")
+	fs := newFlagSet(e, "provider ls", "列出厂商来源与路由概况；--verbose 看完整路径与模型列表")
+	verbose := fs.Bool("verbose", false, "显示每条路由的完整路径与模型列表路径")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if fs.NArg() != 0 {
+		return usagef("用法：lax provider ls [--verbose] [--json]\n多余的参数 %q", fs.Arg(0))
 	}
 
 	a, err := openApp(e, true)
@@ -291,13 +324,23 @@ func cmdProviderLs(e *Env, args []string) error {
 	}
 
 	rows := make([][]string, 0, len(snaps))
+	if *verbose {
+		for _, s := range snaps {
+			rows = append(rows, []string{
+				s.row.Name, providerOriginCell(s.json.Origin), baseURLCell(s.json.BaseURL), defaultProtocolCell(s),
+				routeCell(s.routes), providerModelsCell(s.row, s.routes), s.json.Note,
+			})
+		}
+		fmt.Fprint(e.Stdout, renderTable([]string{"名称", "来源", "地址", "默认协议", "路由与路径", "模型列表", "备注"}, rows))
+		return nil
+	}
 	for _, s := range snaps {
 		rows = append(rows, []string{
-			s.row.Name, baseURLCell(s.json.BaseURL), defaultProtocolCell(s),
-			routeCell(s.routes), providerModelsCell(s.row, s.routes), s.json.Note,
+			s.row.Name, providerOriginCell(s.json.Origin), baseURLCell(s.json.BaseURL), defaultProtocolCell(s),
+			providerProtocolsCell(s.routes), s.json.Note,
 		})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"名称", "地址", "默认协议", "路由与路径", "模型列表", "备注"}, rows))
+	fmt.Fprint(e.Stdout, renderTable([]string{"名称", "来源", "地址", "默认协议", "路由", "备注"}, rows))
 	return nil
 }
 

@@ -4,7 +4,7 @@
 
 ```bash
 lax init                                            # 建配置、数据库与密钥
-lax provider ls                                     # 看已知厂商与各协议的路径
+lax provider ls                                     # 看厂商来源与协议总览；--verbose 看完整路径
 lax account add ds --provider deepseek --key sk-xxx  # 或用 --key - 从标准输入读
 lax account set ds --key sk-yyy                     # 换 key：不删号，冷却与失败计数清零
 lax model sync --account ds                         # 拉上游模型列表
@@ -70,6 +70,8 @@ curl -s http://127.0.0.1:4567/v1beta/models/deepseek-v4-pro:generateContent \
 ```
 
 出站协议由厂商决定，账号只存厂商名：地址与默认协议都是那家厂商行上的值（迁移 `0014` 之后账号不再有 `base_url`、`protocol` 两列），所以 `account add` 没有 `--base-url` 与 `--protocol` 两个参数——先 `provider add` 把厂商登记进去，再建账号。默认协议的取值是 `anthropic`、`openai-chat`、`openai-responses`、`gemini`、`systemone`、`openai-embeddings`、`openai-speech` 与 `openai-transcriptions`（gemini 的原生路径是 `{base}/v1beta/models/{model}:generateContent`，流式换成 `:streamGenerateContent?alt=sse`，凭据头是 `x-goog-api-key`；systemone 是决策协议，入站与出站都是 `POST /v1/systemone`，只与自己互通，见下面「决策请求」；openai-embeddings 是向量化，openai-speech 与 openai-transcriptions 是语音，都见下面「向量化」与「语音」）：`provider add --default-protocol` 显式存的优先，没显式存则按 `openai-chat` → `openai-responses` → `anthropic` 取第一条路由。改一家厂商的地址或默认协议立刻影响所有用它的账号（这是单一来源应有的行为）。厂商与各协议的路径在数据库里，`lax provider ls` 能看到，`provider add` / `set` / `unset` 可以增删改，不必重编译。入站协议与出站协议相同时直通，请求体只改 `model` 字段，其余字段与值原样带到上游，响应按字节原样返回（gemini 的报文里没有 `model` 字段，它直通时请求体一个字节都不改）；不同时经中间表示转换，请求与响应都只搬映射表里定义的字段，表外字段丢弃。未知路径返回 404，请求体解析失败返回 400，错误消息带协议名前缀。
+
+`lax provider ls` 默认只给总览：名称、来源、地址、默认协议、路由协议与备注。来源列区分三种行——「内置」是首次建库时从随二进制发布的 `internal/store/builtin_providers.json` 写入的目录，「插件」是 `plugin install` 登记或认领的厂商，「自建」是 `provider add` 新建或旧库搬迁补建的。来源只用于识别，不限制修改：三种行都能照常 `provider set`、`unset` 或 `rm`。需要每条路由的完整路径与模型列表地址时加 `--verbose`；脚本读 `--json`，每项带 `origin`（`builtin` / `plugin` / `manual`）。
 
 自己加一家厂商时，每个协议一条 flag（`--anthropic`、`--openai`、`--responses`、`--gemini`、`--systemone`、`--embeddings`、`--speech`、`--transcriptions`），值有两种写法：相对 `--base-url` 的完整路径，或者整条地址。整条地址给同一厂商不同协议分域名的情况用，写进去直接使用、不再拼 `--base-url`，例如 `--openai https://openai.example.com/v1/chat/completions --anthropic https://claude.example.com/v1/messages`；整条地址要带主机名，`https://` 这种只有 scheme、`https:///x` 缺主机名与 `ftp://host/x` 这类别的 scheme 都是用法错误（退出码 2）。`--base-url` 可以省略，条件是每个要声明的路由（以及给了的话 `--models-path`）都是整条地址：那时它拼不进任何地址，省掉它账号的地址也留空，转发与模型同步全走整条地址。bigmodel 就是这种形状——三套协议分属不同 host 与路径，模型列表在 chat 路径的同级：
 

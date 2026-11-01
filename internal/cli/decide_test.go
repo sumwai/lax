@@ -88,7 +88,7 @@ func TestProviderSystemOneRoute(t *testing.T) {
 		t.Fatalf("systemone 路由 = %+v，期望 path=/v1/systemone 且没有 models_path", route)
 	}
 
-	code, out, stderr = run(t, "provider", "ls")
+	code, out, stderr = run(t, "provider", "ls", "--verbose")
 	if code != 0 {
 		t.Fatalf("provider ls 退出码 = %d，stderr = %s", code, stderr)
 	}

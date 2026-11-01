@@ -21,6 +21,7 @@ type providerRouteRow struct {
 // providerRow 是 provider ls --json 的一行。
 type providerRow struct {
 	Name            string             `json:"name"`
+	Origin          string             `json:"origin"`
 	BaseURL         string             `json:"base_url"`
 	DefaultProtocol string             `json:"default_protocol"`
 	ModelsPath      string             `json:"models_path"`
@@ -148,14 +149,31 @@ func TestProviderLsSeeded(t *testing.T) {
 		t.Fatalf("commandcode 的 anthropic 路由 = %+v", got)
 	}
 
-	// 人读的表格要带上默认协议、路由与模型列表三列。
+	if ds.Origin != store.ProviderOriginBuiltin {
+		t.Fatalf("deepseek 的来源 = %q，期望 %q", ds.Origin, store.ProviderOriginBuiltin)
+	}
+
+	// 默认表格只给来源与协议概况，完整路径放到 --verbose。
 	code, out, stderr := run(t, "provider", "ls")
 	if code != 0 {
 		t.Fatalf("provider ls 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"默认协议", "路由与路径", "模型列表", "deepseek", "/anthropic/v1/messages"} {
+	for _, want := range []string{"名称", "来源", "默认协议", "路由", "内置", "deepseek", "anthropic、openai-chat"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("provider ls 文本输出缺 %q: %s", want, out)
+		}
+	}
+	if strings.Contains(out, "/anthropic/v1/messages") {
+		t.Fatalf("默认表格不该展开完整路由路径: %s", out)
+	}
+
+	code, out, stderr = run(t, "provider", "ls", "--verbose")
+	if code != 0 {
+		t.Fatalf("provider ls --verbose 退出码 = %d，stderr = %s", code, stderr)
+	}
+	for _, want := range []string{"来源", "路由与路径", "模型列表", "内置", "/anthropic/v1/messages"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("provider ls --verbose 文本输出缺 %q: %s", want, out)
 		}
 	}
 }
@@ -191,12 +209,12 @@ func TestProviderLsDefaultProtocolFromStore(t *testing.T) {
 	}
 	for name, w := range want {
 		fields := providerLine(t, out, name)
-		if len(fields) < 3 || fields[2] != w {
+		if len(fields) < 4 || fields[3] != w {
 			t.Fatalf("%s 的默认协议列 = %v，期望 %q", name, fields, w)
 		}
 	}
-	if ds := providerLine(t, out, "deepseek"); !strings.Contains(strings.Join(ds, " "), "/anthropic/v1/messages") {
-		t.Fatalf("deepseek 的路由列应列出两条路由: %v", ds)
+	if ds := providerLine(t, out, "deepseek"); !strings.Contains(strings.Join(ds, " "), "anthropic、openai-chat") {
+		t.Fatalf("deepseek 的路由列应列出两种协议: %v", ds)
 	}
 }
 
@@ -241,10 +259,18 @@ func TestProviderLsWithoutRoutes(t *testing.T) {
 		t.Fatalf("provider ls 退出码 = %d，stderr = %s", code, stderr)
 	}
 	fields := providerLine(t, out, "noroute")
-	if len(fields) < 3 || fields[2] != "-" {
+	if len(fields) < 4 || fields[3] != "-" {
 		t.Fatalf("无路由厂商的默认协议列 = %v，期望 -", fields)
 	}
-	if fields[len(fields)-1] != "-" {
+	if fields[4] != "无路由" {
+		t.Fatalf("无路由厂商的路由列 = %v，期望 无路由", fields)
+	}
+
+	code, out, stderr = run(t, "provider", "ls", "--verbose")
+	if code != 0 {
+		t.Fatalf("provider ls --verbose 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if fields := providerLine(t, out, "noroute"); fields[len(fields)-1] != "-" {
 		t.Fatalf("无路由厂商的模型列表列 = %v，期望 -", fields)
 	}
 }
@@ -283,7 +309,7 @@ func TestProviderLsModelsColumn(t *testing.T) {
 		t.Fatalf("openai 路由的 models_path 应按路径推导成 /v1/models，实际 %q", got)
 	}
 
-	code, out, stderr := run(t, "provider", "ls")
+	code, out, stderr := run(t, "provider", "ls", "--verbose")
 	if code != 0 {
 		t.Fatalf("provider ls 退出码 = %d，stderr = %s", code, stderr)
 	}
@@ -317,6 +343,9 @@ func TestProviderAddCreates(t *testing.T) {
 	mustJSON(t, out, &added)
 	if added.Name != "mine" || added.BaseURL != "https://api.example.com" || added.Note != "自建" {
 		t.Fatalf("provider add --json = %+v", added)
+	}
+	if added.Origin != store.ProviderOriginManual {
+		t.Fatalf("provider add 的来源 = %q，期望 %q", added.Origin, store.ProviderOriginManual)
 	}
 	if added.DefaultProtocol != "openai-chat" {
 		t.Fatalf("默认协议应回退到 openai-chat，实际 %q", added.DefaultProtocol)
@@ -968,7 +997,7 @@ func TestProviderGeminiRoute(t *testing.T) {
 	}
 
 	// 人读表格的路由列同样带出协议名与路径。
-	if code, out, stderr = run(t, "provider", "ls"); code != 0 {
+	if code, out, stderr = run(t, "provider", "ls", "--verbose"); code != 0 {
 		t.Fatalf("provider ls 退出码 = %d，stderr = %s", code, stderr)
 	}
 	if !strings.Contains(out, "gemini /v1beta/models/{model}:generateContent") {
@@ -2220,8 +2249,8 @@ func TestProviderAddWithoutBaseURL(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("provider ls 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if line := providerLine(t, tableOut, "bigmodel"); line[1] != "-" {
-		t.Fatalf("provider ls 的地址列 = %q，期望 -", line[1])
+	if line := providerLine(t, tableOut, "bigmodel"); line[2] != "-" {
+		t.Fatalf("provider ls 的地址列 = %q，期望 -", line[2])
 	}
 
 	// 账号的地址也留空：厂商没有 base_url 时不需要再塞一个占位地址。

@@ -178,6 +178,72 @@ func TestProvidersSeededByMigration(t *testing.T) {
 	}
 }
 
+// TestProviderOrigins 钉住三种来源与旧库回填：已有行 origin 为空时按 plugin_id 与内置目录补，
+// 已标过的行不再改——用户删掉内置厂商后自建同名厂商，重启不会又被标成 builtin。
+func TestProviderOrigins(t *testing.T) {
+	path := t.TempDir() + "/sb.db"
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatalf("打开数据库: %v", err)
+	}
+	if err := st.CreateProvider(store.Provider{Name: "mine", BaseURL: "https://api.mine.test"}, []store.ProviderRoute{{
+		Protocol: "openai-chat", Path: "/v1/chat/completions",
+	}}); err != nil {
+		t.Fatalf("建自建厂商: %v", err)
+	}
+	if err := st.ApplyPluginCatalog("com.example.plug", store.PluginCatalog{
+		Provider: "plug", Name: "Plug", BaseURL: "https://api.plug.test",
+		Routes: []store.ProviderRoute{{Provider: "plug", Protocol: "openai-chat", Path: "/v1/chat/completions"}},
+	}, "plugin"); err != nil {
+		t.Fatalf("写插件厂商: %v", err)
+	}
+
+	assertOrigin := func(st *store.Store, want map[string]string) {
+		t.Helper()
+		for name, origin := range want {
+			p, err := st.GetProvider(name)
+			if err != nil {
+				t.Fatalf("取厂商 %s: %v", name, err)
+			}
+			if p.Origin != origin {
+				t.Fatalf("厂商 %s 的来源 = %q，期望 %q", name, p.Origin, origin)
+			}
+		}
+	}
+	assertOrigin(st, map[string]string{
+		"deepseek": store.ProviderOriginBuiltin,
+		"mine":     store.ProviderOriginManual,
+		"plug":     store.ProviderOriginPlugin,
+	})
+
+	// 模拟升级前的库：列已由 AutoMigrate 加上，但还没有来源。
+	if _, err := st.DB().Exec(`UPDATE providers SET origin = ''`); err != nil {
+		t.Fatalf("清空来源: %v", err)
+	}
+	_ = st.Close()
+	st, err = store.Open(path)
+	if err != nil {
+		t.Fatalf("重开数据库: %v", err)
+	}
+	defer st.Close()
+	assertOrigin(st, map[string]string{
+		"deepseek": store.ProviderOriginBuiltin,
+		"mine":     store.ProviderOriginManual,
+		"plug":     store.ProviderOriginPlugin,
+	})
+
+	// 删掉内置厂商后自建同名厂商：来源是 manual，重开也不被目录里的同名项改回 builtin。
+	if err := st.DeleteProvider("deepseek"); err != nil {
+		t.Fatalf("删内置厂商: %v", err)
+	}
+	if err := st.CreateProvider(store.Provider{Name: "deepseek", BaseURL: "https://proxy.deepseek.test"}, []store.ProviderRoute{{
+		Protocol: "openai-chat", Path: "/v1/chat/completions",
+	}}); err != nil {
+		t.Fatalf("自建同名厂商: %v", err)
+	}
+	assertOrigin(st, map[string]string{"deepseek": store.ProviderOriginManual})
+}
+
 // TestMigration0006UpgradesOldDatabase 模拟一个停在 0005 的库：升上来之后两张表在、种子齐全，
 // 老账号与它的模型行一个字段都不动，user_version 推到最新。
 func TestMigration0006UpgradesOldDatabase(t *testing.T) {

@@ -15,6 +15,9 @@ package store
 // diff，表不存在就建、缺列就 ALTER TABLE ADD COLUMN，不改列类型、不删列、不删索引。
 
 import (
+	"bytes"
+	_ "embed"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -68,8 +71,8 @@ func (requestRow) TableName() string { return "requests" }
 
 // providerRow 是 providers 表的一行。行里没有凭据，只有地址与路径。
 //
-// PluginID 记这一行是哪次插件安装建起来的，空串表示用户自己配的厂商。它只服务插件生命周期的
-// 连带清理（见 DeletePlugin），Provider 业务结构体上没有对应字段：读写厂商的既有入口不看它。
+// Origin 记这一行的来源：builtin（内置目录）、plugin（插件安装）或 manual（用户自建）。
+// 它是溯源字段，不决定转发行为；PluginID 仍只服务插件生命周期的连带清理（见 DeletePlugin）。
 type providerRow struct {
 	Name            string `gorm:"column:name;size:191;primaryKey"`
 	BaseURL         string `gorm:"column:base_url;not null"`
@@ -80,7 +83,10 @@ type providerRow struct {
 	// bearer-semicolon。两项都为空表示按线协议推导（见 gateway.setAuth）。
 	AuthHeader string `gorm:"column:auth_header;size:191;not null;default:''"`
 	AuthScheme string `gorm:"column:auth_scheme;size:32;not null;default:''"`
-	PluginID   string `gorm:"column:plugin_id;not null;default:''"`
+	// Origin 是 builtin、plugin 或 manual。旧库升上来先留空，由 backfillProviderOrigins 回填；
+	// 空串不会出现在新写入的行上。
+	Origin   string `gorm:"column:origin;size:16;not null;default:''"`
+	PluginID string `gorm:"column:plugin_id;not null;default:''"`
 }
 
 func (providerRow) TableName() string { return "providers" }
@@ -272,6 +278,7 @@ type seedProvider struct {
 	name            string
 	baseURL         string
 	defaultProtocol string
+	note            string
 }
 
 // seedRoute 是一行种子路由。modelsPath 空串表示这条协议没有自己的列表接口。
@@ -282,40 +289,110 @@ type seedRoute struct {
 	modelsPath string
 }
 
-// seedProviders 是内置厂商。默认协议显式给出：deepseek 与 commandcode 各声明了
-// openai-chat 与 anthropic 两条路由，按协议名排序会把 anthropic 排前面，默认协议会
-// 从 openai-chat 变成 anthropic，这两个厂商的账号在升级前后默认协议就不一致了。
-var seedProviders = []seedProvider{
-	{"anthropic", "https://api.anthropic.com", "anthropic"},
-	{"openai", "https://api.openai.com", "openai-chat"},
-	{"deepseek", "https://api.deepseek.com", "openai-chat"},
-	{"moonshot", "https://api.moonshot.cn", "openai-chat"},
-	{"kimi", "https://api.moonshot.cn", "openai-chat"},
-	{"openrouter", "https://openrouter.ai/api", "openai-chat"},
-	{"ollama", "http://127.0.0.1:11434", "openai-chat"},
-	{"commandcode", "https://api.commandcode.ai/provider/v1", "openai-chat"},
-	{"google-gemini", "https://generativelanguage.googleapis.com", "gemini"},
+// builtinProvidersJSON 是随二进制发布的内置厂商目录。它只决定首次建库时写入什么，
+// 不是运行期目录：用户删掉的行不会因为升级而复活，插件也不会改它。
+//
+//go:embed builtin_providers.json
+var builtinProvidersJSON []byte
+
+type builtinCatalogDoc struct {
+	Schema    string `json:"schema"`
+	Providers []struct {
+		Name            string `json:"name"`
+		BaseURL         string `json:"base_url"`
+		DefaultProtocol string `json:"default_protocol"`
+		Note            string `json:"note"`
+	} `json:"providers"`
+	Routes []struct {
+		Provider   string `json:"provider"`
+		Protocol   string `json:"protocol"`
+		Path       string `json:"path"`
+		ModelsPath string `json:"models_path"`
+	} `json:"routes"`
 }
 
-// seedRoutes 是内置路由。路径照抄各家文档；models_path 为空表示这家在这个协议下没有模型
-// 列表接口，同步时回退到同厂商里按协议名排序的第一条非空路径。
-var seedRoutes = []seedRoute{
-	{"anthropic", "anthropic", "/v1/messages", "/v1/models"},
-	{"openai", "openai-chat", "/v1/chat/completions", "/v1/models"},
-	{"openai", "openai-responses", "/v1/responses", "/v1/models"},
-	{"deepseek", "openai-chat", "/v1/chat/completions", "/v1/models"},
-	{"deepseek", "anthropic", "/anthropic/v1/messages", ""},
-	{"moonshot", "openai-chat", "/v1/chat/completions", "/v1/models"},
-	{"kimi", "openai-chat", "/v1/chat/completions", "/v1/models"},
-	{"openrouter", "openai-chat", "/v1/chat/completions", "/v1/models"},
-	{"ollama", "openai-chat", "/v1/chat/completions", "/v1/models"},
-	{"commandcode", "openai-chat", "/chat/completions", "/models"},
-	{"commandcode", "anthropic", "/messages", ""},
-	{"google-gemini", "gemini", "/v1beta/models/{model}:generateContent", "/v1beta/models"},
-	{"openai", "openai-embeddings", "/v1/embeddings", ""},
-	{"ollama", "openai-embeddings", "/v1/embeddings", ""},
-	{"openai", "openai-speech", "/v1/audio/speech", ""},
-	{"openai", "openai-transcriptions", "/v1/audio/transcriptions", ""},
+const builtinCatalogSchema = "lax.builtin-providers/v1"
+
+// seedProviders 与 seedRoutes 由内嵌目录加载。默认协议必须显式给出：deepseek 与
+// commandcode 各声明了 openai-chat 与 anthropic 两条路由，按协议名排序会把 anthropic
+// 排前面，默认协议会从 openai-chat 变成 anthropic，这两个厂商的账号在升级前后默认协议
+// 就不一致了。
+var seedProviders, seedRoutes = loadBuiltinCatalog()
+
+func loadBuiltinCatalog() ([]seedProvider, []seedRoute) {
+	dec := json.NewDecoder(bytes.NewReader(builtinProvidersJSON))
+	dec.DisallowUnknownFields()
+	var doc builtinCatalogDoc
+	if err := dec.Decode(&doc); err != nil {
+		panic(fmt.Sprintf("解析内置厂商目录 builtin_providers.json 失败：%v", err))
+	}
+	if doc.Schema != builtinCatalogSchema {
+		panic(fmt.Sprintf("内置厂商目录 schema 是 %q，期望 %q", doc.Schema, builtinCatalogSchema))
+	}
+	if len(doc.Providers) == 0 {
+		panic("内置厂商目录没有 providers")
+	}
+
+	providers := make([]seedProvider, 0, len(doc.Providers))
+	byName := make(map[string]bool, len(doc.Providers))
+	routesByProvider := make(map[string]map[string]bool, len(doc.Providers))
+	for _, p := range doc.Providers {
+		if p.Name == "" || p.BaseURL == "" {
+			panic(fmt.Sprintf("内置厂商 %+v 缺少 name 或 base_url", p))
+		}
+		if byName[p.Name] {
+			panic(fmt.Sprintf("内置厂商 %s 重复", p.Name))
+		}
+		byName[p.Name] = true
+		routesByProvider[p.Name] = map[string]bool{}
+		providers = append(providers, seedProvider{
+			name: p.Name, baseURL: p.BaseURL, defaultProtocol: p.DefaultProtocol, note: p.Note,
+		})
+	}
+
+	routes := make([]seedRoute, 0, len(doc.Routes))
+	for _, r := range doc.Routes {
+		if !byName[r.Provider] {
+			panic(fmt.Sprintf("内置路由引用了不存在的厂商 %s", r.Provider))
+		}
+		if !IsWireProtocol(r.Protocol) {
+			panic(fmt.Sprintf("内置厂商 %s 的路由协议 %q 不是宿主认识的线协议", r.Provider, r.Protocol))
+		}
+		if r.Path == "" {
+			panic(fmt.Sprintf("内置厂商 %s 的 %s 路由缺少 path", r.Provider, r.Protocol))
+		}
+		if routesByProvider[r.Provider][r.Protocol] {
+			panic(fmt.Sprintf("内置厂商 %s 的 %s 路由重复", r.Provider, r.Protocol))
+		}
+		routesByProvider[r.Provider][r.Protocol] = true
+		routes = append(routes, seedRoute{
+			provider: r.Provider, protocol: r.Protocol, path: r.Path, modelsPath: r.ModelsPath,
+		})
+	}
+	for _, p := range providers {
+		if p.defaultProtocol != "" && !routesByProvider[p.name][p.defaultProtocol] {
+			panic(fmt.Sprintf("内置厂商 %s 的默认协议 %s 没有对应路由", p.name, p.defaultProtocol))
+		}
+	}
+	return providers, routes
+}
+
+// builtinProviderNames 返回内置目录里的厂商名。旧库回填来源时只认这份名单。
+func builtinProviderNames() []string {
+	out := make([]string, 0, len(seedProviders))
+	for _, p := range seedProviders {
+		out = append(out, p.name)
+	}
+	return out
+}
+
+func isBuiltinProvider(name string) bool {
+	for _, p := range seedProviders {
+		if p.name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // seed 写入内置厂商与路由。
@@ -328,7 +405,9 @@ func seed(db *gorm.DB) error {
 		rows = append(rows, providerRow{
 			Name:            p.name,
 			BaseURL:         p.baseURL,
+			Note:            p.note,
 			DefaultProtocol: p.defaultProtocol,
+			Origin:          ProviderOriginBuiltin,
 		})
 	}
 	if err := db.Clauses(clause.OnConflict{DoNothing: true}).Create(&rows).Error; err != nil {
@@ -360,10 +439,35 @@ func migrate(db *gorm.DB) error {
 	if err := db.AutoMigrate(tables()...); err != nil {
 		return err
 	}
-	if !fresh {
-		return nil
+	if fresh {
+		if err := seed(db); err != nil {
+			return err
+		}
 	}
-	return seed(db)
+	return backfillProviderOrigins(db)
+}
+
+// backfillProviderOrigins 给旧库补来源。只在 origin 为空的行上写，已标过的行不再动：
+// 用户删掉内置厂商后自建同名厂商时，那一行是 manual，不会因为名字又出现在目录里被改回 builtin。
+func backfillProviderOrigins(db *gorm.DB) error {
+	if err := db.Model(&providerRow{}).
+		Where("origin = '' AND plugin_id <> ''").
+		Update("origin", ProviderOriginPlugin).Error; err != nil {
+		return fmt.Errorf("回填插件厂商来源: %w", err)
+	}
+	if names := builtinProviderNames(); len(names) > 0 {
+		if err := db.Model(&providerRow{}).
+			Where("origin = '' AND plugin_id = '' AND name IN ?", names).
+			Update("origin", ProviderOriginBuiltin).Error; err != nil {
+			return fmt.Errorf("回填内置厂商来源: %w", err)
+		}
+	}
+	if err := db.Model(&providerRow{}).
+		Where("origin = ''").
+		Update("origin", ProviderOriginManual).Error; err != nil {
+		return fmt.Errorf("回填自建厂商来源: %w", err)
+	}
+	return nil
 }
 
 // unixNow 是仓储层唯一取时间的地方，便于测试替换。

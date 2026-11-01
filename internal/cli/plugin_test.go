@@ -9,6 +9,7 @@ import (
 
 	"lax/internal/config"
 	"lax/internal/plugin"
+	"lax/internal/store"
 	"lax/internal/store/storetest"
 )
 
@@ -261,8 +262,12 @@ func TestPluginLifecycle(t *testing.T) {
 	if p.ActiveVersion != "1.0.0" || !p.Enabled || p.State != "ok" || p.Kind != "provider" || p.Trust != "declarative" {
 		t.Fatalf("插件行 = %+v", p)
 	}
-	if _, err := db.GetProvider("echo"); err != nil {
+	echoProvider, err := db.GetProvider("echo")
+	if err != nil {
 		t.Fatalf("插件没登记厂商: %v", err)
+	}
+	if echoProvider.Origin != store.ProviderOriginPlugin {
+		t.Fatalf("插件厂商的来源 = %q，期望 %q", echoProvider.Origin, store.ProviderOriginPlugin)
 	}
 	routes, err := db.ProviderRoutes("echo")
 	if err != nil || len(routes) != 1 || routes[0].Protocol != "openai-speech" || routes[0].Path != "/v1/audio/speech" {

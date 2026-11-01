@@ -1,0 +1,148 @@
+{
+  "schema": "lax.builtin-providers/v1",
+  "providers": [
+    {
+      "name": "anthropic",
+      "base_url": "https://api.anthropic.com",
+      "default_protocol": "anthropic"
+    },
+    {
+      "name": "openai",
+      "base_url": "https://api.openai.com",
+      "default_protocol": "openai-chat"
+    },
+    {
+      "name": "deepseek",
+      "base_url": "https://api.deepseek.com",
+      "default_protocol": "openai-chat"
+    },
+    {
+      "name": "moonshot",
+      "base_url": "https://api.moonshot.cn",
+      "default_protocol": "openai-chat"
+    },
+    {
+      "name": "kimi",
+      "base_url": "https://api.moonshot.cn",
+      "default_protocol": "openai-chat"
+    },
+    {
+      "name": "openrouter",
+      "base_url": "https://openrouter.ai/api",
+      "default_protocol": "openai-chat"
+    },
+    {
+      "name": "ollama",
+      "base_url": "http://127.0.0.1:11434",
+      "default_protocol": "openai-chat"
+    },
+    {
+      "name": "commandcode",
+      "base_url": "https://api.commandcode.ai/provider/v1",
+      "default_protocol": "openai-chat"
+    },
+    {
+      "name": "google-gemini",
+      "base_url": "https://generativelanguage.googleapis.com",
+      "default_protocol": "gemini"
+    }
+  ],
+  "routes": [
+    {
+      "provider": "anthropic",
+      "protocol": "anthropic",
+      "path": "/v1/messages",
+      "models_path": "/v1/models"
+    },
+    {
+      "provider": "openai",
+      "protocol": "openai-chat",
+      "path": "/v1/chat/completions",
+      "models_path": "/v1/models"
+    },
+    {
+      "provider": "openai",
+      "protocol": "openai-responses",
+      "path": "/v1/responses",
+      "models_path": "/v1/models"
+    },
+    {
+      "provider": "deepseek",
+      "protocol": "openai-chat",
+      "path": "/v1/chat/completions",
+      "models_path": "/v1/models"
+    },
+    {
+      "provider": "deepseek",
+      "protocol": "anthropic",
+      "path": "/anthropic/v1/messages",
+      "models_path": ""
+    },
+    {
+      "provider": "moonshot",
+      "protocol": "openai-chat",
+      "path": "/v1/chat/completions",
+      "models_path": "/v1/models"
+    },
+    {
+      "provider": "kimi",
+      "protocol": "openai-chat",
+      "path": "/v1/chat/completions",
+      "models_path": "/v1/models"
+    },
+    {
+      "provider": "openrouter",
+      "protocol": "openai-chat",
+      "path": "/v1/chat/completions",
+      "models_path": "/v1/models"
+    },
+    {
+      "provider": "ollama",
+      "protocol": "openai-chat",
+      "path": "/v1/chat/completions",
+      "models_path": "/v1/models"
+    },
+    {
+      "provider": "commandcode",
+      "protocol": "openai-chat",
+      "path": "/chat/completions",
+      "models_path": "/models"
+    },
+    {
+      "provider": "commandcode",
+      "protocol": "anthropic",
+      "path": "/messages",
+      "models_path": ""
+    },
+    {
+      "provider": "google-gemini",
+      "protocol": "gemini",
+      "path": "/v1beta/models/{model}:generateContent",
+      "models_path": "/v1beta/models"
+    },
+    {
+      "provider": "openai",
+      "protocol": "openai-embeddings",
+      "path": "/v1/embeddings",
+      "models_path": ""
+    },
+    {
+      "provider": "ollama",
+      "protocol": "openai-embeddings",
+      "path": "/v1/embeddings",
+      "models_path": ""
+    },
+    {
+      "provider": "openai",
+      "protocol": "openai-speech",
+      "path": "/v1/audio/speech",
+      "models_path": ""
+    },
+    {
+      "provider": "openai",
+      "protocol": "openai-transcriptions",
+      "path": "/v1/audio/transcriptions",
+      "models_path": ""
+    }
+  ]
+}

@@ -148,6 +148,7 @@ func applyCatalogProviderTx(tx *gorm.DB, pluginID, provider, name, base, authHea
 			ModelsPath: modelsPath,
 			AuthHeader: authHeader,
 			AuthScheme: authScheme,
+			Origin:     ProviderOriginPlugin,
 			PluginID:   pluginID,
 		}).Error
 	}
@@ -163,31 +164,28 @@ func applyCatalogProviderTx(tx *gorm.DB, pluginID, provider, name, base, authHea
 	}
 	fillAuth := authHeader != "" && row.AuthHeader == ""
 	if row.PluginID == pluginID {
-		// 同一个插件：只补缺的凭据头，不动其它列。
-		if !fillAuth {
+		// 同一个插件：只补缺的凭据头与来源，不动其它列。
+		if !fillAuth && row.Origin == ProviderOriginPlugin {
 			return nil
 		}
-		return updateProviderAuthTx(tx, provider, authHeader, authScheme)
+		updates := map[string]any{"origin": ProviderOriginPlugin}
+		if fillAuth {
+			updates["auth_header"] = authHeader
+			updates["auth_scheme"] = authScheme
+		}
+		return tx.Model(&providerRow{}).Where("name = ?", provider).Updates(updates).Error
 	}
 	if row.PluginID != "" {
 		return fmt.Errorf("厂商 %s 已经属于插件 %s，不能再归给 %s：先 lax plugin rm %s 卸掉原来的插件，或改插件 manifest 里的厂商 ID",
 			provider, row.PluginID, pluginID, row.PluginID)
 	}
 	// 只补归属与缺的凭据头：地址与插件声明的相同，其余列是用户或同步写的，插件安装不碰。
-	updates := map[string]any{"plugin_id": pluginID}
+	updates := map[string]any{"plugin_id": pluginID, "origin": ProviderOriginPlugin}
 	if fillAuth {
 		updates["auth_header"] = authHeader
 		updates["auth_scheme"] = authScheme
 	}
 	return tx.Model(&providerRow{}).Where("name = ?", provider).Updates(updates).Error
-}
-
-// updateProviderAuthTx 只改凭据头两列，其余列原样。
-func updateProviderAuthTx(tx *gorm.DB, provider, authHeader, authScheme string) error {
-	return tx.Model(&providerRow{}).Where("name = ?", provider).Updates(map[string]any{
-		"auth_header": authHeader,
-		"auth_scheme": authScheme,
-	}).Error
 }
 
 // applyCatalogRoutesTx 按 (厂商, 协议) 补缺失的路由。已存在但路径不同就报错：

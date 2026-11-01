@@ -63,12 +63,22 @@ type Provider struct {
 	Note            string
 	DefaultProtocol string
 	ModelsPath      string
+	// Origin 是这一行的来源：builtin、plugin 或 manual。只用于展示与排查，不参与转发。
+	Origin string
 	// AuthHeader 与 AuthScheme 是凭据头的声明（见 DESIGN 5.8）：AuthHeader 是头名（小写），
 	// AuthScheme 取 raw、bearer 或 bearer-semicolon。两项都为空表示按线协议推导，
 	// 与没有这一项的老版本行为一致。凭据本身不在这里：key 在账号行上，加密存放。
 	AuthHeader string
 	AuthScheme string
 }
+
+// 厂商来源。builtin 是首次建库时从内嵌目录写入的行，plugin 由插件安装认领，
+// manual 是 provider add 或旧库搬迁补建的行。它是溯源，不是权限：用户仍可改或删任何来源的厂商。
+const (
+	ProviderOriginBuiltin = "builtin"
+	ProviderOriginPlugin  = "plugin"
+	ProviderOriginManual  = "manual"
+)
 
 // ProviderRoute 是一行 (厂商, 协议) 的路由。Path 有两种写法（见 NormalizeEndpoint）：相对路径
 // 是厂商 base_url 去掉末尾斜杠后直接拼它，整条地址（含 `://`）则直接使用、不再拼 base_url，
@@ -103,7 +113,7 @@ type ProviderPatch struct {
 	Routes     map[string]string
 }
 
-const providerColumns = `name, base_url, note, default_protocol, models_path, auth_header, auth_scheme`
+const providerColumns = `name, base_url, note, default_protocol, models_path, auth_header, auth_scheme, origin`
 
 // providersFromRows 把行形状转成对外的 Provider。
 func providersFromRows(rows []providerRow) []Provider {
@@ -115,6 +125,7 @@ func providersFromRows(rows []providerRow) []Provider {
 			Note:            r.Note,
 			DefaultProtocol: r.DefaultProtocol,
 			ModelsPath:      r.ModelsPath,
+			Origin:          r.Origin,
 			AuthHeader:      r.AuthHeader,
 			AuthScheme:      r.AuthScheme,
 		})
@@ -596,6 +607,7 @@ func (s *Store) CreateProvider(p Provider, routes []ProviderRoute) error {
 			ModelsPath:      modelsPath,
 			AuthHeader:      authHeader,
 			AuthScheme:      authScheme,
+			Origin:          ProviderOriginManual,
 		}).Error; err != nil {
 			return err
 		}
@@ -808,6 +820,7 @@ func (s *Store) AddProvider(p Provider, routes []ProviderRoute) error {
 			ModelsPath: modelsPath,
 			AuthHeader: authHeader,
 			AuthScheme: authScheme,
+			Origin:     ProviderOriginManual,
 		}).Error; err != nil {
 			return err
 		}

@@ -168,11 +168,10 @@ func accessFromLegacyStatus(status string) string {
 // 不能一律按协议名排序猜：deepseek 与 commandcode 都声明了 openai-chat 与 anthropic
 // 两条路由，排序会把 anthropic 排前面，默认协议会从 openai-chat 变成 anthropic。
 func legacyDefaultProtocol(name string) string {
-	switch name {
-	case "anthropic":
-		return "anthropic"
-	case "openai", "deepseek", "moonshot", "kimi", "openrouter", "ollama", "commandcode":
-		return "openai-chat"
+	for _, p := range seedProviders {
+		if p.name == name {
+			return p.defaultProtocol
+		}
 	}
 	return ""
 }
@@ -247,7 +246,9 @@ func buildProviders(snap legacySnapshot) []providerRow {
 		byName[p.name] = providerRow{
 			Name:            p.name,
 			BaseURL:         p.baseURL,
+			Note:            p.note,
 			DefaultProtocol: p.defaultProtocol,
+			Origin:          ProviderOriginBuiltin,
 		}
 		order = append(order, p.name)
 	}
@@ -258,6 +259,18 @@ func buildProviders(snap legacySnapshot) []providerRow {
 			Note:            r.str("note"),
 			DefaultProtocol: r.str("default_protocol"),
 			ModelsPath:      r.str("models_path"),
+			Origin:          r.str("origin"),
+			PluginID:        r.str("plugin_id"),
+		}
+		if p.Origin == "" {
+			switch {
+			case p.PluginID != "":
+				p.Origin = ProviderOriginPlugin
+			case isBuiltinProvider(p.Name):
+				p.Origin = ProviderOriginBuiltin
+			default:
+				p.Origin = ProviderOriginManual
+			}
 		}
 		if p.DefaultProtocol == "" {
 			p.DefaultProtocol = legacyDefaultProtocol(p.Name)
@@ -301,6 +314,7 @@ func buildProviders(snap legacySnapshot) []providerRow {
 			BaseURL:         orphanBase[name],
 			Note:            "由旧库搬迁从账号地址补建",
 			DefaultProtocol: orphanProto[name],
+			Origin:          ProviderOriginManual,
 		}
 		order = append(order, name)
 	}
