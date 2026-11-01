@@ -40,6 +40,7 @@ lax log tail                                        # 看请求记录
 | `usage` | 按账号、模型或日期汇总用量，含输入、输出与缓存读写 token |
 | `log tail` | 最近的请求记录 |
 | `doctor` | 自检配置、目录、密钥、端口、数据库 |
+| `version` | 打印版本号；`--json` 给出 `name` 与 `version` |
 
 每个命令都支持 `--json`，结果走 stdout，错误走 stderr。不带子命令等同 `--help`：`lax`、`lax model`、`lax plugin` 这类组都打印帮助到 stdout、退出码 0。退出码：0 成功、1 运行失败、2 用法错误。
 
@@ -427,10 +428,21 @@ curl -s http://127.0.0.1:4567/v1/models/deepseek-v4-pro   # 单个模型，未�
 
 ```bash
 make check        # go vet + go test + go build
+make build        # 生成带版本号的 ./lax
+./lax version
 ./lax --help
 ```
 
-只需要 Go 工具链，生成的 `lax` 是单文件，不依赖外部服务，也不需要 cgo。
+只需要 Go 工具链，生成的 `lax` 是单文件，不依赖外部服务，也不需要 cgo。`make build` 从最近的 `v*` tag 推导版本号（例如 `v0.1.0` 之后是 `0.1.0`，再提交几次会变成 `0.1.0-3-gabc1234`）；直接 `go build` 得到 `0.1.0-dev`。
+
+发布包从 GitHub Releases 下载，文件名形如 `lax_0.1.0_linux_amd64.tar.gz`，同一页有 `checksums.txt`。维护者发版时确认 `make check` 通过，打 annotated tag 后推送：
+
+```bash
+git tag -a v0.1.0 -m "lax v0.1.0"
+git push origin master v0.1.0
+```
+
+推送 tag 后 `.github/workflows/release.yml` 会交叉编译 Linux 与 macOS 的 amd64 / arm64 并创建 Release；普通提交由 CI 跑 `make check`。`make dist` 可以在本地复现同一组发布包。Windows 不在发布范围：`serve` 与 `plugin reload` 依赖 Unix 信号。
 
 ## 数据在哪
 

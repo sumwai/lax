@@ -2,6 +2,8 @@
 /dist/
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 *.bak
 .pi/tasks/
 .pi/subagents.json

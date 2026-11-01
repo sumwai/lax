@@ -30,3 +30,4 @@ commit in the row so a later reader can tell whether the note still applies.
 | 2026-11-01 | A speech dialect on its own wire protocol was silently downgraded to passthrough | [lessons/2026-11-01-speech-hook-wire.md](lessons/2026-11-01-speech-hook-wire.md) | fixed in 7bba977 |
 | 2026-11-01 | A same-wire ASR dialect was shadowed by multipart passthrough | [lessons/2026-11-01-doubao-asr-multipart-wire.md](lessons/2026-11-01-doubao-asr-multipart-wire.md) | fixed in cf5f55f |
 | 2026-11-01 | Doubao TTS fragments are independently base64-encoded, and resource IDs must match the voice family | [lessons/2026-11-01-doubao-tts-wire.md](lessons/2026-11-01-doubao-tts-wire.md) | fixed locally; plugin untracked |
+| 2026-11-01 | Local backup tags hijack `git describe` when the version is derived without a tag pattern | [lessons/2026-11-01-backup-tags-hijack-git-describe.md](lessons/2026-11-01-backup-tags-hijack-git-describe.md) | fix in progress |

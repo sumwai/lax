@@ -193,7 +193,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | `model transcribe` | `<音频文件或 - > --model <模型> [--language <代码>] [--prompt <文本>] [--format <格式>]` | 直连本进程发一条 ASR 请求（multipart），入站固定 openai-transcriptions。文件参数给 `-` 时从标准输入读并写进 `file` part（文件名写 `stdin`）。`--format` 默认 `json`，原样当 `response_format` 发；`--language` 与 `--prompt` 给了才落进 multipart。响应体一个字节不改地写 stdout（`text` 是纯文本，`srt`/`vtt` 是字幕，`verbose_json` 多几列），不另加 `--json`：上游本来就在给结构化响应，再包一层只会把字幕弄成 JSON。有效出站协议不是 openai-transcriptions 时退出码 1 |
 | `model call` | `[提示词] --model [--protocol] [--stream] [--max-tokens N] [--system 提示词] [--debug] [--json]` | 绕过客户端直连本进程，打印选号过程；默认发 anthropic 入站，`--protocol` 可在 anthropic、chat、responses、gemini 之间切换；`--protocol systemone` 与「有效出站协议是 systemone 的模型」都被拒绝（退出码 1）：决策请求没有提示词，改用 `lax model decide`（见 5.14）。出站协议不取账号字段（账号已经不存协议，见 5.8）：按「该模型的 `account_models.protocol` → 厂商的有效默认协议」推导，入口是 `store.EffectiveProtocol(账号, 模型)`，cli 与转发层都不重算一份；模型还没探活过、协议列为空时就是厂商的默认协议。gemini 的模型名不在请求体里，由本命令按路径段转义后拼进入站路径：非流式 `/v1beta/models/{model}:generateContent`、`--stream` 时 `:streamGenerateContent`（见 5.9） | 响应，或 debug 轨迹；gemini 的流式按 SSE 逐帧解码后输出文本增量与工具调用，`--json` 时一个 `data` 帧一行 JSON 原文 |
 | `doctor` | 无 | 检查配置文件、数据目录、数据库、端口 | 逐项 ok / fail |
-| `version` | 无 | 版本号 | 一行 |
+| `version` | 无 | 打印构建时注入的版本号，`--json` 给出 `name` 与 `version` 两个字段。版本号由 `-X lax/internal/cli.version=<版本>` 写入：`make build` 取 `git describe --tags --match 'v*'` 并去掉前缀 `v`，直接 `go build` 时是 `0.1.0-dev`。发布流程见 5.18。 | 一行 |
 
 `plugin install --trust` 只对装进来的包做一次显式确认，取值与 manifest 的 `runtime` 一一对应；对不上是用法错误（退出码 2），不静默改成推断值。`plugin update` 没有这个参数：新版本的信任级别按它的 runtime 重新推断。
 
@@ -1243,6 +1243,16 @@ CLI：`lax model speak` 发一条 TTS 请求，`lax model transcribe` 发一条 
 
 `plugin config` 读写 manifest 的 `options`（`string` / `number` / `boolean`，字符串可以带 `enum`）：值落 `plugin_options.value_json`，键必须在活动版本的 manifest 里声明过；没写过的键回落到 `default`；`unset` 幂等。取值只落库，运行中的沙箱不会自己换：`secrets` 不走这里，配置项只放非敏感值。
 
+### 5.18 代码版本与发布
+
+代码版本用 SemVer，发布 tag 是唯一事实来源，形如 `vMAJOR.MINOR.PATCH`。1.0 之前破坏性改动升 MINOR，修复与兼容改动升 PATCH；带预发布后缀的 tag 只用于验收，不覆盖同名的正式版本。仅以 `v*` 开头的 tag 参与版本推导，`backup-*` 一类本地标记不是发布版本。
+
+版本号不写死在源码里：`internal/cli/cli.go` 的 `version` 是变量，默认值 `0.1.0-dev`，构建时由 `-X lax/internal/cli.version=<版本>` 覆盖。`make build` 用 `git describe --tags --match 'v*' --always --dirty` 推导，去掉前缀 `v`，因此开发构建也能看出相对最近发布 tag 的提交数与工作区是否脏。直接 `go build` 不注入，保留开发版本。`lax version` 与 `--json` 只读注入后的值，不在运行时读 Git。
+
+发布由 tag 触发：`.github/workflows/release.yml` 在推送 `v*` tag 时执行 `make dist`，`scripts/release.sh` 以 `CGO_ENABLED=0` 交叉编译 `linux/amd64`、`linux/arm64`、`darwin/amd64`、`darwin/arm64`，生成 tar.gz 与 `checksums.txt`，再由 `gh release create` 建 GitHub Release。构建带 `-trimpath -s -w`，不依赖 GoReleaser 或 cgo。发布包只覆盖 Unix：`plugin reload` 用 `SIGHUP`，`serve` 用 `SIGTERM`，Windows 没有对应的信号语义，不发布 Windows 包。普通提交由 `.github/workflows/ci.yml` 在 `master` 与 pull request 上跑 `make check`。
+
+发版步骤：确认工作区干净且 `make check` 通过，建 annotated tag `git tag -a vX.Y.Z -m "lax vX.Y.Z"`，推送 `git push origin master vX.Y.Z`；Release 工作流成功后核对产物里的 `lax version` 输出与 checksums。tag 一旦推送不再移动；发错了就发新 PATCH，不删旧 tag 重打。
+
 ## 6 数据模型
 
 表结构由 `internal/store/model.go` 的 GORM model 定义，建表与加列由 `AutoMigrate` 完成。没有迁移文件，也没有版本号：`AutoMigrate` 是幂等的 schema diff，表不存在就建，缺列就 `ALTER TABLE ADD COLUMN`，不改列类型、不删列、不删索引。需要删列或改类型时不能依赖它，必须写成一次性搬迁命令。加列（例如 `providers.auth_header` 与 `providers.auth_scheme`）同样只改 model，不新增 `migrations/` 文件：仓库里没有这个目录，历史迁移是 `internal/store/legacy.go` 里的一次性兼容逻辑。`AGENTS.md` 里「改数据库结构必须新增迁移文件」与这一节冲突时以本节为准。
@@ -1644,6 +1654,8 @@ internal/gateway/       HTTP 入站处理、上游转发、错误映射（`embed
 internal/plugin/        manifest、方言文件与模型目录的解析与严格校验，声明式映射的执行器，方言注册表，插件目录加载与目录哈希；`sandbox.go` 是 JS 沙箱与 hook 调用（每 hook 一个 Runtime、超时与中断、返回值与错误映射），`sandbox_module.go` 是受限 ESM 的改写与模块加载（4 MiB 单文件 / 8 MiB 总量），`sandbox_api.go` 是注入的 `lax` API、控制面请求、进程内缓存与日志
 internal/translate/     中间表示（ir.go）、四套协议编解码（anthropic.go、chat.go、responses.go、gemini.go；gemini 的入站与出站都在 gemini.go）
 internal/usage/         用量汇总与花费估算
+scripts/release.sh      交叉编译发布包与 checksums（由 make dist 调用，见 5.18）
+.github/workflows/      CI 与 tag 触发的 Release（见 5.18）
 ```
 
 约束：`translate` 只做结构体到结构体的转换，不读环境、不发请求，便于用对拍用例覆盖；`gateway` 是唯一发上游请求的地方（`account test` 的探活也走 `gateway.Probe`）；`cli` 不直接连数据库，只调 `store` 与 `account`；`plugin` 不读数据库、不读宿主配置与环境变量，只读插件包自己的源文件；唯一的网络出口是沙箱给插件的 `lax.http.request`（白名单与上限都在 `plugin` 里判）；它不 import 任何其它内部包，所以它谁都不依赖、只在标准库与 goja 之上，线协议名在它那里是字符串常量，取值与 `gateway` 的 `Protocol*` 一致；依赖方向是 `gateway`、`store`、`cli` → `plugin`。

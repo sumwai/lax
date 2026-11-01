@@ -12,12 +12,15 @@ import (
 
 const (
 	appName = "lax"
-	version = "0.1.0-dev"
 
 	exitOK    = 0
 	exitFail  = 1
 	exitUsage = 2
 )
+
+// version 由构建参数
+// -X lax/internal/cli.version=<版本> 覆盖；直接 go build 时保留开发版本。
+var version = "0.1.0-dev"
 
 // errNotImplemented 用于「子命令的接口定下来了、这一版还没接上实现」这种占位。
 // 返回它让退出码落在 1（执行失败）而不是 2（参数写错），脚本据此能分清「这一版没有」
