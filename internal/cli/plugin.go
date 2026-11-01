@@ -1178,10 +1178,17 @@ func installedRuntime(st *store.Store, p store.Plugin) string {
 }
 
 func cmdPluginLs(e *Env, args []string) error {
-	fs := newFlagSet(e, "plugin ls", "列出已装插件")
+	fs := newFlagSet(e, "plugin ls", "列出已装插件，或官方插件仓库里可安装的插件")
 	onlyEnabled := fs.Bool("enabled", false, "只列启用的插件")
+	available := fs.Bool("available", false, "列出官方插件仓库里可安装的插件（会联网，读默认分支）")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if fs.NArg() != 0 {
+		return usagef("用法：lax plugin ls [--enabled | --available] [--json]\n多余的参数 %q", fs.Arg(0))
+	}
+	if *available && *onlyEnabled {
+		return usagef("--enabled 只筛已装插件，--available 列仓库里的可安装插件：两个不能一起用")
 	}
 
 	a, err := openApp(e, true)
@@ -1194,6 +1201,15 @@ func cmdPluginLs(e *Env, args []string) error {
 	plugins, err := a.st.ListPlugins()
 	if err != nil {
 		return err
+	}
+	if *available {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		rows, err := listAvailablePlugins(ctx)
+		if err != nil {
+			return err
+		}
+		return printAvailablePlugins(e, markAvailableInstalled(rows, plugins))
 	}
 	rows := make([]pluginJSON, 0, len(plugins))
 	for _, p := range plugins {

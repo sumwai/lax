@@ -40,6 +40,7 @@ lax plugin install https://github.com/<owner>/<repo>/tree/<ref>/plugins/<插件�
 官方 `lax-plugins` 仓库里的插件还可以只写目录名：
 
 ```bash
+lax plugin ls --available                    # 先看官方仓库默认分支里有哪些包
 lax plugin install doubao-seed-tts --trust sandboxed --yes
 lax plugin install doubao-seed-tts@1.2.1 --trust sandboxed --yes
 ```

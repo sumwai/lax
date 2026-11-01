@@ -11,10 +11,13 @@ import (
 	"lax/internal/pluginfetch"
 )
 
+// pluginOfficialRepo 是官方插件仓库的根；plugin ls --available 扫它的 plugins/。
+const pluginOfficialRepo = "github:sumwai/lax-plugins"
+
 // pluginDefaultRegistry 是裸插件名默认查找的官方插件仓库。不带版本时映射到
 // <registry>/<name>@HEAD；带版本时映射到 <registry>/<name>@<name>-v<版本>，
 // 每个插件的发布 tag 因此互不撞车。现有同名目录优先，避免本地包被远程包顶掉。
-const pluginDefaultRegistry = "github:sumwai/lax-plugins/plugins"
+const pluginDefaultRegistry = pluginOfficialRepo + "/plugins"
 
 var (
 	barePluginName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)

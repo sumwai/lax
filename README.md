@@ -305,6 +305,7 @@ lax plugin logs com.example.echo --follow      # 插件日志（每个插件保�
 lax plugin reload                              # 给正在跑的 serve 发 SIGHUP，整表换掉方言注册表
 lax plugin config set com.example.echo region cn   # 读写 manifest 声明的配置项
 lax plugin ls                                  # ID / 版本 / 类型 / 运行时 / 信任 / 状态 / 厂商 / 方言数
+lax plugin ls --available                      # 官方仓库默认分支里有哪些插件、哪些已安装
 lax plugin show com.example.echo               # manifest 原文、权限、版本、厂商、方言、冲突、最近审计与日志
 lax plugin disable com.example.echo            # 重启或 reload 之后不再加载它的方言
 lax plugin rm com.example.echo --purge         # 删库记录、它带来的厂商与包目录
@@ -315,6 +316,8 @@ lax model dialect set mimo-v2.5-tts chat.complete@1 com.example.echo/chat@1
 GitHub 来源支持 `https://github.com/<owner>/<repo>/tree/<ref>/<path>`、`github.com/<owner>/<repo>/<path>[@<ref>]` 与 `github:<owner>/<repo>/<path>[@<ref>]` 三种写法；省略 `<ref>` 时取默认分支。安装只下载公开仓库的 zip，归档与解压各有 64 MiB 上限，临时目录在命令结束时删掉。
 
 裸插件名（只含字母、数字与 `._-`，不以 `.` 开头）不带 `@` 时先看当前目录有没有同名目录：有就按本地目录装；没有就映射到官方插件目录 `github:sumwai/lax-plugins/plugins/<名字>@HEAD`，取默认分支的最新版。要强制取远程最新版，写 `@main` 或完整 GitHub 来源。带 `@<版本>` 时一律走官方目录：`doubao-seed-tts@1.2.1` 与 `@v1.2.1` 都映射到 tag `doubao-seed-tts-v1.2.1`；`@main` 或 `@<提交号>` 原样当 ref。`plugin update --source` 用同一套解析。
+
+`lax plugin ls --available` 会联网读取官方仓库的默认分支，列出 `plugins/` 下校验通过的可安装包，并按插件 ID 标出本机已装版本与启停状态。默认的 `lax plugin ls` 只读本地，不联网。仓库列表跟着默认分支走；要固定版本仍用 `plugin install <名字>@<版本>`，列表里的版本号对应安装时的固定版本。
 
 本机插件包放在 `plugins/<插件名>/`，默认不进版本库（见 `plugins/README.md`）。下面以 `doubao-seed-tts` 为例，它同时提供豆包 Seed-TTS 2.0 与 Seed-ASR 极速版；本机包改成 `./plugins/doubao-seed-tts` 即可：
 
