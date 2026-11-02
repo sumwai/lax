@@ -20,19 +20,20 @@ import (
 )
 
 var commandTable = map[string]command{
-	"init":       {name: "init", summary: "初始化配置目录与数据库", run: cmdInit},
-	"serve":      {name: "serve", summary: "启动网关，前台运行", run: cmdServe},
-	"account":    {name: "account", summary: "管理上游账号：add / ls / rm / test / enable / disable", run: cmdAccount},
-	"model":      {name: "model", summary: "模型：登记、同步、探活、别名、单价与手工试打（call / decide / speak / transcribe）", run: cmdModel},
-	"provider":   {name: "provider", summary: "厂商与路由：ls / add / set / unset / rm / header", run: cmdProvider},
-	"plugin":     {name: "plugin", summary: "插件：install / ls / show / enable / disable / rm / doctor / reload", run: cmdPlugin},
-	"usage":      {name: "usage", summary: "按账号、模型或日期汇总用量", run: cmdUsage},
-	"log":        {name: "log", summary: "查看请求记录：tail", run: cmdLog},
-	"doctor":     {name: "doctor", summary: "自检配置、目录与端口", run: cmdDoctor},
-	"version":    {name: "version", summary: "打印版本", run: cmdVersion},
+	"init":     {name: "init", summary: "初始化配置目录与数据库", run: cmdInit},
+	"serve":    {name: "serve", summary: "启动网关，前台运行", run: cmdServe},
+	"account":  {name: "account", summary: "管理上游账号：add / ls / rm / test / enable / disable", run: cmdAccount},
+	"model":    {name: "model", summary: "模型：登记、同步、探活、别名、单价与手工试打（call / decide / speak / transcribe）", run: cmdModel},
+	"route":    {name: "route", summary: "选号：模型策略、账号权重与预演（ls / show / set / unset / account / explain）", run: cmdRoute},
+	"provider": {name: "provider", summary: "厂商与路由：ls / add / set / unset / rm / header", run: cmdProvider},
+	"plugin":   {name: "plugin", summary: "插件：install / ls / show / enable / disable / rm / doctor / reload", run: cmdPlugin},
+	"usage":    {name: "usage", summary: "按账号、模型或日期汇总用量", run: cmdUsage},
+	"log":      {name: "log", summary: "查看请求记录：tail", run: cmdLog},
+	"doctor":   {name: "doctor", summary: "自检配置、目录与端口", run: cmdDoctor},
+	"version":  {name: "version", summary: "打印版本", run: cmdVersion},
 }
 
-var commandOrder = []string{"init", "serve", "account", "model", "provider", "plugin", "usage", "log", "doctor", "version"}
+var commandOrder = []string{"init", "serve", "account", "model", "route", "provider", "plugin", "usage", "log", "doctor", "version"}
 
 func cmdInit(e *Env, args []string) error {
 	fs := newFlagSet(e, "init", "初始化配置目录与数据库")

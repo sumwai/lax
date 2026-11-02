@@ -37,6 +37,9 @@ lax log tail                                        # 看请求记录
 | `model decide` | 手工发一条 systemone 决策请求（`--state` 加一组问题），打印每个问题的答案与概率；`--json` 给脚本用 |
 | `model speak` | 手工发一条语音合成请求：`--model` 加 `--text`，音频写标准输出或 `--out <文件>`，`--voice` 与 `--format` 可选 |
 | `model transcribe` | 手工发一条语音转写请求：`<音频文件或 ->` 加 `--model`，`--language`、`--prompt` 与 `--format` 可选，响应体原样输出 |
+| `route ls\|show\|set\|unset` | 看、改默认选号策略或某个模型的策略：主备、轮转、按权重轮转、按成功率、softmax |
+| `route account ls\|set\|unset` | 给账号设权重（1–1000），可只对某个模型覆盖；权重只影响 weighted 与 softmax |
+| `route explain` | 用当前策略与统计预演一次选号，打印顺序、得分、概率与排除原因；不发上游、不写记录 |
 | `usage` | 按账号、模型或日期汇总用量；`--account` / `--model` / `--provider` 过滤，`--since` 或 `--from`/`--to` 限定时间，含输入、输出与缓存读写 token |
 | `log tail` | 最近的请求记录；`--since` 或 `--from`/`--to` 限定时间，`--follow` 跟进新记录 |
 | `doctor` | 自检配置、目录、密钥、端口、数据库 |
@@ -207,6 +210,44 @@ lax model price unset glm-4.6 cache-read                 # 清掉某一项；清
 ```
 
 价格单位是每百万 token，0 合法（免费或打包），负数是用法错误。只写命令行上给过的那几项，没给的留空表示继承：账号级的「留空」就是回到厂商级标价（`model price unset` 同理，账号级清掉不是「免费」），缓存读写没定价时按输入价算（`model price ls` 的缓存那格写「回退输入价」）。`account add` 与 `account set` 因此不再收 `--price-*`：误敲会得到一个指向 `model price set` 的用法错误。
+
+## 选号：lax route
+
+不配置时，同一个模型有多个账号就按 `priority` 从小到大试：先试第一个，429、408、5xx 或连接失败才换下一个；429 冷却 500ms，5xx 冷却 10 秒，连接失败冷却 2 秒。失败只冷却「账号 + 模型」，同账号的其它模型不受影响。同一会话默认粘到哈希到的账号，但该账号不可用时照常换号。429 不在一次请求内等冷却后重试同一个账号：候选都试完就返回 503，把重试交给客户端。每次尝试各记一条请求记录，也各算一次选号统计。
+
+要改一个模型的选法，用 `lax route set`。它一次写整条策略，没写的参数取内置默认；改完立即生效，不用重启：
+
+```bash
+# 主备：priority 小的先用，失败再换（内置默认）
+lax route set glm-5.2 --strategy priority
+
+# 轮转：每次请求换下一个账号
+lax route set glm-5.2 --strategy rotate --sticky off
+
+# 按权重轮转：账号权重 3:1，前三个位置里该账号占三个
+lax route set glm-5.2 --strategy weighted
+lax route account set account-a --model glm-5.2 --weight 3
+lax route account set account-b --model glm-5.2 --weight 1
+
+# 按成功率：窗口内成功率高的优先
+lax route set glm-5.2 --strategy success --window 7d --min-samples 20
+
+# softmax：优先级、成功率、延迟综合评分，再按概率抽；权重也参与
+lax route set glm-5.2 --strategy softmax --sticky prefer --temperature 0.1 \
+    --explore 2 --score-priority 0.4 --score-success 0.5 --score-latency 0.1
+```
+
+`route set <模型>` 只影响这个真实模型名；`route set --default` 改默认策略。`route show <模型>` 看最终生效值，`route unset <模型>` 删掉覆盖并回落到默认。账号权重有两个作用域：`lax route account set <账号> --weight 3` 是账号默认，加 `--model` 只覆盖该模型。权重只给 `weighted` 与 `softmax` 用；`priority`、`rotate`、`success` 不看权重。停用账号仍用 `lax account disable`，权重 0 不是停用。
+
+softmax 的成功率用平滑值，新账号从 0.5 附近开始；延迟取窗口内成功请求的平均耗时，10 秒及以上记 0 分。统计只算账号相关结果：2xx、408、429、5xx 与连接层失败进入样本，400、401、403 和客户端主动断开不进入。延迟是整次请求耗时，流式请求会偏长。
+
+不发请求就能看这次会怎么选：
+
+```bash
+lax route explain glm-5.2 --session demo --seed 42
+```
+
+它会打印候选顺序、每个账号的权重、样本数、成功率、平均延迟、得分与概率，以及被停用、没声明该模型或正在冷却的账号。softmax 用同一个 `--seed` 与同一份数据会得到同样的顺序；`--json` 给脚本用。`route explain` 只读库，不写请求记录、不改冷却。
 
 ## 向量化
 
