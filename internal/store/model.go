@@ -255,6 +255,48 @@ type pluginLogRow struct {
 
 func (pluginLogRow) TableName() string { return "plugin_logs" }
 
+// routePolicyRow 是一行选号策略。model 为空串表示默认策略。
+type routePolicyRow struct {
+	Model       string  `gorm:"column:model;size:191;primaryKey"`
+	Strategy    string  `gorm:"column:strategy;size:32;not null;default:'priority'"`
+	Sticky      string  `gorm:"column:sticky;size:16;not null;default:'prefer'"`
+	Temperature float64 `gorm:"column:temperature;not null;default:0.1"`
+	// Explore 与三项评分权重都允许 0，不能用 default tag：GORM 会把带 default 的零值字段
+	// 当成「没给」而落成默认值，用户显式写的 0 会被静默改掉。默认值只由 DefaultRoutePolicy 给。
+	Explore        float64 `gorm:"column:explore;not null"`
+	PriorityWeight float64 `gorm:"column:priority_weight;not null"`
+	SuccessWeight  float64 `gorm:"column:success_weight;not null"`
+	LatencyWeight  float64 `gorm:"column:latency_weight;not null"`
+	WindowSeconds  int64   `gorm:"column:window_seconds;not null;default:86400"`
+	MinSamples     int     `gorm:"column:min_samples;not null;default:20"`
+	UpdatedAt      int64   `gorm:"column:updated_at;not null;default:0"`
+}
+
+func (routePolicyRow) TableName() string { return "route_policies" }
+
+// routeAccountWeightRow 是一行账号权重。model 为空串表示账号默认。
+type routeAccountWeightRow struct {
+	AccountID int64  `gorm:"column:account_id;primaryKey"`
+	Model     string `gorm:"column:model;size:191;primaryKey;default:''"`
+	Weight    int    `gorm:"column:weight;not null;default:1"`
+	UpdatedAt int64  `gorm:"column:updated_at;not null;default:0"`
+}
+
+func (routeAccountWeightRow) TableName() string { return "route_account_weights" }
+
+// routeStatRow 是选号用的分钟聚合。它只保留最近 30 天，不是审计记录。
+type routeStatRow struct {
+	AccountID    int64  `gorm:"column:account_id;primaryKey"`
+	Model        string `gorm:"column:model;size:191;primaryKey"`
+	Bucket       int64  `gorm:"column:bucket;primaryKey;index:route_stats_bucket"`
+	Attempts     int64  `gorm:"column:attempts;not null;default:0"`
+	Successes    int64  `gorm:"column:successes;not null;default:0"`
+	LatencySumMS int64  `gorm:"column:latency_sum_ms;not null;default:0"`
+	LatencyCount int64  `gorm:"column:latency_count;not null;default:0"`
+}
+
+func (routeStatRow) TableName() string { return "route_stats" }
+
 // tables 是 AutoMigrate 与旧库搬迁共用的表清单，顺序不影响结果（GORM 会按依赖重排）。
 func tables() []any {
 	return []any{
@@ -270,6 +312,9 @@ func tables() []any {
 		&pluginVersionRow{},
 		&pluginOptionRow{},
 		&modelOperationRow{},
+		&routePolicyRow{},
+		&routeAccountWeightRow{},
+		&routeStatRow{},
 		&pluginAuditRow{},
 		&pluginLogRow{},
 	}

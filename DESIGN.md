@@ -1379,6 +1379,53 @@ MySQL 的文本列在有默认值或主键时落成 `varchar(191)`：这是 GORM
 | `cooldown_until_ms` | 整数，可空 | 这个账号在这个模型上的冷却截止时间，Unix 毫秒；NULL 表示没在冷却 |
 | `fail_streak` | 整数，默认 0 | 这个账号在这个模型上的连续失败次数，用于冷却翻倍（见 5.3） |
 
+### route_policies
+
+选号策略。`model` 为空串是默认行，非空是按真实模型名的覆盖行。这张表按 `model` 主键，`route set` 是整行覆盖，`route unset` 删行。
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `model` | 文本，主键 | 空串表示默认；否则是别名解析后的真实模型名 |
+| `strategy` | 文本 | `priority` / `rotate` / `weighted` / `success` / `softmax` |
+| `sticky` | 文本 | `prefer` / `off` / `strict` |
+| `temperature` | 实数 | softmax 温度，`(0,1]` |
+| `explore` | 实数 | 探索比例，`[0,1]`；CLI 用百分比展示与输入 |
+| `priority_weight` | 实数 | softmax 的优先级分权重，`[0,1]` |
+| `success_weight` | 实数 | softmax 的成功率分权重，`[0,1]` |
+| `latency_weight` | 实数 | softmax 的延迟分权重，`[0,1]`；三项之和必须大于 0 |
+| `window_seconds` | 整数 | 成功率与延迟的统计窗口，默认 86400，最大 30 天 |
+| `min_samples` | 整数 | 成功率的平滑最小样本，默认 20，至少 1 |
+| `updated_at` | 整数 | 最后一次写入的 Unix 秒 |
+
+### route_account_weights
+
+账号在候选里的权重。`model` 为空串是账号默认，非空只覆盖该账号在该模型上的权重；同一账号同一模型只留一行。
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `account_id` | 整数，主键之一 | |
+| `model` | 文本，主键之一 | 空串表示账号默认 |
+| `weight` | 整数 | 1–1000；未设置时为 1 |
+| `updated_at` | 整数 | 最后一次写入的 Unix 秒 |
+
+账号删除时同一个事务删掉它的权重与统计行；SQLite 的 rowid 会复用，不删会让新账号继承旧账号的权重。
+
+### route_stats
+
+按账号、真实模型与分钟汇总的选号统计。只统计与账号有关的结果：成功、408、429、5xx、连接层失败；400、401、403 与客户端主动断开不进来。网关每写一条 `requests` 时在同一个事务里 upsert 对应分钟桶，选号只读这张表，不扫 `requests`。
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `account_id` | 整数，主键之一 | |
+| `model` | 文本，主键之一 | 真实模型名 |
+| `bucket` | 整数，主键之一 | Unix 秒按分钟向下取整 |
+| `attempts` | 整数 | 进入统计的尝试数 |
+| `successes` | 整数 | 2xx 次数 |
+| `latency_sum_ms` | 整数 | 成功请求耗时之和 |
+| `latency_count` | 整数 | 有耗时的成功请求数；延迟分只用它做分母 |
+
+`route_stats` 不是审计表：它只服务选号，启动时清掉 30 天以前的桶；`requests` 仍保留完整历史。
+
 ### providers
 
 一家上游。行里没有凭据，只有地址与路径。

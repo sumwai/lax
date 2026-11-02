@@ -405,6 +405,12 @@ func (s *Store) DeleteAccount(name string) error {
 	if _, err := tx.Exec(`DELETE FROM account_models WHERE account_id = ?`, id); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`DELETE FROM route_account_weights WHERE account_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM route_stats WHERE account_id = ?`, id); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM accounts WHERE id = ?`, id); err != nil {
 		return err
 	}
@@ -521,6 +527,11 @@ type AttemptState struct {
 	// CooldownUntilMS 是冷却截止时间，Unix 毫秒。
 	CooldownUntilMS int64
 	LastError       string
+	// RouteSample 为真：这次尝试进入 route_stats，参与成功率与延迟统计。
+	// 只统计与账号有关的结果；调用方决定，store 不按状态码再猜一遍。
+	RouteSample bool
+	// RouteSuccess 为真：这次尝试算成功样本。RouteSample 为假时它没有意义。
+	RouteSuccess bool
 }
 
 // RecordAttempt 在同一个事务里写一行请求记录并更新账号状态：要么一起提交，要么都不提交。
@@ -532,13 +543,20 @@ func (s *Store) RecordAttempt(rec *RequestRecord, state AttemptState) error {
 		if err := insertRequestTx(tx, rec); err != nil {
 			return err
 		}
+		var err error
 		switch {
 		case state.Clear:
-			return clearModelFailureTx(tx, rec.AccountID, rec.ModelUsed)
+			err = clearModelFailureTx(tx, rec.AccountID, rec.ModelUsed)
 		case state.Disable:
-			return setEnabledTx(tx, rec.AccountID, false, state.LastError)
+			err = setEnabledTx(tx, rec.AccountID, false, state.LastError)
 		case state.Failure:
-			return recordModelFailureTx(tx, rec.AccountID, rec.ModelUsed, state.CooldownUntilMS, state.LastError)
+			err = recordModelFailureTx(tx, rec.AccountID, rec.ModelUsed, state.CooldownUntilMS, state.LastError)
+		}
+		if err != nil {
+			return err
+		}
+		if state.RouteSample {
+			return upsertRouteStatAtTx(tx, rec.AccountID, rec.ModelUsed, rec.TS, rec.LatencyMS, state.RouteSuccess)
 		}
 		return nil
 	})
