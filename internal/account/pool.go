@@ -2,8 +2,6 @@
 package account
 
 import (
-	"hash/fnv"
-	"sort"
 	"time"
 
 	"lax/internal/store"
@@ -142,28 +140,14 @@ func Providers(accounts []store.Account, model string) []store.Account {
 	return out
 }
 
-// Candidates 过滤出可用于该模型的账号，按 priority 升序排好。
-// session 非空时，把按会话哈希选中的账号提到最前，保证同一会话粘同一个账号。
+// Candidates 是默认策略下的选号结果：priority 升序，会话粘性为 prefer。
+// 新代码要按 route 策略选号时用 Rank；保留这个包装器给只关心候选集合的旧调用方。
 func Candidates(accounts []store.Account, model string, now time.Time, session string) []store.Account {
-	var out []store.Account
-	for _, a := range accounts {
-		if !AvailableForModel(a, model, now) || !Supports(a, model) {
-			continue
-		}
-		out = append(out, a)
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Priority != out[j].Priority {
-			return out[i].Priority < out[j].Priority
-		}
-		return out[i].ID < out[j].ID
-	})
-
-	if session != "" && len(out) > 1 {
-		h := fnv.New32a()
-		_, _ = h.Write([]byte(session))
-		idx := int(h.Sum32() % uint32(len(out)))
-		out = append(out[idx:], out[:idx]...)
-	}
-	return out
+	return Rank(RouteInput{
+		Accounts: accounts,
+		Model:    model,
+		Now:      now,
+		Policy:   store.DefaultRoutePolicy(),
+		Session:  session,
+	}).Candidates
 }
