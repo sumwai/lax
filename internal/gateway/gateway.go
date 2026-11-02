@@ -82,6 +82,10 @@ type Server struct {
 	// dialects 与 dialectsMu 保护方言表的整体替换：重启不是唯一的生效方式。
 	dialectsMu sync.RWMutex
 	dialects   *plugin.Registry
+	// routeSeq 按模型记请求序号，rotate 与 weighted 各自错开第一名；
+	// 不同模型不共用计数器，给一个模型加压不会改变另一个模型的顺序。
+	routeSeqMu sync.Mutex
+	routeSeq   map[string]uint64
 }
 
 // New 构造网关。
@@ -93,7 +97,8 @@ func New(o Options) (*Server, error) {
 		return nil, errors.New("缺少解密密钥")
 	}
 	s := &Server{store: o.Store, key: o.Key, client: o.Client, logf: o.Logf, now: o.Now,
-		dumpBodies: o.DumpBodies, routeProtocols: o.RouteProtocols, dialects: o.Dialects}
+		dumpBodies: o.DumpBodies, routeProtocols: o.RouteProtocols, dialects: o.Dialects,
+		routeSeq: map[string]uint64{}}
 	if s.dialects == nil {
 		s.dialects = plugin.DefaultRegistry()
 	}
@@ -107,6 +112,15 @@ func New(o Options) (*Server, error) {
 		s.now = time.Now
 	}
 	return s, nil
+}
+
+// nextRouteSequence 返回这个模型的下一个请求序号，从 0 开始。
+func (s *Server) nextRouteSequence(model string) uint64 {
+	s.routeSeqMu.Lock()
+	defer s.routeSeqMu.Unlock()
+	seq := s.routeSeq[model]
+	s.routeSeq[model] = seq + 1
+	return seq
 }
 
 // SetDialects 整张换掉方言表。在途请求手里拿的是换表前取到的方言指针，继续用旧版本完成；
@@ -413,8 +427,32 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	candidates := account.Candidates(accounts, req.Model, s.now(), session)
+	snapshot, err := s.store.RouteSnapshot(req.Model, s.now())
+	if err != nil {
+		writeInboundError(w, inbound, http.StatusInternalServerError, "api_error", "读取选号策略失败: "+err.Error())
+		return
+	}
+	sequence := s.nextRouteSequence(req.Model)
+	decision := account.Rank(account.RouteInput{
+		Accounts: accounts,
+		Model:    req.Model,
+		Now:      s.now(),
+		Policy:   snapshot.Policy,
+		Weights:  snapshot.Weights,
+		Stats:    snapshot.Stats,
+		Session:  session,
+		Sequence: sequence,
+		Seed:     s.now().UnixNano() + int64(sequence),
+	})
+	candidates := decision.Candidates
 	if len(candidates) == 0 {
+		if decision.StickyMiss {
+			writeInboundError(w, inbound, http.StatusServiceUnavailable, "api_error",
+				fmt.Sprintf("模型 %s 的会话粘性为 strict，但会话指定的账号此刻不可用；"+
+					"换一个会话键，或运行 lax route set %s --strategy priority --sticky prefer 允许换号",
+					req.Model, req.Model))
+			return
+		}
 		// 候选为空有两种成因，报错不能混在一起：这个模型没有落在任何账号的
 		// `account_models.access='allowed'` 上（清单问题），或者有账号可达但全部在冷却或被停用
 		// （可用性问题，仍按 503 走）。可达性是账号侧唯一的事实，账号行没有第二份清单可对。
@@ -574,6 +612,8 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		// 一次尝试的账（requests 一行）与它的结论（冷却、清零、停用）在同一个事务里落库，
 		// 要么都写、要么都不写（见 store.RecordAttempt）。
 		state := store.AttemptState{}
+		state.RouteSample, state.RouteSuccess = routeSample(res)
+		failStreak := account.FailStreak(cand, req.Model)
 		switch {
 		case rec.OK:
 			// 成功一次就把连续失败次数清零，冷却时长下次从头算。
@@ -590,7 +630,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			// 这类失败因此也不算连接层失败，它与「有没有拿到响应」无关。
 			state.Failure = true
 			state.CooldownUntilMS = s.now().Add(account.Cooldown(cooldownKind(res.status, res.transport),
-				account.FailStreak(cand, req.Model))).UnixMilli()
+				failStreak)).UnixMilli()
 			state.LastError = res.message
 		}
 		if err := s.store.RecordAttempt(rec, state); err != nil {
@@ -640,6 +680,24 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeInboundError(w, inbound, http.StatusServiceUnavailable, "api_error", "所有候选账号都失败："+lastErr)
+}
+
+// routeSample 判断一次尝试是否进入 route_stats。成功只认 2xx；失败只认上游给出的
+// 408/429/5xx 与连接层失败。400/401/403、客户端提前断开、本地解密或构包失败都不算账号表现。
+func routeSample(res attempt) (sample, success bool) {
+	if res.err == nil && res.status >= 200 && res.status < 300 {
+		return true, true
+	}
+	if res.wrote {
+		return false, false
+	}
+	if res.transport {
+		return true, false
+	}
+	if res.err == nil && account.Retryable(res.status) {
+		return true, false
+	}
+	return false, false
 }
 
 // modelNotFoundKind 给出「没有账号提供该模型」在入站协议里的错误类型：anthropic 用它自己的

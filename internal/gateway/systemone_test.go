@@ -504,8 +504,8 @@ func TestSystemOneRejectsBadModelField(t *testing.T) {
 	}
 }
 
-// TestSystemOneUpstreamErrorKeepsType 钉住上游失败的形状与冷却：一次 429 会先把账号打进冷却
-// （限流那一档，1 分钟起），单账号时候选耗尽，最后回 503 与 api_error；错误体始终是 detail 对象。
+// TestSystemOneUpstreamErrorKeepsType 钉住上游失败的形状与冷却：单账号 429 冷却后候选耗尽，
+// 回 503 与 api_error；429 不在一次请求内重试同一个账号，错误体始终是 detail 对象。
 func TestSystemOneUpstreamErrorKeepsType(t *testing.T) {
 	f := newFixture(t)
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -526,7 +526,7 @@ func TestSystemOneUpstreamErrorKeepsType(t *testing.T) {
 		t.Fatalf("错误 = %s/%s，期望 api_error 且带上上游原话", kind, message)
 	}
 
-	// 一次 429 只打一个账号，冷却与失败计数照旧走限流那一档。
+	// 一次 429 只走一次限流档，失败计数因此是 1。
 	acc, err := f.st.GetAccount("ts1")
 	if err != nil {
 		t.Fatalf("读账号: %v", err)

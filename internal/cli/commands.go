@@ -119,6 +119,10 @@ func cmdServe(e *Env, args []string) error {
 	} else if added > 0 && !e.JSON {
 		fmt.Fprintf(e.Stdout, "补齐语音方言绑定 %d 条\n", added)
 	}
+	// route_stats 只服务选号，不是审计表：启动时丢掉 30 天以前的分钟桶，requests 仍保留完整历史。
+	if _, err := a.st.PruneRouteStats(time.Now().Unix() - store.RouteStatsRetentionSeconds); err != nil {
+		fmt.Fprintf(e.Stderr, "警告：清理选号统计失败：%v\n", err)
+	}
 
 	gs, err := gateway.New(gateway.Options{
 		Store:    a.st,

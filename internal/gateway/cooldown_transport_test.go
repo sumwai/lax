@@ -75,7 +75,7 @@ func TestTransportFailureCoolsTwoSeconds(t *testing.T) {
 }
 
 // TestStatusFailureCoolsByStatusCode 钉住拿到状态的那两档：上游 500 从 10 秒起，
-// 429 从 500 毫秒起，与连接层那一档分开算。
+// 429 从 500 毫秒起，与连接层那一档分开算。429 不在一次请求内重试同一个账号。
 func TestStatusFailureCoolsByStatusCode(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -108,8 +108,13 @@ func TestStatusFailureCoolsByStatusCode(t *testing.T) {
 			if err != nil {
 				t.Fatalf("读请求记录: %v", err)
 			}
-			if len(recs) != 1 || recs[0].HTTPStatus != c.status || recs[0].OK {
-				t.Fatalf("请求记录 = %+v，期望 http_status %d 且 ok=0", recs, c.status)
+			if len(recs) != 1 {
+				t.Fatalf("请求记录数 = %d，期望 1: %+v", len(recs), recs)
+			}
+			for _, rec := range recs {
+				if rec.HTTPStatus != c.status || rec.OK {
+					t.Fatalf("请求记录 = %+v，期望 http_status %d 且 ok=0", rec, c.status)
+				}
 			}
 
 			assertCooldown(t, f, "up", "m1", c.want, before)

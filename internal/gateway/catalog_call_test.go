@@ -177,6 +177,7 @@ func TestCatalogKeepsModelWhileAccountCools(t *testing.T) {
 		t.Fatalf("读账号: %v", err)
 	}
 	failure := acc.ModelFailures["deepseek-v4-pro"]
+	// 唯一候选只试一次，429 当场落冷却，失败计数是 1。
 	if failure.CooldownUntilMS <= time.Now().UnixMilli() || failure.FailStreak != 1 {
 		t.Fatalf("账号没进冷却：cooldown = %d，fail_streak = %d", failure.CooldownUntilMS, failure.FailStreak)
 	}

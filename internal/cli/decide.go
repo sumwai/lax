@@ -345,7 +345,11 @@ func pickDecideTarget(st *store.Store, model string) (decideTarget, error) {
 		return decideTarget{}, err
 	}
 	now := time.Now()
-	candidates := account.Candidates(accounts, resolved, now, "")
+	decision, err := routeDecisionAt(st, accounts, resolved, now)
+	if err != nil {
+		return decideTarget{}, err
+	}
+	candidates := decision.Candidates
 	if len(candidates) == 0 {
 		if len(account.Providers(accounts, resolved)) == 0 {
 			return decideTarget{}, fmt.Errorf("模型 %s 不在任何启用账号的模型列表里：决策请求按模型名选号，名字对不上就一个账号也选不出来；用 lax model ls 看现有清单，然后依次运行 %s（model add 一个事务写模型目录与账号可达性，决策模型不在上游清单里，只能手写声明；probe 带 --protocol 时只验这一条路，不去试其它协议）",
@@ -435,7 +439,11 @@ func systemOneOnlyModel(st *store.Store, model string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	candidates := account.Candidates(accounts, resolved, time.Now(), "")
+	decision, err := routeDecisionAt(st, accounts, resolved, time.Now())
+	if err != nil {
+		return false, err
+	}
+	candidates := decision.Candidates
 	if len(candidates) == 0 {
 		return false, nil
 	}
@@ -449,6 +457,23 @@ func systemOneOnlyModel(st *store.Store, model string) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+// routeDecisionAt 让 model decide 的预判与网关第一请求使用同一份策略、权重与统计。
+func routeDecisionAt(st *store.Store, accounts []store.Account, model string, now time.Time) (account.RouteDecision, error) {
+	snapshot, err := st.RouteSnapshot(model, now)
+	if err != nil {
+		return account.RouteDecision{}, err
+	}
+	return account.Rank(account.RouteInput{
+		Accounts: accounts,
+		Model:    model,
+		Now:      now,
+		Policy:   snapshot.Policy,
+		Weights:  snapshot.Weights,
+		Stats:    snapshot.Stats,
+		Seed:     now.UnixNano(),
+	}), nil
 }
 
 // containsProtocol 判断协议清单里有没有这一条。厂商路由清单来自 store，cli 不另算一份。
