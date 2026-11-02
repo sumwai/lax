@@ -531,7 +531,8 @@ func TestSystemOneUpstreamErrorKeepsType(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读账号: %v", err)
 	}
-	if acc.CooldownUntil == 0 || acc.FailStreak != 1 {
+	failure := acc.ModelFailures["typesafe/jev"]
+	if failure.CooldownUntilMS == 0 || failure.FailStreak != 1 {
 		t.Fatalf("账号 = %+v，期望一次 429 之后进冷却且 fail_streak=1", acc)
 	}
 }

@@ -32,7 +32,7 @@ func TestRecordAttemptWritesRowAndStateTogether(t *testing.T) {
 	fail := rec(429, false)
 	fail.Error = "rate limited"
 	if err := st.RecordAttempt(fail, store.AttemptState{
-		Failure: true, CooldownUntil: 160, LastError: "rate limited",
+		Failure: true, CooldownUntilMS: 160, LastError: "rate limited",
 	}); err != nil {
 		t.Fatalf("记录失败尝试: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestRecordAttemptWritesRowAndStateTogether(t *testing.T) {
 		t.Fatal("请求记录应拿到自增 id")
 	}
 	a := get()
-	if a.CooldownUntil != 160 || a.LastError != "rate limited" || a.FailStreak != 1 {
+	if f := a.ModelFailures["m1"]; f.CooldownUntilMS != 160 || f.FailStreak != 1 || a.LastError != "rate limited" {
 		t.Fatalf("失败后的账号状态 = %+v", a)
 	}
 
@@ -49,8 +49,8 @@ func TestRecordAttemptWritesRowAndStateTogether(t *testing.T) {
 		t.Fatalf("记录成功尝试: %v", err)
 	}
 	a = get()
-	if a.CooldownUntil != 0 || a.LastError != "" || a.FailStreak != 0 {
-		t.Fatalf("成功后的账号状态 = %+v，期望冷却与连续失败清掉", a)
+	if f := a.ModelFailures["m1"]; f.CooldownUntilMS != 0 || f.FailStreak != 0 {
+		t.Fatalf("成功后的账号状态 = %+v，期望 m1 冷却与连续失败清掉", a)
 	}
 
 	// 401：请求行与停用一起写。
@@ -75,7 +75,7 @@ func TestRecordAttemptWritesRowAndStateTogether(t *testing.T) {
 		t.Fatalf("把库设成只读: %v", err)
 	}
 	if err := st.RecordAttempt(rec(500, false), store.AttemptState{
-		Failure: true, CooldownUntil: 999, LastError: "boom",
+		Failure: true, CooldownUntilMS: 999, LastError: "boom",
 	}); err == nil {
 		t.Fatal("只读库上记录尝试应报错")
 	}
@@ -83,7 +83,7 @@ func TestRecordAttemptWritesRowAndStateTogether(t *testing.T) {
 		t.Fatalf("恢复可写: %v", err)
 	}
 	a = get()
-	if a.CooldownUntil != 0 || a.FailStreak != 0 || a.LastError != "invalid key" {
+	if f := a.ModelFailures["m1"]; f.CooldownUntilMS != 0 || f.FailStreak != 0 || a.LastError != "invalid key" {
 		t.Fatalf("写入失败后账号状态不该变: %+v", a)
 	}
 	recs, err = st.RecentRequests(10)

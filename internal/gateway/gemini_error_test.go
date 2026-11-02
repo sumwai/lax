@@ -56,10 +56,10 @@ func TestGeminiFailoverOnRetryableStatus(t *testing.T) {
 		name       string
 		status     int
 		statusText string
-		// 冷却时长按状态算：429 是一分钟，5xx 是十秒。
+		// 冷却时长按状态算：429 是 500 毫秒，5xx 是十秒。
 		minCooldown, maxCooldown time.Duration
 	}{
-		{"配额用完 429", http.StatusTooManyRequests, "RESOURCE_EXHAUSTED", time.Minute, time.Minute},
+		{"配额用完 429", http.StatusTooManyRequests, "RESOURCE_EXHAUSTED", 500 * time.Millisecond, 500 * time.Millisecond},
 		{"上游 500", http.StatusInternalServerError, "INTERNAL", 10 * time.Second, 10 * time.Second},
 		{"上游 503", http.StatusServiceUnavailable, "UNAVAILABLE", 10 * time.Second, 10 * time.Second},
 	}
@@ -93,15 +93,16 @@ func TestGeminiFailoverOnRetryableStatus(t *testing.T) {
 			if err != nil {
 				t.Fatalf("读账号: %v", err)
 			}
-			if got.CooldownUntil == 0 {
+			failure := got.ModelFailures["gemini-2.5-flash"]
+			if failure.CooldownUntilMS == 0 {
 				t.Fatalf("被上游拒绝的账号没有进冷却: %+v", got)
 			}
-			remaining := time.Until(time.Unix(got.CooldownUntil, 0))
-			if remaining > c.minCooldown+time.Second || remaining < c.minCooldown-5*time.Second {
+			remaining := time.Until(time.UnixMilli(failure.CooldownUntilMS))
+			if remaining > c.maxCooldown+time.Second || remaining < c.minCooldown/4 {
 				t.Fatalf("冷却剩余 = %v，期望约 %v", remaining, c.minCooldown)
 			}
-			if got.FailStreak != 1 {
-				t.Fatalf("连续失败次数 = %d，期望 1", got.FailStreak)
+			if failure.FailStreak != 1 {
+				t.Fatalf("连续失败次数 = %d，期望 1", failure.FailStreak)
 			}
 			if !strings.Contains(got.LastError, "上游说慢一点") {
 				t.Fatalf("账号的失败说明 = %q，期望带上上游原话", got.LastError)
@@ -112,7 +113,7 @@ func TestGeminiFailoverOnRetryableStatus(t *testing.T) {
 			if err != nil {
 				t.Fatalf("读账号: %v", err)
 			}
-			if ok.CooldownUntil != 0 || ok.FailStreak != 0 || !ok.Enabled {
+			if len(ok.ModelFailures) != 0 || !ok.Enabled {
 				t.Fatalf("成功的账号不该被惩罚: %+v", ok)
 			}
 

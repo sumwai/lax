@@ -89,7 +89,7 @@ func TestModelsListSkipsDisabledKeepsCooling(t *testing.T) {
 	if err := f.st.SetEnabled(off.ID, false, "手工停用"); err != nil {
 		t.Fatalf("停用账号: %v", err)
 	}
-	if err := f.st.RecordFailure(cool.ID, time.Now().Add(time.Minute).Unix(), "上游 429"); err != nil {
+	if err := f.st.RecordFailure(cool.ID, "m-cool", time.Now().Add(time.Minute).UnixMilli(), "上游 429"); err != nil {
 		t.Fatalf("打冷却: %v", err)
 	}
 	srv := f.server(t)
@@ -295,7 +295,7 @@ func TestModelsRejectNonGet(t *testing.T) {
 func TestModelsEndpointsAreReadOnly(t *testing.T) {
 	f := newFixture(t)
 	cool := f.addAs(t, "cool", "zeta", gateway.ProtocolChat, "http://127.0.0.1:1", "sk-cool", []string{"m-cool"})
-	if err := f.st.RecordFailure(cool.ID, time.Now().Add(time.Minute).Unix(), "上游 429"); err != nil {
+	if err := f.st.RecordFailure(cool.ID, "m-cool", time.Now().Add(time.Minute).UnixMilli(), "上游 429"); err != nil {
 		t.Fatalf("打冷却: %v", err)
 	}
 	off := f.addAs(t, "off", "alpha", gateway.ProtocolChat, "http://127.0.0.1:1", "sk-off", []string{"m-off"})

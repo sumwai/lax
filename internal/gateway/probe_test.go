@@ -112,7 +112,7 @@ func (f *fixture) exhausted(t *testing.T, name string) {
 	if err := f.st.SetEnabled(acc.ID, false, "上一个 key 被拒"); err != nil {
 		t.Fatalf("停用账号: %v", err)
 	}
-	if err := f.st.RecordFailure(acc.ID, time.Now().Add(time.Minute).Unix(), "上一个 key 被拒"); err != nil {
+	if err := f.st.RecordFailure(acc.ID, acc.Models[0], time.Now().Add(time.Minute).UnixMilli(), "上一个 key 被拒"); err != nil {
 		t.Fatalf("记失败: %v", err)
 	}
 }
@@ -124,6 +124,15 @@ func (f *fixture) mustAccount(t *testing.T, name string) (enabled bool, failStre
 		t.Fatalf("读账号: %v", err)
 	}
 	return acc.Enabled, acc.FailStreak, acc.CooldownUntil, acc.LastError
+}
+
+func (f *fixture) modelFailStreak(t *testing.T, name, model string) int {
+	t.Helper()
+	acc, err := f.st.GetAccount(name)
+	if err != nil {
+		t.Fatalf("读账号: %v", err)
+	}
+	return acc.ModelFailures[model].FailStreak
 }
 
 // TestProbeListOKStillChecksKey 钉住「列表 2xx 之后仍然发一次调用」：公开的列表接口对任何 key
@@ -532,18 +541,57 @@ func TestProbeModelsListServerErrorCooldowns(t *testing.T) {
 	if res.OK || res.Status != http.StatusInternalServerError {
 		t.Fatalf("探活结果 = %+v，期望 500 且不 OK", res)
 	}
-	enabled, streak, cooldown, lastErr := f.mustAccount(t, "boom")
-	if !enabled {
+	acc, err = f.st.GetAccount("boom")
+	if err != nil {
+		t.Fatalf("读账号: %v", err)
+	}
+	if !acc.Enabled {
 		t.Fatalf("5xx 不该停用账号")
 	}
-	if streak != 1 {
-		t.Fatalf("fail_streak = %d，期望 1", streak)
+	failure := acc.ModelFailures["m1"]
+	if failure.FailStreak != 1 {
+		t.Fatalf("fail_streak = %d，期望 1", failure.FailStreak)
 	}
-	if want := before.Add(10 * time.Second).Unix(); cooldown < want-1 || cooldown > want+1 {
-		t.Fatalf("cooldown_until = %d，期望首次 5xx 的 10 秒冷却（约 %d）", cooldown, want)
+	if want := before.Add(10 * time.Second).UnixMilli(); failure.CooldownUntilMS < want-int64(time.Second/time.Millisecond) || failure.CooldownUntilMS > want+int64(time.Second/time.Millisecond) {
+		t.Fatalf("cooldown_until_ms = %d，期望首次 5xx 的 10 秒冷却（约 %d）", failure.CooldownUntilMS, want)
 	}
-	if !strings.Contains(lastErr, "upstream boom") {
-		t.Fatalf("last_error = %q，期望带上游原话", lastErr)
+	if !strings.Contains(acc.LastError, "upstream boom") {
+		t.Fatalf("last_error = %q，期望带上游原话", acc.LastError)
+	}
+}
+
+// 探活的可重试失败只冷却这次实际探的模型：同账号其它模型不跟着进冷却。
+func TestProbeRetryableFailureCoolsOnlyProbedModel(t *testing.T) {
+	f := newFixture(t)
+	up := newProbeUpstream(t, map[string]probeReply{
+		"GET /v1/models":            {status: http.StatusNotFound, body: `{"error":{"message":"没有列表接口"}}`},
+		"POST /v1/chat/completions": {status: http.StatusTooManyRequests, body: `{"error":{"message":"慢一点"}}`},
+	})
+	acc := f.addAs(t, "limited", "custom", gateway.ProtocolChat, up.srv.URL, "sk-test", []string{"m1", "m2"})
+
+	gs := newGateway(t, f)
+	before := time.Now()
+	res, err := gs.Probe(context.Background(), acc)
+	if err != nil {
+		t.Fatalf("探活失败: %v", err)
+	}
+	if res.OK || res.Status != http.StatusTooManyRequests || res.Stage != gateway.ProbeStageCall {
+		t.Fatalf("探活结果 = %+v，期望调用段 429", res)
+	}
+
+	got, err := f.st.GetAccount("limited")
+	if err != nil {
+		t.Fatalf("读账号: %v", err)
+	}
+	failure := got.ModelFailures["m1"]
+	if failure.FailStreak != 1 || failure.CooldownUntilMS == 0 {
+		t.Fatalf("探的 m1 没进冷却: %+v", got.ModelFailures)
+	}
+	if remaining := time.UnixMilli(failure.CooldownUntilMS).Sub(before); remaining < 100*time.Millisecond || remaining > time.Second {
+		t.Fatalf("429 探活冷却 = %v，期望约 500ms", remaining)
+	}
+	if f, ok := got.ModelFailures["m2"]; ok {
+		t.Fatalf("没探的 m2 不该进冷却: %+v", f)
 	}
 }
 
@@ -736,12 +784,16 @@ func TestProbeNetworkErrorCooldowns(t *testing.T) {
 			t.Fatalf("备注 = %q，期望包含 %q", res.Message, want)
 		}
 	}
-	_, streak, cooldown, _ := f.mustAccount(t, "dead")
-	if streak != 1 {
-		t.Fatalf("fail_streak = %d，期望 1", streak)
+	acc, err = f.st.GetAccount("dead")
+	if err != nil {
+		t.Fatalf("读账号: %v", err)
 	}
-	if want := before.Add(2 * time.Second).Unix(); cooldown < want-1 || cooldown > want+1 {
-		t.Fatalf("cooldown_until = %d，期望首次网络失败的 2 秒冷却（约 %d）", cooldown, want)
+	failure := acc.ModelFailures["m1"]
+	if failure.FailStreak != 1 {
+		t.Fatalf("fail_streak = %d，期望 1", failure.FailStreak)
+	}
+	if want := before.Add(2 * time.Second).UnixMilli(); failure.CooldownUntilMS < want-int64(time.Second/time.Millisecond) || failure.CooldownUntilMS > want+int64(time.Second/time.Millisecond) {
+		t.Fatalf("cooldown_until_ms = %d，期望首次网络失败的 2 秒冷却（约 %d）", failure.CooldownUntilMS, want)
 	}
 }
 

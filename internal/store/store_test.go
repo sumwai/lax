@@ -55,7 +55,7 @@ func TestAccountLifecycle(t *testing.T) {
 		t.Fatal("重名应报错")
 	}
 
-	if err := st.RecordFailure(acc.ID, time.Now().Add(time.Minute).Unix(), "限流"); err != nil {
+	if err := st.RecordFailure(acc.ID, "m1", time.Now().Add(time.Minute).UnixMilli(), "限流"); err != nil {
 		t.Fatalf("记失败: %v", err)
 	}
 	if err := st.SetEnabled(acc.ID, false, "key 无效"); err != nil {
@@ -65,33 +65,39 @@ func TestAccountLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("再取: %v", err)
 	}
-	if got.CooldownUntil == 0 || got.Enabled || got.LastError != "key 无效" {
+	if got.Enabled || got.LastError != "key 无效" {
 		t.Fatalf("状态 = %+v", got)
 	}
-	if got.FailStreak != 1 {
-		t.Fatalf("连续失败次数 = %d，期望 1", got.FailStreak)
+	if got.ModelFailures["m1"].FailStreak != 1 || got.ModelFailures["m1"].CooldownUntilMS == 0 {
+		t.Fatalf("m1 冷却状态 = %+v，期望 1 次连续失败且截止时间非零", got.ModelFailures["m1"])
 	}
 
-	if err := st.RecordFailure(acc.ID, time.Now().Add(2*time.Minute).Unix(), "还是限流"); err != nil {
+	if err := st.RecordFailure(acc.ID, "m1", time.Now().Add(2*time.Minute).UnixMilli(), "还是限流"); err != nil {
 		t.Fatalf("再记失败: %v", err)
 	}
 	got, err = st.GetAccount("ds1")
 	if err != nil {
 		t.Fatalf("第三次取: %v", err)
 	}
-	if got.FailStreak != 2 {
-		t.Fatalf("连续失败次数 = %d，期望 2", got.FailStreak)
+	if got.ModelFailures["m1"].FailStreak != 2 {
+		t.Fatalf("m1 连续失败次数 = %d，期望 2", got.ModelFailures["m1"].FailStreak)
+	}
+	if got.LastError != "还是限流" {
+		t.Fatalf("last_error = %q，期望更新为最近一次失败", got.LastError)
 	}
 
-	if err := st.ClearFailure(acc.ID); err != nil {
+	if err := st.ClearFailure(acc.ID, "m1"); err != nil {
 		t.Fatalf("清失败: %v", err)
 	}
 	got, err = st.GetAccount("ds1")
 	if err != nil {
 		t.Fatalf("第四次取: %v", err)
 	}
-	if got.FailStreak != 0 || got.CooldownUntil != 0 || got.LastError != "" {
-		t.Fatalf("清失败后状态 = %+v", got)
+	if f := got.ModelFailures["m1"]; f.FailStreak != 0 || f.CooldownUntilMS != 0 {
+		t.Fatalf("清 m1 冷却后状态 = %+v", f)
+	}
+	if got.LastError != "还是限流" {
+		t.Fatalf("清一个模型的冷却不该抹掉账号最近错误，last_error = %q", got.LastError)
 	}
 
 	if err := st.DeleteAccount("ds1"); err != nil {
@@ -99,6 +105,73 @@ func TestAccountLifecycle(t *testing.T) {
 	}
 	if err := st.DeleteAccount("ds1"); err == nil {
 		t.Fatal("删不存在的账号应报错")
+	}
+}
+
+// 冷却按账号-模型隔离：一个模型的失败与清零不碰同账号的其它模型。
+func TestModelFailuresAreIndependent(t *testing.T) {
+	st := openTemp(t)
+	acc := store.Account{
+		Name: "ds1", Provider: "deepseek", Protocol: "openai-chat",
+		BaseURL: "u", KeyCipher: []byte{1}, Models: []string{"m1", "m2"}, Enabled: true,
+	}
+	if err := st.CreateAccount(&acc); err != nil {
+		t.Fatalf("新增: %v", err)
+	}
+
+	until1 := time.Now().Add(time.Second).UnixMilli()
+	if err := st.RecordFailure(acc.ID, "m1", until1, "m1 限流"); err != nil {
+		t.Fatalf("记 m1 失败: %v", err)
+	}
+	got, err := st.GetAccount("ds1")
+	if err != nil {
+		t.Fatalf("读账号: %v", err)
+	}
+	if f := got.ModelFailures["m1"]; f.FailStreak != 1 || f.CooldownUntilMS != until1 {
+		t.Fatalf("m1 冷却 = %+v，期望 1 次与 %d", f, until1)
+	}
+	if f, ok := got.ModelFailures["m2"]; ok {
+		t.Fatalf("m1 失败不该影响 m2: %+v", f)
+	}
+
+	if err := st.RecordFailure(acc.ID, "m1", until1, "m1 又限流"); err != nil {
+		t.Fatalf("再记 m1 失败: %v", err)
+	}
+	if err := st.RecordFailure(acc.ID, "m2", until1, "m2 限流"); err != nil {
+		t.Fatalf("记 m2 失败: %v", err)
+	}
+	got, err = st.GetAccount("ds1")
+	if err != nil {
+		t.Fatalf("再读账号: %v", err)
+	}
+	if got.ModelFailures["m1"].FailStreak != 2 || got.ModelFailures["m2"].FailStreak != 1 {
+		t.Fatalf("连续失败次数 m1/m2 = %d/%d，期望 2/1",
+			got.ModelFailures["m1"].FailStreak, got.ModelFailures["m2"].FailStreak)
+	}
+
+	if err := st.ClearFailure(acc.ID, "m1"); err != nil {
+		t.Fatalf("清 m1: %v", err)
+	}
+	got, err = st.GetAccount("ds1")
+	if err != nil {
+		t.Fatalf("清后读账号: %v", err)
+	}
+	if f := got.ModelFailures["m1"]; f.FailStreak != 0 || f.CooldownUntilMS != 0 {
+		t.Fatalf("m1 没清干净: %+v", f)
+	}
+	if got.ModelFailures["m2"].FailStreak != 1 {
+		t.Fatalf("清 m1 不该清 m2: %+v", got.ModelFailures["m2"])
+	}
+
+	if err := st.ClearFailures(acc.ID); err != nil {
+		t.Fatalf("清全部: %v", err)
+	}
+	got, err = st.GetAccount("ds1")
+	if err != nil {
+		t.Fatalf("清全部后读账号: %v", err)
+	}
+	if len(got.ModelFailures) != 0 {
+		t.Fatalf("清全部后仍有冷却: %+v", got.ModelFailures)
 	}
 }
 

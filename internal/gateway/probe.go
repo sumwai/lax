@@ -33,10 +33,10 @@ type ProbeStep struct {
 	// 「上游有 0 个模型」与「不知道几个」要能分开：输出里前者显示 0，后者显示 -。
 	Models      int
 	ModelsKnown bool
-	// Model 也只有列表那一段有意义：清单里的第一个模型名（与 model sync 同一份解析、排序去重后的
-	// 第一项）。账号自己还没有模型时，最小调用拿它当模型名——列表已经给出了一个真实存在的名字，
-	// 再用固定名字去打会把「模型名不对」误报成账号失败。空串表示这一步没拿到名字
-	// （列表接口没成，或上游返回的不是模型列表）。
+	// Model 记录这一步实际用到的模型名。列表那一段是清单里的第一个模型（与 model sync 同一份解析、
+	// 排序去重后的第一项），账号自己还没有模型时，最小调用拿它当模型名——列表已经给出了一个真实存在的
+	// 名字，再用固定名字去打会把「模型名不对」误报成账号失败。最小调用那一段记录最终选中的名字，
+	// 冷却只落在这个账号-模型上。空串表示这一步没拿到名字（列表接口没成，或上游返回的不是模型列表）。
 	Model   string
 	Latency time.Duration
 	Message string
@@ -248,6 +248,7 @@ func (s *Server) probeMinimalCall(ctx context.Context, a store.Account, listNote
 			Blocks: []translate.Block{{Kind: translate.BlockText, Text: "ping"}},
 		}},
 	}
+	step.Model = model
 	// 账号探活按账号所属厂商的有效默认协议打：它检验的是凭据与账号整体可用性，
 	// 不跟模型上的协议发现结果走（那个由 model probe 负责）。账号行不再存协议，
 	// a.Protocol 就是这个派生值；算不出来时先报配置缺什么，不拿默认分支去打 chat。
@@ -301,23 +302,32 @@ func (s *Server) probeMinimalCall(ctx context.Context, a store.Account, listNote
 
 // applyProbeState 按结论更新账号状态，是 `account test` 唯一的写入路径：两段都只经它落库，
 // 冷却、清零与停用不会长出第二套算法：两个阶段、几条命令都只经过这里。2xx 启用账号并清零
-// （冷却、last_error 与 fail_streak 一起），401 停用并把错误写进 last_error，429/5xx 与连接层
-// 失败按连续失败次数与三档冷却（见 cooldownKind），其它 4xx 只报原话、不动状态。同一份结论
-// 永远算出同一个时长，冷却不加抖动（加了抖动，两个账号在同一时刻被限流会锁上不同的时长，
-// 排查时看不出规律）。
+// （该账号全部模型的冷却、last_error 与 fail_streak 一起），401 停用并把错误写进 last_error，
+// 429/5xx 与连接层失败按这次探活实际使用的模型、该模型的连续失败次数与三档冷却（见 cooldownKind），
+// 其它 4xx 只报原话、不动状态。列表那一段失败时用账号清单第一项作为冷却对象；名称都没有时
+// 只报错、不打冷却——没有模型名就定位不到账号-模型行。同一份结论永远算出同一个时长，
+// 冷却不加抖动（加了抖动，两个账号在同一时刻被限流会锁上不同的时长，排查时看不出规律）。
 func (s *Server) applyProbeState(a store.Account, step ProbeStep) error {
 	switch {
 	case step.OK:
 		if err := s.store.SetEnabled(a.ID, true, ""); err != nil {
 			return err
 		}
-		return s.store.ClearFailure(a.ID)
+		return s.store.ClearFailures(a.ID)
 	case step.Status == http.StatusUnauthorized:
 		// 401 才是凭据问题。403 多为套餐或模型权限，凭据本身可用，不停用账号。
 		return s.store.SetEnabled(a.ID, false, step.Message)
 	case account.Retryable(step.Status):
-		until := s.now().Add(account.Cooldown(cooldownKind(step.Status, step.Transport), a.FailStreak)).Unix()
-		return s.store.RecordFailure(a.ID, until, step.Message)
+		model := step.Model
+		if model == "" {
+			model = firstModelName(a.Models)
+		}
+		if model == "" {
+			return nil
+		}
+		untilMS := s.now().Add(account.Cooldown(cooldownKind(step.Status, step.Transport),
+			account.FailStreak(a, model))).UnixMilli()
+		return s.store.RecordFailure(a.ID, model, untilMS, step.Message)
 	}
 	return nil
 }

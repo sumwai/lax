@@ -146,6 +146,8 @@ type accountModelRow struct {
 	HTTPStatus      int      `gorm:"column:http_status;not null;default:0"`
 	Error           string   `gorm:"column:error;not null;default:''"`
 	CheckedAt       int64    `gorm:"column:checked_at;not null;default:0"`
+	CooldownUntilMS *int64   `gorm:"column:cooldown_until_ms"`
+	FailStreak      int      `gorm:"column:fail_streak;not null;default:0"`
 	Protocol        string   `gorm:"column:protocol;not null;default:''"`
 	ContextWindow   *int64   `gorm:"column:context_window"`
 	MaxOutput       *int64   `gorm:"column:max_output"`

@@ -589,7 +589,8 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			// 重试会把半截响应当成新请求再打一遍，而这一次的结局已经写在客户端那边了。
 			// 这类失败因此也不算连接层失败，它与「有没有拿到响应」无关。
 			state.Failure = true
-			state.CooldownUntil = s.now().Add(account.Cooldown(cooldownKind(res.status, res.transport), cand.FailStreak)).Unix()
+			state.CooldownUntilMS = s.now().Add(account.Cooldown(cooldownKind(res.status, res.transport),
+				account.FailStreak(cand, req.Model))).UnixMilli()
 			state.LastError = res.message
 		}
 		if err := s.store.RecordAttempt(rec, state); err != nil {

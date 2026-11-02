@@ -87,7 +87,7 @@ func cmdAccountSetEnabled(e *Env, args []string, sub string, enabled bool) error
 	}
 	if enabled {
 		// 手工启用意味着人工确认过，顺手清掉冷却，不用再等。
-		if err := a.st.ClearFailure(acc.ID); err != nil {
+		if err := a.st.ClearFailures(acc.ID); err != nil {
 			return err
 		}
 	}
@@ -379,8 +379,8 @@ func cmdAccountLs(e *Env, args []string) error {
 	if err != nil {
 		return err
 	}
-	counts := countModels(modelCounts)
 	now := time.Now()
+	counts := countModels(modelCounts, now)
 
 	if e.JSON {
 		out := make([]map[string]any, 0, len(accounts))
@@ -389,16 +389,17 @@ func cmdAccountLs(e *Env, args []string) error {
 			// protocol 与 base_url 都是厂商行派生的只读值：协议取厂商的有效默认协议
 			// 协议取厂商的有效默认协议，地址取厂商的 base_url，厂商行不在时都是空串。
 			out = append(out, map[string]any{
-				"name":           acc.Name,
-				"provider":       acc.Provider,
-				"protocol":       acc.Protocol,
-				"base_url":       acc.BaseURL,
-				"models":         acc.Models,
-				"priority":       acc.Priority,
-				"enabled":        acc.Enabled,
-				"status":         accountStatus(acc, now),
-				"cooldown_until": acc.CooldownUntil,
-				"last_error":     acc.LastError,
+				"name":             acc.Name,
+				"provider":         acc.Provider,
+				"protocol":         acc.Protocol,
+				"base_url":         acc.BaseURL,
+				"models":           acc.Models,
+				"priority":         acc.Priority,
+				"enabled":          acc.Enabled,
+				"status":           accountStatus(acc, counts[acc.ID]),
+				"cooling_models":   counts[acc.ID].Cooling,
+				"next_cooldown_ms": counts[acc.ID].NextCooldownMS,
+				"last_error":       acc.LastError,
 				// 与文本输出的「N 可用 / M 已登记」同一组计数：两个数都来自 account_models，
 				// usable 数 access='allowed' 的行，synced 数全部行。
 				"models_usable": c.Usable,
@@ -424,7 +425,7 @@ func cmdAccountLs(e *Env, args []string) error {
 			protocolCell(acc.Protocol, counts[acc.ID].Protocols),
 			modelsCell(counts[acc.ID]),
 			fmt.Sprintf("%d", acc.Priority),
-			accountStatus(acc, now),
+			accountStatus(acc, counts[acc.ID]),
 		})
 	}
 	fmt.Fprint(e.Stdout, renderTable([]string{"名称", "厂商", "地址", "协议", "模型", "优先级", "状态"}, rows))
@@ -436,12 +437,14 @@ func cmdAccountLs(e *Env, args []string) error {
 // Total 是这个账号在 account_models 里的全部行数：同步、手填与探活都会留行。
 // Protocols 是模型行上发现过的协议，升序去重，含与账号默认协议相同的那些。
 type modelCount struct {
-	Total     int
-	Usable    int
-	Protocols []string
+	Total          int
+	Usable         int
+	Cooling        int
+	NextCooldownMS int64
+	Protocols      []string
 }
 
-func countModels(rows []store.AccountModel) map[int64]modelCount {
+func countModels(rows []store.AccountModel, now time.Time) map[int64]modelCount {
 	out := map[int64]modelCount{}
 	seen := map[int64]map[string]bool{}
 	for _, r := range rows {
@@ -449,6 +452,12 @@ func countModels(rows []store.AccountModel) map[int64]modelCount {
 		c.Total++
 		if r.Access == store.AccessAllowed {
 			c.Usable++
+		}
+		if r.CooldownUntilMS > now.UnixMilli() {
+			c.Cooling++
+			if r.CooldownUntilMS > c.NextCooldownMS {
+				c.NextCooldownMS = r.CooldownUntilMS
+			}
 		}
 		if r.Protocol != "" {
 			if seen[r.AccountID] == nil {
@@ -519,12 +528,12 @@ func modelsCell(c modelCount) string {
 	return fmt.Sprintf("%d 可用 / %d 已登记", c.Usable, c.Total)
 }
 
-func accountStatus(acc store.Account, now time.Time) string {
+func accountStatus(acc store.Account, c modelCount) string {
 	if !acc.Enabled {
 		return "停用"
 	}
-	if acc.CooldownUntil > now.Unix() {
-		return "冷却至 " + time.Unix(acc.CooldownUntil, 0).Format("15:04:05")
+	if c.Cooling > 0 {
+		return fmt.Sprintf("%d 个模型冷却", c.Cooling)
 	}
 	return "正常"
 }
@@ -813,12 +822,14 @@ func cmdModelLs(e *Env, args []string) error {
 				order = append(order, r.Model)
 			}
 			ent.accounts = append(ent.accounts, modelAccountJSON{
-				Name:       acc.Name,
-				Status:     info.Access,
-				Protocol:   info.Protocol,
-				HTTPStatus: r.HTTPStatus,
-				CheckedAt:  r.CheckedAt,
-				Error:      r.Error,
+				Name:            acc.Name,
+				Status:          info.Access,
+				Protocol:        info.Protocol,
+				HTTPStatus:      r.HTTPStatus,
+				CheckedAt:       r.CheckedAt,
+				CooldownUntilMS: info.CooldownUntilMS,
+				FailStreak:      info.FailStreak,
+				Error:           r.Error,
 			})
 		}
 	}
@@ -851,7 +862,7 @@ func cmdModelLs(e *Env, args []string) error {
 		ent := byModel[m]
 		names := make([]string, 0, len(ent.accounts))
 		for _, ae := range ent.accounts {
-			names = append(names, fmt.Sprintf("%s(%s)", ae.Name, modelAccessText(ae.Status, ae.CheckedAt)))
+			names = append(names, fmt.Sprintf("%s(%s)", ae.Name, modelAccessText(ae.Status, ae.CheckedAt, ae.CooldownUntilMS, time.Now())))
 		}
 		price := "未定价"
 		if ent.priceIn != nil || ent.priceOut != nil {
@@ -877,9 +888,11 @@ func cmdModelLs(e *Env, args []string) error {
 // HTTPStatus、CheckedAt 与 Error 是同一行上的探活事实：脚本靠这三列判断「可用」是手写进来
 // 还是真打过一条上游请求，不必再跑一次 model show。
 type modelAccountJSON struct {
-	Name     string `json:"name"`
-	Status   string `json:"status"`
-	Protocol string `json:"protocol"`
+	Name            string `json:"name"`
+	Status          string `json:"status"`
+	Protocol        string `json:"protocol"`
+	CooldownUntilMS int64  `json:"cooldown_until_ms"`
+	FailStreak      int    `json:"fail_streak"`
 	// HTTPStatus 为 0 表示没探过（同步、手写与未判定的行就是这一档）。
 	HTTPStatus int `json:"http_status"`
 	// CheckedAt 是探活时间的 Unix 秒，0 表示没探过。
@@ -889,7 +902,10 @@ type modelAccountJSON struct {
 
 // modelAccessText 把可达性换成人话。「可用」只给探过的 allowed 行：刚同步进来或手填的
 // allowed 行还是一次都没验证过的，写成「可用」会让人以为这些模型已经试通了。
-func modelAccessText(access string, checkedAt int64) string {
+func modelAccessText(access string, checkedAt int64, cooldownUntilMS int64, now time.Time) string {
+	if cooldownUntilMS > now.UnixMilli() {
+		return "冷却至 " + cooldownClock(cooldownUntilMS)
+	}
 	switch access {
 	case store.AccessAllowed:
 		if checkedAt == 0 {
@@ -905,6 +921,12 @@ func modelAccessText(access string, checkedAt int64) string {
 	default:
 		return access
 	}
+}
+
+// cooldownClock 把 Unix 毫秒写成带毫秒的本地时间：500 毫秒的冷却如果只显示到秒，
+// 同一秒内的截止时间看起来与现在没有区别。
+func cooldownClock(ms int64) string {
+	return time.UnixMilli(ms).Format("15:04:05.000")
 }
 
 // tokenCell 是 model ls 里长度类元数据的单元格：目录里没填就是空，写 - 与别的空值列一致。

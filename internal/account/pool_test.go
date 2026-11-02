@@ -9,10 +9,19 @@ import (
 )
 
 func acc(id int64, name string, priority int, models []string, enabled bool, cooldownUntil int64) store.Account {
-	return store.Account{
+	a := store.Account{
 		ID: id, Name: name, Priority: priority, Models: models,
-		Enabled: enabled, CooldownUntil: cooldownUntil,
+		Enabled: enabled,
 	}
+	if cooldownUntil > 0 {
+		a.ModelFailures = map[string]store.ModelFailure{}
+		for _, model := range models {
+			a.ModelFailures[model] = store.ModelFailure{
+				CooldownUntilMS: time.Unix(cooldownUntil, 0).UnixMilli(),
+			}
+		}
+	}
+	return a
 }
 
 func TestCandidatesFiltersAndOrders(t *testing.T) {
@@ -106,9 +115,30 @@ func TestCandidatesStickySession(t *testing.T) {
 	}
 }
 
+// 冷却按账号-模型隔离：同一个账号的一个模型冷却时，另一个模型照样是候选。
+func TestCandidatesCooldownIsPerModel(t *testing.T) {
+	now := time.Unix(1000, 0)
+	a := acc(1, "a", 100, []string{"m1", "m2"}, true, 0)
+	a.ModelFailures = map[string]store.ModelFailure{
+		"m1": {CooldownUntilMS: now.Add(time.Minute).UnixMilli(), FailStreak: 2},
+	}
+	if got := account.Candidates([]store.Account{a}, "m1", now, ""); len(got) != 0 {
+		t.Fatalf("m1 冷却时仍有候选: %+v", got)
+	}
+	if got := account.Candidates([]store.Account{a}, "m2", now, ""); len(got) != 1 {
+		t.Fatalf("m2 不该被 m1 的冷却挡住: %+v", got)
+	}
+	if got := account.FailStreak(a, "m1"); got != 2 {
+		t.Fatalf("m1 连续失败次数 = %d，期望 2", got)
+	}
+	if got := account.FailStreak(a, "m2"); got != 0 {
+		t.Fatalf("m2 连续失败次数 = %d，期望 0", got)
+	}
+}
+
 func TestCooldownGrowsAndCaps(t *testing.T) {
 	// 三档起始值、翻倍序列与上限都一样长，只有底数不同：连接层 2 秒、上游 5xx 10 秒、
-	// 限流 60 秒。
+	// 限流 500 毫秒。
 	cases := []struct {
 		name string
 		kind account.FailureKind
@@ -116,7 +146,7 @@ func TestCooldownGrowsAndCaps(t *testing.T) {
 	}{
 		{"连接层", account.KindTransport, 2 * time.Second},
 		{"上游 5xx", account.KindServer, 10 * time.Second},
-		{"限流", account.KindRateLimit, time.Minute},
+		{"限流", account.KindRateLimit, 500 * time.Millisecond},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

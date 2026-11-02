@@ -337,6 +337,50 @@ func TestAccountLsShowsProviderAddressAndProtocol(t *testing.T) {
 	}
 }
 
+// account ls 按账号-模型展示冷却：单个模型冷却不再把整个账号标成冷却，
+// --json 用 cooling_models 与 next_cooldown_ms 报同一份事实。
+func TestAccountLsShowsPerModelCooldown(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+	addAccount(t, "ds1", "deepseek", "", "", "--key", "sk-1", "--models", "m1,m2")
+
+	st, _ := mustStore(t)
+	acc, err := st.GetAccount("ds1")
+	if err != nil {
+		t.Fatalf("读账号: %v", err)
+	}
+	until := time.Now().Add(time.Hour).UnixMilli()
+	if err := st.RecordFailure(acc.ID, "m1", until, "m1 限流"); err != nil {
+		t.Fatalf("给 m1 打冷却: %v", err)
+	}
+
+	code, out, stderr := run(t, "account", "ls", "--json")
+	if code != 0 {
+		t.Fatalf("account ls --json 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var rows []struct {
+		Name           string `json:"name"`
+		Status         string `json:"status"`
+		CoolingModels  int    `json:"cooling_models"`
+		NextCooldownMS int64  `json:"next_cooldown_ms"`
+	}
+	mustJSON(t, out, &rows)
+	if len(rows) != 1 {
+		t.Fatalf("账号行数 = %d，期望 1", len(rows))
+	}
+	if rows[0].Status != "1 个模型冷却" || rows[0].CoolingModels != 1 || rows[0].NextCooldownMS != until {
+		t.Fatalf("account ls --json = %+v，期望只报 1 个模型冷却且截止时间为 %d", rows[0], until)
+	}
+
+	code, out, stderr = run(t, "account", "ls")
+	if code != 0 {
+		t.Fatalf("account ls 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if line := accountLsLine(t, out, "ds1"); !strings.Contains(line, "1 个模型冷却") {
+		t.Fatalf("状态列 = %q，期望 1 个模型冷却", line)
+	}
+}
+
 // accountLsLine 从 account ls 的表格里挑出某个账号那一行：用例要逐列看地址与协议，
 // 只找子串分不清哪一列写了什么。
 func accountLsLine(t *testing.T, out, name string) string {
@@ -392,7 +436,7 @@ func TestAccountSetRotatesKey(t *testing.T) {
 	if plain, err := secret.Decrypt(key, oldCipher); err != nil || string(plain) != "sk-old" {
 		t.Fatalf("旧凭据解密 = %q, %v，期望 sk-old", plain, err)
 	}
-	if err := st.RecordFailure(acc.ID, time.Now().Add(time.Hour).Unix(), "上游 429"); err != nil {
+	if err := st.RecordFailure(acc.ID, "m1", time.Now().Add(time.Hour).UnixMilli(), "上游 429"); err != nil {
 		t.Fatalf("造失败状态: %v", err)
 	}
 	if err := st.SetEnabled(acc.ID, false, "手工停用"); err != nil {

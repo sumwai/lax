@@ -176,8 +176,9 @@ func TestCatalogKeepsModelWhileAccountCools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读账号: %v", err)
 	}
-	if acc.CooldownUntil <= time.Now().Unix() || acc.FailStreak != 1 {
-		t.Fatalf("账号没进冷却：cooldown = %d，fail_streak = %d", acc.CooldownUntil, acc.FailStreak)
+	failure := acc.ModelFailures["deepseek-v4-pro"]
+	if failure.CooldownUntilMS <= time.Now().UnixMilli() || failure.FailStreak != 1 {
+		t.Fatalf("账号没进冷却：cooldown = %d，fail_streak = %d", failure.CooldownUntilMS, failure.FailStreak)
 	}
 
 	status, listBody, _ := getJSON(t, srv.URL+"/v1/models")

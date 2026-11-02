@@ -20,17 +20,25 @@ func closedURL(t *testing.T) string {
 	return url
 }
 
-// assertCooldown 检查账号的 cooldown_until 离 before 约等于 want：允许一秒的截断误差
-// （cooldown_until 是秒级时间戳），向后放宽两秒吸收测试本身的耗时。
-func assertCooldown(t *testing.T, f *fixture, name string, want time.Duration, before time.Time) {
+// assertCooldown 检查账号-模型的冷却截止时间离 before 约等于 want。时间戳是毫秒级，
+// 500 毫秒的档位也能直接比较；向后放宽两秒吸收测试本身的耗时。
+func assertCooldown(t *testing.T, f *fixture, name, model string, want time.Duration, before time.Time) {
 	t.Helper()
-	_, _, cooldown, _ := f.mustAccount(t, name)
-	if cooldown == 0 {
-		t.Fatalf("账号 %s 没有进冷却", name)
+	acc, err := f.st.GetAccount(name)
+	if err != nil {
+		t.Fatalf("读账号: %v", err)
 	}
-	got := time.Unix(cooldown, 0).Sub(before)
-	if got < want-time.Second || got > want+2*time.Second {
-		t.Fatalf("冷却 = %v，期望约 %v", got, want)
+	until := acc.ModelFailures[model].CooldownUntilMS
+	if until == 0 {
+		t.Fatalf("账号 %s 的模型 %s 没有进冷却", name, model)
+	}
+	got := time.UnixMilli(until).Sub(before)
+	slack := want / 4
+	if slack < 100*time.Millisecond {
+		slack = 100 * time.Millisecond
+	}
+	if got < want-slack || got > want+2*time.Second {
+		t.Fatalf("账号 %s 的模型 %s 冷却 = %v，期望约 %v", name, model, got, want)
 	}
 }
 
@@ -60,14 +68,14 @@ func TestTransportFailureCoolsTwoSeconds(t *testing.T) {
 		t.Fatalf("请求记录 = %+v，期望 http_status 502 且 ok=0", recs[0])
 	}
 
-	assertCooldown(t, f, "dead", 2*time.Second, before)
-	if _, streak, _, _ := f.mustAccount(t, "dead"); streak != 1 {
+	assertCooldown(t, f, "dead", "m1", 2*time.Second, before)
+	if streak := f.modelFailStreak(t, "dead", "m1"); streak != 1 {
 		t.Fatalf("fail_streak = %d，期望 1", streak)
 	}
 }
 
-// TestStatusFailureCoolsByStatusCode 钉住拿到状态的那两档没有变：上游 500 从 10 秒起，
-// 429 从 60 秒起，与连接层那一档分开算。
+// TestStatusFailureCoolsByStatusCode 钉住拿到状态的那两档：上游 500 从 10 秒起，
+// 429 从 500 毫秒起，与连接层那一档分开算。
 func TestStatusFailureCoolsByStatusCode(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -75,7 +83,7 @@ func TestStatusFailureCoolsByStatusCode(t *testing.T) {
 		want   time.Duration
 	}{
 		{"上游 500", http.StatusInternalServerError, 10 * time.Second},
-		{"限流 429", http.StatusTooManyRequests, time.Minute},
+		{"限流 429", http.StatusTooManyRequests, 500 * time.Millisecond},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -104,7 +112,7 @@ func TestStatusFailureCoolsByStatusCode(t *testing.T) {
 				t.Fatalf("请求记录 = %+v，期望 http_status %d 且 ok=0", recs, c.status)
 			}
 
-			assertCooldown(t, f, "up", c.want, before)
+			assertCooldown(t, f, "up", "m1", c.want, before)
 		})
 	}
 }
@@ -116,7 +124,7 @@ func TestTransportFailureDoublesByFailStreak(t *testing.T) {
 	acc := f.add(t, "flaky", gateway.ProtocolChat, closedURL(t), "sk-test", []string{"m1"}, 100)
 	// 先记两次失败、冷冷却清零，账号仍在候选里：下一次连接层失败按 streak=2 翻两倍成 8 秒。
 	for i := 0; i < 2; i++ {
-		if err := f.st.RecordFailure(acc.ID, 0, "上一次失败"); err != nil {
+		if err := f.st.RecordFailure(acc.ID, "m1", 0, "上一次失败"); err != nil {
 			t.Fatalf("记失败: %v", err)
 		}
 	}
@@ -128,8 +136,8 @@ func TestTransportFailureDoublesByFailStreak(t *testing.T) {
 		t.Fatalf("状态 = %d，期望 503（唯一候选失败），响应 %s", status, body)
 	}
 
-	assertCooldown(t, f, "flaky", 8*time.Second, before)
-	if _, streak, _, _ := f.mustAccount(t, "flaky"); streak != 3 {
+	assertCooldown(t, f, "flaky", "m1", 8*time.Second, before)
+	if streak := f.modelFailStreak(t, "flaky", "m1"); streak != 3 {
 		t.Fatalf("fail_streak = %d，期望 3", streak)
 	}
 }

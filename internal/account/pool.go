@@ -11,7 +11,7 @@ import (
 
 const (
 	// CooldownRateLimit 是首次撞上 429 后的冷却时长。
-	CooldownRateLimit = time.Minute
+	CooldownRateLimit = 500 * time.Millisecond
 	// CooldownServer 是上游明确回了 5xx 后首次的冷却时长。
 	CooldownServer = 10 * time.Second
 	// CooldownTransport 是没有拿到任何 HTTP 响应时首次的冷却时长：连不上、TLS 握手失败、
@@ -111,15 +111,22 @@ func SettledFresh(status string, checkedAt int64, now time.Time, maxAge time.Dur
 	return age >= 0 && age <= maxAge
 }
 
-// Available 判断账号此刻能否接请求。
-func Available(a store.Account, now time.Time) bool {
+// AvailableForModel 判断账号此刻能否接这个模型的请求：账号停用或这个账号-模型在冷却中都不行。
+// 冷却按账号-模型隔离，同账号的其它模型不受影响（见 store.ModelFailure）。
+func AvailableForModel(a store.Account, model string, now time.Time) bool {
 	if !a.Enabled {
 		return false
 	}
-	if a.CooldownUntil == 0 {
+	f := a.ModelFailures[model]
+	if f.CooldownUntilMS == 0 {
 		return true
 	}
-	return now.Unix() >= a.CooldownUntil
+	return now.UnixMilli() >= f.CooldownUntilMS
+}
+
+// FailStreak 返回这个账号在这个模型上的连续失败次数，用于冷却翻倍。
+func FailStreak(a store.Account, model string) int {
+	return a.ModelFailures[model].FailStreak
 }
 
 // Providers 列出模型列表覆盖该模型的账号，不看 enabled 与冷却。
@@ -140,7 +147,7 @@ func Providers(accounts []store.Account, model string) []store.Account {
 func Candidates(accounts []store.Account, model string, now time.Time, session string) []store.Account {
 	var out []store.Account
 	for _, a := range accounts {
-		if !Available(a, now) || !Supports(a, model) {
+		if !AvailableForModel(a, model, now) || !Supports(a, model) {
 			continue
 		}
 		out = append(out, a)

@@ -331,18 +331,22 @@ func TestFailoverOnRateLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("读账号: %v", err)
 	}
-	if acc.CooldownUntil == 0 {
+	failure := acc.ModelFailures["m1"]
+	if failure.CooldownUntilMS == 0 {
 		t.Fatalf("被限流的账号没有进冷却: %+v", acc)
 	}
-	if acc.FailStreak != 1 {
-		t.Fatalf("连续失败次数 = %d，期望 1", acc.FailStreak)
+	if failure.FailStreak != 1 {
+		t.Fatalf("连续失败次数 = %d，期望 1", failure.FailStreak)
+	}
+	if remaining := time.Until(time.UnixMilli(failure.CooldownUntilMS)); remaining > time.Second || remaining < 100*time.Millisecond {
+		t.Fatalf("429 冷却剩余 = %v，期望约 500ms", remaining)
 	}
 
 	healthyAcc, err := f.st.GetAccount("healthy")
 	if err != nil {
 		t.Fatalf("读账号: %v", err)
 	}
-	if healthyAcc.FailStreak != 0 || healthyAcc.CooldownUntil != 0 {
+	if len(healthyAcc.ModelFailures) != 0 {
 		t.Fatalf("成功的账号不应留下失败计数: %+v", healthyAcc)
 	}
 
@@ -352,6 +356,37 @@ func TestFailoverOnRateLimit(t *testing.T) {
 	}
 	if len(recs) != 2 {
 		t.Fatalf("请求记录数 = %d，期望 2（失败一次 + 成功一次）", len(recs))
+	}
+}
+
+// 成功一次只清这次用到的账号-模型，不碰同账号其它模型已有的冷却。
+func TestSuccessClearsOnlyUsedModel(t *testing.T) {
+	f := newFixture(t)
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, chatCompletion)
+	}))
+	defer up.Close()
+
+	acc := f.add(t, "ds1", gateway.ProtocolChat, up.URL, "sk-test", []string{"m1", "m2"}, 100)
+	until := time.Now().Add(time.Minute).UnixMilli()
+	if err := f.st.RecordFailure(acc.ID, "m2", until, "m2 限流"); err != nil {
+		t.Fatalf("给 m2 打冷却: %v", err)
+	}
+	srv := f.server(t)
+
+	status, body := postMessages(t, srv, `{"model":"m1","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	if status != http.StatusOK {
+		t.Fatalf("状态 = %d，响应 %s", status, body)
+	}
+	got, err := f.st.GetAccount("ds1")
+	if err != nil {
+		t.Fatalf("读账号: %v", err)
+	}
+	if _, ok := got.ModelFailures["m1"]; ok {
+		t.Fatalf("m1 成功后不该留下冷却: %+v", got.ModelFailures["m1"])
+	}
+	if f := got.ModelFailures["m2"]; f.FailStreak != 1 || f.CooldownUntilMS != until {
+		t.Fatalf("m2 的冷却被 m1 的成功清掉了: %+v", f)
 	}
 }
 
@@ -521,7 +556,7 @@ func TestAllProvidersCoolingOrDisabled(t *testing.T) {
 	f := newFixture(t)
 	cooling := f.add(t, "cooling", gateway.ProtocolChat, "http://127.0.0.1:1", "sk-1", []string{"m1"}, 100)
 	disabled := f.add(t, "disabled", gateway.ProtocolChat, "http://127.0.0.1:1", "sk-2", []string{"m1"}, 200)
-	if err := f.st.RecordFailure(cooling.ID, time.Now().Add(time.Minute).Unix(), "429 冷却中"); err != nil {
+	if err := f.st.RecordFailure(cooling.ID, "m1", time.Now().Add(time.Minute).UnixMilli(), "429 冷却中"); err != nil {
 		t.Fatalf("设置冷却: %v", err)
 	}
 	if err := f.st.SetEnabled(disabled.ID, false, "手工停用"); err != nil {
@@ -566,7 +601,7 @@ func TestCandidateErrorsDoNotLeakKey(t *testing.T) {
 
 	// 有账号提供 m1 但正在冷却：503。可达性那一行走 ReplaceModels（`access='allowed'`），
 	// 与 `model sync` / `account add --models` 是同一条写入口。
-	if err := f.st.RecordFailure(fresh.ID, time.Now().Add(time.Minute).Unix(), "429 冷却中"); err != nil {
+	if err := f.st.RecordFailure(fresh.ID, "m1", time.Now().Add(time.Minute).UnixMilli(), "429 冷却中"); err != nil {
 		t.Fatalf("设置冷却: %v", err)
 	}
 	if _, err := f.st.ReplaceModels(fresh.ID, []string{"m1"}); err != nil {

@@ -18,6 +18,7 @@ import (
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"lax/internal/translate"
 )
@@ -67,13 +68,25 @@ type Account struct {
 	Models []string
 	// 价格不在这里：单价属于「供应商 × 模型」，厂商级标价在 provider_models、套餐差异在
 	// account_models 的覆盖列。账号行上的四个价格列由迁移 0016 删除。
-	Priority      int
-	Enabled       bool
+	Priority int
+	Enabled  bool
+	// CooldownUntil 与 FailStreak 是旧的账号级冷却字段，只作只读汇总保留：
+	// 选号按 ModelFailures 里的账号-模型状态判断，不再用这两个字段。
 	CooldownUntil int64
 	LastError     string
-	// FailStreak 是连续失败次数，跨请求累计，用于冷却翻倍。成功一次即清零。
+	// FailStreak 是各模型连续失败次数的最大值，只用于展示与旧调用方兼容。
 	FailStreak int
-	CreatedAt  int64
+	// ModelFailures 是账号-模型级冷却状态，键是模型名。没有冷却与失败记录的模型不在表里。
+	ModelFailures map[string]ModelFailure
+	CreatedAt     int64
+}
+
+// ModelFailure 是一个账号在一个模型上的冷却状态。
+type ModelFailure struct {
+	// CooldownUntilMS 是冷却截止时间，Unix 毫秒；0 表示没在冷却。
+	CooldownUntilMS int64
+	// FailStreak 是这个账号在这个模型上的连续失败次数。
+	FailStreak int
 }
 
 // RequestRecord 是一次上游尝试。
@@ -403,14 +416,19 @@ func (s *Store) withTx(fn func(*gorm.DB) error) error {
 	return s.gorm.Transaction(fn)
 }
 
-// RecordFailure 记录一次失败：冷却截止时间、最近一次错误，并把连续失败次数加一。
-func (s *Store) RecordFailure(id int64, until int64, lastErr string) error {
-	return s.withTx(func(tx *gorm.DB) error { return recordFailureTx(tx, id, until, lastErr) })
+// RecordFailure 记录一次账号-模型失败：冷却截止时间（Unix 毫秒），并把该模型的连续失败次数加一。
+func (s *Store) RecordFailure(id int64, model string, untilMS int64, lastErr string) error {
+	return s.withTx(func(tx *gorm.DB) error { return recordModelFailureTx(tx, id, model, untilMS, lastErr) })
 }
 
-// ClearFailure 清掉冷却、最近一次错误与连续失败次数。
-func (s *Store) ClearFailure(id int64) error {
-	return s.withTx(func(tx *gorm.DB) error { return clearFailureTx(tx, id) })
+// ClearFailure 清掉一个账号-模型的冷却与连续失败次数，不动同账号的其它模型。
+func (s *Store) ClearFailure(id int64, model string) error {
+	return s.withTx(func(tx *gorm.DB) error { return clearModelFailureTx(tx, id, model) })
+}
+
+// ClearFailures 清掉一个账号全部模型的冷却与连续失败次数，并清掉旧账号级字段。
+func (s *Store) ClearFailures(id int64) error {
+	return s.withTx(func(tx *gorm.DB) error { return clearAccountFailuresTx(tx, id) })
 }
 
 // SetEnabled 启用或停用账号。
@@ -419,37 +437,67 @@ func (s *Store) SetEnabled(id int64, enabled bool, lastErr string) error {
 }
 
 // RotateKey 换掉一个账号的凭据，并在同一个事务里清掉旧凭据留下的结论：
-// 清冷却、清最近错误与连续失败次数，并把账号重新启用（`account set --key`）。
+// 清该账号全部模型的冷却与连续失败次数，并把账号重新启用（`account set --key`）。
 // 换 key 意味着之前那些失败都是上一个凭据的结果，留在库里会让新 key 一上来就排在候选之外：
-// 干净的凭据应该从干净的账号状态开始。冷却、清零与启停的 SQL 复用 clearFailureTx 与 setEnabledTx，
-// 不另拼一份；`account_models` 的可达性、协议发现与覆盖值一个字不动，只换凭据与失败状态。
+// 干净的凭据应该从干净的账号状态开始。冷却、清零与启停的 SQL 复用 clearAccountFailuresTx 与
+// setEnabledTx，不另拼一份；`account_models` 的可达性、协议发现与覆盖值一个字不动，只换凭据与失败状态。
 func (s *Store) RotateKey(id int64, cipher []byte) error {
 	return s.withTx(func(tx *gorm.DB) error {
 		if err := tx.Model(&accountRow{}).Where("id = ?", id).
 			Update("key_cipher", cipher).Error; err != nil {
 			return err
 		}
-		if err := clearFailureTx(tx, id); err != nil {
+		if err := clearAccountFailuresTx(tx, id); err != nil {
 			return err
 		}
 		return setEnabledTx(tx, id, true, "")
 	})
 }
 
-// recordFailureTx 是冷却的写入口（加一），只给事务内部用。
-func recordFailureTx(tx *gorm.DB, id int64, until int64, lastErr string) error {
-	return tx.Model(&accountRow{}).Where("id = ?", id).Updates(map[string]any{
-		"cooldown_until": until,
-		"last_error":     lastErr,
-		"fail_streak":    gorm.Expr("fail_streak + 1"),
+// recordModelFailureTx 是账号-模型冷却的写入口（加一），只给事务内部用。
+// 行不存在时补一行 allowed 占位：只有选号选中的账号-模型才会走到这里，理论上行一定存在，
+// 但手工构造的请求记录与旧数据也不该让冷却写丢。
+func recordModelFailureTx(tx *gorm.DB, id int64, model string, untilMS int64, lastErr string) error {
+	if strings.TrimSpace(model) == "" {
+		return fmt.Errorf("记录冷却需要模型名：账号 %d 的哪一行都定位不了", id)
+	}
+	if err := tx.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "account_id"}, {Name: "model"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"cooldown_until_ms": untilMS,
+			"fail_streak":       gorm.Expr("fail_streak + 1"),
+		}),
+	}).Create(&accountModelRow{
+		AccountID:       id,
+		Model:           model,
+		Access:          AccessAllowed,
+		CooldownUntilMS: &untilMS,
+		FailStreak:      1,
+	}).Error; err != nil {
+		return err
+	}
+	// error 列只属于探活结论；运行时失败的最近一条留在账号行上，供 account ls 展示。
+	return tx.Model(&accountRow{}).Where("id = ?", id).Update("last_error", lastErr).Error
+}
+
+// clearModelFailureTx 是清一个账号-模型冷却的写入口，只给事务内部用。
+func clearModelFailureTx(tx *gorm.DB, id int64, model string) error {
+	return tx.Model(&accountModelRow{}).Where("account_id = ? AND model = ?", id, model).Updates(map[string]any{
+		"cooldown_until_ms": nil,
+		"fail_streak":       0,
 	}).Error
 }
 
-// clearFailureTx 是清冷却的写入口，只给事务内部用。
-func clearFailureTx(tx *gorm.DB, id int64) error {
+// clearAccountFailuresTx 清一个账号全部模型的冷却，并顺带清掉旧账号级字段。
+func clearAccountFailuresTx(tx *gorm.DB, id int64) error {
+	if err := tx.Model(&accountModelRow{}).Where("account_id = ?", id).Updates(map[string]any{
+		"cooldown_until_ms": nil,
+		"fail_streak":       0,
+	}).Error; err != nil {
+		return err
+	}
 	return tx.Model(&accountRow{}).Where("id = ?", id).Updates(map[string]any{
 		"cooldown_until": nil,
-		"last_error":     "",
 		"fail_streak":    0,
 	}).Error
 }
@@ -464,20 +512,21 @@ func setEnabledTx(tx *gorm.DB, id int64, enabled bool, lastErr string) error {
 
 // AttemptState 是一次上游尝试对账号状态的改动。三者互斥，零值表示什么都不改。
 type AttemptState struct {
-	// Failure 为真：写入 CooldownUntil 与 LastError，并把 fail_streak 加一。
+	// Failure 为真：给这次尝试的账号-模型写入 CooldownUntilMS，并把该模型的 fail_streak 加一。
 	Failure bool
-	// Clear 为真：清掉冷却、最近错误与 fail_streak。
+	// Clear 为真：清掉这次尝试的账号-模型的冷却与 fail_streak。
 	Clear bool
 	// Disable 为真：停用账号并记下 LastError。
-	Disable       bool
-	CooldownUntil int64
-	LastError     string
+	Disable bool
+	// CooldownUntilMS 是冷却截止时间，Unix 毫秒。
+	CooldownUntilMS int64
+	LastError       string
 }
 
 // RecordAttempt 在同一个事务里写一行请求记录并更新账号状态：要么一起提交，要么都不提交。
 // 一次尝试的账（requests 一行）与它的结论（冷却、清零、停用）本来就是同一件事，
 // 分开写在中途失败时会留下「有请求行但没设冷却」或者反过来，事后对不上账。
-// 冷却、清零与停用的 SQL 只在 recordFailureTx、clearFailureTx、setEnabledTx 里，这里不另拼。
+// 冷却、清零与停用的 SQL 只在 recordModelFailureTx、clearModelFailureTx、setEnabledTx 里，这里不另拼。
 func (s *Store) RecordAttempt(rec *RequestRecord, state AttemptState) error {
 	return s.withTx(func(tx *gorm.DB) error {
 		if err := insertRequestTx(tx, rec); err != nil {
@@ -485,11 +534,11 @@ func (s *Store) RecordAttempt(rec *RequestRecord, state AttemptState) error {
 		}
 		switch {
 		case state.Clear:
-			return clearFailureTx(tx, rec.AccountID)
+			return clearModelFailureTx(tx, rec.AccountID, rec.ModelUsed)
 		case state.Disable:
 			return setEnabledTx(tx, rec.AccountID, false, state.LastError)
 		case state.Failure:
-			return recordFailureTx(tx, rec.AccountID, state.CooldownUntil, state.LastError)
+			return recordModelFailureTx(tx, rec.AccountID, rec.ModelUsed, state.CooldownUntilMS, state.LastError)
 		}
 		return nil
 	})

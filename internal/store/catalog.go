@@ -110,6 +110,8 @@ type AccountModel struct {
 	HTTPStatus      int
 	Error           string
 	CheckedAt       int64
+	CooldownUntilMS int64
+	FailStreak      int
 	Protocol        string
 	ContextWindow   *int64
 	MaxOutput       *int64
@@ -128,6 +130,8 @@ type AccountModel struct {
 type ModelInfo struct {
 	Model           string
 	Access          string
+	CooldownUntilMS int64
+	FailStreak      int
 	Protocol        string
 	ContextWindow   *int64
 	MaxOutput       *int64
@@ -590,9 +594,10 @@ func (s *Store) providerModel(provider, model string) (ProviderModel, bool, erro
 }
 
 // accountModelSelect 是读可达性行的唯一列清单，几个读入口共用它。
-const accountModelSelect = `SELECT account_id, model, access, http_status, error, checked_at, protocol,
+const accountModelSelect = `SELECT account_id, model, access, http_status, error, checked_at,
 	context_window, max_output, price_in, price_out, price_cache_read, price_cache_write,
-	price_tts_char, price_audio_second
+	price_tts_char, price_audio_second, protocol,
+	COALESCE(cooldown_until_ms, 0) AS cooldown_until_ms, fail_streak
 	FROM account_models`
 
 // AccountModels 返回一个账号的模型行，按模型名升序。
@@ -623,6 +628,8 @@ func scanAccountModels(rows []accountModelRow) []AccountModel {
 			HTTPStatus:      r.HTTPStatus,
 			Error:           r.Error,
 			CheckedAt:       r.CheckedAt,
+			CooldownUntilMS: derefInt64(r.CooldownUntilMS),
+			FailStreak:      r.FailStreak,
 			Protocol:        r.Protocol,
 			ContextWindow:   r.ContextWindow,
 			MaxOutput:       r.MaxOutput,
@@ -648,9 +655,10 @@ func (s *Store) AllowedModels(accountID int64) ([]string, error) {
 	return out, err
 }
 
-// fillDerivedModels 给账号列表填上派生字段 Models（access='allowed' 的名字集合）。
-// 一次查询取回全部账号的 allowed 名字再按 account_id 归位：账号再多也只多一次查询，
-// 不按账号逐个查。
+// fillDerivedModels 给账号列表填上派生字段 Models（access='allowed' 的名字集合）与
+// ModelFailures（账号-模型级冷却）。两次查询取回全部账号的数据再按 account_id 归位：
+// 账号再多也只多两次查询，不按账号逐个查。
+// 账号级的 CooldownUntil、FailStreak 只由这里汇总，供旧调用方与展示使用；选号不读它们。
 func (s *Store) fillDerivedModels(list []Account) error {
 	if len(list) == 0 {
 		return nil
@@ -669,8 +677,43 @@ func (s *Store) fillDerivedModels(list []Account) error {
 	for _, n := range names {
 		byID[n.AccountID] = append(byID[n.AccountID], n.Model)
 	}
+
+	var failures []struct {
+		AccountID       int64
+		Model           string
+		CooldownUntilMS int64
+		FailStreak      int
+	}
+	if err := s.gorm.Model(&accountModelRow{}).
+		Select("account_id, model, COALESCE(cooldown_until_ms, 0) AS cooldown_until_ms, fail_streak").
+		Where("cooldown_until_ms IS NOT NULL OR fail_streak > 0").
+		Order("account_id").Order("model").Scan(&failures).Error; err != nil {
+		return err
+	}
+	failuresByID := make(map[int64]map[string]ModelFailure, len(list))
+	for _, f := range failures {
+		if failuresByID[f.AccountID] == nil {
+			failuresByID[f.AccountID] = map[string]ModelFailure{}
+		}
+		failuresByID[f.AccountID][f.Model] = ModelFailure{
+			CooldownUntilMS: f.CooldownUntilMS,
+			FailStreak:      f.FailStreak,
+		}
+	}
 	for i := range list {
 		list[i].Models = byID[list[i].ID]
+		list[i].ModelFailures = failuresByID[list[i].ID]
+		list[i].CooldownUntil = 0
+		list[i].FailStreak = 0
+		for _, f := range list[i].ModelFailures {
+			// 旧字段是秒级的账号级汇总：取最大的截止时间（向上取整）与最大的连续失败次数。
+			if sec := (f.CooldownUntilMS + 999) / 1000; sec > list[i].CooldownUntil {
+				list[i].CooldownUntil = sec
+			}
+			if f.FailStreak > list[i].FailStreak {
+				list[i].FailStreak = f.FailStreak
+			}
+		}
 	}
 	return nil
 }
@@ -715,6 +758,8 @@ func (s *Store) EffectiveModels(accountID int64) ([]ModelInfo, error) {
 		out = append(out, ModelInfo{
 			Model:           row.Model,
 			Access:          row.Access,
+			CooldownUntilMS: row.CooldownUntilMS,
+			FailStreak:      row.FailStreak,
 			Protocol:        resolveModelProtocol(providerDefault, pm.Protocols, row.Protocol),
 			ContextWindow:   firstOfInt(row.ContextWindow, pm.ContextWindow),
 			MaxOutput:       firstOfInt(row.MaxOutput, pm.MaxOutput),

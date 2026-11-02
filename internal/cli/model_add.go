@@ -101,7 +101,8 @@ func cmdModelAdd(e *Env, args []string) error {
 	}
 
 	fmt.Fprintf(e.Stdout, "已声明模型 %s（厂商 %s，账号 %s，%s，协议 %s）\n",
-		model, acc.Provider, acc.Name, modelAccessText(row.Access, row.CheckedAt), dashIfEmpty(effective))
+		model, acc.Provider, acc.Name,
+		modelAccessText(row.Access, row.CheckedAt, row.CooldownUntilMS, time.Now()), dashIfEmpty(effective))
 	// 下一步只探这一条路：声明过的协议排在候选最前面，写出来省掉一次猜。
 	next := fmt.Sprintf("下一步：lax model probe --account %s --model %s", acc.Name, model)
 	if effective != "" {
@@ -137,8 +138,11 @@ type modelShowRow struct {
 	// HTTPStatus 为 0 表示没探过（手写与同步的行就是这一档），不是「上游回了 0」。
 	HTTPStatus int `json:"http_status"`
 	// CheckedAt 是 Unix 秒，0 表示没探过。
-	CheckedAt int64  `json:"checked_at"`
-	Error     string `json:"error"`
+	CheckedAt int64 `json:"checked_at"`
+	// CooldownUntilMS 是这个账号-模型的冷却截止时间，Unix 毫秒；0 表示没在冷却。
+	CooldownUntilMS int64  `json:"cooldown_until_ms"`
+	FailStreak      int    `json:"fail_streak"`
+	Error           string `json:"error"`
 }
 
 // cmdModelShow 按账号列出一个模型的可达性事实。只读库：不发上游请求，也不写可达性。
@@ -199,14 +203,16 @@ func cmdModelShow(e *Env, args []string) error {
 			return err
 		}
 		rows = append(rows, modelShowRow{
-			Account:    acc.Name,
-			Provider:   acc.Provider,
-			Model:      r.Model,
-			Access:     r.Access,
-			Protocol:   protocol,
-			HTTPStatus: r.HTTPStatus,
-			CheckedAt:  r.CheckedAt,
-			Error:      r.Error,
+			Account:         acc.Name,
+			Provider:        acc.Provider,
+			Model:           r.Model,
+			Access:          r.Access,
+			Protocol:        protocol,
+			HTTPStatus:      r.HTTPStatus,
+			CheckedAt:       r.CheckedAt,
+			CooldownUntilMS: r.CooldownUntilMS,
+			FailStreak:      r.FailStreak,
+			Error:           r.Error,
 		})
 	}
 
@@ -225,7 +231,7 @@ func cmdModelShow(e *Env, args []string) error {
 			r.Account,
 			r.Model,
 			dashIfEmpty(r.Protocol),
-			modelAccessText(r.Access, r.CheckedAt),
+			modelAccessText(r.Access, r.CheckedAt, r.CooldownUntilMS, time.Now()),
 			httpStatusCell(r.HTTPStatus),
 			checkedAtCell(r.CheckedAt),
 			dashIfEmpty(r.Error),
