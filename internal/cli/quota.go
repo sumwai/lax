@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,8 +17,8 @@ import (
 
 // quotaSubs 是 quota 一组的子命令清单，组级帮助与错误提示都读它。
 var quotaSubs = []groupItem{
-	{"ls", "列出各账号的额度快照与监控设置"},
-	{"show", "查看一个账号的额度事实与监控设置"},
+	{"ls", "列出各账号的额度快照"},
+	{"show", "查看一个账号的额度明细；加 --settings 看监控设置"},
 	{"refresh", "手动刷新一个账号或全部账号的额度"},
 	{"set", "修改账号的额度监控设置（只改显式给出的项）"},
 	{"unset", "清除账号的额度监控设置（整行或某一项）"},
@@ -49,7 +50,7 @@ func cmdQuota(e *Env, args []string) error {
 }
 
 func cmdQuotaLs(e *Env, args []string) error {
-	fs := newFlagSet(e, "quota ls", "列出各账号的额度快照与监控设置")
+	fs := newFlagSet(e, "quota ls", "列出各账号的额度快照")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -145,12 +146,13 @@ func cmdQuotaLs(e *Env, args []string) error {
 }
 
 func cmdQuotaShow(e *Env, args []string) error {
-	fs := newFlagSet(e, "quota show", "查看一个账号的额度事实与监控设置")
+	fs := newFlagSet(e, "quota show", "查看一个账号的额度明细；加 --settings 看监控设置")
+	settingsOnly := fs.Bool("settings", false, "只看监控设置，不显示额度快照")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return usagef("用法：lax quota show <账号> [--json]")
+		return usagef("用法：lax quota show <账号> [--settings] [--json]")
 	}
 	a, err := openApp(e, true)
 	if err != nil {
@@ -166,6 +168,22 @@ func cmdQuotaShow(e *Env, args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// 监控设置是配置，不是额度事实：默认不跟快照混在一起，
+	// 需要时用 --settings 单独看，避免在明细下面再叠一张配置表。
+	if *settingsOnly {
+		if e.JSON {
+			return e.printJSON(map[string]any{
+				"account":  acc.Name,
+				"provider": acc.Provider,
+				"settings": quotaSettingsJSON(cfg),
+			})
+		}
+		fmt.Fprintf(e.Stdout, "%s 的额度监控设置：\n", acc.Name)
+		fmt.Fprint(e.Stdout, renderTable([]string{"项", "值"}, quotaSettingsRows(cfg)))
+		return nil
+	}
+
 	facts, found, err := a.st.QuotaSnapshot(acc.ID)
 	if err != nil {
 		return err
@@ -195,41 +213,90 @@ func cmdQuotaShow(e *Env, args []string) error {
 
 	if !found {
 		fmt.Fprintf(e.Stdout, "账号 %s 还没有额度快照。运行 lax quota refresh %s 查一次（账号仍按原样参与选号）\n", acc.Name, acc.Name)
-		fmt.Fprint(e.Stdout, quotaSettingsTable(cfg))
 		return nil
 	}
 
+	fmt.Fprint(e.Stdout, renderTable([]string{"项", "值"}, quotaFactRows(acc, facts, state, time.Now())))
+	if note := quotaFactNote(facts); note != "" {
+		fmt.Fprintf(e.Stdout, "\n%s\n", note)
+	}
+	return nil
+}
+
+// quotaFactRows 组装 quota show 的人读表格。只列对用户有意义的项：
+// 未知、未设置或这次不适用的行直接不出现，不拿一堆 "-" 撑满屏幕。
+// 到期处理方式属于监控设置，这里只回答「还有多久到期」，不显示内部动作名。
+func quotaFactRows(acc store.Account, f quota.Facts, state string, now time.Time) [][]string {
 	rows := [][]string{
 		{"账号", acc.Name},
 		{"厂商", acc.Provider},
-		{"监控来源", quotaSourceText(facts.Source)},
-		{"状态", quotaStatusText(facts.Status)},
-		{"显示名", dashIfEmpty(quotaSafeText(facts.DisplayName))},
-		{"余额", quotaBalanceCell(facts)},
-		{"本期已用", quotaAmountCell(facts.Used, facts.UsedKnown)},
-		{"币种", dashIfEmpty(facts.Currency)},
-		{"汇率", quotaRateCell(facts.FXRate)},
-		{"折合余额 USD", quotaUSDCell(facts.BalanceUSD)},
-		{"折合已用 USD", quotaUSDCell(facts.UsedUSD)},
-		{"折合总额 USD", quotaUSDCell(facts.TotalUSD)},
-		{"剩余比例", quotaPercentCell(facts.RemainingRatio)},
-		{"周期结束", quotaTimeCell(facts.PeriodEnd)},
-		{"套餐", dashIfEmpty(facts.PlanID)},
-		{"套餐状态", dashIfEmpty(facts.PlanStatus)},
-		{"续费", quotaRenewalText(facts)},
-		{"5 小时窗口", quotaWindowText(facts.FiveHour)},
-		{"每周窗口", quotaWindowText(facts.Weekly)},
-		{"上游用量", quotaUsageText(facts.Usage)},
-		{"上游可用", quotaAvailableText(facts.Available)},
-		{"刷新时间", quotaCheckedAtCell(facts.CheckedAt)},
-		{"备注", dashIfEmpty(quotaSafeText(facts.LastError))},
-		{"失败端点", quotaSourceErrorsText(facts.SourceErrors)},
-		{"到期状态", quotaExpiryText(state, action)},
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"项", "值"}, rows))
-	fmt.Fprint(e.Stdout, "\n"+quotaSettingsTable(cfg))
-	fmt.Fprintln(e.Stdout, "说明：5 小时/每周窗口是限流窗口，不是月度总额；上游用量是所有客户端合计，仅供查看，不参与选号。")
-	return nil
+	// 来源与厂商一致时是重复信息；只有用户强制换过来源才值得单独显示。
+	if f.Source != "" && f.Source != acc.Provider {
+		rows = append(rows, []string{"额度接口", quotaSourceText(f.Source)})
+	}
+	rows = append(rows, []string{"状态", quotaStatusText(f.Status)})
+	if name := quotaSafeText(f.DisplayName); name != "" {
+		rows = append(rows, []string{"显示名", name})
+	}
+	rows = append(rows, []string{"余额", quotaBalanceCell(f)})
+	if f.UsedKnown {
+		rows = append(rows, []string{"本期已用", quotaMoneyCell(f.Used, true, f.Currency)})
+	}
+	if f.FXRate != nil && *f.FXRate != 1 {
+		rows = append(rows, []string{"汇率", quotaRateCell(f.FXRate)})
+		if f.BalanceUSD != nil {
+			rows = append(rows, []string{"折合余额", quotaUSDWithUnit(f.BalanceUSD)})
+		}
+		if f.UsedUSD != nil {
+			rows = append(rows, []string{"折合已用", quotaUSDWithUnit(f.UsedUSD)})
+		}
+	}
+	if f.TotalUSD != nil {
+		rows = append(rows, []string{"折合总额", quotaUSDWithUnit(f.TotalUSD)})
+	}
+	if f.RemainingRatio != nil {
+		rows = append(rows, []string{"剩余比例", quotaPercentCell(f.RemainingRatio)})
+	}
+	if f.PeriodEnd > 0 {
+		rows = append(rows, []string{"周期结束", quotaPeriodEndCell(f.PeriodEnd, state, now)})
+	}
+	if plan := quotaPlanCell(f); plan != "" {
+		rows = append(rows, []string{"套餐", plan})
+	}
+	if f.PlanID != "" || f.PeriodEnd > 0 {
+		rows = append(rows, []string{"续费", quotaRenewalText(f)})
+	}
+	if f.FiveHour != nil {
+		rows = append(rows, []string{"5 小时窗口", quotaWindowText(f.FiveHour)})
+	}
+	if f.Weekly != nil {
+		rows = append(rows, []string{"每周窗口", quotaWindowText(f.Weekly)})
+	}
+	if usage := quotaUsageText(f.Usage); usage != "-" {
+		rows = append(rows, []string{"上游用量", usage})
+	}
+	if f.Available != nil {
+		rows = append(rows, []string{"上游可用", quotaAvailableText(f.Available)})
+	}
+	rows = append(rows, []string{"刷新时间", quotaCheckedAtCell(f.CheckedAt)})
+	if note := quotaSafeText(f.LastError); note != "" {
+		rows = append(rows, []string{"备注", note})
+	}
+	if errs := quotaSourceErrorsText(f.SourceErrors); errs != "-" {
+		rows = append(rows, []string{"失败端点", errs})
+	}
+	return rows
+}
+
+// quotaFactNote 只在表格里真的出现窗口或上游用量时补一句说明，
+// 没有这些数据时不打印一段与本次无关的话。
+func quotaFactNote(f quota.Facts) string {
+	hasUsage := f.Usage.TotalCredits != nil || f.Usage.Requests != nil || f.Usage.SuccessRate != nil
+	if f.FiveHour == nil && f.Weekly == nil && !hasUsage {
+		return ""
+	}
+	return "说明：5 小时/每周窗口是限流窗口，不是月度总额；上游用量是所有客户端合计，仅供查看，不参与选号。"
 }
 
 func cmdQuotaRefresh(e *Env, args []string) error {
@@ -743,36 +810,45 @@ func quotaWindowJSON(w *quota.Window) any {
 	return map[string]any{"used": w.Used, "limit": w.Limit, "reset_at": w.ResetAt}
 }
 
-func quotaSettingsTable(s quota.Settings) string {
-	rate := "-"
+// quotaSettingsRows 是监控设置的人读表格行。内部取值（auto、warn 这类）
+// 只出现在命令参数里，展示给用户时换成中文说法。
+func quotaSettingsRows(s quota.Settings) [][]string {
+	rate := "未设置"
 	if s.FXRate != nil {
 		rate = quotaAmount(*s.FXRate)
 	}
-	auto := "关"
+	auto := "关闭"
 	if s.AutoRefresh {
-		auto = "开"
+		auto = "开启"
 	}
-	rows := [][]string{
+	base := "跟随账号的 base_url"
+	if strings.TrimSpace(s.BaseURL) != "" {
+		base = s.BaseURL
+	}
+	return [][]string{
 		{"监控来源", quotaSourceText(s.Source)},
 		{"汇率", rate},
 		{"自动刷新", auto},
 		{"到期处理", quotaExpiryModeText(s.ExpiryMode)},
-		{"提前天数", strconv.Itoa(s.ExpiryDays)},
-		{"额度地址", dashIfEmpty(s.BaseURL)},
+		{"提前天数", strconv.Itoa(s.ExpiryDays) + " 天"},
+		{"额度地址", base},
 	}
-	return "额度监控设置：\n" + renderTable([]string{"项", "值"}, rows)
+}
+
+func quotaSettingsTable(s quota.Settings) string {
+	return "额度监控设置：\n" + renderTable([]string{"项", "值"}, quotaSettingsRows(s))
 }
 
 func quotaSourceText(source string) string {
 	switch source {
 	case quota.SourceAuto:
-		return "auto（按厂商）"
+		return "自动识别（按厂商）"
 	case quota.SourceCommandCode:
-		return "commandcode"
+		return "CommandCode"
 	case quota.SourceDeepSeek:
-		return "deepseek"
+		return "DeepSeek"
 	case quota.SourceOff:
-		return "off（关闭）"
+		return "已关闭"
 	case "":
 		return "-"
 	default:
@@ -787,13 +863,13 @@ func quotaStatusText(status string) string {
 	case quota.StatusOK:
 		return "正常"
 	case quota.StatusPartial:
-		return "部分"
+		return "部分成功"
 	case quota.StatusAuth:
 		return "凭据被拒"
 	case quota.StatusError:
-		return "错误"
+		return "查询失败"
 	case quota.StatusUnsupported:
-		return "不支持"
+		return "暂不支持"
 	default:
 		return status
 	}
@@ -802,31 +878,29 @@ func quotaStatusText(status string) string {
 func quotaExpiryModeText(mode string) string {
 	switch mode {
 	case quota.ExpiryModeWarn:
-		return "warn（只提示）"
+		return "只提示"
 	case quota.ExpiryModeDeprioritize:
-		return "deprioritize（排到后面）"
+		return "排到后面"
 	case quota.ExpiryModeExclude:
-		return "exclude（排除）"
+		return "不参与选号"
 	default:
 		return mode
 	}
 }
 
 func quotaBalanceCell(f quota.Facts) string {
-	if !f.BalanceKnown {
-		return "-"
-	}
-	if f.Currency == "" {
-		return quotaAmount(f.Balance)
-	}
-	return quotaAmount(f.Balance) + " " + f.Currency
+	return quotaMoneyCell(f.Balance, f.BalanceKnown, f.Currency)
 }
 
-func quotaAmountCell(v float64, known bool) string {
+// quotaMoneyCell 渲染带币种的金额。币种为空时只给数字，不硬塞一个 USD。
+func quotaMoneyCell(v float64, known bool, currency string) string {
 	if !known {
 		return "-"
 	}
-	return quotaAmount(v)
+	if currency == "" {
+		return quotaAmount(v)
+	}
+	return quotaAmount(v) + " " + currency
 }
 
 func quotaAmount(v float64) string {
@@ -843,6 +917,14 @@ func quotaUSDCell(v *float64) string {
 		return "-"
 	}
 	return quotaAmount(*v)
+}
+
+// quotaUSDWithUnit 用在 quota show：行名不带 USD，单位直接写在值里，读起来更自然。
+func quotaUSDWithUnit(v *float64) string {
+	if v == nil {
+		return "-"
+	}
+	return quotaAmount(*v) + " USD"
 }
 
 func quotaRateCell(v *float64) string {
@@ -869,6 +951,27 @@ func quotaTimeCell(ms int64) string {
 		return "-"
 	}
 	return time.UnixMilli(ms).Format("2006-01-02 15:04")
+}
+
+// quotaPeriodEndCell 渲染周期结束，并在后面补一句人读的到期提示。
+// 这里只回答「还有多久」，到期之后怎么处理属于监控设置，不在这里展示。
+func quotaPeriodEndCell(ms int64, state string, now time.Time) string {
+	if ms <= 0 {
+		return "-"
+	}
+	out := quotaTimeCell(ms)
+	switch state {
+	case quota.ExpiryExpired:
+		return out + "（已到期）"
+	case quota.ExpiryNear:
+		days := int(math.Ceil(float64(ms-now.UnixMilli()) / float64(24*time.Hour/time.Millisecond)))
+		if days < 1 {
+			days = 1
+		}
+		return out + "（还剩 " + strconv.Itoa(days) + " 天）"
+	default:
+		return out
+	}
 }
 
 // quotaCheckedAtCell 渲染 Unix 秒。额度快照的 checked_at 按秒存，周期结束与窗口重置按毫秒存；
@@ -929,12 +1032,51 @@ func quotaUsageText(u quota.UpstreamUsage) string {
 		parts = append(parts, "请求 "+strconv.FormatInt(*u.Requests, 10))
 	}
 	if u.SuccessRate != nil {
-		parts = append(parts, "成功率原值 "+quotaAmount(*u.SuccessRate))
+		parts = append(parts, "成功率 "+quotaAmount(*u.SuccessRate))
 	}
 	if len(parts) == 0 {
 		return "-"
 	}
 	return strings.Join(parts, "，")
+}
+
+// quotaPlanCell 把套餐名与状态合成一格，状态翻成常见中文；不认识的取值原样保留。
+func quotaPlanCell(f quota.Facts) string {
+	id := quotaSafeText(f.PlanID)
+	status := quotaPlanStatusText(f.PlanStatus)
+	switch {
+	case id != "" && status != "":
+		return id + "（" + status + "）"
+	case id != "":
+		return id
+	default:
+		return status
+	}
+}
+
+func quotaPlanStatusText(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "":
+		return ""
+	case "active":
+		return "生效中"
+	case "trialing":
+		return "试用中"
+	case "canceled", "cancelled":
+		return "已取消"
+	case "past_due":
+		return "待付款"
+	case "unpaid":
+		return "未付款"
+	case "paused":
+		return "已暂停"
+	case "incomplete":
+		return "未完成"
+	case "incomplete_expired":
+		return "已失效"
+	default:
+		return quotaSafeText(status)
+	}
 }
 
 func quotaAvailableText(v *bool) string {
@@ -971,17 +1113,6 @@ func quotaNote(f quota.Facts) string {
 		return "部分端点失败：" + quotaSourceErrorsText(f.SourceErrors)
 	}
 	return "-"
-}
-
-func quotaExpiryText(state, action string) string {
-	switch state {
-	case quota.ExpiryNear:
-		return "临近到期（动作：" + quotaExpiryModeText(action) + "）"
-	case quota.ExpiryExpired:
-		return "已到期（动作：" + quotaExpiryModeText(action) + "）"
-	default:
-		return "-"
-	}
 }
 
 func quotaSettingsIsDefault(s quota.Settings) bool {

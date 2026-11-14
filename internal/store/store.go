@@ -9,6 +9,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"gorm.io/gorm/logger"
 
 	"lax/internal/translate"
 )
@@ -150,7 +152,7 @@ func OpenWith(o Options) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	gdb, err := gorm.Open(dialector, &gorm.Config{})
+	gdb, err := gorm.Open(dialector, &gorm.Config{Logger: newDBLogger()})
 	if err != nil {
 		return nil, fmt.Errorf("连接 %s 数据库: %w", driver, err)
 	}
@@ -168,6 +170,18 @@ func OpenWith(o Options) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// newDBLogger 把数据库日志写到 stderr。人读输出与 --json 都走 stdout，
+// 数据库日志混进 stdout 会污染管道与脚本解析；record not found 是正常分支
+// （例如账号还没有额度设置行），不按错误打印。
+func newDBLogger() logger.Interface {
+	return logger.New(log.New(os.Stderr, "", log.LstdFlags), logger.Config{
+		SlowThreshold:             500 * time.Millisecond,
+		LogLevel:                  logger.Warn,
+		IgnoreRecordNotFoundError: true,
+		Colorful:                  false,
+	})
 }
 
 // dialectorFor 按后端名给出 GORM 的 dialector。

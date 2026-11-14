@@ -669,21 +669,11 @@ func routeQuotaCells(entry *quota.Entry, now time.Time) []string {
 	if entry == nil {
 		return []string{"-", "-", "-"}
 	}
-	expiry := "-"
-	if entry.Facts.PeriodEnd > 0 {
-		expiry = quotaTimeCell(entry.Facts.PeriodEnd)
-		state, _ := quota.ExpiryAt(entry.Facts.PeriodEnd, now, entry.Settings)
-		switch state {
-		case quota.ExpiryNear:
-			expiry += "（临近）"
-		case quota.ExpiryExpired:
-			expiry += "（已到期）"
-		}
-	}
+	state, _ := quota.ExpiryAt(entry.Facts.PeriodEnd, now, entry.Settings)
 	return []string{
 		quotaBalanceCell(entry.Facts),
 		quotaPercentCell(entry.Facts.RemainingRatio),
-		expiry,
+		quotaPeriodEndCell(entry.Facts.PeriodEnd, state, now),
 	}
 }
 

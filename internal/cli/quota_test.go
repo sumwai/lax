@@ -177,10 +177,46 @@ func TestQuotaCommands(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("quota show 人读退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"5 小时/每周窗口是限流窗口", "上游用量是所有客户端合计", "thesumwaimzkz"} {
+	for _, want := range []string{"5 小时/每周窗口是限流窗口", "上游用量是所有客户端合计", "thesumwaimzkz", "折合总额", "剩余比例"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("quota show 人读输出缺少 %q: %s", want, out)
 		}
+	}
+	// 明细只回答额度事实：到期处理属于监控设置，不能把 warn 这类内部取值混进来；
+	// 设置表也不该默认叠在明细下面。
+	for _, unwanted := range []string{"动作：", "warn（", "额度监控设置"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("quota show 人读输出不该出现 %q: %s", unwanted, out)
+		}
+	}
+
+	code, out, stderr = run(t, "quota", "show", "cc1", "--settings")
+	if code != 0 {
+		t.Fatalf("quota show --settings 退出码 = %d，stderr = %s", code, stderr)
+	}
+	for _, want := range []string{"额度监控设置", "到期处理", "只提示", "提前天数", "3 天", "自动识别（按厂商）"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("quota show --settings 输出缺少 %q: %s", want, out)
+		}
+	}
+	if strings.Contains(out, "warn（") {
+		t.Fatalf("监控设置不该展示内部取值: %s", out)
+	}
+
+	code, out, stderr = run(t, "quota", "show", "cc1", "--settings", "--json")
+	if code != 0 {
+		t.Fatalf("quota show --settings --json 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var settingsOnly map[string]any
+	mustJSON(t, out, &settingsOnly)
+	if settingsOnly["account"] != "cc1" {
+		t.Fatalf("quota show --settings --json = %+v", settingsOnly)
+	}
+	if _, ok := settingsOnly["snapshot"]; ok {
+		t.Fatalf("--settings --json 不该带快照: %+v", settingsOnly)
+	}
+	if settings := quotaMap(t, settingsOnly, "settings"); settings["source"] != "auto" {
+		t.Fatalf("默认来源 = %v，期望 auto", settings["source"])
 	}
 
 	// 额度刷新不改账号启用状态，也不写请求记录。

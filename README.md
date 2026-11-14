@@ -264,9 +264,14 @@ lax quota refresh --all
 # 看所有账号的快照；没有快照的显示「未刷新」
 lax quota ls
 
-# 看一个账号的明细：余额、本期已用、周期结束、套餐、限流窗口与到期状态
+# 看一个账号的明细：余额、本期已用、周期结束与套餐
 lax quota show cc1
+
+# 看这个账号的监控设置：来源、汇率、自动刷新与到期处理
+lax quota show cc1 --settings
 ```
+
+`quota show` 默认只列这次有内容的额度事实：未知或不适用的行直接不出现，周期结束后面会标「还剩 N 天」或「已到期」，到期之后怎么处理不在这里显示。监控设置是配置，单独用 `--settings` 看。
 
 CommandCode 的余额来自 `/alpha/billing/credits` 的 `monthlyCredits`（剩余），本期已用来自 `/alpha/usage/summary` 的 `totalCredits`，总额按「余额 + 已用」算；订阅接口给周期结束与套餐。`windowLimits` 的 5 小时/每周窗口是限流窗口，不是月度总额。DeepSeek 只报余额，没有总额、周期与比例。上游用量汇总（本期已用、请求数、成功率）是所有客户端的合计，只展示，不参与选号。
 
