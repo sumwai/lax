@@ -276,25 +276,43 @@ func TestParseCommandCodeWhoAmI(t *testing.T) {
 }
 
 func TestParseCommandCodeCredits(t *testing.T) {
-	balance, currency, err := quota.ParseCommandCodeCredits([]byte(`{"monthlyCredits":24.6301}`))
+	credits, err := quota.ParseCommandCodeCredits([]byte(`{
+		"credits":{"monthlyCredits":24.6301},
+		"windowLimits":{
+			"limited":true,
+			"fiveHour":{"used":14.0221354831,"cap":14,"resetAt":1794694603609},
+			"weekly":{"used":14.0221354831,"cap":35,"resetAt":1795281403609}
+		}
+	}`))
 	if err != nil {
 		t.Fatalf("解析 credits: %v", err)
 	}
-	requireFloat(t, "余额", balance, 24.6301, 1e-9)
-	if currency != "USD" {
-		t.Fatalf("默认币种 = %q，期望 USD", currency)
+	requireFloat(t, "余额", credits.Balance, 24.6301, 1e-9)
+	if credits.Currency != "USD" {
+		t.Fatalf("默认币种 = %q，期望 USD", credits.Currency)
+	}
+	if credits.FiveHour == nil || credits.FiveHour.Used == nil || *credits.FiveHour.Used != 14.0221354831 ||
+		credits.FiveHour.Limit == nil || *credits.FiveHour.Limit != 14 || credits.FiveHour.ResetAt != 1794694603609 {
+		t.Fatalf("5 小时窗口 = %+v", credits.FiveHour)
+	}
+	if credits.Weekly == nil || credits.Weekly.Used == nil || *credits.Weekly.Used != 14.0221354831 ||
+		credits.Weekly.Limit == nil || *credits.Weekly.Limit != 35 || credits.Weekly.ResetAt != 1795281403609 {
+		t.Fatalf("每周窗口 = %+v", credits.Weekly)
 	}
 
-	balance, currency, err = quota.ParseCommandCodeCredits([]byte(`{"data":{"monthlyCredits":"117.84","currency":"cny"}}`))
+	credits, err = quota.ParseCommandCodeCredits([]byte(`{"data":{"monthlyCredits":"117.84","currency":"cny"}}`))
 	if err != nil {
 		t.Fatalf("解析包装后的 credits: %v", err)
 	}
-	requireFloat(t, "包装余额", balance, 117.84, 1e-9)
-	if currency != "CNY" {
-		t.Fatalf("币种 = %q，期望 CNY", currency)
+	requireFloat(t, "包装余额", credits.Balance, 117.84, 1e-9)
+	if credits.Currency != "CNY" {
+		t.Fatalf("币种 = %q，期望 CNY", credits.Currency)
+	}
+	if credits.FiveHour != nil || credits.Weekly != nil {
+		t.Fatalf("没有 windowLimits 时不该有窗口: %+v", credits)
 	}
 
-	if _, _, err := quota.ParseCommandCodeCredits([]byte(`{"foo":1}`)); err == nil {
+	if _, err := quota.ParseCommandCodeCredits([]byte(`{"foo":1}`)); err == nil {
 		t.Fatal("没有余额字段时应报错")
 	}
 }
@@ -303,11 +321,7 @@ func TestParseCommandCodeSubscription(t *testing.T) {
 	body := []byte(`{
 		"plan":{"id":"pro","status":"active"},
 		"currentPeriodEnd":"2026-12-01T00:00:00Z",
-		"cancelAtPeriodEnd":true,
-		"windowLimits":{
-			"fiveHour":{"used":2,"limit":10,"resetAt":1760000000000},
-			"weekly":{"used":30,"limit":100,"resetAt":1760500000}
-		}
+		"cancelAtPeriodEnd":true
 	}`)
 	sub, err := quota.ParseCommandCodeSubscription(body)
 	if err != nil {
@@ -319,12 +333,6 @@ func TestParseCommandCodeSubscription(t *testing.T) {
 	}
 	if sub.PlanID != "pro" || sub.PlanStatus != "active" || !sub.CancelAtPeriodEnd {
 		t.Fatalf("套餐信息 = %+v", sub)
-	}
-	if sub.FiveHour == nil || sub.FiveHour.ResetAt != 1760000000000 || sub.FiveHour.Used == nil || *sub.FiveHour.Used != 2 || sub.FiveHour.Limit == nil || *sub.FiveHour.Limit != 10 {
-		t.Fatalf("5 小时窗口 = %+v", sub.FiveHour)
-	}
-	if sub.Weekly == nil || sub.Weekly.ResetAt != 1760500000000 || sub.Weekly.Used == nil || *sub.Weekly.Used != 30 {
-		t.Fatalf("每周窗口 = %+v", sub.Weekly)
 	}
 
 	// currentPeriodEnd 同时接受 Unix 秒与 Unix 毫秒。

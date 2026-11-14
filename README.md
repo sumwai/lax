@@ -271,9 +271,9 @@ lax quota show cc1
 lax quota show cc1 --settings
 ```
 
-`quota show` 默认只列这次有内容的额度事实：未知或不适用的行直接不出现，周期结束后面会标「还剩 N 天」或「已到期」，到期之后怎么处理不在这里显示。监控设置是配置，单独用 `--settings` 看。
+`quota show` 按区块输出：账号信息、额度（剩余比例带进度条）、周期、限流窗口（已用比例带进度条）、上游与排障分开，没有内容的区块整块省略。周期结束后面会标「还剩 N 天」或「已到期」，到期之后怎么处理不在这里显示。终端里状态与进度条带颜色，管道和 `--json` 不带；设置 `NO_COLOR` 可以关掉颜色。监控设置是配置，单独用 `--settings` 看。
 
-CommandCode 的余额来自 `/alpha/billing/credits` 的 `monthlyCredits`（剩余），本期已用来自 `/alpha/usage/summary` 的 `totalCredits`，总额按「余额 + 已用」算；订阅接口给周期结束与套餐。`windowLimits` 的 5 小时/每周窗口是限流窗口，不是月度总额。DeepSeek 只报余额，没有总额、周期与比例。上游用量汇总（本期已用、请求数、成功率）是所有客户端的合计，只展示，不参与选号。
+CommandCode 的余额与 5 小时/每周限流窗口都来自 `/alpha/billing/credits`：`monthlyCredits` 是剩余，`windowLimits` 的 `fiveHour` / `weekly` 给 `used`、`cap`、`resetAt`；`used` 超过 `cap` 时 `quota show` 标「已超限」。本期已用来自 `/alpha/usage/summary` 的 `totalCredits`，月限额按「余额 + 已用」算；订阅接口只给周期结束与套餐。窗口是限流窗口，不是月度总额。DeepSeek 只报余额，没有总额、周期与比例。上游用量汇总（本期已用、请求数、成功率）是所有客户端的合计，只展示，不参与选号。
 
 只有一种情况需要手工汇率：账号余额不是 USD（例如 DeepSeek 的 CNY）。没给汇率时原值照存，折合 USD 与剩余比例留空，不会用一个猜的汇率去过滤账号。
 

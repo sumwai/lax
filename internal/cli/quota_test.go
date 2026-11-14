@@ -11,16 +11,18 @@ const quotaCLIKey = "sk-cc-secret-123"
 
 func quotaCLIRoutes() map[string]fakeResponse {
 	return map[string]fakeResponse{
-		"GET /alpha/whoami":          {status: 200, body: `{"user":{"displayName":"thesumwaimzkz"}}`},
-		"GET /alpha/billing/credits": {status: 200, body: `{"monthlyCredits":24.6301}`},
+		"GET /alpha/whoami": {status: 200, body: `{"user":{"displayName":"thesumwaimzkz"}}`},
+		"GET /alpha/billing/credits": {status: 200, body: `{
+			"credits":{"monthlyCredits":24.6301},
+			"windowLimits":{
+				"fiveHour":{"used":12,"cap":10,"resetAt":1760000000000},
+				"weekly":{"used":30,"cap":100,"resetAt":1760500000000}
+			}
+		}`},
 		"GET /alpha/billing/subscriptions": {status: 200, body: `{
 			"plan":{"id":"pro","status":"active"},
 			"currentPeriodEnd":"2026-12-01T00:00:00Z",
-			"cancelAtPeriodEnd":true,
-			"windowLimits":{
-				"fiveHour":{"used":2,"limit":10,"resetAt":1760000000000},
-				"weekly":{"used":30,"limit":100,"resetAt":1760500000000}
-			}
+			"cancelAtPeriodEnd":true
 		}`},
 		"GET /alpha/usage/summary": {status: 200, body: `{"summary":{"totalCredits":45.33,"requests":123,"successRate":0.98}}`},
 	}
@@ -119,7 +121,7 @@ func TestQuotaCommands(t *testing.T) {
 		t.Fatalf("上游用量 = %+v", usage)
 	}
 	five := quotaMap(t, facts, "five_hour")
-	if !quotaNearly(quotaNumber(t, five, "used"), 2) || !quotaNearly(quotaNumber(t, five, "limit"), 10) {
+	if !quotaNearly(quotaNumber(t, five, "used"), 12) || !quotaNearly(quotaNumber(t, five, "limit"), 10) {
 		t.Fatalf("5 小时窗口 = %+v", five)
 	}
 	wantEnd := float64(time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC).UnixMilli())
@@ -177,10 +179,17 @@ func TestQuotaCommands(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("quota show 人读退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"5 小时/每周窗口是限流窗口", "上游用量是所有客户端合计", "thesumwaimzkz", "折合总额", "剩余比例"} {
+	for _, want := range []string{
+		"5 小时/每周窗口是限流窗口", "上游用量是所有客户端合计", "thesumwaimzkz",
+		"额度", "周期", "限流窗口", "上游", "月限额", "已超限", "剩余", "█", "5 小时", "每周",
+	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("quota show 人读输出缺少 %q: %s", want, out)
 		}
+	}
+	// 测试拿到的是 buffer，不是终端：排版可以分组，但不能带 ANSI 颜色。
+	if strings.Contains(out, "\x1b[") {
+		t.Fatalf("非终端输出不该带 ANSI 颜色: %q", out)
 	}
 	// 明细只回答额度事实：到期处理属于监控设置，不能把 warn 这类内部取值混进来；
 	// 设置表也不该默认叠在明细下面。

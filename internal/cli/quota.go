@@ -3,7 +3,9 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"math"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -179,8 +181,8 @@ func cmdQuotaShow(e *Env, args []string) error {
 				"settings": quotaSettingsJSON(cfg),
 			})
 		}
-		fmt.Fprintf(e.Stdout, "%s 的额度监控设置：\n", acc.Name)
-		fmt.Fprint(e.Stdout, renderTable([]string{"项", "值"}, quotaSettingsRows(cfg)))
+		fmt.Fprintf(e.Stdout, "%s 的额度监控设置\n\n", acc.Name)
+		fmt.Fprint(e.Stdout, quotaSettingsReport(cfg))
 		return nil
 	}
 
@@ -216,77 +218,269 @@ func cmdQuotaShow(e *Env, args []string) error {
 		return nil
 	}
 
-	fmt.Fprint(e.Stdout, renderTable([]string{"项", "值"}, quotaFactRows(acc, facts, state, time.Now())))
+	ui := newQuotaUI(e.Stdout)
+	fmt.Fprint(e.Stdout, ui.renderQuota(acc, facts, state, time.Now()))
 	if note := quotaFactNote(facts); note != "" {
 		fmt.Fprintf(e.Stdout, "\n%s\n", note)
 	}
 	return nil
 }
 
-// quotaFactRows 组装 quota show 的人读表格。只列对用户有意义的项：
-// 未知、未设置或这次不适用的行直接不出现，不拿一堆 "-" 撑满屏幕。
-// 到期处理方式属于监控设置，这里只回答「还有多久到期」，不显示内部动作名。
-func quotaFactRows(acc store.Account, f quota.Facts, state string, now time.Time) [][]string {
-	rows := [][]string{
-		{"账号", acc.Name},
-		{"厂商", acc.Provider},
+// quotaLabelWidth 是所有「标签 + 值」行共用的标签宽度，让各区块的值对齐在同一列。
+// 按终端显示宽度算，中文字符占两格。
+const quotaLabelWidth = 8
+
+// quotaRow 是一行「标签 + 值」。color 是值的 ANSI 颜色，空表示不着色。
+type quotaRow struct {
+	label string
+	value string
+	color string
+}
+
+// quotaSection 是人读输出里的一个区块：标题加若干行；行全为空时整块不输出。
+type quotaSection struct {
+	title string
+	rows  []quotaRow
+}
+
+// quotaUI 负责人读输出的排版。颜色只在真正的终端上开启：
+// 管道、重定向与测试传入的 buffer 都不会带 ANSI 序列。
+type quotaUI struct {
+	color bool
+}
+
+func newQuotaUI(w io.Writer) quotaUI {
+	if os.Getenv("NO_COLOR") != "" {
+		return quotaUI{}
+	}
+	f, ok := w.(*os.File)
+	if !ok {
+		return quotaUI{}
+	}
+	info, err := f.Stat()
+	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
+		return quotaUI{}
+	}
+	return quotaUI{color: true}
+}
+
+func (u quotaUI) paint(code, s string) string {
+	if !u.color || code == "" || s == "" {
+		return s
+	}
+	return "\x1b[" + code + "m" + s + "\x1b[0m"
+}
+
+func (u quotaUI) renderRows(b *strings.Builder, indent int, rows []quotaRow) {
+	for _, row := range rows {
+		if row.value == "" {
+			continue
+		}
+		b.WriteString(strings.Repeat(" ", indent))
+		b.WriteString(pad(row.label, quotaLabelWidth))
+		b.WriteString("  ")
+		b.WriteString(u.paint(row.color, row.value))
+		b.WriteByte('\n')
+	}
+}
+
+// renderQuota 按「账号 / 额度 / 周期 / 限流窗口 / 上游 / 排障」分组输出。
+// 没有内容的区块整块省略，不拿空行和 "-" 占位。
+func (u quotaUI) renderQuota(acc store.Account, f quota.Facts, state string, now time.Time) string {
+	var b strings.Builder
+
+	top := []quotaRow{
+		{"账号", acc.Name + "（" + acc.Provider + "）", ""},
+		{"状态", quotaStatusText(f.Status), quotaStatusColor(f.Status)},
+	}
+	if f.CheckedAt > 0 {
+		top = append(top, quotaRow{"刷新", quotaCheckedAtCell(f.CheckedAt), ""})
+	}
+	if name := quotaSafeText(f.DisplayName); name != "" {
+		top = append(top, quotaRow{"显示名", name, ""})
 	}
 	// 来源与厂商一致时是重复信息；只有用户强制换过来源才值得单独显示。
 	if f.Source != "" && f.Source != acc.Provider {
-		rows = append(rows, []string{"额度接口", quotaSourceText(f.Source)})
+		top = append(top, quotaRow{"接口", quotaSourceText(f.Source), ""})
 	}
-	rows = append(rows, []string{"状态", quotaStatusText(f.Status)})
-	if name := quotaSafeText(f.DisplayName); name != "" {
-		rows = append(rows, []string{"显示名", name})
+	u.renderRows(&b, 0, top)
+
+	sections := []quotaSection{
+		{"额度", quotaCreditRows(f)},
+		{"周期", quotaPeriodRows(f, state, now)},
+		{"限流窗口", quotaWindowRows(f)},
+		{"上游", quotaUpstreamRows(f)},
+		{"排障", quotaTroubleRows(f)},
 	}
-	rows = append(rows, []string{"余额", quotaBalanceCell(f)})
+	for _, section := range sections {
+		if len(section.rows) == 0 {
+			continue
+		}
+		b.WriteByte('\n')
+		b.WriteString(u.paint("1", section.title))
+		b.WriteByte('\n')
+		u.renderRows(&b, 2, section.rows)
+	}
+	return b.String()
+}
+
+func quotaCreditRows(f quota.Facts) []quotaRow {
+	rows := make([]quotaRow, 0, 7)
+	if f.BalanceKnown {
+		rows = append(rows, quotaRow{"余额", quotaBalanceCell(f), ""})
+	}
 	if f.UsedKnown {
-		rows = append(rows, []string{"本期已用", quotaMoneyCell(f.Used, true, f.Currency)})
+		rows = append(rows, quotaRow{"本期已用", quotaMoneyCell(f.Used, true, f.Currency), ""})
 	}
 	if f.FXRate != nil && *f.FXRate != 1 {
-		rows = append(rows, []string{"汇率", quotaRateCell(f.FXRate)})
+		rows = append(rows, quotaRow{"汇率", quotaRateCell(f.FXRate), ""})
 		if f.BalanceUSD != nil {
-			rows = append(rows, []string{"折合余额", quotaUSDWithUnit(f.BalanceUSD)})
+			rows = append(rows, quotaRow{"折合余额", quotaUSDWithUnit(f.BalanceUSD), ""})
 		}
 		if f.UsedUSD != nil {
-			rows = append(rows, []string{"折合已用", quotaUSDWithUnit(f.UsedUSD)})
+			rows = append(rows, quotaRow{"折合已用", quotaUSDWithUnit(f.UsedUSD), ""})
 		}
 	}
 	if f.TotalUSD != nil {
-		rows = append(rows, []string{"折合总额", quotaUSDWithUnit(f.TotalUSD)})
+		// CommandCode 的计费周期是按月的，余额 + 本期已用就是月限额；其它来源没有这个口径。
+		label := "总额"
+		if f.Source == quota.SourceCommandCode {
+			label = "月限额"
+		}
+		rows = append(rows, quotaRow{label, quotaUSDWithUnit(f.TotalUSD), ""})
 	}
 	if f.RemainingRatio != nil {
-		rows = append(rows, []string{"剩余比例", quotaPercentCell(f.RemainingRatio)})
-	}
-	if f.PeriodEnd > 0 {
-		rows = append(rows, []string{"周期结束", quotaPeriodEndCell(f.PeriodEnd, state, now)})
-	}
-	if plan := quotaPlanCell(f); plan != "" {
-		rows = append(rows, []string{"套餐", plan})
-	}
-	if f.PlanID != "" || f.PeriodEnd > 0 {
-		rows = append(rows, []string{"续费", quotaRenewalText(f)})
-	}
-	if f.FiveHour != nil {
-		rows = append(rows, []string{"5 小时窗口", quotaWindowText(f.FiveHour)})
-	}
-	if f.Weekly != nil {
-		rows = append(rows, []string{"每周窗口", quotaWindowText(f.Weekly)})
-	}
-	if usage := quotaUsageText(f.Usage); usage != "-" {
-		rows = append(rows, []string{"上游用量", usage})
-	}
-	if f.Available != nil {
-		rows = append(rows, []string{"上游可用", quotaAvailableText(f.Available)})
-	}
-	rows = append(rows, []string{"刷新时间", quotaCheckedAtCell(f.CheckedAt)})
-	if note := quotaSafeText(f.LastError); note != "" {
-		rows = append(rows, []string{"备注", note})
-	}
-	if errs := quotaSourceErrorsText(f.SourceErrors); errs != "-" {
-		rows = append(rows, []string{"失败端点", errs})
+		rows = append(rows, quotaRow{
+			"剩余",
+			quotaPercentCell(f.RemainingRatio) + "  " + quotaBar(f.RemainingRatio),
+			quotaRatioColor(f.RemainingRatio),
+		})
 	}
 	return rows
+}
+
+func quotaPeriodRows(f quota.Facts, state string, now time.Time) []quotaRow {
+	rows := make([]quotaRow, 0, 3)
+	if f.PeriodEnd > 0 {
+		rows = append(rows, quotaRow{"结束", quotaPeriodEndCell(f.PeriodEnd, state, now), ""})
+	}
+	if plan := quotaPlanCell(f); plan != "" {
+		rows = append(rows, quotaRow{"套餐", plan, ""})
+	}
+	if f.PlanID != "" || f.PeriodEnd > 0 {
+		rows = append(rows, quotaRow{"续费", quotaRenewalText(f), ""})
+	}
+	return rows
+}
+
+func quotaWindowRows(f quota.Facts) []quotaRow {
+	rows := make([]quotaRow, 0, 2)
+	if f.FiveHour != nil {
+		value, color := quotaWindowCell(f.FiveHour)
+		rows = append(rows, quotaRow{"5 小时", value, color})
+	}
+	if f.Weekly != nil {
+		value, color := quotaWindowCell(f.Weekly)
+		rows = append(rows, quotaRow{"每周", value, color})
+	}
+	return rows
+}
+
+// quotaWindowCell 给限流窗口补一条已用比例进度条。窗口是「已用 / 上限」，
+// 方向与余额相反：用得多更紧张，所以条越满颜色越红。
+func quotaWindowCell(w *quota.Window) (string, string) {
+	base, notes := quotaWindowParts(w)
+	if w == nil || w.Used == nil || w.Limit == nil || *w.Limit <= 0 {
+		return quotaWindowText(w), ""
+	}
+	ratio := *w.Used / *w.Limit
+	parts := []string{base, quotaBar(&ratio)}
+	if len(notes) > 0 {
+		parts = append(parts, "（"+strings.Join(notes, "，")+"）")
+	}
+	return strings.Join(parts, "  "), quotaWindowColor(ratio)
+}
+
+func quotaWindowColor(ratio float64) string {
+	switch {
+	case ratio >= 1:
+		return "31"
+	case ratio >= 0.8:
+		return "33"
+	default:
+		return "32"
+	}
+}
+
+func quotaUpstreamRows(f quota.Facts) []quotaRow {
+	rows := make([]quotaRow, 0, 2)
+	if usage := quotaUsageText(f.Usage); usage != "-" {
+		rows = append(rows, quotaRow{"用量", usage, ""})
+	}
+	if f.Available != nil {
+		rows = append(rows, quotaRow{"可用", quotaAvailableText(f.Available), ""})
+	}
+	return rows
+}
+
+func quotaTroubleRows(f quota.Facts) []quotaRow {
+	rows := make([]quotaRow, 0, 2)
+	if note := quotaSafeText(f.LastError); note != "" {
+		rows = append(rows, quotaRow{"备注", note, ""})
+	}
+	if errs := quotaSourceErrorsText(f.SourceErrors); errs != "-" {
+		rows = append(rows, quotaRow{"失败端点", errs, ""})
+	}
+	return rows
+}
+
+// quotaBar 画一条剩余比例进度条。未知比例不画；大于 0 但不足一格时至少画一格，
+// 让「还剩一点点」也能被看见。
+func quotaBar(ratio *float64) string {
+	if ratio == nil {
+		return ""
+	}
+	const width = 20
+	filled := int(math.Round(*ratio * width))
+	if filled < 0 {
+		filled = 0
+	}
+	if filled > width {
+		filled = width
+	}
+	if filled == 0 && *ratio > 0 {
+		filled = 1
+	}
+	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+}
+
+func quotaStatusColor(status string) string {
+	switch status {
+	case quota.StatusOK:
+		return "32"
+	case quota.StatusPartial:
+		return "33"
+	case quota.StatusAuth, quota.StatusError:
+		return "31"
+	case "":
+		return "2"
+	default:
+		return ""
+	}
+}
+
+func quotaRatioColor(ratio *float64) string {
+	if ratio == nil {
+		return ""
+	}
+	switch {
+	case *ratio >= 0.5:
+		return "32"
+	case *ratio >= 0.2:
+		return "33"
+	default:
+		return "31"
+	}
 }
 
 // quotaFactNote 只在表格里真的出现窗口或上游用量时补一句说明，
@@ -685,13 +879,13 @@ func mergeQuotaFacts(prev, next quota.Facts, cfg quota.Settings) quota.Facts {
 			next.DisplayName = prev.DisplayName
 		case "credits":
 			next.Balance, next.BalanceKnown, next.Currency = prev.Balance, prev.BalanceKnown, prev.Currency
+			next.FiveHour, next.Weekly = prev.FiveHour, prev.Weekly
 		case "usage":
 			next.Used, next.UsedKnown, next.Usage = prev.Used, prev.UsedKnown, prev.Usage
 		case "subscriptions":
 			next.PeriodEnd = prev.PeriodEnd
 			next.PlanID, next.PlanStatus = prev.PlanID, prev.PlanStatus
 			next.CancelAtPeriodEnd = prev.CancelAtPeriodEnd
-			next.FiveHour, next.Weekly = prev.FiveHour, prev.Weekly
 		case "balance":
 			next.Balance, next.BalanceKnown, next.Currency = prev.Balance, prev.BalanceKnown, prev.Currency
 			next.Available = prev.Available
@@ -810,9 +1004,9 @@ func quotaWindowJSON(w *quota.Window) any {
 	return map[string]any{"used": w.Used, "limit": w.Limit, "reset_at": w.ResetAt}
 }
 
-// quotaSettingsRows 是监控设置的人读表格行。内部取值（auto、warn 这类）
+// quotaSettingsRows 是监控设置的人读行。内部取值（auto、warn 这类）
 // 只出现在命令参数里，展示给用户时换成中文说法。
-func quotaSettingsRows(s quota.Settings) [][]string {
+func quotaSettingsRows(s quota.Settings) []quotaRow {
 	rate := "未设置"
 	if s.FXRate != nil {
 		rate = quotaAmount(*s.FXRate)
@@ -825,18 +1019,24 @@ func quotaSettingsRows(s quota.Settings) [][]string {
 	if strings.TrimSpace(s.BaseURL) != "" {
 		base = s.BaseURL
 	}
-	return [][]string{
-		{"监控来源", quotaSourceText(s.Source)},
-		{"汇率", rate},
-		{"自动刷新", auto},
-		{"到期处理", quotaExpiryModeText(s.ExpiryMode)},
-		{"提前天数", strconv.Itoa(s.ExpiryDays) + " 天"},
-		{"额度地址", base},
+	return []quotaRow{
+		{"监控来源", quotaSourceText(s.Source), ""},
+		{"汇率", rate, ""},
+		{"自动刷新", auto, ""},
+		{"到期处理", quotaExpiryModeText(s.ExpiryMode), ""},
+		{"提前天数", strconv.Itoa(s.ExpiryDays) + " 天", ""},
+		{"额度地址", base, ""},
 	}
 }
 
+func quotaSettingsReport(s quota.Settings) string {
+	var b strings.Builder
+	quotaUI{}.renderRows(&b, 2, quotaSettingsRows(s))
+	return b.String()
+}
+
 func quotaSettingsTable(s quota.Settings) string {
-	return "额度监控设置：\n" + renderTable([]string{"项", "值"}, quotaSettingsRows(s))
+	return "额度监控设置\n\n" + quotaSettingsReport(s)
 }
 
 func quotaSourceText(source string) string {
@@ -1006,8 +1206,17 @@ func quotaRenewalText(f quota.Facts) string {
 }
 
 func quotaWindowText(w *quota.Window) string {
+	base, notes := quotaWindowParts(w)
+	if len(notes) > 0 {
+		base += "（" + strings.Join(notes, "，") + "）"
+	}
+	return base
+}
+
+// quotaWindowParts 把窗口拆成「已用 / 上限」与附加说明，方便进度条插在两者之间。
+func quotaWindowParts(w *quota.Window) (string, []string) {
 	if w == nil {
-		return "-"
+		return "-", nil
 	}
 	used, limit := "-", "-"
 	if w.Used != nil {
@@ -1016,11 +1225,14 @@ func quotaWindowText(w *quota.Window) string {
 	if w.Limit != nil {
 		limit = quotaAmount(*w.Limit)
 	}
-	text := used + " / " + limit
-	if w.ResetAt > 0 {
-		text += "（重置 " + quotaTimeCell(w.ResetAt) + "）"
+	notes := make([]string, 0, 2)
+	if w.Used != nil && w.Limit != nil && *w.Used > *w.Limit {
+		notes = append(notes, "已超限")
 	}
-	return text
+	if w.ResetAt > 0 {
+		notes = append(notes, "重置 "+quotaTimeCell(w.ResetAt))
+	}
+	return used + " / " + limit, notes
 }
 
 func quotaUsageText(u quota.UpstreamUsage) string {

@@ -107,16 +107,18 @@ func requireQuotaFloat(t *testing.T, name string, got *float64, want float64) {
 
 func commandCodeQuotaRoutes() map[string]quotaTestReply {
 	return map[string]quotaTestReply{
-		"/alpha/whoami":          {status: 200, body: `{"user":{"displayName":"thesumwaimzkz"}}`},
-		"/alpha/billing/credits": {status: 200, body: `{"monthlyCredits":24.6301}`},
+		"/alpha/whoami": {status: 200, body: `{"user":{"displayName":"thesumwaimzkz"}}`},
+		"/alpha/billing/credits": {status: 200, body: `{
+			"credits":{"monthlyCredits":24.6301},
+			"windowLimits":{
+				"fiveHour":{"used":2,"cap":10,"resetAt":1760000000000},
+				"weekly":{"used":30,"cap":100,"resetAt":1760500000000}
+			}
+		}`},
 		"/alpha/billing/subscriptions": {status: 200, body: `{
 			"plan":{"id":"pro","status":"active"},
 			"currentPeriodEnd":"2026-12-01T00:00:00Z",
-			"cancelAtPeriodEnd":true,
-			"windowLimits":{
-				"fiveHour":{"used":2,"limit":10,"resetAt":1760000000000},
-				"weekly":{"used":30,"limit":100,"resetAt":1760500000000}
-			}
+			"cancelAtPeriodEnd":true
 		}`},
 		"/alpha/usage/summary": {status: 200, body: `{"summary":{"totalCredits":45.33,"requests":123,"successRate":0.98}}`},
 	}

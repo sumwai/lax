@@ -147,11 +147,12 @@ func (s *Server) refreshCommandCodeQuota(ctx context.Context, facts quota.Facts,
 	}
 
 	apply("credits", s.fetchQuotaEndpoint(ctx, endpoints.Credits, key, headers), func(body []byte) error {
-		balance, currency, perr := quota.ParseCommandCodeCredits(body)
+		credits, perr := quota.ParseCommandCodeCredits(body)
 		if perr != nil {
 			return perr
 		}
-		facts.Balance, facts.BalanceKnown, facts.Currency = balance, true, currency
+		facts.Balance, facts.BalanceKnown, facts.Currency = credits.Balance, true, credits.Currency
+		facts.FiveHour, facts.Weekly = credits.FiveHour, credits.Weekly
 		return nil
 	})
 
@@ -164,8 +165,6 @@ func (s *Server) refreshCommandCodeQuota(ctx context.Context, facts quota.Facts,
 		facts.PlanID = sub.PlanID
 		facts.PlanStatus = sub.PlanStatus
 		facts.CancelAtPeriodEnd = sub.CancelAtPeriodEnd
-		facts.FiveHour = sub.FiveHour
-		facts.Weekly = sub.Weekly
 		return nil
 	})
 

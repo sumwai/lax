@@ -352,30 +352,58 @@ func ParseCommandCodeWhoAmI(data []byte) (string, error) {
 	return "", fmt.Errorf("whoami 响应里没有显示名")
 }
 
-// ParseCommandCodeCredits 取剩余额度。monthlyCredits 是剩余，不是总额；
-// 本期已用在 usage.summary.totalCredits 里。币种缺省按 USD。
-func ParseCommandCodeCredits(data []byte) (balance float64, currency string, err error) {
-	doc, err := decodeObject(data)
+// Credits 是 CommandCode credits 端点里与额度有关的部分。
+// monthlyCredits 是剩余额度；windowLimits 是 5 小时与每周限流窗口（used / cap / resetAt）。
+type Credits struct {
+	Balance  float64
+	Currency string
+	FiveHour *Window
+	Weekly   *Window
+}
+
+// ParseCommandCodeCredits 取剩余额度与两个限流窗口。monthlyCredits 是剩余，不是总额；
+// 本期已用在 usage.summary.totalCredits 里；windowLimits 只在 credits 响应里，
+// subscriptions 不返回它。币种缺省按 USD。
+func ParseCommandCodeCredits(data []byte) (Credits, error) {
+	root, err := decodeObject(data)
 	if err != nil {
-		return 0, "", err
+		return Credits{}, err
 	}
-	// 常见的包装层：data、billing 或 credits 对象。credits 本身是数字时它不是 map，跳过。
+	out := Credits{Currency: "USD"}
+
+	// windowLimits 在响应最外层；有的包装响应会把它放进 data / billing。
+	limitsDoc := root
+	for _, wrapper := range []string{"data", "billing"} {
+		if inner, ok := root[wrapper].(map[string]any); ok {
+			if _, ok := firstValue(inner, "windowLimits", "window_limits", "limits").(map[string]any); ok {
+				limitsDoc = inner
+				break
+			}
+		}
+	}
+	if limits, ok := firstValue(limitsDoc, "windowLimits", "window_limits", "limits").(map[string]any); ok {
+		out.FiveHour = parseWindow(firstValue(limits, "fiveHour", "five_hour", "fiveHourWindow", "5h"))
+		out.Weekly = parseWindow(firstValue(limits, "weekly", "week", "weeklyWindow"))
+	}
+
+	// 余额在 credits / billing / data 里；credits 本身也可能是数字，跳过非对象。
+	doc := root
 	for _, wrapper := range []string{"data", "billing", "credits"} {
 		if inner, ok := doc[wrapper].(map[string]any); ok {
 			doc = inner
 			break
 		}
 	}
-	currency = "USD"
 	if c := strings.TrimSpace(stringValue(firstValue(doc, "currency", "unit"))); c != "" {
-		currency = strings.ToUpper(c)
+		out.Currency = strings.ToUpper(c)
 	}
 	for _, key := range []string{"monthlyCredits", "monthly_credits", "monthlyCredit", "balance", "credits", "availableCredits", "available_credits"} {
 		if n, ok := numberFrom(doc[key]); ok {
-			return n, currency, nil
+			out.Balance = n
+			return out, nil
 		}
 	}
-	return 0, "", fmt.Errorf("credits 响应里没有余额字段")
+	return Credits{}, fmt.Errorf("credits 响应里没有余额字段")
 }
 
 // Subscription 是 CommandCode 订阅信息里与额度有关的部分。
@@ -384,12 +412,10 @@ type Subscription struct {
 	PlanID            string
 	PlanStatus        string
 	CancelAtPeriodEnd bool
-	FiveHour          *Window
-	Weekly            *Window
 }
 
-// ParseCommandCodeSubscription 解析周期结束、套餐与两个限流窗口。
-// currentPeriodEnd 同时接受 RFC3339、Unix 秒与 Unix 毫秒；窗口的 resetAt 统一存毫秒。
+// ParseCommandCodeSubscription 解析周期结束、套餐与续费。
+// currentPeriodEnd 同时接受 RFC3339、Unix 秒与 Unix 毫秒。
 func ParseCommandCodeSubscription(data []byte) (Subscription, error) {
 	doc, err := decodeObject(data)
 	if err != nil {
@@ -428,16 +454,9 @@ func ParseCommandCodeSubscription(data []byte) (Subscription, error) {
 		sub.CancelAtPeriodEnd = b
 		known = true
 	}
-	if limits, ok := firstValue(doc, "windowLimits", "window_limits", "limits").(map[string]any); ok {
-		sub.FiveHour = parseWindow(firstValue(limits, "fiveHour", "five_hour", "fiveHourWindow", "5h"))
-		sub.Weekly = parseWindow(firstValue(limits, "weekly", "week", "weeklyWindow"))
-		if sub.FiveHour != nil || sub.Weekly != nil {
-			known = true
-		}
-	}
 	// 200 也可能回 `{}`、`{"subscription":null}` 或字段名改过的空对象。一个已知字段都
 	// 没命中时必须报错，让调用方把 subscriptions 记进 SourceErrors 并保留旧快照；
-	// 否则零值会被当成成功，把上次已知的到期时间、套餐与窗口清空，expiry_mode=exclude 静默失效。
+	// 否则零值会被当成成功，把上次已知的到期时间与套餐清空，expiry_mode=exclude 静默失效。
 	if !known {
 		return Subscription{}, fmt.Errorf("subscriptions 响应里没有已知字段")
 	}
