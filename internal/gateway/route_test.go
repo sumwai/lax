@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"lax/internal/gateway"
+	"lax/internal/quota"
 	"lax/internal/store"
 )
 
@@ -232,5 +233,97 @@ func TestGatewayRateLimitStopsAfterCandidatesExhausted(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("上游调用 = %d 次，期望 1 次：唯一候选 429 后直接返回 503", calls)
+	}
+}
+
+// quotaBalanceFacts 造一条只有余额的额度快照，USD 币种因此折合值就是原值。
+func quotaBalanceFacts(usd float64) quota.Facts {
+	return quota.Facts{
+		Status: quota.StatusOK, Balance: usd, BalanceKnown: true, Currency: "USD", CheckedAt: 1,
+	}
+}
+
+func TestGatewayQuotaOrderAndMinUSDSelectHighBalance(t *testing.T) {
+	f := newFixture(t)
+	var lowCalls, midCalls, highCalls int
+	lowUp := routeUpstream(t, http.StatusOK, chatCompletion, &lowCalls)
+	midUp := routeUpstream(t, http.StatusOK, chatCompletion, &midCalls)
+	highUp := routeUpstream(t, http.StatusOK, chatCompletion, &highCalls)
+	low := f.add(t, "low", gateway.ProtocolChat, lowUp.URL, "sk-low", []string{"m1"}, 10)
+	mid := f.add(t, "mid", gateway.ProtocolChat, midUp.URL, "sk-mid", []string{"m1"}, 20)
+	high := f.add(t, "high", gateway.ProtocolChat, highUp.URL, "sk-high", []string{"m1"}, 30)
+
+	for _, item := range []struct {
+		acc store.Account
+		usd float64
+	}{{low, 0.069}, {mid, 5}, {high, 10}} {
+		if err := f.st.SaveQuotaSnapshot(item.acc.ID, quotaBalanceFacts(item.usd)); err != nil {
+			t.Fatalf("存账号 %s 的额度快照: %v", item.acc.Name, err)
+		}
+	}
+	policy := store.DefaultRoutePolicy()
+	policy.Model = "m1"
+	policy.Sticky = store.RouteStickyOff
+	policy.QuotaOrder = quota.OrderUSDDesc
+	policy.QuotaMinUSD = 1
+	setRoutePolicy(t, f.st, policy)
+	srv := f.server(t)
+
+	status, body := postMessages(t, srv, `{"model":"m1","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	if status != http.StatusOK {
+		t.Fatalf("状态 = %d，期望 200：%s", status, body)
+	}
+	if highCalls != 1 || midCalls != 0 || lowCalls != 0 {
+		t.Fatalf("上游调用 = low %d / mid %d / high %d，期望只打高余额账号（低余额被 min_usd 排除）",
+			lowCalls, midCalls, highCalls)
+	}
+}
+
+func TestGatewayQuotaDefaultPolicyWithEmptyQuotasUnchanged(t *testing.T) {
+	f := newFixture(t)
+	var firstCalls, secondCalls int
+	firstUp := routeUpstream(t, http.StatusOK, chatCompletion, &firstCalls)
+	secondUp := routeUpstream(t, http.StatusOK, chatCompletion, &secondCalls)
+	f.add(t, "first", gateway.ProtocolChat, firstUp.URL, "sk-first", []string{"m1"}, 100)
+	f.add(t, "second", gateway.ProtocolChat, secondUp.URL, "sk-second", []string{"m1"}, 200)
+	srv := f.server(t)
+
+	status, body := postMessages(t, srv, `{"model":"m1","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	if status != http.StatusOK {
+		t.Fatalf("状态 = %d，期望 200：%s", status, body)
+	}
+	if firstCalls != 1 || secondCalls != 0 {
+		t.Fatalf("没有额度数据时仍应按 priority 先打第一个账号，实际 %d / %d", firstCalls, secondCalls)
+	}
+}
+
+func TestGatewayQuotaFilterEmptyReturnsQuota503(t *testing.T) {
+	f := newFixture(t)
+	var firstCalls, secondCalls int
+	firstUp := routeUpstream(t, http.StatusOK, chatCompletion, &firstCalls)
+	secondUp := routeUpstream(t, http.StatusOK, chatCompletion, &secondCalls)
+	first := f.add(t, "first", gateway.ProtocolChat, firstUp.URL, "sk-first", []string{"m1"}, 100)
+	second := f.add(t, "second", gateway.ProtocolChat, secondUp.URL, "sk-second", []string{"m1"}, 200)
+	for _, acc := range []store.Account{first, second} {
+		if err := f.st.SaveQuotaSnapshot(acc.ID, quotaBalanceFacts(10)); err != nil {
+			t.Fatalf("存额度快照: %v", err)
+		}
+	}
+	policy := store.DefaultRoutePolicy()
+	policy.Model = "m1"
+	policy.Sticky = store.RouteStickyOff
+	policy.QuotaMinUSD = 50
+	setRoutePolicy(t, f.st, policy)
+	srv := f.server(t)
+
+	status, body := postMessages(t, srv, `{"model":"m1","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("状态 = %d，期望 503：%s", status, body)
+	}
+	if !strings.Contains(body, "额度过滤后没有候选") {
+		t.Fatalf("503 文案应区分额度过滤，实际: %s", body)
+	}
+	if firstCalls != 0 || secondCalls != 0 {
+		t.Fatalf("全部被额度排除时不该请求上游，实际 %d / %d", firstCalls, secondCalls)
 	}
 }

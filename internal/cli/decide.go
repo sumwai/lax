@@ -472,6 +472,7 @@ func routeDecisionAt(st *store.Store, accounts []store.Account, model string, no
 		Policy:   snapshot.Policy,
 		Weights:  snapshot.Weights,
 		Stats:    snapshot.Stats,
+		Quotas:   snapshot.Quotas,
 		Seed:     now.UnixNano(),
 	}), nil
 }

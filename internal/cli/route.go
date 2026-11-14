@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"lax/internal/account"
+	"lax/internal/quota"
 	"lax/internal/store"
 )
 
@@ -140,6 +141,7 @@ func cmdRouteShow(e *Env, args []string) error {
 		{"延迟评分", fmt.Sprintf("%.2f", item.ScoreLatency)},
 	}
 	fmt.Fprint(e.Stdout, renderTable([]string{"项", "值"}, rows))
+	fmt.Fprintf(e.Stdout, "额度排序：%s / 最低折合 USD：%.2f\n", item.QuotaOrder, item.QuotaMinUSD)
 	return nil
 }
 
@@ -156,6 +158,8 @@ func cmdRouteSet(e *Env, args []string) error {
 	scoreLatency := fs.Float64("score-latency", defaults.LatencyWeight, "softmax 的延迟评分权重")
 	window := fs.String("window", routeWindowText(defaults.WindowSeconds), "统计窗口：90m、24h、7d")
 	minSamples := fs.Int("min-samples", defaults.MinSamples, "成功率平滑的最小样本")
+	quotaOrder := fs.String("quota-order", defaults.QuotaOrder, "额度排序：off / expiry_asc / expiry_desc / ratio_desc / ratio_asc / usd_desc / usd_asc")
+	quotaMinUSD := fs.Float64("quota-min-usd", defaults.QuotaMinUSD, "已知折合余额低于这个 USD 值的账号不参与选号；0 表示关闭")
 	usage := "用法：lax route set <模型> --strategy priority|rotate|weighted|success|softmax [参数]\n" +
 		"      lax route set --default --strategy <策略> [参数]"
 	if err := fs.Parse(args); err != nil {
@@ -172,6 +176,12 @@ func cmdRouteSet(e *Env, args []string) error {
 	if err != nil {
 		return usagef("--window：%v\n%s", err, usage)
 	}
+	if err := quota.ValidateOrder(strings.TrimSpace(*quotaOrder)); err != nil {
+		return usagef("--quota-order：%v\n%s", err, usage)
+	}
+	if err := quota.ValidateMinUSD(*quotaMinUSD); err != nil {
+		return usagef("--quota-min-usd：%v\n%s", err, usage)
+	}
 	p := store.RoutePolicy{
 		Strategy:       strings.TrimSpace(*strategy),
 		Sticky:         strings.TrimSpace(*sticky),
@@ -182,6 +192,8 @@ func cmdRouteSet(e *Env, args []string) error {
 		LatencyWeight:  *scoreLatency,
 		WindowSeconds:  windowSeconds,
 		MinSamples:     *minSamples,
+		QuotaOrder:     strings.TrimSpace(*quotaOrder),
+		QuotaMinUSD:    *quotaMinUSD,
 	}
 	if err := store.ValidateRoutePolicy(p); err != nil {
 		return usagef("%v\n%s", err, usage)
@@ -520,6 +532,7 @@ func cmdRouteExplain(e *Env, args []string) error {
 		Policy:   snapshot.Policy,
 		Weights:  snapshot.Weights,
 		Stats:    snapshot.Stats,
+		Quotas:   snapshot.Quotas,
 		Session:  *session,
 		Seed:     *seed,
 	})
@@ -530,10 +543,22 @@ func cmdRouteExplain(e *Env, args []string) error {
 
 	fmt.Fprintf(e.Stdout, "模型 %s：%s / 会话 %s / 来源 %s\n",
 		model, policy.Strategy, policy.Sticky, routeSourceText(policy.Source))
+	fmt.Fprintf(e.Stdout, "额度排序：%s / 最低折合 USD：%.2f\n", policy.QuotaOrder, policy.QuotaMinUSD)
 	if len(decision.Choices) == 0 {
 		fmt.Fprintln(e.Stdout, "没有候选账号。")
 	}
 	if len(decision.Choices) > 0 {
+		hasQuota := false
+		for _, c := range decision.Choices {
+			if c.Quota != nil {
+				hasQuota = true
+				break
+			}
+		}
+		header := []string{"顺序", "账号", "权重", "样本", "成功率", "平均延迟", "得分", "概率"}
+		if hasQuota {
+			header = append(header, "额度", "剩余", "到期")
+		}
 		rows := make([][]string, 0, len(decision.Choices))
 		for i, c := range decision.Choices {
 			prob := "-"
@@ -544,13 +569,17 @@ func cmdRouteExplain(e *Env, args []string) error {
 			if c.LatencySamples > 0 {
 				latency = fmt.Sprintf("%.0fms", c.AvgLatencyMS)
 			}
-			rows = append(rows, []string{
+			cells := []string{
 				strconv.Itoa(i + 1), c.Account.Name, strconv.Itoa(c.Weight),
 				strconv.FormatInt(c.Attempts, 10), routePercentText(c.SuccessRate),
 				latency, fmt.Sprintf("%.3f", c.Score), prob,
-			})
+			}
+			if hasQuota {
+				cells = append(cells, routeQuotaCells(c.Quota, now)...)
+			}
+			rows = append(rows, cells)
 		}
-		fmt.Fprint(e.Stdout, renderTable([]string{"顺序", "账号", "权重", "样本", "成功率", "平均延迟", "得分", "概率"}, rows))
+		fmt.Fprint(e.Stdout, renderTable(header, rows))
 		names := make([]string, 0, len(decision.Choices))
 		for _, c := range decision.Choices {
 			names = append(names, c.Account.Name)
@@ -618,6 +647,8 @@ type routePolicyJSON struct {
 	ScoreLatency  float64 `json:"score_latency"`
 	WindowSeconds int64   `json:"window_seconds"`
 	MinSamples    int     `json:"min_samples"`
+	QuotaOrder    string  `json:"quota_order"`
+	QuotaMinUSD   float64 `json:"quota_min_usd"`
 	UpdatedAt     int64   `json:"updated_at"`
 }
 
@@ -627,7 +658,61 @@ func routePolicyToJSON(p store.RoutePolicy, source string) routePolicyJSON {
 		Strategy: p.Strategy, Sticky: p.Sticky, Temperature: p.Temperature,
 		Explore: p.Explore, ScorePriority: p.PriorityWeight, ScoreSuccess: p.SuccessWeight,
 		ScoreLatency: p.LatencyWeight, WindowSeconds: p.WindowSeconds,
-		MinSamples: p.MinSamples, UpdatedAt: p.UpdatedAt,
+		MinSamples: p.MinSamples, QuotaOrder: p.QuotaOrder, QuotaMinUSD: p.QuotaMinUSD,
+		UpdatedAt: p.UpdatedAt,
+	}
+}
+
+// routeQuotaCells 给 explain 的人读表格补「额度/剩余/到期」三格。
+// 没有快照的账号三格都是 -，不补一个 0 冒充已知额度。
+func routeQuotaCells(entry *quota.Entry, now time.Time) []string {
+	if entry == nil {
+		return []string{"-", "-", "-"}
+	}
+	expiry := "-"
+	if entry.Facts.PeriodEnd > 0 {
+		expiry = quotaTimeCell(entry.Facts.PeriodEnd)
+		state, _ := quota.ExpiryAt(entry.Facts.PeriodEnd, now, entry.Settings)
+		switch state {
+		case quota.ExpiryNear:
+			expiry += "（临近）"
+		case quota.ExpiryExpired:
+			expiry += "（已到期）"
+		}
+	}
+	return []string{
+		quotaBalanceCell(entry.Facts),
+		quotaPercentCell(entry.Facts.RemainingRatio),
+		expiry,
+	}
+}
+
+// routeQuotaExplainJSON 是 explain --json 里每个候选的额度对象。
+// 只给选号与排障需要的字段，不带 source_errors 等整包细节（看明细用 lax quota show）。
+func routeQuotaExplainJSON(entry *quota.Entry) map[string]any {
+	f := entry.Facts
+	var balance any
+	if f.BalanceKnown {
+		balance = f.Balance
+	}
+	settingsErr := ""
+	if f.LastError != "" {
+		settingsErr = f.LastError
+	}
+	return map[string]any{
+		"status":               f.Status,
+		"balance":              balance,
+		"currency":             f.Currency,
+		"balance_usd":          f.BalanceUSD,
+		"remaining_ratio":      f.RemainingRatio,
+		"period_end":           f.PeriodEnd,
+		"plan_id":              f.PlanID,
+		"plan_status":          f.PlanStatus,
+		"cancel_at_period_end": f.CancelAtPeriodEnd,
+		"expiry_mode":          entry.Settings.ExpiryMode,
+		"expiry_days":          entry.Settings.ExpiryDays,
+		"checked_at":           f.CheckedAt,
+		"error":                settingsErr,
 	}
 }
 
@@ -750,7 +835,7 @@ func routeExplainJSON(model string, policy routePolicyJSON, d account.RouteDecis
 		if c.Probability != nil {
 			probability = *c.Probability
 		}
-		candidates = append(candidates, map[string]any{
+		candidate := map[string]any{
 			"order":           i + 1,
 			"account":         c.Account.Name,
 			"id":              c.Account.ID,
@@ -761,7 +846,11 @@ func routeExplainJSON(model string, policy routePolicyJSON, d account.RouteDecis
 			"avg_latency_ms":  c.AvgLatencyMS,
 			"score":           c.Score,
 			"probability":     probability,
-		})
+		}
+		if c.Quota != nil {
+			candidate["quota"] = routeQuotaExplainJSON(c.Quota)
+		}
+		candidates = append(candidates, candidate)
 		order = append(order, c.Account.Name)
 	}
 	excluded := make([]map[string]any, 0, len(d.Excluded))

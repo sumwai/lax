@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"lax/internal/quota"
 	"lax/internal/store"
 )
 
@@ -153,5 +154,76 @@ func TestRecordAttemptWritesRouteStatsAndPrunes(t *testing.T) {
 	}
 	if len(stats) != 0 {
 		t.Fatalf("删账号后统计没有清掉: %+v", stats)
+	}
+}
+
+func TestRouteQuotaPolicyAndSnapshot(t *testing.T) {
+	st := openTemp(t)
+
+	def := store.DefaultRoutePolicy()
+	if def.QuotaOrder != quota.OrderOff || def.QuotaMinUSD != 0 {
+		t.Fatalf("默认额度设置 = %q / %v，期望 off / 0", def.QuotaOrder, def.QuotaMinUSD)
+	}
+	// 空串按 off 处理：旧行或手工构造的策略没写这个字段时不该被拒绝，也不能变成非法值。
+	legacy := store.DefaultRoutePolicy()
+	legacy.QuotaOrder = ""
+	if err := store.ValidateRoutePolicy(legacy); err != nil {
+		t.Fatalf("空额度排序应按 off 通过校验: %v", err)
+	}
+
+	policy := store.DefaultRoutePolicy()
+	policy.Model = "m1"
+	policy.QuotaOrder = quota.OrderUSDDesc
+	policy.QuotaMinUSD = 1.5
+	if err := st.SetRoutePolicy(policy); err != nil {
+		t.Fatalf("写含额度设置的政策: %v", err)
+	}
+	got, source, err := st.ResolveRoutePolicy("m1")
+	if err != nil {
+		t.Fatalf("读政策: %v", err)
+	}
+	if source != "model" || got.QuotaOrder != quota.OrderUSDDesc || got.QuotaMinUSD != 1.5 {
+		t.Fatalf("额度设置没有持久化: %+v / %s", got, source)
+	}
+
+	invalid := policy
+	invalid.QuotaOrder = "bogus"
+	if err := st.SetRoutePolicy(invalid); err == nil {
+		t.Fatal("非法额度排序应被拒绝")
+	}
+	negative := policy
+	negative.QuotaMinUSD = -1
+	if err := st.SetRoutePolicy(negative); err == nil {
+		t.Fatal("负数 min_usd 应被拒绝")
+	}
+
+	// 没有任何额度行时，快照给空 map（非 nil），选号侧因此跳过额度过滤。
+	snapshot, err := st.RouteSnapshot("m1", time.Unix(1000, 0))
+	if err != nil {
+		t.Fatalf("空快照: %v", err)
+	}
+	if snapshot.Quotas == nil || len(snapshot.Quotas) != 0 {
+		t.Fatalf("没有额度行时 Quotas = %#v，期望非 nil 空 map", snapshot.Quotas)
+	}
+
+	acc := newAccount(t, st, "qa", []string{"m1"})
+	if err := st.SaveQuotaSnapshot(acc.ID, quota.Facts{
+		Status: quota.StatusOK, Balance: 10, BalanceKnown: true, Currency: "USD", CheckedAt: 1,
+	}); err != nil {
+		t.Fatalf("存快照: %v", err)
+	}
+	snapshot, err = st.RouteSnapshot("m1", time.Unix(1000, 0))
+	if err != nil {
+		t.Fatalf("带额度快照: %v", err)
+	}
+	entry, ok := snapshot.Quotas[acc.ID]
+	if !ok {
+		t.Fatalf("快照缺少账号 %d: %+v", acc.ID, snapshot.Quotas)
+	}
+	if entry.Facts.BalanceUSD == nil || *entry.Facts.BalanceUSD != 10 {
+		t.Fatalf("快照的折合余额 = %+v，期望 10", entry.Facts.BalanceUSD)
+	}
+	if entry.Settings != quota.DefaultSettings() {
+		t.Fatalf("没有设置行时应使用默认设置: %+v", entry.Settings)
 	}
 }

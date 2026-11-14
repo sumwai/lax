@@ -25,6 +25,7 @@ var commandTable = map[string]command{
 	"account":  {name: "account", summary: "管理上游账号：add / ls / rm / test / enable / disable", run: cmdAccount},
 	"model":    {name: "model", summary: "模型：登记、同步、探活、别名、单价与手工试打（call / decide / speak / transcribe）", run: cmdModel},
 	"route":    {name: "route", summary: "选号：模型策略、账号权重与预演（ls / show / set / unset / account / explain）", run: cmdRoute},
+	"quota":    {name: "quota", summary: "账号额度监控与到期提示：ls / show / refresh / set / unset", run: cmdQuota},
 	"provider": {name: "provider", summary: "厂商与路由：ls / add / set / unset / rm / header", run: cmdProvider},
 	"plugin":   {name: "plugin", summary: "插件：install / ls / show / enable / disable / rm / doctor / reload", run: cmdPlugin},
 	"usage":    {name: "usage", summary: "按账号、模型或日期汇总用量", run: cmdUsage},
@@ -33,7 +34,7 @@ var commandTable = map[string]command{
 	"version":  {name: "version", summary: "打印版本", run: cmdVersion},
 }
 
-var commandOrder = []string{"init", "serve", "account", "model", "route", "provider", "plugin", "usage", "log", "doctor", "version"}
+var commandOrder = []string{"init", "serve", "account", "model", "route", "quota", "provider", "plugin", "usage", "log", "doctor", "version"}
 
 func cmdInit(e *Env, args []string) error {
 	fs := newFlagSet(e, "init", "初始化配置目录与数据库")
@@ -182,6 +183,12 @@ func cmdServe(e *Env, args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// 额度自动刷新只刷新 auto_refresh=true 的账号，默认一个都不刷；它与 serve 共用同一个
+	// 信号 ctx，退出时一起停。失败只打日志并写快照状态，不改账号启用状态、不写请求记录。
+	go startQuotaAutoRefresh(ctx, a.st, gs, func(format string, logArgs ...any) {
+		fmt.Fprintf(e.Stdout, "%s %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, logArgs...))
+	}, quotaAutoRefreshInterval)
 
 	// SIGHUP 热加载：重建注册表并整表换掉，在途请求手里拿的仍是换表前取到的方言。
 	// 失败只打一行日志、当前注册表一个字不动：一次手滑不该让在跑的服务断掉。

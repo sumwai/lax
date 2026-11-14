@@ -212,3 +212,166 @@ func TestRouteDefaultAliasAndUsage(t *testing.T) {
 		}
 	}
 }
+
+// TestREADMEQuotaRouteSetExample 逐字跑 README「账号额度与余额」一节的 route set 示例。
+// route set 要求 --strategy；文档里的这行漏过它，示例照抄会以用法错误退出。
+func TestREADMEQuotaRouteSetExample(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+	up := newRecorderUpstream(t, quotaCLIRoutes())
+	if code, _, stderr := addAccount(t, "cc1", "commandcode", up.srv.URL, "", "--key", quotaCLIKey, "--models", "glm-5.2"); code != 0 {
+		t.Fatalf("建账号退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	// 与 README 第 290 行逐字一致（换行后拼成一条命令）。
+	code, _, stderr := run(t, "route", "set", "glm-5.2", "--strategy", "priority",
+		"--quota-order", "usd_desc", "--quota-min-usd", "1")
+	if code != 0 {
+		t.Fatalf("README route set 示例退出码 = %d，stderr = %s", code, stderr)
+	}
+	code, out, stderr := run(t, "route", "show", "glm-5.2", "--json")
+	if code != 0 {
+		t.Fatalf("route show 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var policy map[string]any
+	mustJSON(t, out, &policy)
+	if policy["strategy"] != "priority" || policy["quota_order"] != "usd_desc" ||
+		policy["quota_min_usd"].(float64) != 1 {
+		t.Fatalf("README 示例写入的策略 = %+v", policy)
+	}
+}
+
+func TestRouteQuotaPolicyAndExplain(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+	up := newRecorderUpstream(t, quotaCLIRoutes())
+	for _, name := range []string{"a1", "b1"} {
+		code, _, stderr := addAccount(t, name, "commandcode", up.srv.URL, "", "--key", quotaCLIKey, "--models", "glm-5.2")
+		if code != 0 {
+			t.Fatalf("建账号 %s 退出码 = %d，stderr = %s", name, code, stderr)
+		}
+	}
+
+	// 没有额度数据时，人读表格保持旧列，只多一行默认额度策略。
+	code, out, stderr := run(t, "route", "explain", "glm-5.2")
+	if code != 0 {
+		t.Fatalf("无额度 explain 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if !strings.Contains(out, "最终顺序") || !strings.Contains(out, "额度排序：off / 最低折合 USD：0.00") {
+		t.Fatalf("无额度 explain 输出 = %s", out)
+	}
+	if strings.Contains(out, "剩余") || strings.Contains(out, "到期") {
+		t.Fatalf("没有额度数据时不该出现额度列: %s", out)
+	}
+
+	code, out, stderr = run(t, "route", "set", "glm-5.2", "--strategy", "priority",
+		"--sticky", "off", "--quota-order", "usd_desc", "--quota-min-usd", "1.5")
+	if code != 0 {
+		t.Fatalf("route set 额度参数退出码 = %d，stderr = %s", code, stderr)
+	}
+	code, out, stderr = run(t, "route", "show", "glm-5.2")
+	if code != 0 {
+		t.Fatalf("route show 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if !strings.Contains(out, "额度排序：usd_desc / 最低折合 USD：1.50") {
+		t.Fatalf("route show 人读输出缺少额度设置: %s", out)
+	}
+	code, out, stderr = run(t, "route", "show", "glm-5.2", "--json")
+	if code != 0 {
+		t.Fatalf("route show --json 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var policy map[string]any
+	mustJSON(t, out, &policy)
+	if policy["quota_order"] != "usd_desc" || policy["quota_min_usd"].(float64) != 1.5 {
+		t.Fatalf("route show JSON 额度字段 = %+v", policy)
+	}
+
+	for _, args := range [][]string{
+		{"route", "set", "glm-5.2", "--strategy", "priority", "--quota-order", "bogus"},
+		{"route", "set", "glm-5.2", "--strategy", "priority", "--quota-min-usd", "-1"},
+	} {
+		if code, out, _ := run(t, args...); code != 2 || out != "" {
+			t.Fatalf("%v 应退出 2 且不写 stdout，实际 %d / %q", args, code, out)
+		}
+	}
+
+	// 刷新出快照后才能看到额度列；24.6301 / (24.6301+45.33) ≈ 35.2%。
+	code, _, stderr = run(t, "quota", "refresh", "--all")
+	if code != 0 {
+		t.Fatalf("quota refresh --all 退出码 = %d，stderr = %s", code, stderr)
+	}
+	code, out, stderr = run(t, "route", "explain", "glm-5.2", "--json")
+	if code != 0 {
+		t.Fatalf("带额度 explain 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var explain struct {
+		Policy     map[string]any `json:"policy"`
+		Order      []string       `json:"order"`
+		Candidates []struct {
+			Account string         `json:"account"`
+			Quota   map[string]any `json:"quota"`
+		} `json:"candidates"`
+	}
+	mustJSON(t, out, &explain)
+	if explain.Policy["quota_order"] != "usd_desc" || explain.Policy["quota_min_usd"].(float64) != 1.5 {
+		t.Fatalf("explain policy 额度字段 = %+v", explain.Policy)
+	}
+	if len(explain.Candidates) != 2 || len(explain.Order) != 2 {
+		t.Fatalf("explain 候选 = %+v", explain)
+	}
+	for _, c := range explain.Candidates {
+		q := c.Quota
+		if len(q) == 0 {
+			t.Fatalf("候选 %s 缺少 quota 对象", c.Account)
+		}
+		if q["status"] != "ok" || q["currency"] != "USD" || q["expiry_mode"] != "warn" ||
+			q["expiry_days"] != float64(3) {
+			t.Fatalf("候选 %s 的 quota = %+v", c.Account, q)
+		}
+		if !quotaNearly(quotaNumber(t, q, "balance"), 24.6301) ||
+			!quotaNearly(quotaNumber(t, q, "balance_usd"), 24.6301) ||
+			!quotaNearly(quotaNumber(t, q, "remaining_ratio"), 24.6301/69.9601) {
+			t.Fatalf("候选 %s 的金额 = %+v", c.Account, q)
+		}
+	}
+
+	code, out, stderr = run(t, "route", "explain", "glm-5.2")
+	if code != 0 {
+		t.Fatalf("带额度 explain 人读退出码 = %d，stderr = %s", code, stderr)
+	}
+	for _, want := range []string{"剩余", "到期", "24.6301 USD"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("带额度 explain 人读输出缺少 %q: %s", want, out)
+		}
+	}
+
+	// 阈值高于两个账号的已知余额时，候选为空且原因是额度，不是冷却。
+	code, _, stderr = run(t, "route", "set", "glm-5.2", "--strategy", "priority",
+		"--sticky", "off", "--quota-min-usd", "30")
+	if code != 0 {
+		t.Fatalf("调高 min_usd 退出码 = %d，stderr = %s", code, stderr)
+	}
+	code, out, stderr = run(t, "route", "explain", "glm-5.2", "--json")
+	if code != 0 {
+		t.Fatalf("过滤后 explain 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var filtered struct {
+		Candidates []any `json:"candidates"`
+		Excluded   []struct {
+			Account string `json:"account"`
+			Reason  string `json:"reason"`
+		} `json:"excluded"`
+	}
+	mustJSON(t, out, &filtered)
+	if len(filtered.Candidates) != 0 {
+		t.Fatalf("min_usd=30 应过滤掉两个账号: %+v", filtered.Candidates)
+	}
+	if len(filtered.Excluded) != 2 {
+		t.Fatalf("排除列表 = %+v，期望两个账号", filtered.Excluded)
+	}
+	for _, ex := range filtered.Excluded {
+		if !strings.HasPrefix(ex.Reason, "额度：") {
+			t.Fatalf("账号 %s 的排除原因应标明额度: %q", ex.Account, ex.Reason)
+		}
+	}
+}

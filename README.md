@@ -37,9 +37,10 @@ lax log tail                                        # 看请求记录
 | `model decide` | 手工发一条 systemone 决策请求（`--state` 加一组问题），打印每个问题的答案与概率；`--json` 给脚本用 |
 | `model speak` | 手工发一条语音合成请求：`--model` 加 `--text`，音频写标准输出或 `--out <文件>`，`--voice` 与 `--format` 可选 |
 | `model transcribe` | 手工发一条语音转写请求：`<音频文件或 ->` 加 `--model`，`--language`、`--prompt` 与 `--format` 可选，响应体原样输出 |
-| `route ls\|show\|set\|unset` | 看、改默认选号策略或某个模型的策略：主备、轮转、按权重轮转、按成功率、softmax |
+| `route ls\|show\|set\|unset` | 看、改默认选号策略或某个模型的策略：主备、轮转、按权重轮转、按成功率、softmax；`--quota-order` 与 `--quota-min-usd` 可按额度排序或设最低折合余额（默认关闭） |
 | `route account ls\|set\|unset` | 给账号设权重（1–1000），可只对某个模型覆盖；权重只影响 weighted 与 softmax |
-| `route explain` | 用当前策略与统计预演一次选号，打印顺序、得分、概率与排除原因；不发上游、不写记录 |
+| `route explain` | 用当前策略、统计与额度预演一次选号，打印顺序、得分、概率与排除原因；始终打印一行额度排序与最低折合 USD，有额度快照时再附「额度 / 剩余 / 到期」三列；不发上游、不写记录 |
+| `quota ls\|show\|refresh\|set\|unset` | 账号额度监控：列出快照、看明细、手动刷新、改监控设置（来源、汇率、自动刷新、到期处理）；只读监控，默认不参与选号 |
 | `usage` | 按账号、模型或日期汇总用量；`--account` / `--model` / `--provider` 过滤，`--since` 或 `--from`/`--to` 限定时间，含输入、输出与缓存读写 token |
 | `log tail` | 最近的请求记录；`--since` 或 `--from`/`--to` 限定时间，`--follow` 跟进新记录 |
 | `doctor` | 自检配置、目录、密钥、端口、数据库 |
@@ -248,6 +249,56 @@ lax route explain glm-5.2 --session demo --seed 42
 ```
 
 它会打印候选顺序、每个账号的权重、样本数、成功率、平均延迟、得分与概率，以及被停用、没声明该模型或正在冷却的账号。softmax 用同一个 `--seed` 与同一份数据会得到同样的顺序；`--json` 给脚本用。`route explain` 只读库，不写请求记录、不改冷却。
+
+额度也能参与选号，默认关闭：`--quota-order` 默认 `off`、`--quota-min-usd` 默认 `0`，不配置时输出与旧版一致。只有「折合余额已知且低于阈值」的账号会被排除，从未刷新、汇率未知的账号一律保留；到期默认只提示（`warn`），可以改成排到末尾（`deprioritize`）或直接排除（`exclude`）。细节见下一节。
+
+## 账号额度与余额
+
+额度监控是只读的：查上游余额与到期时间，存一份快照给命令看，也可以选择让它参与选号。默认不自动刷新、不参与选号，不配置时行为与旧版完全一样。目前只支持 CommandCode 与 DeepSeek 两类账号。
+
+```bash
+# 手动查一次；--all 刷新全部账号
+lax quota refresh cc1
+lax quota refresh --all
+
+# 看所有账号的快照；没有快照的显示「未刷新」
+lax quota ls
+
+# 看一个账号的明细：余额、本期已用、周期结束、套餐、限流窗口与到期状态
+lax quota show cc1
+```
+
+CommandCode 的余额来自 `/alpha/billing/credits` 的 `monthlyCredits`（剩余），本期已用来自 `/alpha/usage/summary` 的 `totalCredits`，总额按「余额 + 已用」算；订阅接口给周期结束与套餐。`windowLimits` 的 5 小时/每周窗口是限流窗口，不是月度总额。DeepSeek 只报余额，没有总额、周期与比例。上游用量汇总（本期已用、请求数、成功率）是所有客户端的合计，只展示，不参与选号。
+
+只有一种情况需要手工汇率：账号余额不是 USD（例如 DeepSeek 的 CNY）。没给汇率时原值照存，折合 USD 与剩余比例留空，不会用一个猜的汇率去过滤账号。
+
+```bash
+# 改监控设置：只改显式给出的项
+lax quota set cc1 --fx-rate 0.14          # CNY 折 USD 的手工汇率
+lax quota set cc1 --auto-refresh          # serve 时每 30 分钟刷一次
+lax quota set cc1 --expiry-mode exclude --expiry-days 7
+
+# 恢复某一项或整行默认值
+lax quota unset cc1 fx_rate
+lax quota unset cc1
+```
+
+`quota set` 只管账号的监控设置；要不要让额度参与选号，在 `route set` 上配置：
+
+```bash
+# 按折合余额从高到低选，并排除已知余额低于 1 USD 的账号
+lax route set glm-5.2 --strategy priority --quota-order usd_desc --quota-min-usd 1
+
+# 到期处理：warn 只提示（默认）、deprioritize 排到最后、exclude 直接排除
+lax quota set cc1 --expiry-mode deprioritize
+
+# 看这次会怎么选，有快照时多出「额度 / 剩余 / 到期」三列
+lax route explain glm-5.2
+```
+
+额度选号有几个默认与边界：`--quota-order` 默认 `off`、`--quota-min-usd` 默认 `0`，都不改选号；只有「折合余额已知且低于阈值」的账号才会被排除，从未刷新、汇率未知的账号一律保留；到期默认 `warn`，只展示，`exclude` 才会排除。额度排序在策略、粘性与 softmax 之后做稳定排序，未知值排最后；`strict` 粘性被额度排除时仍返回 503，不换号。额度刷新失败只更新快照状态，不停用账号、不写请求记录；只有真实请求 401 才会停用账号。
+
+只剩 0.069 credits 这类几乎用尽的账号，要开过滤就设一个小的最低阈值（如 `--quota-min-usd 0.5`），让它在余额低于阈值后退出选号；不要把这个数字当成默认值。
 
 ## 向量化
 
@@ -541,3 +592,5 @@ Release 创建成功后，同一工作流的 `deploy` job 会把 `linux/amd64` �
 gemini 的入站与出站都支持非流式与流式，模型列表可同步（`google-gemini` 内置，`GET /v1beta/models` 的清单去掉 `models/` 前缀、按 `nextPageToken` 翻页；只能做向量化的条目现在也进清单，能力位记 `embedding`，以前它们被 `supportedGenerationMethods` 过滤掉了）。gemini 的模型名在 URL 路径里，路由的 `path` 因此可以写 `{model}` 占位符（相对路径与整条地址都行，替换时按路径段转义）；入站 gemini 的错误体是 google 的形状（`error.code` 是 HTTP 状态码、`error.status` 是状态名），四条入站路径各自的形状见 DESIGN 5.2；非正常的 `finishReason`（`SAFETY` 一类）按正常结束转给客户端，原值只进网关日志；gemini 的内置工具（`googleSearch` 等）与思考内容（`thought` 标记、`thinkingConfig`）不搬。转换时搬运文本、图片、思考内容、工具调用与工具结果五类块：思考内容只在响应方向搬运，请求方向不回填——chat 的 `reasoning_content` 与 responses 的 `reasoning` item 是上游自己产生的字段，回填给推理模型会被以 400 拒掉整条请求；响应方向仍照旧搬运。签名只有 anthropic 有落点，没有签名的思考块不写进 anthropic 的请求与响应（不伪造签名，伪造会被上游以 400 拒绝），所以 chat 与 responses 的思考内容转到 anthropic 时丢弃；流式转换下发给 anthropic 客户端的思考块没有签名，客户端若把这些块回填进下一轮请求，上游会报 400。工具结果之后紧跟的追问并进同一条 user 消息，因为 anthropic 不接受两条相邻的 user 消息。思考配置参数（anthropic 的 `thinking`、chat 的 `reasoning_effort`）、`redacted_thinking` 的不透明 `data` 与 responses 的 `encrypted_content` 跨协议不搬，reasoning token 不单独记账（算进输出 token）。音频与文件类内容丢弃；anthropic 的服务端内置工具（`web_search` 等）跨协议时整条丢弃，chat 与 responses 的工具定义只认 function，编回 anthropic 时才原样保留 `type`；`tools[].strict` 不搬运，`is_error` 只有 anthropic 有落点，`allowed_tools` 降级为 `auto`。流式转换下断在工具参数中间时，已下发的参数片段撤不回来，收尾的错误帧会写明「工具调用参数在上游中断，内容不完整」，这一次记失败，程序不伪造闭合的 JSON。跨协议只搬运图片地址，没有其它多模态变换。不改写任何客户端配置文件；需要非标准请求头的上游通过 `provider header` 声明（见 DESIGN 5.10），例如 opencode 的 Go 端点要求 `x-opencode-session`，声明 `{session}` 即可路由，要求按请求计算的签名的上游仍然接不了；冷却按账号-模型隔离：429 首次 500 毫秒，5xx 首次 10 秒，连接层失败首次 2 秒，均按该账号该模型的连续失败次数翻倍、上限 30 分钟；探活调用不计入用量汇总；估算花费需要给模型定价（`model price set` 的 `--in` 与 `--out`，账号只在套餐不同时用 `--account` 覆盖），缓存读写按 `--cache-read` 与 `--cache-write` 折价（未填时回退到输入价，单价单位都是每百万 token）；`usage` 与 `log tail` 里仍分别显示缓存读写的 token。语音不做音频转码、不解析音频容器算时长（直通路径 TTS 按入参字符、ASR 按上游报的秒数，chat 方言按 token 记账），变化的模型名也不改写（响应里的 `model` 原样）；出站形状只由绑定的方言决定，同协议的方言不执行声明式映射，chat 形状的语音方言可以是内置的 Go 实现，也可以是插件用声明式映射或 hook 方言写的（见「插件与方言」）。
 
 插件与方言：本版落地声明式插件、内置方言与 `moejs` 沙箱，仍没有 `trusted-worker`（独立进程，以及文件、进程、环境变量权限）、Magpie/OpenCode 导入与 `plugin import`、OAuth 登录、插件市场与签名（`plugin_versions.signature_status` 一律 `unverified`、`source` 记 `dir` 或 `github:<owner>/<repo>/<path>@<ref>`）。声明式映射只能表达 `const`、`input`、`model`、`option` 四种来源加 `map`、`default`、`omit_if_empty` 三个修饰键，没有表达式、正则、循环与脚本，`input` 白名单只有语音那八项，所以声明式方言只能给语音两条操作写映射；对话、向量化与决策请求可以绑宿主方言（`lax/` 前缀）走 Go 编解码，也可以绑 hook 方言。hook 方言的边界：`Input.Body` 是宿主编好的报文（`Input.Messages` 仍为空，读消息要解析 `ctx.body`）；向量化与决策入站的响应，方言返回的 `ResultJSON` 在入站与出站同协议时原样写回（这两个协议没有中间表示，跨协议改编不支持）；要流式就得实现 `decode_stream`，否则在发上游请求之前 400；`Plan.Path` 只能改相对路径，语音路径不看它；`Plan.Headers` 是逐请求的头（请求 ID、资源号这类），语音与非语音两条方言路径都生效，但凭据头与帧头是保留头、沙箱直接拒，凭据只由厂商的 `auth` 声明注入。沙箱没有内存硬上限（goja 不提供堆上限 API，只有源码 8 MiB、返回值 8 MiB、注入音频与流块 8 MiB、cache 1 MiB 四道字节闸门）；逐 hook 超时打不断在途的 `lax.http.request`，一个 100 ms 的 hook 可能占用几秒；ESM 只支持静态 `export`、`export default` 与相对 import，没有 `import *`、裸模块、动态 import 与顶层 `await`；联网只走 `lax.http.request` 的白名单 https，没有媒体通道。`plugin install` 逐家厂商一个事务，一个插件带多家厂商时第 N 家失败会让前 N-1 家留在库里（用 `lax plugin rm` 或 `lax provider rm` 清）。`plugin reload`（`SIGHUP`）只整表换方言注册表，不关旧沙箱，反复 reload 会积累旧实例；没有 `models` / `probe` 两个控制面钩子，模型清单与探活仍由 `model sync` / `model probe` 做。
+
+账号额度监控只支持 CommandCode 与 DeepSeek：CommandCode 的 `/alpha/*` 是未公开接口，路径、字段与「缺浏览器 UA 返回 403」都可能变；DeepSeek 的 `/user/balance` 只报余额，没有总额、周期与剩余比例。人民币折 USD 没有可靠默认汇率，必须 `quota set --fx-rate` 手填；未设置时折合 USD、剩余比例与美元排序都按未知处理，`--quota-min-usd` 也不会排除它。额度刷新失败只写快照状态，不停用账号、不写 `requests` 与 `route_stats`；额度刷新本身不是一次转发请求，不计入 `usage` 与 `log`。上游 `usage.summary` 是所有客户端的合计，仅供查看。

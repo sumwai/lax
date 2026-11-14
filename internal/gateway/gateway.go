@@ -440,6 +440,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		Policy:   snapshot.Policy,
 		Weights:  snapshot.Weights,
 		Stats:    snapshot.Stats,
+		Quotas:   snapshot.Quotas,
 		Session:  session,
 		Sequence: sequence,
 		Seed:     s.now().UnixNano() + int64(sequence),
@@ -460,6 +461,28 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			writeInboundError(w, inbound, http.StatusNotFound, modelNotFoundKind(inbound),
 				modelNotFoundMessage(requested, req.Model))
 			return
+		}
+		// 额度过滤后为空是配置问题，不是账号坏了：让用户去看路由与额度，而不是去查冷却。
+		// 只在「通过前三条硬过滤的账号全部被额度排除」时才这么说；有账号停用/冷却时
+		// 仍是下面那句通用文案，否则会把两种成因混在一起。
+		quotaExcluded := 0
+		for _, ex := range decision.Excluded {
+			if account.IsQuotaExclusionReason(ex.Reason) {
+				quotaExcluded++
+			}
+		}
+		if quotaExcluded > 0 {
+			usable := 0
+			for _, acc := range accounts {
+				if acc.Enabled && account.Supports(acc, req.Model) && account.AvailableForModel(acc, req.Model, s.now()) {
+					usable++
+				}
+			}
+			if usable > 0 && quotaExcluded == usable {
+				writeInboundError(w, inbound, http.StatusServiceUnavailable, "api_error",
+					fmt.Sprintf("模型 %s 的额度过滤后没有候选，检查 lax route show %s 与 lax quota ls", req.Model, req.Model))
+				return
+			}
 		}
 		writeInboundError(w, inbound, http.StatusServiceUnavailable, "api_error",
 			fmt.Sprintf("模型 %s 的账号都在冷却或被停用，先用 lax account ls 看状态", req.Model))

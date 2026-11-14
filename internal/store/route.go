@@ -10,6 +10,8 @@ import (
 
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+
+	"lax/internal/quota"
 )
 
 const (
@@ -51,7 +53,10 @@ type RoutePolicy struct {
 	LatencyWeight  float64
 	WindowSeconds  int64
 	MinSamples     int
-	UpdatedAt      int64
+	// QuotaOrder 与 QuotaMinUSD 是额度选号设置，默认 off / 0，即不改变选号行为。
+	QuotaOrder  string
+	QuotaMinUSD float64
+	UpdatedAt   int64
 }
 
 // DefaultRoutePolicy 返回内置默认策略。
@@ -66,7 +71,18 @@ func DefaultRoutePolicy() RoutePolicy {
 		LatencyWeight:  0.1,
 		WindowSeconds:  RouteDefaultWindowSeconds,
 		MinSamples:     20,
+		QuotaOrder:     quota.OrderOff,
+		QuotaMinUSD:    0,
 	}
+}
+
+// normalizedQuotaOrder 把空串按 off 处理：旧行或手工构造的策略没写这个字段时
+// 等价于关闭额度排序，而不是被当成非法值拒绝。
+func normalizedQuotaOrder(order string) string {
+	if strings.TrimSpace(order) == "" {
+		return quota.OrderOff
+	}
+	return order
 }
 
 // ValidRouteStrategy 判断策略名是否可用。
@@ -120,6 +136,12 @@ func ValidateRoutePolicy(p RoutePolicy) error {
 	if p.MinSamples < 1 {
 		return fmt.Errorf("最小样本至少是 1，当前是 %d", p.MinSamples)
 	}
+	if err := quota.ValidateOrder(normalizedQuotaOrder(p.QuotaOrder)); err != nil {
+		return err
+	}
+	if err := quota.ValidateMinUSD(p.QuotaMinUSD); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -166,13 +188,15 @@ func (s *Store) ResolveRoutePolicy(model string) (RoutePolicy, string, error) {
 	return DefaultRoutePolicy(), "builtin", nil
 }
 
-// RouteSnapshot 是一次选号要读的全部库内事实：生效策略、账号权重与窗口统计。
-// 三个读取集中在这里，网关、CLI 与 explain 不各拼一份取数顺序。
+// RouteSnapshot 是一次选号要读的全部库内事实：生效策略、账号权重、窗口统计与额度快照。
+// 四个读取集中在这里，网关、CLI 与 explain 不各拼一份取数顺序。
 type RouteSnapshot struct {
 	Policy       RoutePolicy
 	PolicySource string
 	Weights      map[int64]int
 	Stats        map[int64]RouteStat
+	// Quotas 只含有快照的账号；没有额度行时是空 map（非 nil），选号行为与旧版一致。
+	Quotas map[int64]quota.Entry
 }
 
 // RouteSnapshot 按模型读取选号快照。now 决定统计窗口的右端，测试因此不依赖真实时钟。
@@ -190,7 +214,13 @@ func (s *Store) RouteSnapshot(model string, now time.Time) (RouteSnapshot, error
 	if err != nil {
 		return RouteSnapshot{}, err
 	}
-	return RouteSnapshot{Policy: policy, PolicySource: source, Weights: weights, Stats: stats}, nil
+	quotas, err := s.QuotaEntries()
+	if err != nil {
+		// 额度读失败时整次快照失败，不静默给空：否则一个库故障会悄悄绕开
+		// 用户配置的 min_usd 过滤或排序。
+		return RouteSnapshot{}, err
+	}
+	return RouteSnapshot{Policy: policy, PolicySource: source, Weights: weights, Stats: stats, Quotas: quotas}, nil
 }
 
 // ListRoutePolicies 返回落库的默认行与模型覆盖行；空列表表示只有内置默认。
@@ -231,7 +261,7 @@ func (s *Store) SetRoutePolicy(p RoutePolicy) error {
 	row := routePolicyRowFrom(p)
 	return s.gorm.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "model"}},
-		DoUpdates: clause.AssignmentColumns([]string{"strategy", "sticky", "temperature", "explore", "priority_weight", "success_weight", "latency_weight", "window_seconds", "min_samples", "updated_at"}),
+		DoUpdates: clause.AssignmentColumns([]string{"strategy", "sticky", "temperature", "explore", "priority_weight", "success_weight", "latency_weight", "window_seconds", "min_samples", "quota_order", "quota_min_usd", "updated_at"}),
 	}).Create(&row).Error
 }
 
@@ -260,6 +290,8 @@ func routePolicyFromRow(r routePolicyRow) RoutePolicy {
 		LatencyWeight:  r.LatencyWeight,
 		WindowSeconds:  r.WindowSeconds,
 		MinSamples:     r.MinSamples,
+		QuotaOrder:     normalizedQuotaOrder(r.QuotaOrder),
+		QuotaMinUSD:    r.QuotaMinUSD,
 		UpdatedAt:      r.UpdatedAt,
 	}
 }
@@ -276,6 +308,8 @@ func routePolicyRowFrom(p RoutePolicy) routePolicyRow {
 		LatencyWeight:  p.LatencyWeight,
 		WindowSeconds:  p.WindowSeconds,
 		MinSamples:     p.MinSamples,
+		QuotaOrder:     normalizedQuotaOrder(p.QuotaOrder),
+		QuotaMinUSD:    p.QuotaMinUSD,
 		UpdatedAt:      p.UpdatedAt,
 	}
 }

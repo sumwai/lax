@@ -8,7 +8,7 @@
 
 与同类产品的差别：
 
-- 不是多租户服务。没有用户、充值、额度与网页后台。一个进程、一份配置、一个数据库（缺省是 SQLite 单文件）。
+- 不是多租户服务。没有用户、充值、配额分配与网页后台；账号额度只做只读监控与选号提示（见 5.19），不做分配与扣减。一个进程、一份配置、一个数据库（缺省是 SQLite 单文件）。
 - 不是图形应用。所有操作都是子命令，输出能用 `--json` 解析，方便写脚本。
 - 服务端只在回环地址上监听，默认不对外开端口。
 
@@ -140,7 +140,9 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 
 `route` 一组的子命令：`ls`、`show`、`set`、`unset`、`account`、`explain`。它维护全局与按模型的选号策略、账号权重，并试运行一次选号；只改 `lax` 自己的候选顺序，不碰厂商的 HTTP 路由（后者仍由 `provider` 与 `providers.route` 管，见 5.8）。`route account` 只改账号在候选里的权重，不单独选策略：一次请求有多个候选账号，策略必须由一个目标统一解析（见 5.3）。
 
-`account`、`model`、`route`、`provider`、`plugin`、`log` 六组支持 `-h`、`--help` 与 `help`：把该组的用途与子命令清单（每个子命令一行中文说明）打到 stdout，退出码 0，不读数据库。不带子命令时与 `--help` 完全一致：与 `--help` 同一个分支、同样的 stdout 与退出码 0，因为要列子命令的人不该再敲一次 `--help`；只有未知子命令算用法错误。一级入口也一样：直接运行 `lax` 打印用法、退出码 0。子命令自己的 `--help` 仍打印该子命令的参数清单。未知子命令退出码 2，提示里给出 `lax <组> --help`。`provider header` 这一组同样支持 `--help`，但它打印的是三条用法、一个示例与四种取值写法（见 5.10）：光列子命令说不清值怎么展开。`model alias` 这一组也一样：它的 `--help` 打印三条用法、一个示例与两段说明（别名只影响请求方向、客户端请求别名时 `log tail` 的模型列写成 `别名 → 真名`），光列子命令说不清别名改的是什么、不改的是什么。`model price` 同样按这个形状打印（三条用法、一个示例 `lax model price set glm-4.6 --in 0.6 --out 2.2`、两段说明：价格属于模型不属于账号；账号级只在套餐不同时覆盖，不影响其它账号）。
+`quota` 一组的子命令：`ls`、`show`、`refresh`、`set`、`unset`，只做账号额度的只读监控与到期提示（见 5.19）。`set` 是 patch 语义，只改命令行上显式给出的监控项（来源、汇率、自动刷新、到期处理、提前天数、额度地址），`unset` 可清单项或整行恢复默认；它们只管账号级的监控设置，选号侧的额度排序与最低折合 USD 阈值在 `route set --quota-order` 与 `route set --quota-min-usd`，不走这里。`quota refresh` 是唯一会打上游额度接口的命令（`serve` 里 `auto_refresh=true` 的账号由后台循环刷新），刷新失败只改快照状态，不写请求记录、不停用账号。
+
+`account`、`model`、`route`、`quota`、`provider`、`plugin`、`log` 七组支持 `-h`、`--help` 与 `help`：把该组的用途与子命令清单（每个子命令一行中文说明）打到 stdout，退出码 0，不读数据库。不带子命令时与 `--help` 完全一致：与 `--help` 同一个分支、同样的 stdout 与退出码 0，因为要列子命令的人不该再敲一次 `--help`；只有未知子命令算用法错误。一级入口也一样：直接运行 `lax` 打印用法、退出码 0。子命令自己的 `--help` 仍打印该子命令的参数清单。未知子命令退出码 2，提示里给出 `lax <组> --help`。`provider header` 这一组同样支持 `--help`，但它打印的是三条用法、一个示例与四种取值写法（见 5.10）：光列子命令说不清值怎么展开。`model alias` 这一组也一样：它的 `--help` 打印三条用法、一个示例与两段说明（别名只影响请求方向、客户端请求别名时 `log tail` 的模型列写成 `别名 → 真名`），光列子命令说不清别名改的是什么、不改的是什么。`model price` 同样按这个形状打印（三条用法、一个示例 `lax model price set glm-4.6 --in 0.6 --out 2.2`、两段说明：价格属于模型不属于账号；账号级只在套餐不同时覆盖，不影响其它账号）。
 
 | 命令 | 参数 | 行为 | 输出 |
 | --- | --- | --- | --- |
@@ -154,13 +156,18 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | `account enable` | `<名称>` | 重新启用账号并清冷却 | 确认一行 |
 | `account disable` | `<名称>` | 停用账号，不再参与选号 | 确认一行 |
 | `route ls` | `--json` | 列出默认策略与所有按模型的覆盖行；没有落库的默认行时显示内置默认 `priority / prefer`。目标列写 `default` 或真实模型名，来源列写「内置」「默认」「模型」。只读库，不读取请求记录 | 表格（目标 / 来源 / 策略 / 会话 / 温度 / 探索） |
-| `route show` | `<模型> \| --default` `--json` | 显示一个目标最终生效的策略：模型覆盖优先，否则默认行，再否则内置默认。模型名先按别名规则解析成真名；`--json` 另带 `source`、`window_seconds`、`min_samples` 与三项评分权重 | 表格（一行一项）或一个 JSON 对象 |
-| `route set` | `<模型> \| --default` `--strategy priority\|rotate\|weighted\|success\|softmax [--sticky prefer\|off\|strict] [--temperature N] [--explore 百分比] [--score-priority N] [--score-success N] [--score-latency N] [--window 时长] [--min-samples N]` | 覆盖语义：整条策略一次写全，没给的参数取内置默认值。模型目标先解析别名，写入真实模型名；`--default` 写默认行。改完立即生效，不发上游、不重启网关 | 确认一行；`--json` 是写完再读一次的完整策略 |
+| `route show` | `<模型> \| --default` `--json` | 显示一个目标最终生效的策略：模型覆盖优先，否则默认行，再否则内置默认。模型名先按别名规则解析成真名；`--json` 另带 `source`、`window_seconds`、`min_samples`、`quota_order`、`quota_min_usd` 与三项评分权重；人读输出另有一行「额度排序：… / 最低折合 USD：…」 | 表格（一行一项）或一个 JSON 对象 |
+| `route set` | `<模型> \| --default` `--strategy priority\|rotate\|weighted\|success\|softmax [--sticky prefer\|off\|strict] [--temperature N] [--explore 百分比] [--score-priority N] [--score-success N] [--score-latency N] [--window 时长] [--min-samples N] [--quota-order off\|expiry_asc\|expiry_desc\|ratio_desc\|ratio_asc\|usd_desc\|usd_asc] [--quota-min-usd N]` | 覆盖语义：整条策略一次写全，没给的参数取内置默认值（额度两项默认 `off` / `0`，即不改变选号）。模型目标先解析别名，写入真实模型名；`--default` 写默认行。改完立即生效，不发上游、不重启网关 | 确认一行；`--json` 是写完再读一次的完整策略 |
 | `route unset` | `<模型> \| --default` | 删除模型覆盖或默认行；模型覆盖删掉后回落到默认，默认行删掉后回落到内置默认。本来不存在时退出 0，并说明现在生效的是哪一条 | 确认一行 |
 | `route account ls` | `[--model 模型]` `--json` | 不给 `--model` 时列出显式设置的账号权重（`*` 表示账号默认，模型名表示该模型覆盖）；给了 `--model` 时列出所有账号在这个模型上的最终权重与来源（模型覆盖 / 账号默认 / 内置 1） | 表格（账号 / 模型 / 权重 / 来源） |
 | `route account set` | `<账号> [--model 模型] --weight N` | 增量写一个权重：`--model` 不给就写账号默认，给了就只覆盖该账号在该模型上的权重。权重取 1–1000 的整数；停用账号请用 `account disable`，不用权重 0 代替 | 确认一行；`--json` 含 `account`、`model`、`weight` |
 | `route account unset` | `<账号> [--model 模型]` | 删除对应的账号权重行；不存在的行同样退出 0。实际生效的权重回落到账号默认或内置 1 | 确认一行 |
-| `route explain` | `<模型> [--session 会话键] [--seed N]` `--json` | 只读预演：按当前策略、账号权重、冷却与请求统计排出候选，打印每个账号的权重、样本数、成功率、延迟、得分、概率与最终顺序。softmax 的随机抽样用 `--seed` 固定，默认种子 1；不发上游、不写请求记录、不改冷却 | 表格 + 最终顺序；`--json` 含策略、候选、排除原因与最终顺序 |
+| `route explain` | `<模型> [--session 会话键] [--seed N]` `--json` | 只读预演：按当前策略、账号权重、冷却、请求统计与额度设置排出候选，打印每个账号的权重、样本数、成功率、延迟、得分、概率与最终顺序。softmax 的随机抽样用 `--seed` 固定，默认种子 1；不发上游、不写请求记录、不改冷却。无论有没有快照，人读输出都有一行「额度排序：… / 最低折合 USD：…」；有额度快照时表格追加「额度 / 剩余 / 到期」三列，没有快照时保持旧表；额度过滤造成的排除原因以「额度：」开头 | 表格 + 最终顺序；`--json` 含策略、候选、排除原因与最终顺序，候选有额度数据时多一个 `quota` 对象 |
+| `quota ls` | `--json` | 列出所有账号的额度快照与监控设置：没有快照的账号状态写「未刷新」，仍按原样参与选号。只读库，不发上游请求 | 表格（账号 / 厂商 / 状态 / 余额 / 折合 USD / 剩余比例 / 周期结束 / 刷新时间 / 备注）；`--json` 每项含账号、厂商、设置与快照事实，不带显示名与失败端点（看明细用 `quota show`） |
+| `quota show` | `<账号>` `--json` | 显示一个账号的额度事实与监控设置：来源、状态、余额、本期已用、币种、汇率、折合 USD、剩余比例、周期结束、套餐、续费、5 小时/每周窗口、上游用量、上游可用、刷新时间、失败端点与到期状态。没有快照时提示先 `quota refresh`，并说明账号仍按原样参与选号。`--json` 另带 `expiry_state`、`expiry_action` 与 `settings` | 表格（项 / 值）+ 监控设置表 |
+| `quota refresh` | `<账号> \| --all` `--json` | 逐账号调 `gateway.RefreshQuota` 查一次上游额度并 upsert 快照；部分端点失败时按失败端点保留上一次的余额、周期与用量，整体失败只更新状态、错误与刷新时间。不支持的厂商跳过、不算失败；任一支持的账号刷新失败退出码 1。绝不发转发请求、不写 `requests` 与 `route_stats`、不停用账号 | 表格（账号 / 厂商 / 状态 / 备注）；`--json` 每项含 `account`、`provider`、`status`、`skipped`、`error`、`facts`、`settings` |
+| `quota set` | `<账号>` `[--source auto\|commandcode\|deepseek\|off] [--fx-rate N] [--auto-refresh[=true\|false]] [--expiry-mode warn\|deprioritize\|exclude] [--expiry-days N] [--base-url <地址>]` | 改账号的额度监控设置，patch 语义：只改命令行显式给出的项，其余保留；一个都不给是用法错误。写入前过 `quota.ValidateSettings`（来源、汇率、到期处理、提前天数 1–3650、地址）。只管监控配置，选号侧的额度排序与阈值在 `route set` | 确认一行（账号名）与监控设置表；`--json` 含 `account`、`settings` |
+| `quota unset` | `<账号> [source\|fx_rate\|auto_refresh\|expiry_mode\|expiry_days\|base_url]` | 清单项时把那一项恢复默认；不写字段时删掉整行设置。删完恰好等于默认值时整行也删掉。本来没有设置时退出 0 并说明按默认值生效 | 确认一行与监控设置表；`--json` 含 `account`、`field`、`removed`、`settings` |
 | `model ls` | `[--provider 厂商]` `[--account 账号]` `--json` | 按模型名列出提供它的账号、目录里的元数据与计价来源，一行一个模型名；账号列写成「账号(状态)」，状态取 `account_models.access`：`allowed` 且 `checked_at` 不为 0 是「可用」，`allowed` 但没探过是「待探活」，`forbidden` 是「无权」，`missing` 是「不存在」，`error` 是「失败」（更早版本探活或本地写入留下的旧行；这一轮探活不再写 `error`，没拿到判定时保留原值，见 5.7）；账号-模型的冷却截止时间仍在未来时改写成「冷却至 时:分:秒.毫秒」，不让一次短冷却看起来像不可用；协议列是该模型在这个账号上的有效出站协议，取值只经 `store.EffectiveModels`（账号覆盖 → 目录里的协议集合 → 厂商的有效默认协议，见 5.13），cli 不重算合并规则；另有三列目录元数据：上下文长度、最大输出（`store.EffectiveModels` 的合并结果，账号覆盖 → 目录）与支持的协议集合（只在 `provider_models.protocols` 里，账号侧没有协议集合的覆盖值），目录里没填的写 `-`；价格列是合并之后的模型单价（账号覆盖 → 厂商级标价，见 5.13），两项都是空时写「未定价」。一行模型行都没有时输出一行提示，下一步是 `model sync` 与 `model probe`，也可以用 `account add --models` 或 `model add` 手填；`--json` 每项含 `model`、`accounts`（每项 `name`、`status`（`access` 原文）、`protocol`、`cooldown_until_ms`（Unix 毫秒，0 表示没在冷却）、`fail_streak`、`http_status`、`checked_at`（Unix 秒，0 表示没探过）、`error`）、`context_window`、`max_output`、`protocols`（空集合是空数组，不是 null）、`price_in`、`price_out` | 表格（模型 / 账号 / 协议 / 上下文长度 / 最大输出 / 支持协议 / 输入价 / 输出价） |
 | `model show` | `<模型> [--provider 厂商] [--account 账号]` `--json` | 按账号列出一个模型的可达性事实：有效出站协议（取值只经 `store.EffectiveProtocol`）、`access`、`cooldown_until_ms`、`fail_streak`、`http_status`、`checked_at` 与 `error`。只读库，不发上游请求，也不改可达性。一行可达性都没有时报错（退出码 1），文案给出 `lax model sync` 与 `lax model add` 两条下一步；给了 `--provider` 或 `--account` 就只列匹配的行（账号不存在、厂商对不上时报错，与 `selectAccounts` 同一套判定）。探活时间写成 `2006-01-02 15:04` 这类本地时间，`checked_at` 为 0 写「未探活」（同步与手填的行就是这一档，不是错误）；状态列在冷却截止时间仍在未来时优先写「冷却至 时:分:秒.毫秒」，否则按 `access` 写可达性。`--json` 是数组，每项 `account`、`provider`、`model`、`access`、`protocol`、`cooldown_until_ms`、`fail_streak`、`http_status`、`checked_at`（Unix 秒，0 表示没探过）、`error` | 表格（账号 / 模型 / 协议 / 状态 / HTTP / 探活时间 / 备注） |
 | `model add` | `<模型> --account 账号 [--provider 厂商] [--protocol 协议]` | 手写一条「这个账号能用这个模型」，一次事务写两张表：`provider_models` 里补一行（来源 `manual`，`--protocol` 并进协议集合）与 `account_models` 里把这一行标成 `access='allowed'`（`--protocol` 同时写进账号级 `protocol`）。决策模型与不在上游清单里的模型靠它声明，写完就能选号，不需要先跑 `model sync` 或探活。可重复执行：同名再写一次结果相同，不加重复行；已有的 `allowed` 行保留 `http_status`、`error` 与 `checked_at`，从 `forbidden` / `missing` / `error` 翻回 `allowed` 时把这三项清成 0 / 空串（旧结论不再作数，下一轮照常重探）。`--provider` 不给时取账号所属厂商，给了必须与账号一致；账号不存在时报错并指向 `lax account add`。`--protocol` 只收线协议（`anthropic`、`openai`/`openai-chat`、`responses`/`openai-responses`、`gemini`、`systemone`、`embeddings`/`openai-embeddings`、`speech`/`openai-speech`、`transcriptions`/`openai-transcriptions`），不收空值；不给就只写可达性、不动协议。写入口只有 `store.DeclareAccountModel` 一份，cli 不拼 SQL；`checked_at` 保持 0（手写不是探活结论，`model ls` 因此写「待探活」） | 确认一行（模型、厂商、账号、可达性、协议）与下一步 `lax model probe --account <账号> --model <模型>`（有效协议非空时再补 `--protocol <协议>`，只验这一条路）；`--json` 含 `model`、`provider`、`account`、`access`、`protocol`（有效协议）、`declared_protocol`（这次写进账号级的协议，没给就是空串）、`created`（这一行是不是新建的） |
@@ -310,6 +317,8 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 ### 5.3 选号与失败转移
 
 - 选号分四层，顺序固定：硬过滤 → 策略排序 → 会话粘性 → 失败转移。硬过滤只有三条：账号 `enabled=1`、`account_models.access='allowed'` 覆盖请求的模型、账号-模型不在冷却中。任何策略都不能把被这三条挡掉的账号重新放回候选；协议不参与第一层，它决定「怎么打」而不是「能不能接」（有效出站协议见 5.7），换号时按候选账号各自的有效协议重新算。模型名先按 5.12 解析别名，`route` 的目标与运行时匹配都使用解析后的真实名字。
+
+- 额度只在显式开启时参与选号，默认 `quota_order=off`、`quota_min_usd=0`，输出与旧版逐项一致（额度事实见 5.19）。开启后，额度在现有四层之外做两件事：`quota_min_usd>0` 时在硬过滤之后追加一层，只排除「折合余额已知且低于阈值」的账号，从未刷新、汇率未知或余额未知的账号一律保留；`expiry_mode=exclude` 时同样排除已到期或 `expiry_days` 内到期的账号。所有策略、会话粘性与 softmax 排完之后，`quota_order` 再对完整顺序做一次稳定排序（到期、剩余比例或折合余额，未知值排最后），`expiry_mode=deprioritize` 的账号整体移到末尾。softmax 的随机抽样仍先发生，额度排序只重排已经抽出的顺序；`prefer` 粘性可以被额度排序挪走，`strict` 粘性命中但被额度层排除时仍返回 503、不换号。额度快照从不改 `accounts.enabled`，也不写 `route_stats`；只有真实转发请求收到 401 才走本节 401 那条的停用逻辑。
 - 策略作用域只有两级：按真实模型名的覆盖行优先，其次默认行，最后内置默认。内置默认是 `priority`、会话 `prefer`、温度 `0.1`、探索 `2%`、评分权重 `priority 0.4 / success 0.5 / latency 0.1`、统计窗口 24 小时、最小样本 20。`route set` 是整条覆盖：没给的参数取内置默认，不与旧行合并；`route unset` 删掉覆盖后立即回落。策略每次请求从库里读，改完不需要重启。
 - 账号权重是策略的输入，不是另一套策略。解析顺序是「账号+模型覆盖 → 账号默认 → 1」，范围 1–1000；`route account` 只写这张权重表，不写策略。`weighted` 与 `softmax` 读权重，`priority`、`rotate`、`success` 忽略权重。停用账号用 `account disable`，不用权重 0 表示。
 - `priority` 按账号 `priority` 升序、同值按 ID 升序。`rotate` 以模型为单位维护请求序号，把 `priority` 排好的列表循环左移 `序号 mod 候选数` 位；每换一个模型各自计数，不共用全局计数器。`weighted` 把每个候选按权重展开成一份列表（权重 3 出现三次、1 出现一次），再用同一个序号取第一条、其余按 `priority` 顺序跟在后面；它是比例轮转，不是随机。`success` 按统计窗口内的账号相关成功率降序，成功率相同的按 `priority`、ID 排序。
@@ -1272,9 +1281,29 @@ Release 建好后，同一工作流的 `deploy` job 把 `linux/amd64` 包自动�
 
 发版步骤：确认工作区干净且 `make check` 通过，建 annotated tag `git tag -a vX.Y.Z -m "lax vX.Y.Z"`，推送 `git push origin master vX.Y.Z`；Release 工作流成功后核对产物里的 `lax version` 输出与 checksums。tag 一旦推送不再移动；发错了就发新 PATCH，不删旧 tag 重打。
 
+### 5.19 账号额度与到期监控
+
+额度是只读事实：查上游、存快照、展示并按设置参与选号，不做分配、扣减或计费。默认不自动刷新，默认不参与选号（`quota_order=off`、`quota_min_usd=0`），所以升级后线上行为不变。
+
+上游来源只有两家，`quota set --source` 可强制指定，`auto` 按账号厂商映射，`off` 关闭：
+
+- CommandCode：一次刷新顺序打四个 `GET /alpha/...` 端点，从账号厂商的 `base_url` 取 origin，再拼 `/alpha/whoami`、`/alpha/billing/credits`、`/alpha/billing/subscriptions`、`/alpha/usage/summary`。请求头固定 `x-api-key`、`accept: application/json` 与一个浏览器 UA，不设 `Authorization`；缺 UA 时上游回 403。`credits` 里的 `monthlyCredits` 是剩余额度，不是总额；`usage.summary.totalCredits` 是本期已用；两者都已知时总额 = 余额 + 已用，剩余比例 = 余额 ÷ 总额。`subscriptions` 的 `currentPeriodEnd` 是周期结束（RFC3339、Unix 秒或毫秒都接受），`planId`、`planStatus`、`cancelAtPeriodEnd` 一并记下；`cancelAtPeriodEnd=false` 表示会自动续费，但到期判断只看时间，续费与否只影响展示。`windowLimits` 里的 5 小时与每周窗口是限流窗口，不是月度总额，只展示。`whoami` 只取显示名，失败不影响其它端点。
+- DeepSeek：打 `GET /user/balance`，用 `Authorization: Bearer <key>`。它只报余额（多币种时优先 CNY，否则取第一条），没有总额、周期与剩余比例，因此剩余比例与美元排序对这类账号是未知。
+- 其他厂商或 `source=off` 返回 `unsupported`，`quota refresh` 跳过，不算刷新失败。
+
+金额统一折算成 USD 再比较与排序：USD、空币种与 credits 按汇率 1；其它币种只认手工汇率（`quota set --fx-rate`），未设置时原值照存，`balance_usd`、`used_usd`、`total_usd` 与剩余比例都留空。这样不会用一个猜出来的汇率把账号误排除。
+
+到期看 `period_end` 与设置：`expiry_days`（默认 3 天）内是「临近到期」，已过 `period_end` 是「已到期」。`expiry_mode` 决定动作：`warn` 只展示，`deprioritize` 在选号时把账号整体移到末尾，`exclude` 直接排除。默认 `warn`，因此只提示、不改选号。
+
+刷新：`quota refresh <账号>` 或 `--all` 手动查；`serve` 里只有 `auto_refresh=true` 的账号会被后台循环刷新（启动先刷一次，之后每 30 分钟一轮），默认关闭。刷新失败只写 `quota_snapshots.status`、`last_error` 与 `checked_at`，绝不改 `accounts.enabled`、不写 `requests` 或 `route_stats`；401/403 也只记 `auth`，只有真实转发请求收到 401 才走 5.3 的停用逻辑。部分端点失败时，按失败端点保留上一次的余额、周期与用量，成功段照常更新，所以 `quota show` 仍能看到最后一次已知值。
+
+展示与选号：`quota ls` 一行一个账号，没有快照的写「未刷新」；`quota show` 展示全部事实并明确标注「5 小时/每周窗口是限流窗口，不是月度总额」「上游用量是所有客户端合计，仅供查看」。`route explain` 无论有没有快照都打印一行额度策略，有额度数据时再追加「额度 / 剩余 / 到期」三列，`--json` 的候选里多一个 `quota` 对象；没有快照时表格保持旧列。`quota set` / `unset` 只管一个账号的监控设置（来源、汇率、自动刷新、到期处理、提前天数、额度地址），选号侧的 `quota_order` 与 `quota_min_usd` 在 `route set` 里，两者不共用一个命令。
+
+边界与风险：CommandCode 的 `/alpha/*` 是未公开接口，字段与 UA 要求可能变；DeepSeek 只有余额；人民币汇率没有可靠默认值，必须手填。只剩 0.069 credits 这类几乎用尽的账号，要开过滤就设一个小的 `--quota-min-usd` 阈值，不要把 0.069 当默认值。额度刷新不是一次转发请求，不计入 `usage`、`log` 与 `route_stats`。
+
 ## 6 数据模型
 
-表结构由 `internal/store/model.go` 的 GORM model 定义，建表与加列由 `AutoMigrate` 完成。没有迁移文件，也没有版本号：`AutoMigrate` 是幂等的 schema diff，表不存在就建，缺列就 `ALTER TABLE ADD COLUMN`，不改列类型、不删列、不删索引。需要删列或改类型时不能依赖它，必须写成一次性搬迁命令。加列（例如 `providers.auth_header` 与 `providers.auth_scheme`）同样只改 model，不新增 `migrations/` 文件：仓库里没有这个目录，历史迁移是 `internal/store/legacy.go` 里的一次性兼容逻辑。`AGENTS.md` 里「改数据库结构必须新增迁移文件」与这一节冲突时以本节为准。
+表结构由 `internal/store/model.go` 的 GORM model 定义，建表与加列由 `AutoMigrate` 完成。没有迁移文件，也没有版本号：`AutoMigrate` 是幂等的 schema diff，表不存在就建，缺列就 `ALTER TABLE ADD COLUMN`，不改列类型、不删列、不删索引。需要删列或改类型时不能依赖它，必须写成一次性搬迁命令。加列（例如 `providers.auth_header` 与 `providers.auth_scheme`）同样只改 model，不新增 `migrations/` 文件：仓库里没有这个目录，历史迁移是 `internal/store/legacy.go` 里的一次性兼容逻辑。账号额度的 `quota_snapshots`、`quota_settings` 两张新表和 `route_policies` 的 `quota_order`、`quota_min_usd` 两列也走这条路：只改 model、由 `AutoMigrate` 建表与加列，不新增迁移文件。`AGENTS.md` 里「改数据库结构必须新增迁移文件」与这一节冲突时以本节为准。
 
 支持三种后端，由配置文件的 `driver` 与 `dsn` 决定，缺省是 SQLite 单文件：
 
@@ -1410,6 +1439,8 @@ MySQL 的文本列在有默认值或主键时落成 `varchar(191)`：这是 GORM
 | `latency_weight` | 实数 | softmax 的延迟分权重，`[0,1]`；三项之和必须大于 0 |
 | `window_seconds` | 整数 | 成功率与延迟的统计窗口，默认 86400，最大 30 天 |
 | `min_samples` | 整数 | 成功率的平滑最小样本，默认 20，至少 1 |
+| `quota_order` | 文本 | 额度排序：`off` / `expiry_asc` / `expiry_desc` / `ratio_desc` / `ratio_asc` / `usd_desc` / `usd_asc`，默认 `off` |
+| `quota_min_usd` | 实数 | 已知折合余额低于这个值的账号不参与选号，默认 0（关闭） |
 | `updated_at` | 整数 | 最后一次写入的 Unix 秒 |
 
 ### route_account_weights
@@ -1440,6 +1471,48 @@ MySQL 的文本列在有默认值或主键时落成 `varchar(191)`：这是 GORM
 | `latency_count` | 整数 | 有耗时的成功请求数；延迟分只用它做分母 |
 
 `route_stats` 不是审计表：它只服务选号，启动时清掉 30 天以前的桶；`requests` 仍保留完整历史。
+
+### quota_snapshots
+
+一个账号最近一次额度快照，`account_id` 主键，一个账号只留一行；它是监控事实，不是审计记录，历史快照不落库。账号删除时随外键级联删掉。
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `account_id` | 整数，主键 | 一个账号一行 |
+| `source` | 文本 | `commandcode` / `deepseek`；`off` 不落快照 |
+| `status` | 文本 | `ok` / `partial` / `auth` / `error` / `unsupported` |
+| `display_name` | 文本 | 上游显示名，只在 `quota show` 展示 |
+| `balance` / `balance_known` | 实数 / 布尔 | 余额原值与是否已知 |
+| `used` / `used_known` | 实数 / 布尔 | 本期已用原值与是否已知（CommandCode 取 usage 汇总） |
+| `currency` | 文本 | 原币种 |
+| `fx_rate` | 实数，可空 | 折 USD 用的手工汇率；USD、空币种与 credits 按 1 |
+| `balance_usd` / `used_usd` / `total_usd` | 实数，可空 | 折合值；汇率未知时为空 |
+| `remaining_ratio` | 实数，可空 | 余额 ÷（余额 + 本期已用），两个数都已知才有 |
+| `period_end` | 整数 | 周期结束，Unix 毫秒；0 表示未知 |
+| `plan_id` / `plan_status` / `cancel_at_period_end` | 文本 / 文本 / 布尔 | 套餐与是否到期取消 |
+| `five_hour_used` / `five_hour_limit` / `five_hour_reset_at` | 实数可空 / 实数可空 / 整数 | 5 小时限流窗口的已用、上限与重置时间（Unix 毫秒），不是月度总额 |
+| `weekly_used` / `weekly_limit` / `weekly_reset_at` | 实数可空 / 实数可空 / 整数 | 每周限流窗口，同上 |
+| `upstream_usage_json` | 文本 | 上游用量汇总（本期已用、请求数、成功率原值）的 JSON，只供展示 |
+| `available` | 布尔，可空 | DeepSeek 的 `is_available` |
+| `checked_at` | 整数 | 最近一次刷新时间，Unix 秒 |
+| `last_error` | 文本 | 最近一次失败的文字 |
+| `source_errors_json` | 文本 | 每个失败端点的错误文字（不存上游原始报文） |
+| `updated_at` | 整数 | 最后一次写入的 Unix 秒 |
+
+### quota_settings
+
+一个账号的额度监控设置，`account_id` 主键。缺行表示默认设置：`auto`、不自动刷新、`warn`、提前 3 天、额度地址为空。账号删除时随外键级联删掉。
+
+| 列 | 语义 | 说明 |
+| --- | --- | --- |
+| `account_id` | 整数，主键 | 一个账号一行 |
+| `source` | 文本 | `auto` / `commandcode` / `deepseek` / `off`，默认 `auto` |
+| `fx_rate` | 实数，可空 | 手工汇率，默认空 |
+| `auto_refresh` | 布尔 | `serve` 是否定时刷新，默认 false |
+| `expiry_mode` | 文本 | `warn` / `deprioritize` / `exclude`，默认 `warn` |
+| `expiry_days` | 整数 | 临近到期的提前天数，默认 3 |
+| `base_url` | 文本 | 额度接口地址；空表示用账号所属厂商的 `base_url` 只取 origin |
+| `updated_at` | 整数 | 最后一次写入的 Unix 秒 |
 
 ### providers
 
@@ -1719,8 +1792,9 @@ internal/config/        路径解析与配置读写
 internal/timerange/     命令行时间范围解析（相对时长、当天时刻、相对日期与绝对时间）
 internal/store/         数据库连接、建表与加列、账号与请求记录的读写；builtin_providers.json 是随二进制嵌入的内置厂商目录
 internal/secret/        凭据加解密
-internal/account/       账号池、冷却、选号
-internal/gateway/       HTTP 入站处理、上游转发、错误映射（`embeddings.go` 放向量化的路径、最少校验与用量读取；`speech.go` 放语音两条协议的路径、multipart 改写、音频响应与用量读取；`speech_dialect.go` 按方言绑定定出站，并让方言编请求、解响应；`speech_capability.go` 只做能力位、音色与音频格式的校验）
+internal/account/       账号池、冷却、选号；`quota.go` 只做额度的过滤与稳定排序（纯函数）
+internal/quota/         账号额度的纯逻辑：上游响应解析、金额折算、到期判断与设置校验；不读库、不发请求、不读环境
+internal/gateway/       HTTP 入站处理、上游转发、错误映射（`embeddings.go` 放向量化的路径、最少校验与用量读取；`speech.go` 放语音两条协议的路径、multipart 改写、音频响应与用量读取；`speech_dialect.go` 按方言绑定定出站，并让方言编请求、解响应；`speech_capability.go` 只做能力位、音色与音频格式的校验；`quota.go` 是唯一的额度查询入口，只读上游、不写库、不改账号状态）
 internal/plugin/        manifest、方言文件与模型目录的解析与严格校验，声明式映射的执行器，方言注册表，插件目录加载与目录哈希；`sandbox.go` 是 JS 沙箱与 hook 调用（每 hook 一个 Runtime、超时与中断、返回值与错误映射），`sandbox_module.go` 是受限 ESM 的改写与模块加载（4 MiB 单文件 / 8 MiB 总量），`sandbox_api.go` 是注入的 `lax` API、控制面请求、进程内缓存与日志
 internal/pluginfetch/   把 GitHub 仓库里的一段路径下载成临时插件目录：解析来源、限制归档与解压大小、拒绝符号链接与越界路径；不读数据库与配置，不校验 manifest，下载目录由调用方删除
 internal/translate/     中间表示（ir.go）、四套协议编解码（anthropic.go、chat.go、responses.go、gemini.go；gemini 的入站与出站都在 gemini.go）
@@ -1731,7 +1805,7 @@ scripts/deploy-remote.sh 在目标主机校验、替换二进制、重启并做�
 .github/workflows/      CI 与 tag 触发的 Release（见 5.18）
 ```
 
-约束：`translate` 只做结构体到结构体的转换，不读环境、不发请求，便于用对拍用例覆盖；`gateway` 是唯一发上游厂商请求的地方（`account test` 的探活也走 `gateway.Probe`）；`cli` 不直接连数据库，只调 `store` 与 `account`；`plugin` 不读数据库、不读宿主配置与环境变量，只读插件包自己的源文件；`pluginfetch` 只发 GitHub 归档下载请求，解压完就交差，不碰 manifest 与数据库；插件运行时唯一的网络出口是沙箱给它的 `lax.http.request`（白名单与上限都在 `plugin` 里判）；`plugin` 不 import 任何其它内部包，所以它谁都不依赖、只在标准库与 goja 之上，线协议名在它那里是字符串常量，取值与 `gateway` 的 `Protocol*` 一致；依赖方向是 `gateway`、`store`、`cli` → `plugin`，`cli` → `pluginfetch`。
+约束：`translate` 只做结构体到结构体的转换，不读环境、不发请求，便于用对拍用例覆盖；`gateway` 是唯一发上游厂商请求的地方（`account test` 的探活也走 `gateway.Probe`）；`cli` 不直接连数据库，只调 `store` 与 `account`（额度一组只调 `store` 与 `gateway`，不直接连库、不直接发 HTTP）；`internal/quota` 不 import 任何内部包，只做上游响应解析、金额折算、到期判断与设置校验；`gateway/quota.go` 是唯一发额度上游请求的地方；`account/quota.go` 是纯过滤与稳定排序，不读库、不发请求；`plugin` 不读数据库、不读宿主配置与环境变量，只读插件包自己的源文件；`pluginfetch` 只发 GitHub 归档下载请求，解压完就交差，不碰 manifest 与数据库；插件运行时唯一的网络出口是沙箱给它的 `lax.http.request`（白名单与上限都在 `plugin` 里判）；`plugin` 不 import 任何其它内部包，所以它谁都不依赖、只在标准库与 goja 之上，线协议名在它那里是字符串常量，取值与 `gateway` 的 `Protocol*` 一致；依赖方向是 `gateway`、`store`、`cli` → `plugin`，`cli` → `pluginfetch`。
 
 包之间的依赖：`store` 为协议常量（`translate.ProtocolAnthropic`、`translate.ProtocolChat`、`translate.ProtocolResponses`、`translate.ProtocolGemini`、`translate.ProtocolSpeech`、`translate.ProtocolTranscriptions`）import `internal/translate`，只取常量，不调用编解码；`gateway`、`cli`、`account` 都经 `store` 与 `translate` 拿协议取值，不各自复制一份字符串。`store` 与 `cli` 还 import `internal/plugin`：前者用它的操作名与内置方言 ID 写 `model_operations` 与回填，后者用 `plugin.LoadDir`、`PluginDirHash` 与 `DefaultRegistry` 做安装与自检；`gateway` 用它的 `Dialect` 接口与注册表，不认识任何一家上游的语音形状。`cli` 的 `plugin install` / `plugin update` 用 `pluginfetch` 把 GitHub 来源落到临时目录，再交给 `plugin.LoadDir`；`pluginfetch` 不 import `plugin`，也不管安装。
 
@@ -1741,7 +1815,7 @@ scripts/deploy-remote.sh 在目标主机校验、替换二进制、重启并做�
 
 ## 9 非目标
 
-- 多租户、配额、充值、开票。
+- 多租户、配额分配与扣减、充值、开票。账号额度的只读监控与选号提示不在非目标内（见 5.19），但不做分配、扣减与计费。
 - 网页后台与桌面菜单栏。
 - 逆向接口、把订阅网页版包装成 API。
 - 改写其它客户端的配置文件，不论带不带备份。
@@ -1760,3 +1834,6 @@ scripts/deploy-remote.sh 在目标主机校验、替换二进制、重启并做�
 - 各家价格，用于估算花费。缺价格就记 null。
 - 各家推理上游是否接受请求里回填的思考内容：现在只在请求带 `tools`、且思考块带本网关回执签名时回填（见 5.4）。DeepSeek 的 thinking 模式实测：带 `tools` 且 tool 结果结尾时，历史里的 assistant tool 消息缺 `reasoning_content` 返回 400（`The reasoning_content in the thinking mode must be passed back to the API`），补上空字符串也能通过，但补上原 CoT 才能保住上下文。其余厂商（含 responses 的 `reasoning` item）还没实测：写 `reasoning` item 需要 `id` 与 `encrypted_content` 配套，现在不写。
 - 语音两条端点的真实形状要在拿到 key 后确认：`/v1/audio/speech` 的 `stream_format: "sse"` 帧名与音频分片大小、`/v1/audio/transcriptions` 在 `stream: true` 下的 SSE 帧名，以及 `usage.duration` 是否与 `verbose_json` 的 `duration` 同时存在。直通不依赖这些细节（字节原样），但 `lax model speak` / `lax model transcribe` 的默认输出与探活的错误码需要实测校准。
+- CommandCode 的 `/alpha/whoami`、`/alpha/billing/credits`、`/alpha/billing/subscriptions`、`/alpha/usage/summary` 是未公开接口：路径、字段名与「缺浏览器 UA 返回 403」都可能变。解析按宽松处理，失败只写快照状态；地址从厂商 `base_url` 的 origin 拼，可用 `quota set --base-url` 覆盖。`monthlyCredits` 按剩余额度理解、`usage.summary.totalCredits` 按本期已用理解，这两个语义也要在拿到真实响应后复核。
+- DeepSeek 的余额接口只报余额（可能多币种，优先取 CNY），没有总额、周期与剩余比例；`user/balance` 的形状同样要以真实响应为准。
+- 人民币折 USD 的汇率没有可靠默认值，必须用 `quota set --fx-rate` 手工给；未设置时折合 USD 与剩余比例都记为未知，不参与 `quota_min_usd` 过滤，也排在美元排序最后。

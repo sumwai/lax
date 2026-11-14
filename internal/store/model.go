@@ -1,6 +1,6 @@
 package store
 
-// 这个文件是数据库形状的唯一来源：十二张表的 model 定义、种子数据与旧库搬迁要用的表清单。
+// 这个文件是数据库形状的唯一来源：各表的 model 定义、种子数据与旧库搬迁要用的表清单。
 //
 // model 与业务结构体分开写，因为两者形状不同：
 //
@@ -269,7 +269,11 @@ type routePolicyRow struct {
 	LatencyWeight  float64 `gorm:"column:latency_weight;not null"`
 	WindowSeconds  int64   `gorm:"column:window_seconds;not null;default:86400"`
 	MinSamples     int     `gorm:"column:min_samples;not null;default:20"`
-	UpdatedAt      int64   `gorm:"column:updated_at;not null;default:0"`
+	// QuotaOrder 与 QuotaMinUSD 是额度选号设置，默认 off / 0，即不改变现状。
+	// 默认值只由 DefaultRoutePolicy 给：QuotaOrder 的 default tag 让旧行升级时落成 off。
+	QuotaOrder  string  `gorm:"column:quota_order;size:32;not null;default:'off'"`
+	QuotaMinUSD float64 `gorm:"column:quota_min_usd;not null;default:0"`
+	UpdatedAt   int64   `gorm:"column:updated_at;not null;default:0"`
 }
 
 func (routePolicyRow) TableName() string { return "route_policies" }
@@ -297,6 +301,69 @@ type routeStatRow struct {
 
 func (routeStatRow) TableName() string { return "route_stats" }
 
+// quotaSnapshotRow 是一个账号最近一次额度快照，一个账号一行。
+//
+// 金额原值与 USD 折算值分开存：汇率未知时原值仍然有用，只是 USD 值与剩余比例算不出来。
+// 这个表只服务展示与选号参考，不参与记账；刷新失败只改这里的 status / last_error。
+type quotaSnapshotRow struct {
+	AccountID    int64    `gorm:"column:account_id;primaryKey"`
+	Source       string   `gorm:"column:source;size:32;not null;default:''"`
+	Status       string   `gorm:"column:status;size:32;not null;default:''"`
+	DisplayName  string   `gorm:"column:display_name;not null;default:''"`
+	Balance      float64  `gorm:"column:balance;not null;default:0"`
+	BalanceKnown bool     `gorm:"column:balance_known;not null;default:false"`
+	Used         float64  `gorm:"column:used;not null;default:0"`
+	UsedKnown    bool     `gorm:"column:used_known;not null;default:false"`
+	Currency     string   `gorm:"column:currency;size:16;not null;default:''"`
+	FXRate       *float64 `gorm:"column:fx_rate"`
+	BalanceUSD   *float64 `gorm:"column:balance_usd"`
+	UsedUSD      *float64 `gorm:"column:used_usd"`
+	TotalUSD     *float64 `gorm:"column:total_usd"`
+	// RemainingRatio 是「余额 ÷（余额 + 本期已用）」，只对两个数都已知的上游计算。
+	RemainingRatio    *float64 `gorm:"column:remaining_ratio"`
+	PeriodEnd         int64    `gorm:"column:period_end;not null;default:0"`
+	PlanID            string   `gorm:"column:plan_id;not null;default:''"`
+	PlanStatus        string   `gorm:"column:plan_status;not null;default:''"`
+	CancelAtPeriodEnd bool     `gorm:"column:cancel_at_period_end;not null;default:false"`
+	// 5 小时与每周窗口是限流窗口，不是月度总额，只供展示。
+	FiveHourUsed    *float64 `gorm:"column:five_hour_used"`
+	FiveHourLimit   *float64 `gorm:"column:five_hour_limit"`
+	FiveHourResetAt int64    `gorm:"column:five_hour_reset_at;not null;default:0"`
+	WeeklyUsed      *float64 `gorm:"column:weekly_used"`
+	WeeklyLimit     *float64 `gorm:"column:weekly_limit"`
+	WeeklyResetAt   int64    `gorm:"column:weekly_reset_at;not null;default:0"`
+	// UpstreamUsageJSON 是上游用量汇总的原文 JSON，只供展示；解析失败或没有数据时为空串。
+	UpstreamUsageJSON string `gorm:"column:upstream_usage_json;not null;default:''"`
+	Available         *bool  `gorm:"column:available"`
+	CheckedAt         int64  `gorm:"column:checked_at;not null;default:0"`
+	LastError         string `gorm:"column:last_error;not null;default:''"`
+	// SourceErrorsJSON 只存每个端点的错误文字，不存上游原始报文，避免显示名等整包落库。
+	SourceErrorsJSON string `gorm:"column:source_errors_json;not null;default:''"`
+	UpdatedAt        int64  `gorm:"column:updated_at;not null;default:0"`
+
+	AccountRow *accountRow `gorm:"foreignKey:AccountID;references:ID;constraint:OnDelete:CASCADE"`
+}
+
+func (quotaSnapshotRow) TableName() string { return "quota_snapshots" }
+
+// quotaSettingsRow 是一个账号的额度监控设置，一个账号一行。缺行表示默认设置：
+// source=auto、auto_refresh=false、expiry_mode=warn、expiry_days=3、base_url 空。
+type quotaSettingsRow struct {
+	AccountID   int64    `gorm:"column:account_id;primaryKey"`
+	Source      string   `gorm:"column:source;size:32;not null;default:''"`
+	FXRate      *float64 `gorm:"column:fx_rate"`
+	AutoRefresh bool     `gorm:"column:auto_refresh;not null;default:false"`
+	ExpiryMode  string   `gorm:"column:expiry_mode;size:32;not null;default:''"`
+	ExpiryDays  int      `gorm:"column:expiry_days;not null;default:3"`
+	// BaseURL 为空时按账号所属厂商的 base_url 取 origin；填了就用它。
+	BaseURL   string `gorm:"column:base_url;not null;default:''"`
+	UpdatedAt int64  `gorm:"column:updated_at;not null;default:0"`
+
+	AccountRow *accountRow `gorm:"foreignKey:AccountID;references:ID;constraint:OnDelete:CASCADE"`
+}
+
+func (quotaSettingsRow) TableName() string { return "quota_settings" }
+
 // tables 是 AutoMigrate 与旧库搬迁共用的表清单，顺序不影响结果（GORM 会按依赖重排）。
 func tables() []any {
 	return []any{
@@ -315,6 +382,8 @@ func tables() []any {
 		&routePolicyRow{},
 		&routeAccountWeightRow{},
 		&routeStatRow{},
+		&quotaSnapshotRow{},
+		&quotaSettingsRow{},
 		&pluginAuditRow{},
 		&pluginLogRow{},
 	}

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"lax/internal/quota"
 	"lax/internal/store"
 )
 
@@ -19,7 +20,10 @@ type RouteInput struct {
 	Policy   store.RoutePolicy
 	Weights  map[int64]int
 	Stats    map[int64]store.RouteStat
-	Session  string
+	// Quotas 是每个账号最近一次额度快照与监控设置。为空表示没有额度数据，
+	// 选号行为与额度功能上线前完全一致。
+	Quotas  map[int64]quota.Entry
+	Session string
 	// Sequence 是同一模型的请求序号，rotate 与 weighted 用它错开第一名。
 	Sequence uint64
 	// Seed 固定 softmax 的随机抽样，测试与 route explain 因此可复现。
@@ -38,6 +42,8 @@ type RouteChoice struct {
 	Score          float64
 	// Probability 只有 softmax 会填；其它策略是 nil。
 	Probability *float64
+	// Quota 是这个账号的额度事实，没有快照时为 nil。它只用于 explain，不参与打分。
+	Quota *quota.Entry
 }
 
 // RouteExclusion 是一个被硬过滤挡掉的账号及原因。
@@ -57,7 +63,8 @@ type RouteDecision struct {
 	StickyMiss bool
 }
 
-// Rank 按策略返回候选顺序与解释数据。硬过滤只有三条：账号启用、声明了该模型、账号-模型未冷却。
+// Rank 按策略返回候选顺序与解释数据。硬过滤固定三条：账号启用、声明了该模型、账号-模型未冷却；
+// Quotas 非空时再叠加一层额度过滤（见 quotaFilter），为空时与额度功能上线前完全一致。
 func Rank(in RouteInput) RouteDecision {
 	var decision RouteDecision
 	available := make([]store.Account, 0, len(in.Accounts))
@@ -72,6 +79,14 @@ func Rank(in RouteInput) RouteDecision {
 		default:
 			available = append(available, a)
 		}
+	}
+
+	// 额度过滤排在三条硬过滤之后、粘性判断之前：strict 粘性命中的账号如果被额度排除，
+	// 仍然走 StickyMiss 返回 503，不偷偷换号。没有额度数据时整段跳过。
+	if len(in.Quotas) > 0 {
+		var quotaExcluded []RouteExclusion
+		available, quotaExcluded = quotaFilter(available, in.Quotas, in.Policy, in.Now)
+		decision.Excluded = append(decision.Excluded, quotaExcluded...)
 	}
 
 	targetID, hasTarget := stickyTarget(in.Accounts, in.Model, in.Session)
@@ -107,6 +122,15 @@ func Rank(in RouteInput) RouteDecision {
 	choices := scoreChoices(ordered, in.Policy, in.Weights, in.Stats)
 	if in.Policy.Strategy == store.RouteStrategySoftmax && len(choices) > 0 {
 		choices = softmaxOrder(choices, in.Policy.Temperature, in.Policy.Explore, in.Seed)
+	}
+	// 额度排序在所有策略、粘性与 softmax 之后做最终稳定排序：显式开启后，额度优先于软粘性。
+	choices = quotaOrder(choices, in.Quotas, in.Policy, in.Now)
+	for i := range choices {
+		if entry, ok := in.Quotas[choices[i].Account.ID]; ok {
+			// 复制一份再取地址，避免所有 choice 指向同一个循环变量。
+			e := entry
+			choices[i].Quota = &e
+		}
 	}
 	decision.Choices = choices
 	decision.Candidates = make([]store.Account, len(choices))

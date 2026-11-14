@@ -267,6 +267,7 @@ func TestGroupWithoutSubcommandPrintsHelp(t *testing.T) {
 		{"account", []string{"account"}, "add"},
 		{"model", []string{"model"}, "sync"},
 		{"provider", []string{"provider"}, "header"},
+		{"quota", []string{"quota"}, "refresh"},
 		{"provider header", []string{"provider", "header"}, "{env:NAME}"},
 		{"plugin", []string{"plugin"}, "install"},
 		{"plugin config", []string{"plugin", "config"}, "unset"},
@@ -371,6 +372,7 @@ func TestGroupHelp(t *testing.T) {
 		{"account", []string{"add", "ls", "set", "rm", "test", "enable", "disable"}},
 		{"model", []string{"ls", "sync", "probe"}},
 		{"provider", []string{"ls", "add", "set", "unset", "rm"}},
+		{"quota", []string{"ls", "show", "refresh", "set", "unset"}},
 		{"log", []string{"tail"}},
 	}
 	for _, g := range groups {
@@ -417,7 +419,7 @@ func TestTopLevelHelpListsProviderGroup(t *testing.T) {
 // TestGroupUnknownSubcommandHints 确认未知子命令仍退出码 2，并提示去看组级帮助；子命令自己的 --help 保持原样，退出码 0。
 func TestGroupUnknownSubcommandHints(t *testing.T) {
 	sandbox(t)
-	for _, group := range []string{"account", "model", "provider", "log"} {
+	for _, group := range []string{"account", "model", "provider", "quota", "log"} {
 		code, out, errOut := run(t, group, "nope")
 		if code != 2 {
 			t.Fatalf("%s nope 的退出码 = %d，期望 2", group, code)
