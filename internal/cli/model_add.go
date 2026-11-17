@@ -12,7 +12,7 @@ import (
 // modelAddUsage 是 model add 的用法行：用法错误都打出来，用户不必回头猜语法。
 const modelAddUsage = "用法：lax model add <模型> --account <账号> [--provider <厂商>] [--protocol <协议>]\n" +
 	"手写一条「这个账号能用这个模型」：同一个事务写模型目录与账号可达性，写完就能选号，不需要先跑 model sync 或探活\n" +
-	"--account 必填（可达性是账号侧的结论）；--provider 不给就取该账号所属厂商；--protocol 只收线协议，不给就只写可达性、不动协议"
+	"--account 必填（可达性是账号侧的结论）；--provider 不给就取该账号所属厂商；--protocol 只收报文协议，不给就只写可达性、不动协议"
 
 // cmdModelAdd 手写一条「这个账号能用这个模型」。
 //
@@ -22,7 +22,7 @@ func cmdModelAdd(e *Env, args []string) error {
 	fs := newFlagSet(e, "model add", "手写一条账号能用的模型（同事务写目录与可达性）")
 	accountName := fs.String("account", "", "账号名，必填：可达性写在账号上，没有账号就没有可写的那一行")
 	provider := fs.String("provider", "", "厂商名，可省略；给了必须与账号所属厂商一致")
-	protocolFlag := fs.String("protocol", "", "这个模型在这个账号上的协议，只收线协议；不给就只写可达性、不动协议")
+	protocolFlag := fs.String("protocol", "", "这个模型在这个账号上的协议，只收报文协议；不给就只写可达性、不动协议")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -37,7 +37,7 @@ func cmdModelAdd(e *Env, args []string) error {
 	accName := strings.TrimSpace(*accountName)
 
 	if flagWasSet(fs, "protocol") && strings.TrimSpace(*protocolFlag) == "" {
-		return usagef("--protocol 传了空值：它要么写一条线协议，要么整个去掉（不给就只写可达性、不动协议）；清掉已有的协议发现用 lax model probe --account %s --model %s 重探\n%s",
+		return usagef("--protocol 传了空值：它要么写一条报文协议，要么整个去掉（不给就只写可达性、不动协议）；清掉已有的协议发现用 lax model probe --account %s --model %s 重探\n%s",
 			accName, model, modelAddUsage)
 	}
 	protocol, err := protocolFromCLIName(*protocolFlag, "--protocol", "lax model add typesafe/jev --account ts --protocol systemone")

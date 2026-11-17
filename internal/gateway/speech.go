@@ -15,7 +15,7 @@ import (
 	"lax/internal/store"
 )
 
-// 语音。两条线协议都按 OpenAI 的形状：openai-speech（文本转语音，POST /v1/audio/speech）
+// 语音。两条报文协议都按 OpenAI 的形状：openai-speech（文本转语音，POST /v1/audio/speech）
 // 与 openai-transcriptions（语音转文本，POST /v1/audio/transcriptions）。它们没有消息序列，
 // translate 的编解码器不认它们，只做同协议直通。这个文件放这条路径上的纯函数：
 // 路径、最少校验、multipart 重写、音频响应与用量读取，不读库、不发请求。
@@ -570,12 +570,12 @@ func (s *Server) speechSuccess(w http.ResponseWriter, resp *http.Response, outbo
 func speechInteropMessage(inbound, outbound, model string) string {
 	if inbound == ProtocolSpeech || inbound == ProtocolTranscriptions {
 		return fmt.Sprintf("模型 %s 的方言要打 %s 协议，与 %s 入站不相通："+
-			"语音入站只走自己的线协议或语音方言（openai-chat），音频字节与消息序列之间没有可转换的映射；"+
+			"语音入站只走自己的报文协议或语音方言（openai-chat），音频字节与消息序列之间没有可转换的映射；"+
 			"语音请求用 POST %s 发，%s 的请求改用走其它协议的模型",
 			model, outbound, inbound, speechInboundPath(inbound), inbound)
 	}
 	return fmt.Sprintf("模型 %s 的有效出站协议是 %s，与 %s 入站不相通："+
-		"语音只与自己的线协议或语音方言相通，没有消息序列可以经中间表示转换；"+
+		"语音只与自己的报文协议或语音方言相通，没有消息序列可以经中间表示转换；"+
 		"对话请求用 POST %s 发，或改用走其它协议的模型",
 		model, outbound, inbound, inboundPath(inbound))
 }

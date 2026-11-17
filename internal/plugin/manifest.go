@@ -388,7 +388,7 @@ func validateProviders(kind string, providers []ProviderDecl) error {
 }
 
 // NormalizedAuth 返回规整后的凭据头声明（头名小写、scheme 归一）。
-// 未声明 auth 时两项都是空串，表示按线协议推导：转发行为与没有这一项的老版本一致。
+// 未声明 auth 时两项都是空串，表示按报文协议推导：转发行为与没有这一项的老版本一致。
 func (p ProviderDecl) NormalizedAuth() (header, scheme string, err error) {
 	if p.Auth == nil {
 		return "", "", nil
@@ -412,7 +412,7 @@ func (p ProviderDecl) NormalizedAuth() (header, scheme string, err error) {
 	return header, scheme, nil
 }
 
-// validateRouteDecls 校验 manifest 里的 routes：协议必须是已知线协议且不重复，路径非空。
+// validateRouteDecls 校验 manifest 里的 routes：协议必须是已知报文协议且不重复，路径非空。
 // 路径的规整与整条地址的校验不在这里做：它走 store.prepareRoutes 那一份（与 provider 子命令
 // 同一个入口），否则同一串路径在插件安装与手工声明上会有两种命运。
 func validateRouteDecls(field string, routes []RouteDecl) error {
@@ -421,7 +421,7 @@ func validateRouteDecls(field string, routes []RouteDecl) error {
 		item := fmt.Sprintf("%s[%d]", field, i)
 		protocol := strings.TrimSpace(r.Protocol)
 		if protocol == "" {
-			return fmt.Errorf("%s.protocol 为空：写线协议全名，例如 openai-speech", item)
+			return fmt.Errorf("%s.protocol 为空：写报文协议全名，例如 openai-speech", item)
 		}
 		if !KnownWire(protocol) {
 			return fmt.Errorf("%s.protocol 是 %q：只能是 %s", item, r.Protocol, strings.Join(knownWireNames(), "、"))

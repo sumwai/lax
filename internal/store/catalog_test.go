@@ -281,9 +281,9 @@ func TestSetAccountModelAccessValidates(t *testing.T) {
 		}
 	}
 
-	// 协议只能是空串或四条线协议。
+	// 协议只能是空串或四条报文协议。
 	if err := st.SetAccountModelProtocol(acc.ID, "m1", "openai"); err == nil {
-		t.Fatal("非线协议应报错")
+		t.Fatal("非报文协议应报错")
 	}
 	if err := st.SetAccountModelProtocol(acc.ID, "m1", "anthropic"); err != nil {
 		t.Fatalf("写协议: %v", err)

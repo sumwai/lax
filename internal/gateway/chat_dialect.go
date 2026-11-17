@@ -158,7 +158,7 @@ func (s *Server) chatDialectSuccess(ctx context.Context, w http.ResponseWriter, 
 
 	switch result.Kind {
 	case plugin.ResultJSON:
-		// 约定：ResultJSON 是**出站线协议形状**的整条响应体（不是入站形状）。方言只负责把
+		// 约定：ResultJSON 是**出站报文协议形状**的整条响应体（不是入站形状）。方言只负责把
 		// 上游那种奇怪的报文改写成一条本宿主认识的响应，转成客户端协议由 translate 做：
 		// 入站协议有四种，让每个方言自己按入站协议编四种形状既重复又容易漏字段。
 		//

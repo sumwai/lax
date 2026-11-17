@@ -10,7 +10,7 @@ import (
 	"lax/internal/translate"
 )
 
-// fourProtocols 是四条线协议，矩阵按「入站 × 出站」全排列跑。
+// fourProtocols 是四条报文协议，矩阵按「入站 × 出站」全排列跑。
 var fourProtocols = []string{
 	translate.ProtocolAnthropic,
 	translate.ProtocolChat,

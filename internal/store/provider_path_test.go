@@ -224,11 +224,11 @@ func TestGeminiRouteKeepsModelPlaceholder(t *testing.T) {
 		t.Fatalf("整条地址里的占位符 = %q", route.Path)
 	}
 
-	// 线协议的判定只有一份，gemini 在里面（只作出站），不认识的取值仍然是错的。
+	// 报文协议的判定只有一份，gemini 在里面（只作出站），不认识的取值仍然是错的。
 	if !store.IsWireProtocol("gemini") {
-		t.Fatal("gemini 是线协议：账号的 --protocol 与厂商路由都要认它")
+		t.Fatal("gemini 是报文协议：账号的 --protocol 与厂商路由都要认它")
 	}
 	if store.IsWireProtocol("cohere") {
-		t.Fatal("不认识的取值不该被当成线协议")
+		t.Fatal("不认识的取值不该被当成报文协议")
 	}
 }

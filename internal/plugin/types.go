@@ -2,7 +2,7 @@
 // 以及方言注册表。
 //
 // 不碰数据库、不发网络、不读环境变量。依赖方向是 gateway → plugin，
-// 线协议名以字符串常量出现，取值与 gateway 的 Protocol* 一致。
+// 报文协议名以字符串常量出现，取值与 gateway 的 Protocol* 一致。
 package plugin
 
 import (
@@ -45,7 +45,7 @@ const (
 	ImplDeclarative = "declarative"
 )
 
-// 线协议名，取值与 internal/gateway 的 Protocol* 常量一致。
+// 报文协议名，取值与 internal/gateway 的 Protocol* 常量一致。
 const (
 	WireAnthropic       = "anthropic"
 	WireOpenAIChat      = "openai-chat"
@@ -57,7 +57,7 @@ const (
 	WireSystemOne       = "systemone"
 )
 
-// 操作名，格式 <namespace>.<verb>@<major>，不含线协议名。
+// 操作名，格式 <namespace>.<verb>@<major>，不含报文协议名。
 const (
 	OpChatComplete     = "chat.complete@1"
 	OpEmbeddingsCreate = "embeddings.create@1"
@@ -74,7 +74,7 @@ const (
 	DialectMiMoChatSpeech = "lax/mimo-chat-speech@1"
 	DialectMiMoChatASR    = "lax/mimo-chat-asr@1"
 
-	// 宿主自己实现的线协议方言：对话、向量化、决策请求的请求与响应都由
+	// 宿主自己实现的报文协议方言：对话、向量化、决策请求的请求与响应都由
 	// internal/translate 的编解码器处理，绑定它们只是把「谁处理」写清楚，
 	// 不需要插件提供映射。
 	DialectHostAnthropic       = "lax/anthropic@1"
@@ -85,7 +85,7 @@ const (
 	DialectHostSystemOne       = "lax/systemone@1"
 )
 
-// WireDialect 给出一条线协议的宿主方言 ID，认不出的线协议返回空串。
+// WireDialect 给出一条报文协议的宿主方言 ID，认不出的报文协议返回空串。
 func WireDialect(wire string) string {
 	switch wire {
 	case WireAnthropic:
@@ -110,7 +110,7 @@ func IsHostDialect(id string) bool {
 	return strings.HasPrefix(id, "lax/")
 }
 
-// DefaultRoutePath 给出一条线协议在插件安装时的默认端点。
+// DefaultRoutePath 给出一条报文协议在插件安装时的默认端点。
 // 插件目录引用宿主方言时没有 dialects.json，路由只能从这张表推。
 func DefaultRoutePath(wire string) string {
 	switch wire {
@@ -151,7 +151,7 @@ func OperationForInbound(wire string) string {
 	return ""
 }
 
-// KnownWire 判断线协议名是不是宿主认识的八个之一。
+// KnownWire 判断报文协议名是不是宿主认识的八个之一。
 func KnownWire(wire string) bool {
 	switch wire {
 	case WireAnthropic, WireOpenAIChat, WireOpenAIResponses, WireGemini,
@@ -181,7 +181,7 @@ type Limits struct {
 // Input 是一次语义操作的输入，由宿主从入站报文归一得到。
 type Input struct {
 	Operation string
-	// Wire 是这次请求的出站线协议。
+	// Wire 是这次请求的出站报文协议。
 	Wire string
 	// Dialect 是这次请求用的方言 ID，插件可以直接回显它。
 	Dialect string
@@ -382,7 +382,7 @@ type ProviderDecl struct {
 	Dialects string      `json:"dialects"`
 }
 
-// AuthDecl 声明这家厂商的凭据头。空值表示按线协议推导（anthropic 用 x-api-key、
+// AuthDecl 声明这家厂商的凭据头。空值表示按报文协议推导（anthropic 用 x-api-key、
 // gemini 用 x-goog-api-key、其余用 Authorization: Bearer），与未声明这一项的老插件行为一致。
 // 声明之后凭据只写这一个头：豆包要 X-Api-Key，而 openai-speech 的默认写法是 Bearer。
 type AuthDecl struct {
@@ -390,7 +390,7 @@ type AuthDecl struct {
 	Scheme string `json:"scheme"`
 }
 
-// RouteDecl 声明一个线协议的上游端点。路径与 provider 子命令的取值同一套规则：
+// RouteDecl 声明一个报文协议的上游端点。路径与 provider 子命令的取值同一套规则：
 // 相对 base_url 的路径，或整条地址。声明的路由不参与协议推导，只回答「这条协议打哪里」。
 type RouteDecl struct {
 	Protocol string `json:"protocol"`

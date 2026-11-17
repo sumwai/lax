@@ -11,7 +11,7 @@ import (
 )
 
 // TestProviderAuthColumns 钉住凭据头声明的写入、读取、清除与旧库补列。
-// 两列只走 AutoMigrate：老库没有它们时打开就补上，缺省值是空串（按线协议推导）。
+// 两列只走 AutoMigrate：老库没有它们时打开就补上，缺省值是空串（按报文协议推导）。
 func TestProviderAuthColumns(t *testing.T) {
 	t.Run("写入与读取", func(t *testing.T) {
 		st := openTemp(t)

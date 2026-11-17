@@ -8,8 +8,8 @@ import (
 	"strings"
 )
 
-// 线协议名称。入站按路径区分，出站按该模型的有效协议区分。
-// gemini 两边都算一条线协议：入站路径是 /v1beta/models/{model}:generateContent，
+// 报文协议名称。入站按路径区分，出站按该模型的有效协议区分。
+// gemini 两边都算一条报文协议：入站路径是 /v1beta/models/{model}:generateContent，
 // 模型名在路径里而不是请求体里。
 // systemone 是决策协议（TypeSafe System One / Jev）：入站与出站都是 POST /v1/systemone，
 // 只与自己互通、不经中间表示转换，存储层只把它当成第五个协议取值。
@@ -19,13 +19,13 @@ const (
 	ProtocolResponses = "openai-responses"
 	ProtocolGemini    = "gemini"
 	ProtocolSystemOne = "systemone"
-	// ProtocolEmbeddings 是向量化的线协议（OpenAI 的 /v1/embeddings 报文）。
+	// ProtocolEmbeddings 是向量化的报文协议（OpenAI 的 /v1/embeddings 报文）。
 	// 它没有消息序列，编解码器也不认它：网关只做同协议直通，translate 只用这个常量。
 	ProtocolEmbeddings = "openai-embeddings"
-	// ProtocolSpeech 是文本转语音的线协议（OpenAI 的 /v1/audio/speech 报文）。
+	// ProtocolSpeech 是文本转语音的报文协议（OpenAI 的 /v1/audio/speech 报文）。
 	// 入站是 JSON、响应是音频字节，编解码器不认它：同样只做同协议直通。
 	ProtocolSpeech = "openai-speech"
-	// ProtocolTranscriptions 是语音转文本的线协议（OpenAI 的 /v1/audio/transcriptions 报文）。
+	// ProtocolTranscriptions 是语音转文本的报文协议（OpenAI 的 /v1/audio/transcriptions 报文）。
 	// 入站是 multipart/form-data、响应是 JSON 或 SSE，只做同协议直通。
 	ProtocolTranscriptions = "openai-transcriptions"
 )

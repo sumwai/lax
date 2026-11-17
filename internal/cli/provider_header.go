@@ -83,7 +83,7 @@ func printProviderHeaderHelp(w io.Writer) {
 	var b strings.Builder
 	b.WriteString(appName + " provider header — 厂商附加请求头：有些上游除凭据头之外还要额外的头才路由\n\n")
 	b.WriteString(providerHeaderUsageText + "\n\n")
-	b.WriteString("可用的 --protocol：anthropic | openai | responses | gemini（也认线协议全名 openai-chat、openai-responses）。\n")
+	b.WriteString("可用的 --protocol：anthropic | openai | responses | gemini（也认报文协议全名 openai-chat、openai-responses）。\n")
 	b.WriteString("不给 --protocol 就是厂商级：这家厂商的每条路由都带上这条头；给了协议就是协议级：只加给这条协议。\n")
 	b.WriteString("同名头两边都有时协议级覆盖厂商级，删掉协议级那行就回退到厂商级。\n\n")
 	b.WriteString("值的写法（转发前才展开，展开后为空则这条头不发）：\n")
@@ -116,8 +116,8 @@ func cmdProviderHeader(e *Env, args []string) error {
 	}
 }
 
-// headerProtocolFlag 把 --protocol 的取值换成线协议，不给（或没出现在命令行上）就是厂商级（空串）。
-// 映射与 --default-protocol 同一份（protocolFromCLIName），落到线协议全名：store 只认线协议，
+// headerProtocolFlag 把 --protocol 的取值换成报文协议，不给（或没出现在命令行上）就是厂商级（空串）。
+// 映射与 --default-protocol 同一份（protocolFromCLIName），落到报文协议全名：store 只认报文协议，
 // 命令行写法 `openai` 直接落库会让这条头永远匹配不上真实协议，等于这条头从来没生效过。
 func headerProtocolFlag(fs *flagSet, raw, usageLine string) (string, error) {
 	if !flagWasSet(fs, "protocol") {

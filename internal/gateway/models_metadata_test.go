@@ -131,7 +131,7 @@ func TestSyncModelsMetadataByShape(t *testing.T) {
 			t.Fatalf("能力位 = %q，期望 embedding", got)
 		}
 		if len(embed.Protocols) != 0 {
-			t.Fatalf("协议 = %v，期望留空（embedContent 是接口动作，不是线协议）", embed.Protocols)
+			t.Fatalf("协议 = %v，期望留空（embedContent 是接口动作，不是报文协议）", embed.Protocols)
 		}
 	})
 

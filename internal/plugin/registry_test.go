@@ -64,7 +64,7 @@ func TestRegistryRejectsBadIDs(t *testing.T) {
 			},
 		},
 		{
-			name: "线协议不认识",
+			name: "报文协议不认识",
 			register: func() error {
 				return r.RegisterSystem(stubDialect{id: "lax/x@1", wire: "carrier-pigeon"})
 			},

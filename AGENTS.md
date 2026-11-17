@@ -9,7 +9,7 @@
 | `cmd/lax` | 进程入口 | 只调 `cli.Run` |
 | `internal/cli` | 子命令、参数、输出 | 不直接连数据库、不发上游请求 |
 | `internal/config` | 路径与配置文件 | 不含业务状态 |
-| `internal/store` | SQLite、迁移、读写 | 上游凭据只在 `secret` 解密后进入这里 |
+| `internal/store` | SQLite、建表、读写 | 上游凭据只在 `secret` 解密后进入这里 |
 | `internal/secret` | 凭据加解密 | 不碰数据库连接 |
 | `internal/account` | 账号池、冷却、选号 | 选号是纯逻辑，输入是候选集与时间 |
 | `internal/gateway` | 入站 HTTP、上游转发 | 唯一发上游厂商请求的地方 |
@@ -27,9 +27,11 @@
 
 ## 测试
 
-- `translate` 的每条映射都要有对拍用例，输入与期望输出放在 `testdata/` 里。
+- `translate` 的每条映射都要有拿标准答案逐字节比对的用例，输入与期望输出放在 `testdata/` 里。
 - 上游一律用 `httptest` 假服务，测试不连真实厂商。
-- 改数据库结构必须新增迁移文件，不改已提交的迁移。
+- 改数据库结构改 `internal/store/model.go` 里的 row 定义，`AutoMigrate` 按结构差异补列；`user_version` 保持 0，不写迁移编号。
+- 删列与改列类型 `AutoMigrate` 做不到，只能写一次性迁移，做法记进 `DESIGN.md` 第 6 节。
+- `internal/store/migrations/` 下的 SQL 只是旧库升级测试的样本，不参与建库。
 - 交付前跑 `make check`。
 
 ## 发版
@@ -79,7 +81,7 @@ Conventional Commits：`feat(gateway): …`、`fix(translate): …`、`docs: …
 | 命令、参数、输出列、`--json` 字段、退出码 | `DESIGN.md` 第 4 节、`README.md` 对应段 |
 | 协议、转发、错误形状、已知边界 | `DESIGN.md` 第 5、7 节、`README.md`「已知边界」 |
 | 厂商、路由、附加头、模型同步与探活 | `DESIGN.md` 5.7、5.8、5.10 与第 6 节、`README.md` |
-| 数据库结构或新增迁移 | `DESIGN.md` 第 6 节（含迁移编号） |
+| 数据库结构 | `DESIGN.md` 第 6 节 |
 | 客户端接入方式（路径、鉴权头、SDK 示例） | `README.md` |
 | 非显然的坑 | `LESSONS.md` 索引 + `lessons/<yyyy-mm-dd>-<topic>.md` |
 

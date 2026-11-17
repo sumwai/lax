@@ -12,7 +12,7 @@ import (
 
 // 向量化。它没有消息序列：输入一段文本或一组文本，输出一组向量，没有角色、
 // 没有工具、没有流式，因此不进中间表示，只做同协议直通。入站有两条：openai 的
-// /v1/embeddings（第六条线协议 openai-embeddings）与 gemini 的 :embedContent 动作。
+// /v1/embeddings（第六条报文协议 openai-embeddings）与 gemini 的 :embedContent 动作。
 // 这个文件放这条路径上的纯函数：路径、最少校验、用量读取与出站地址改写，不读库、不发请求。
 
 // embeddingsPath 是 openai 向量化的入站路径，也是入站协议 openai-embeddings 的唯一入口。

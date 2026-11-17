@@ -57,7 +57,7 @@ func TestAccountAddUsesProviderTable(t *testing.T) {
 		t.Fatalf("anthropic 账号 = %+v", got)
 	}
 
-	// 只声明了 openai-responses 的厂商同样算得出默认协议：三种线协议都收。
+	// 只声明了 openai-responses 的厂商同样算得出默认协议：三种报文协议都收。
 	code, out, stderr = addAccount(t, "oa1", "respco", "https://resp.example.com", "openai-responses", "--key", "sk-3", "--json")
 	if code != 0 {
 		t.Fatalf("openai-responses 账号的退出码 = %d，stderr = %s", code, stderr)

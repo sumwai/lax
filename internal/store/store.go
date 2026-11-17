@@ -59,7 +59,7 @@ type Account struct {
 	// 逐模型的协议覆盖仍在 account_models.protocol，见 EffectiveProtocol。
 	Protocol string
 	// AuthHeader 与 AuthScheme 派生自 providers 的同名两列，规则与 BaseURL、Protocol 一样：
-	// 账号行不存它们，改写厂商行立即对所有引用它的账号生效。两项都为空表示按线协议推导凭据头。
+	// 账号行不存它们，改写厂商行立即对所有引用它的账号生效。两项都为空表示按报文协议推导凭据头。
 	AuthHeader string
 	AuthScheme string
 	KeyCipher  []byte

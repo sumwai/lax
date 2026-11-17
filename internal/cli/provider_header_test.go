@@ -273,7 +273,7 @@ func TestProviderHeaderUsageErrors(t *testing.T) {
 			wants: []string{"--protocol", "anthropic、openai、responses、gemini", "lax provider header set opencode x-opencode-session"},
 		},
 		{
-			name:  "协议传线协议全名也认",
+			name:  "协议传报文协议全名也认",
 			args:  []string{"provider", "header", "set", "opencode", "x-a", "v", "--protocol", "openai-responses"},
 			wants: nil, // 这条不是错误，单独在下面断言
 		},

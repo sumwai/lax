@@ -141,7 +141,7 @@ func TestPluginDirHash(t *testing.T) {
 	}
 }
 
-// TestChatWireDeclarativeDialect 走完整链路：插件声明一条 chat 线协议的 TTS 方言，
+// TestChatWireDeclarativeDialect 走完整链路：插件声明一条 chat 报文协议的 TTS 方言，
 // 加载、登记、编请求、解响应四步都由声明式映射完成，不需要任何 Go 代码。
 func TestChatWireDeclarativeDialect(t *testing.T) {
 	p, err := plugin.LoadDir("testdata/plugin-chatvoice")

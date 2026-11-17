@@ -17,7 +17,7 @@ import (
 )
 
 // 非语音操作按方言分发：宿主先按有效出站协议编好报文，方言在它之上打字段补丁（请求侧）、
-// 把上游响应改写成一条线协议形状的响应体（响应侧，ResultJSON 约定），流式则由方言逐块解。
+// 把上游响应改写成一条报文协议形状的响应体（响应侧，ResultJSON 约定），流式则由方言逐块解。
 // 这里用两条测试方言把三条路径都钉住。
 
 const (
@@ -62,7 +62,7 @@ func (d *chatPatchDialect) Prepare(in plugin.Input) (plugin.Plan, error) {
 	return plugin.Plan{Body: patched, Path: d.path}, nil
 }
 
-// Decode 把上游那条 chat 响应改写成另一条 chat 形状（ResultJSON 的约定：出站线协议形状），
+// Decode 把上游那条 chat 响应改写成另一条 chat 形状（ResultJSON 的约定：出站报文协议形状），
 // 正文前加「方言：」以证明客户端看到的字是方言给的，不是宿主直通回来的。
 func (d *chatPatchDialect) Decode(in plugin.Input, resp plugin.Response) (plugin.Result, error) {
 	var upstream struct {

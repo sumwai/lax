@@ -66,7 +66,7 @@ type Provider struct {
 	// Origin 是这一行的来源：builtin、plugin 或 manual。只用于展示与排查，不参与转发。
 	Origin string
 	// AuthHeader 与 AuthScheme 是凭据头的声明（见 DESIGN 5.8）：AuthHeader 是头名（小写），
-	// AuthScheme 取 raw、bearer 或 bearer-semicolon。两项都为空表示按线协议推导，
+	// AuthScheme 取 raw、bearer 或 bearer-semicolon。两项都为空表示按报文协议推导，
 	// 与没有这一项的老版本行为一致。凭据本身不在这里：key 在账号行上，加密存放。
 	AuthHeader string
 	AuthScheme string
@@ -133,7 +133,7 @@ func providersFromRows(rows []providerRow) []Provider {
 	return out
 }
 
-// normalizeAuth 规整一次写入的凭据头声明。空头是合法的（表示按线协议推导），
+// normalizeAuth 规整一次写入的凭据头声明。空头是合法的（表示按报文协议推导），
 // 但头为空时写法必须也为空，头非空而写法为空时归一到 raw。规则本身在 plugin 包里，
 // manifest 的 auth 声明与 provider 子命令走的是同一份。
 func normalizeAuth(header, scheme string) (string, string, error) {
@@ -231,7 +231,7 @@ func (s *Store) ProviderProtocols(provider string) ([]string, error) {
 	return out, nil
 }
 
-// IsWireProtocol 判断一个取值是不是线协议。八个值都认：三条入站对话协议加 gemini，再加上
+// IsWireProtocol 判断一个取值是不是报文协议。八个值都认：三条入站对话协议加 gemini，再加上
 // systemone、openai-embeddings、openai-speech 与 openai-transcriptions。gemini 入站有两条路径、两个方向的流式都支持，
 // systemone 的入站与出站是同一个 POST /v1/systemone，向量化与语音的入站与出站各是自己的协议路径；
 // 它们同样是线上的协议取值，账号的 --protocol、厂商路由与默认协议、探活候选都用这一个判定：
@@ -246,7 +246,7 @@ func IsWireProtocol(protocol string) bool {
 	return false
 }
 
-// WireProtocols 是全部线协议，按文档里列的顺序（入站三条在前，gemini、systemone、向量化与两条语音在后）。
+// WireProtocols 是全部报文协议，按文档里列的顺序（入站三条在前，gemini、systemone、向量化与两条语音在后）。
 // 错误文案只从这一份清单拼，不另写一串字面量。
 func WireProtocols() []string {
 	return []string{
@@ -261,7 +261,7 @@ func WireProtocols() []string {
 	}
 }
 
-// wireProtocolNames 把线协议清单拼成一句「A、B、C、D」，供错误文案用。
+// wireProtocolNames 把报文协议清单拼成一句「A、B、C、D」，供错误文案用。
 func wireProtocolNames() string { return strings.Join(WireProtocols(), "、") }
 
 // NormalizePath 是相对路径规整的唯一入口：写入侧（CreateProvider、SetProvider、AddProvider 的
@@ -745,7 +745,7 @@ func (s *Store) SetProvider(name string, patch ProviderPatch) error {
 }
 
 // protocolFlagName 把协议名换成 `provider set` 上对应的那个 flag，错误文案直接给出下一步能敲的命令。
-// systemone 与语音两条的 flag 不是线协议全名，这里逐个映射回命令行写法。
+// systemone 与语音两条的 flag 不是报文协议全名，这里逐个映射回命令行写法。
 func protocolFlagName(protocol string) string {
 	switch protocol {
 	case translate.ProtocolChat:

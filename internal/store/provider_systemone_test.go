@@ -14,7 +14,7 @@ import (
 // systemOnePath 是决策协议的出站路径：入站与出站同一个路径。
 const systemOnePath = "/v1/systemone"
 
-// TestWireProtocolsOrder 钉住线协议清单与顺序：anthropic → openai-chat → openai-responses
+// TestWireProtocolsOrder 钉住报文协议清单与顺序：anthropic → openai-chat → openai-responses
 // → gemini → systemone → openai-embeddings。错误文案、CLI 的 flag 与默认协议的候选都从这一份清单取，
 // 顺序或成员错了，`--default-protocol` 的提示会跟着错。
 func TestWireProtocolsOrder(t *testing.T) {
@@ -34,10 +34,10 @@ func TestWireProtocolsOrder(t *testing.T) {
 		t.Fatalf("translate.ProtocolSystemOne = %q，期望 systemone", translate.ProtocolSystemOne)
 	}
 	if !store.IsWireProtocol(translate.ProtocolSystemOne) {
-		t.Fatal("systemone 是线协议：厂商路由、默认协议与协议覆盖都要认它")
+		t.Fatal("systemone 是报文协议：厂商路由、默认协议与协议覆盖都要认它")
 	}
 	if store.IsWireProtocol("decide") {
-		t.Fatal("不认识的取值不该被当成线协议")
+		t.Fatal("不认识的取值不该被当成报文协议")
 	}
 
 	// 错误文案里能查到 systemone：允许的取值由 wireProtocolNames 拼出来，不另写一份。
@@ -51,7 +51,7 @@ func TestWireProtocolsOrder(t *testing.T) {
 }
 
 // TestMissingDefaultRouteSuggestsCLIFlag 钉住错误文案里的下一步命令：
-// 线协议全名与 CLI flag 不同的几条要映射回去，不能建议 --openai-speech 这类不存在的参数。
+// 报文协议全名与 CLI flag 不同的几条要映射回去，不能建议 --openai-speech 这类不存在的参数。
 func TestMissingDefaultRouteSuggestsCLIFlag(t *testing.T) {
 	st := openTemp(t)
 	if err := st.CreateProvider(store.Provider{Name: "flags", BaseURL: "https://api.example.com"},

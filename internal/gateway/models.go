@@ -315,7 +315,7 @@ type listModel struct {
 	name          string
 	contextWindow *int64
 	maxOutput     *int64
-	// protocols 是这条条目声明的线协议集合，按 wireProtocolOrder 的固定顺序排列。
+	// protocols 是这条条目声明的报文协议集合，按 wireProtocolOrder 的固定顺序排列。
 	protocols []string
 	// capabilities 是条目声明过的能力位（chat / embedding），按 capabilityOrder 排列。
 	// 空集合是「上游没说」，不表示不支持：把它读成不支持，就会把一个其实能用的模型
@@ -325,7 +325,7 @@ type listModel struct {
 
 // generateContentMethod 是 gemini 清单里「这个模型能做生成」的方法名，它折成 gemini 协议。
 // 与它并列的 embedContent / batchEmbedContents 折成能力位 embedding（见 entryCapabilities）：
-// 它们不是线协议，而是这个模型能干什么：向量化能力不进协议集合，模型同步与选号靠它区分
+// 它们不是报文协议，而是这个模型能干什么：向量化能力不进协议集合，模型同步与选号靠它区分
 // 「这个模型能对话」与「这个模型只能算向量」。
 const (
 	generateContentMethod = "generateContent"
@@ -337,7 +337,7 @@ const (
 // gateway 不另存一份名单。
 var capabilityOrder = store.CapabilityValues()
 
-// endpointProtocols 是「上游清单里声明的端点名 → 线协议」的映射，放在 gateway 而不是 translate：
+// endpointProtocols 是「上游清单里声明的端点名 → 报文协议」的映射，放在 gateway 而不是 translate：
 // 它服务的是模型同步与探活这两件上游侧的事（同步时写进目录、探活时据此排候选），
 // 与协议编解码无关，translate 那边仍然是纯编解码、不认识厂商清单的字段名。
 //
@@ -357,10 +357,10 @@ var endpointProtocols = map[string]string{
 
 // wireProtocolOrder 是协议集合落库与排候选的固定顺序：同一份上游数据多跑几次
 // 得到同一串，与上游列出端点的先后无关。不固定顺序的话，同一份清单两次同步能存出两串不同的值，
-// 对比数据库时看不出到底改了什么。向量化排在最后：它是唯一不会成为对话默认协议的线协议。
+// 对比数据库时看不出到底改了什么。向量化排在最后：它是唯一不会成为对话默认协议的报文协议。
 var wireProtocolOrder = []string{ProtocolAnthropic, ProtocolChat, ProtocolResponses, ProtocolGemini, ProtocolSystemOne, ProtocolEmbeddings, ProtocolSpeech, ProtocolTranscriptions}
 
-// endpointProtocol 查端点名对应的线协议。表里没有的写法返回 false，调用方直接不计这个取值。
+// endpointProtocol 查端点名对应的报文协议。表里没有的写法返回 false，调用方直接不计这个取值。
 func endpointProtocol(name string) (string, bool) {
 	protocol, ok := endpointProtocols[strings.TrimSpace(name)]
 	return protocol, ok
@@ -557,7 +557,7 @@ func entryMaxOutput(entry json.RawMessage) *int64 {
 	return jsonPositiveInt(topProvider["max_completion_tokens"])
 }
 
-// entryProtocols 把条目声明支持的协议折成线协议集合，按 wireProtocolOrder 的固定顺序返回：
+// entryProtocols 把条目声明支持的协议折成报文协议集合，按 wireProtocolOrder 的固定顺序返回：
 //
 //   - `supported_endpoints`（commandcode）里每个端点名按 endpointProtocols 折算，未识别的不计；
 //   - `supportedGenerationMethods`（gemini）只有 generateContent 折成 gemini 协议，
@@ -755,8 +755,8 @@ var defaultProbeProtocols = []string{
 	translate.ProtocolAnthropic, translate.ProtocolChat, translate.ProtocolResponses,
 }
 
-// isWireProtocol 判断一个取值是不是线协议。判定只有 store.IsWireProtocol 一份：gemini
-// 也是线协议（有原生入站路径，流式与非流式双向都支持），厂商声明了 gemini 路由时探活要能用它。
+// isWireProtocol 判断一个取值是不是报文协议。判定只有 store.IsWireProtocol 一份：gemini
+// 也是报文协议（有原生入站路径，流式与非流式双向都支持），厂商声明了 gemini 路由时探活要能用它。
 // 别的值不能进探活：编码器遇见未知协议会报错，静默落进 chat 分支更糟——那会把一条配置
 // 错误变成对错误地址的上游调用。
 func isWireProtocol(p string) bool {
@@ -779,7 +779,7 @@ func isWireProtocol(p string) bool {
 //
 // 账号行不再存协议（迁移 0014），a.Protocol 是厂商默认协议的派生值：厂商没有路由时它是空串，
 // 候选就只剩第 4 步的三种全试。override 非 nil 时顶替第 4 步的来源（探活自己指定候选时用）。
-// 出现线协议以外的值直接报错。
+// 出现报文协议以外的值直接报错。
 func (s *Server) routeProtocolOrder(a store.Account, model string, override []string) ([]string, error) {
 	var order []string
 	seen := map[string]bool{}
@@ -788,7 +788,7 @@ func (s *Server) routeProtocolOrder(a store.Account, model string, override []st
 			return nil
 		}
 		if !isWireProtocol(protocol) {
-			return fmt.Errorf("%s 给出的协议 %q 不是线协议，可用 %s",
+			return fmt.Errorf("%s 给出的协议 %q 不是报文协议，可用 %s",
 				from, protocol, strings.Join(store.WireProtocols(), "、"))
 		}
 		seen[protocol] = true
@@ -938,12 +938,12 @@ func (s *Server) ProbeModelWithProtocols(ctx context.Context, a store.Account, m
 //
 // `model probe --protocol` 用它只验一条路：不读已发现协议、不读目录声明、不取厂商默认协议，
 // 所以没有多协议顺序，也没有「换协议之后那几次不作数」这一回事——打到的就是这一条，
-// 401 照样是凭据被拒、停用账号。protocol 不是线协议时是用法错误，不发上游请求，
+// 401 照样是凭据被拒、停用账号。protocol 不是报文协议时是用法错误，不发上游请求，
 // 带出的结论标 Undecided，调用方不拿它写可达性。
 // 判定与 ProbeModelWithProtocols 是同一套（同一个 probeOrder），只打一条路时不另写一份。
 func (s *Server) ProbeModelProtocol(ctx context.Context, a store.Account, model, protocol string) (ModelProbe, error) {
 	if !isWireProtocol(protocol) {
-		msg := fmt.Sprintf("探活协议 %q 不是线协议，可用 %s", protocol, strings.Join(store.WireProtocols(), "、"))
+		msg := fmt.Sprintf("探活协议 %q 不是报文协议，可用 %s", protocol, strings.Join(store.WireProtocols(), "、"))
 		return ModelProbe{Model: model, Access: "", Undecided: true, Message: msg}, errors.New(msg)
 	}
 	return s.probeOrder(ctx, a, model, []string{protocol}, 0)

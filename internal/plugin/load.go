@@ -98,8 +98,8 @@ func LoadDir(root string) (Plugin, error) {
 }
 
 // checkRouteCoverage 在 manifest 声明了 routes 时确认每家厂商的方言都落在其中一条上。
-// 漏一条的结果是「装得下、打不通」：没有路由的线协议拼不出地址，第一次请求就是 400。
-// 只比方言声明的 upstream_wire：目录引用宿主方言时路由按线协议推导，与这里判的是同一件事。
+// 漏一条的结果是「装得下、打不通」：没有路由的报文协议拼不出地址，第一次请求就是 400。
+// 只比方言声明的 upstream_wire：目录引用宿主方言时路由按报文协议推导，与这里判的是同一件事。
 func checkRouteCoverage(manifest Manifest, p Plugin) error {
 	wires := map[string]map[string]bool{}
 	for _, provider := range manifest.Providers {

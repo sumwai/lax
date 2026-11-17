@@ -145,8 +145,8 @@ func TestSetProviderHeaderRejectsInvalidInput(t *testing.T) {
 		{desc: "值是空串", provider: "myco", name: "x-a", value: "", wantText: "头的值不能为空"},
 		{desc: "值是空白", provider: "myco", name: "x-a", value: " \t ", wantText: "头的值不能为空"},
 		{desc: "值带换行", provider: "myco", name: "x-a", value: "a\r\nx-injected: 1", wantText: "不能有回车"},
-		{desc: "协议是命令行别名", provider: "myco", protocol: "openai", name: "x-a", value: "v", wantText: "不是线协议"},
-		{desc: "协议不认识", provider: "myco", protocol: "chatgpt", name: "x-a", value: "v", wantText: "不是线协议"},
+		{desc: "协议是命令行别名", provider: "myco", protocol: "openai", name: "x-a", value: "v", wantText: "不是报文协议"},
+		{desc: "协议不认识", provider: "myco", protocol: "chatgpt", name: "x-a", value: "v", wantText: "不是报文协议"},
 		{desc: "厂商不存在", provider: "nope", name: "x-a", value: "v", wantErr: store.ErrProviderNotFound},
 	}
 	for _, c := range cases {

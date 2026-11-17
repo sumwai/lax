@@ -43,12 +43,12 @@ const (
 )
 
 // providerUnsetField 是一个可以被 `provider unset` 清掉的字段。字段名用 flag 名，
-// 删路由的几项带上线协议；base-url 与厂商名不在这里：前者只能改成另一个地址（清掉之后相对路径
+// 删路由的几项带上报文协议；base-url 与厂商名不在这里：前者只能改成另一个地址（清掉之后相对路径
 // 的路由就拼不出完整地址），后者是主键。
 type providerUnsetField struct {
 	name     string // 位置参数上的字段名，也是这一项的 flag 名
 	what     string // 人读输出里的说法：输出里写「anthropic 路由」比写 anthropic 清楚
-	protocol string // 删掉路由时的线协议；空串表示这一项不是路由，不碰 provider_routes
+	protocol string // 删掉路由时的报文协议；空串表示这一项不是路由，不碰 provider_routes
 }
 
 var providerUnsetFields = []providerUnsetField{
@@ -454,8 +454,8 @@ func checkAuthSchemeFlag(raw string, setCmd bool, usageLine string) (string, err
 	return strings.ToLower(strings.TrimSpace(raw)), nil
 }
 
-// protocolFromCLI 把 --default-protocol 的取值换成线协议。命令行写法是 anthropic、openai、
-// responses、gemini、systemone、embeddings、speech、transcriptions；线协议全名也认：
+// protocolFromCLI 把 --default-protocol 的取值换成报文协议。命令行写法是 anthropic、openai、
+// responses、gemini、systemone、embeddings、speech、transcriptions；报文协议全名也认：
 // 输入 openai 就是 chat，gemini 与 systemone 两种写法同形。
 func protocolFromCLI(value string) (string, error) {
 	return protocolFromCLIName(value, "--default-protocol",
@@ -463,8 +463,8 @@ func protocolFromCLI(value string) (string, error) {
 }
 
 // protocolFromCLIName 是 protocolFromCLI 的同一套映射，只把错误文案里的参数名与示例换成调用方那一个：
-// provider header 的 --protocol 也收这四个命令行写法，落库的必须是线协议全名：
-// 库里的路由与行按线协议全名匹配，存了一简称就永远匹配不上。
+// provider header 的 --protocol 也收这四个命令行写法，落库的必须是报文协议全名：
+// 库里的路由与行按报文协议全名匹配，存了一简称就永远匹配不上。
 func protocolFromCLIName(value, flagName, example string) (string, error) {
 	switch v := strings.TrimSpace(value); v {
 	case "":
@@ -486,7 +486,7 @@ func protocolFromCLIName(value, flagName, example string) (string, error) {
 	case "transcriptions", gateway.ProtocolTranscriptions:
 		return gateway.ProtocolTranscriptions, nil
 	}
-	return "", usagef("%s %q 不认识，可用 anthropic、openai、responses、gemini、systemone、embeddings、speech、transcriptions（也认线协议全名 openai-chat、openai-responses、openai-embeddings、openai-speech、openai-transcriptions），例如 %s", flagName, value, example)
+	return "", usagef("%s %q 不认识，可用 anthropic、openai、responses、gemini、systemone、embeddings、speech、transcriptions（也认报文协议全名 openai-chat、openai-responses、openai-embeddings、openai-speech、openai-transcriptions），例如 %s", flagName, value, example)
 }
 
 // emptyValueError 是「给了参数但值是空」的统一文案，路径参数规整之后为空也算空。
@@ -542,7 +542,7 @@ func cmdProviderAdd(e *Env, args []string) error {
 	paths := newProviderPathFlags(fs)
 	defProtocol := fs.String("default-protocol", "", "这家的默认协议：anthropic | openai | responses | gemini | systemone | embeddings | speech | transcriptions，必须落在这次声明的路由上；不给按 openai → responses → anthropic 取第一条")
 	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖，相对 --base-url 的路径（如 /v1/models）或整条地址；不给按各路由的 models_path 取（相对路径的斜杠写法由程序规整）")
-	authHeader := fs.String("auth-header", "", "凭据头的头名（如 X-Api-Key）：声明之后上游只收这一个头，不再发协议默认的 Authorization / x-api-key；不给表示按线协议推导")
+	authHeader := fs.String("auth-header", "", "凭据头的头名（如 X-Api-Key）：声明之后上游只收这一个头，不再发协议默认的 Authorization / x-api-key；不给表示按报文协议推导")
 	authScheme := fs.String("auth-scheme", "", "凭据头的写法：raw（头值就是 key）| bearer（Bearer <key>）| bearer-semicolon（Bearer;<key>）；不给按 raw")
 	note := fs.String("note", "", "备注")
 	if err := fs.Parse(args); err != nil {
@@ -965,7 +965,7 @@ func cmdProviderRm(e *Env, args []string) error {
 	return nil
 }
 
-// isWireProtocol 判断一个取值是不是线协议。判定只有 store.IsWireProtocol 一份（六条线协议：
+// isWireProtocol 判断一个取值是不是报文协议。判定只有 store.IsWireProtocol 一份（六条报文协议：
 // gemini 的入站与出站都可用；systemone 的入站与出站是同一个 POST /v1/systemone；向量化是第六条）：
 // 账号的 --protocol 与厂商的默认协议共用这一个判断，两处各写一份名单迟早会对不上。
 func isWireProtocol(proto string) bool {

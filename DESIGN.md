@@ -1,10 +1,46 @@
 # lax 设计
 
+这份文档是设计依据：实现与它冲突时先改这里。它不教怎么装，安装与常用命令在 `README.md`。
+
+怎么查：
+
+| 我想弄清楚…… | 看 |
+| --- | --- |
+| 这东西解决什么问题、和别家差在哪 | §1 |
+| 第一版做了哪些、没做哪些 | §2 |
+| 一条命令跑下来是什么样 | §3 |
+| 有哪些命令与参数 | §4 |
+| 一条请求进来之后发生了什么 | 5.2、5.3、5.4 |
+| 协议怎么定、怎么转换 | 5.4、5.9、5.15、5.16 |
+| 账号、厂商、路由、附加头怎么配 | 5.6、5.7、5.8、5.10 |
+| 模型目录、可达性、别名 | 5.12、5.13 |
+| 账号额度与到期怎么参与选号 | 5.19 |
+| 插件与方言能做什么、沙箱边界在哪 | 5.17 |
+| 数据存在哪张表、谁写谁读 | §6 |
+| 为什么没做多租户、网页后台 | §9 |
+
+先读 §1 与 §2 就够判断这东西适不适合你；其余按上表挑。
+
 ## 1 这是什么
 
 本机上的模型总机。手上有几家模型的账号，客户端只连 `http://127.0.0.1:4567`，由 lax 挑账号、转协议、记用量。
 
-入站收八种线协议，按路径区分：`POST /v1/messages` 是 anthropic，`POST /v1/chat/completions` 是 openai-chat，`POST /v1/responses` 是 openai-responses，`POST /v1beta/models/{model}:generateContent` 与 `:streamGenerateContent` 是 gemini，`POST /v1/systemone` 是 systemone，`POST /v1/embeddings` 是 openai-embeddings，`POST /v1/audio/speech` 是 openai-speech，`POST /v1/audio/transcriptions` 是 openai-transcriptions。前四种之间可以互相转换，出站协议归属在模型上（见 5.7）；systemone、向量化与两条语音协议不参与中间表示的转换：systemone 与向量化只与各自互通，语音按模型绑定的方言出站（见 5.14、5.15、5.16）。入站协议与有效出站协议相同则直通，不同则经中间表示转换，前四种入站 × 前四种出站共十六种组合，流式与非流式都可用（gemini 的原生形状见 5.9）。
+入站收八种报文协议，按路径区分：
+
+| 路径 | 入站协议 |
+| --- | --- |
+| `POST /v1/messages` | anthropic |
+| `POST /v1/chat/completions` | openai-chat |
+| `POST /v1/responses` | openai-responses |
+| `POST /v1beta/models/{model}:generateContent`、`:streamGenerateContent` | gemini |
+| `POST /v1/systemone` | systemone |
+| `POST /v1/embeddings` | openai-embeddings |
+| `POST /v1/audio/speech` | openai-speech |
+| `POST /v1/audio/transcriptions` | openai-transcriptions |
+
+前四种之间可以互相转换，出站协议归属在模型上（见 5.7）。systemone、向量化与两条语音协议不参与中间表示的转换：systemone 与向量化只与各自互通，语音按模型绑定的方言出站（见 5.14、5.15、5.16）。
+
+入站协议与有效出站协议相同则直通，不同则经中间表示转换；前四种入站 × 前四种出站共十六种组合，流式与非流式都可用（gemini 的原生形状见 5.9）。
 
 与同类产品的差别：
 
@@ -26,7 +62,7 @@
 | 计费 | 不做 | 没有第三方付款方，只记录 token 与估算花费 |
 | 插件运行时 | 分阶段做：本版落地声明式插件、内置方言与 `moejs` JS 沙箱 | 厂商差异写在 Go 里，每加一个上游都要改路由、写请求构造与响应解码，再重新编译发版。声明式插件把请求映射变成数据，装之前能静态审计；只用声明表达不了「给宿主编好的报文补一个字段」与「按块解上游流」，这两件事要可执行代码，所以带一个进程内 JS 解释器，用字节闸门与逐 hook 超时圈住（见 5.17）。`trusted-worker`、Magpie 导入、OAuth 与插件市场仍未做（见第 9 节） |
 
-协议矩阵。行列都按线协议算，四条入站 × 四条出站的十六种组合全部可用，非流式与流式都支持：
+协议矩阵。行列都按报文协议算，四条入站 × 四条出站的十六种组合全部可用，非流式与流式都支持：
 
 | 入站 ＼ 出站 | anthropic | openai-chat | openai-responses | gemini |
 | --- | --- | --- | --- | --- |
@@ -35,7 +71,7 @@
 | openai-responses | 转换 | 转换 | 直通 | 转换 |
 | gemini | 转换 | 转换 | 转换 | 直通 |
 
-同行同列是“直通”，其余是“转换”。“直通”只需重写请求体里的 `model` 字段，其余字段与值原样带到上游，响应与流式帧按字节原样返回（上游中途断流时按同一协议补上错误帧与收尾帧，见 5.4），用量另由该协议的 scanner 读出；gemini 的报文里没有 `model` 字段（模型名在路径里），它的直通因此一个字节都不改。语音与向量化不进这张矩阵：向量化只做同协议直通；语音另有一条按模型绑定的方言走的路（见 5.16），它转的不是中间表示，是某个上游自己的报文形状。“转换”走中间表示：请求与响应都只搬映射表里定义过的字段（见 5.4 与 5.9）。gemini 的原生路径、凭据头与流式端点见 5.9。
+同行同列是“直通”，其余是“转换”。“直通”只重写请求体里的 `model` 字段，其余字段的值不变；报文会重新编码，顶层的键序与空白不保证原样。响应与流式帧按字节原样返回（上游中途断流时按同一协议补上错误帧与收尾帧，见 5.4），用量另由该协议的 scanner 读出；gemini 的报文里没有 `model` 字段（模型名在路径里），它的直通因此一个字节都不改。语音与向量化不进这张矩阵：向量化只做同协议直通；语音另有一条按模型绑定的方言走的路（见 5.16），它转的不是中间表示，是某个上游自己的报文形状。“转换”走中间表示：请求与响应都只搬映射表里定义过的字段（见 5.4 与 5.9）。gemini 的原生路径、凭据头与流式端点见 5.9。
 
 ## 3 用起来是这样
 
@@ -171,13 +207,13 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | `quota unset` | `<账号> [source\|fx_rate\|auto_refresh\|expiry_mode\|expiry_days\|base_url]` | 清单项时把那一项恢复默认；不写字段时删掉整行设置。删完恰好等于默认值时整行也删掉。本来没有设置时退出 0 并说明按默认值生效 | 确认一行与监控设置表；`--json` 含 `account`、`field`、`removed`、`settings` |
 | `model ls` | `[--provider 厂商]` `[--account 账号]` `--json` | 按模型名列出提供它的账号、目录里的元数据与计价来源，一行一个模型名；账号列写成「账号(状态)」，状态取 `account_models.access`：`allowed` 且 `checked_at` 不为 0 是「可用」，`allowed` 但没探过是「待探活」，`forbidden` 是「无权」，`missing` 是「不存在」，`error` 是「失败」（更早版本探活或本地写入留下的旧行；这一轮探活不再写 `error`，没拿到判定时保留原值，见 5.7）；账号-模型的冷却截止时间仍在未来时改写成「冷却至 时:分:秒.毫秒」，不让一次短冷却看起来像不可用；协议列是该模型在这个账号上的有效出站协议，取值只经 `store.EffectiveModels`（账号覆盖 → 目录里的协议集合 → 厂商的有效默认协议，见 5.13），cli 不重算合并规则；另有三列目录元数据：上下文长度、最大输出（`store.EffectiveModels` 的合并结果，账号覆盖 → 目录）与支持的协议集合（只在 `provider_models.protocols` 里，账号侧没有协议集合的覆盖值），目录里没填的写 `-`；价格列是合并之后的模型单价（账号覆盖 → 厂商级标价，见 5.13），两项都是空时写「未定价」。一行模型行都没有时输出一行提示，下一步是 `model sync` 与 `model probe`，也可以用 `account add --models` 或 `model add` 手填；`--json` 每项含 `model`、`accounts`（每项 `name`、`status`（`access` 原文）、`protocol`、`cooldown_until_ms`（Unix 毫秒，0 表示没在冷却）、`fail_streak`、`http_status`、`checked_at`（Unix 秒，0 表示没探过）、`error`）、`context_window`、`max_output`、`protocols`（空集合是空数组，不是 null）、`price_in`、`price_out` | 表格（模型 / 账号 / 协议 / 上下文长度 / 最大输出 / 支持协议 / 输入价 / 输出价） |
 | `model show` | `<模型> [--provider 厂商] [--account 账号]` `--json` | 按账号列出一个模型的可达性事实：有效出站协议（取值只经 `store.EffectiveProtocol`）、`access`、`cooldown_until_ms`、`fail_streak`、`http_status`、`checked_at` 与 `error`。只读库，不发上游请求，也不改可达性。一行可达性都没有时报错（退出码 1），文案给出 `lax model sync` 与 `lax model add` 两条下一步；给了 `--provider` 或 `--account` 就只列匹配的行（账号不存在、厂商对不上时报错，与 `selectAccounts` 同一套判定）。探活时间写成 `2006-01-02 15:04` 这类本地时间，`checked_at` 为 0 写「未探活」（同步与手填的行就是这一档，不是错误）；状态列在冷却截止时间仍在未来时优先写「冷却至 时:分:秒.毫秒」，否则按 `access` 写可达性。`--json` 是数组，每项 `account`、`provider`、`model`、`access`、`protocol`、`cooldown_until_ms`、`fail_streak`、`http_status`、`checked_at`（Unix 秒，0 表示没探过）、`error` | 表格（账号 / 模型 / 协议 / 状态 / HTTP / 探活时间 / 备注） |
-| `model add` | `<模型> --account 账号 [--provider 厂商] [--protocol 协议]` | 手写一条「这个账号能用这个模型」，一次事务写两张表：`provider_models` 里补一行（来源 `manual`，`--protocol` 并进协议集合）与 `account_models` 里把这一行标成 `access='allowed'`（`--protocol` 同时写进账号级 `protocol`）。决策模型与不在上游清单里的模型靠它声明，写完就能选号，不需要先跑 `model sync` 或探活。可重复执行：同名再写一次结果相同，不加重复行；已有的 `allowed` 行保留 `http_status`、`error` 与 `checked_at`，从 `forbidden` / `missing` / `error` 翻回 `allowed` 时把这三项清成 0 / 空串（旧结论不再作数，下一轮照常重探）。`--provider` 不给时取账号所属厂商，给了必须与账号一致；账号不存在时报错并指向 `lax account add`。`--protocol` 只收线协议（`anthropic`、`openai`/`openai-chat`、`responses`/`openai-responses`、`gemini`、`systemone`、`embeddings`/`openai-embeddings`、`speech`/`openai-speech`、`transcriptions`/`openai-transcriptions`），不收空值；不给就只写可达性、不动协议。写入口只有 `store.DeclareAccountModel` 一份，cli 不拼 SQL；`checked_at` 保持 0（手写不是探活结论，`model ls` 因此写「待探活」） | 确认一行（模型、厂商、账号、可达性、协议）与下一步 `lax model probe --account <账号> --model <模型>`（有效协议非空时再补 `--protocol <协议>`，只验这一条路）；`--json` 含 `model`、`provider`、`account`、`access`、`protocol`（有效协议）、`declared_protocol`（这次写进账号级的协议，没给就是空串）、`created`（这一行是不是新建的） |
-| `provider ls` | `[--verbose]` `--json` | 默认列总览：名称、来源、地址、默认协议、路由协议与备注。来源取 `providers.origin`：`builtin` 显示「内置」、`plugin` 显示「插件」、`manual` 显示「自建」；它是溯源字段，不限制用户改或删任何来源的厂商。默认的路由列只列协议名，不展开路径；`--verbose` 才显示每条路由的完整路径与模型列表路径。`base_url` 为空的厂商（它的路由与模型列表地址都是整条地址，见 5.8）地址列显示 `-`，`--json` 的 `base_url` 是空串；默认协议是该厂商的有效默认协议（显式值落在已声明路由上就用它，否则按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 取第一条，见 5.8），一条路由都没有时显示 `-`，不算错误；详细表格的模型列表列：厂商级 `models_path` 非空就显示它，否则显示各路由自己的 `models_path`（多条路由共用一个路径时只显示一次），都没有时显示 `-`；路由列与 `--json` 的 `protocols` 原样带出 gemini 路由，`path` 里的 `{model}` 占位符照库里存的写，命令行不展开它（见 5.9）；`--json` 每项含 `name`、`origin`、`base_url`、`default_protocol`、`models_path`、`auth_header`、`auth_scheme`、`protocols`（每项 `protocol`、`path`、`models_path`）、`note`，没有路由时 `default_protocol` 为空串、`protocols` 为空数组；两列凭据头声明不是秘密（头名与写法，key 在账号行上），空串表示按线协议推导，见 5.8 | 表格（默认：名称 / 来源 / 地址 / 默认协议 / 路由 / 备注；`--verbose` 追加完整路由路径与模型列表） |
-| `provider add` | `<名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径或整条地址>] [--systemone <路径或整条地址>] [--embeddings <路径或整条地址>] [--speech <路径或整条地址>] [--transcriptions <路径或整条地址>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]` | 只新建：名称已在厂商表里时报错（「厂商 X 已存在，改用 lax provider set X 修改」），绝不顺手改已有的行。`--base-url` 可以省略，条件是这次声明的每一条路由与 `--models-path`（给了的话）都是整条地址：那时它拼不进任何地址，写一个只为过校验的地址只是无效配置（见 5.8）；有一条相对路径时缺它仍是用法错误，文案说清「这条路由是相对路径，需要 --base-url，或把它写成整条地址」，判定只有 `store` 一份（`requireBaseURLCoverage`），cli 把 `store.ErrBaseURLRequired` 包成用法错误。给了就校验并规整，走 `store.NormalizeBaseURL`（见 5.8），cli 不另写一份 scheme/主机名预检：必须是带主机名的完整地址，`https://` 这种只有 scheme 的写法是用法错误（退出码 2，文案说明缺主机名并给正确例子）；scheme 大小写不敏感（`HTTPS://host/` 能用），落库时归一成小写、路径里重复斜杠合并、末尾斜杠去掉。至少要给一条协议路由，一条都不给是用法错误（不再需要这家厂商就用 `provider rm`）。八个协议 flag 各声明 `(厂商, 协议)` 的一条路由，值可以是相对 `base_url` 的完整路径，也可以是整条地址（含 `://`，见 5.8）：相对路径只规整不拒绝，`v1/chat/completions`、`//v1//chat/completions`、`/v1/chat/completions/` 都落成同一个地址，不报错，只有规整之后为空才算缺值；整条地址校验 scheme 与主机名（`https://`、`https:///x`、`ftp://host/x` 都是用法错误，退出码 2，文案指出缺的是主机名还是 scheme 不对），路径部分照旧规整、查询串与 `#` 之后原样保留，使用时不再拼 `--base-url`。同一个 `base_url` 上不同协议落在不同域名时，协议 flag 直接写整条地址：`lax provider add myco --base-url https://api.example.com --openai https://openai.example.com/v1/chat/completions --anthropic https://claude.example.com/v1/messages`。`--gemini` 与另外七个同一套写法，声明的是 `(厂商, gemini)` 那条路由：gemini 的入站与出站都可用，非流式与流式都有（见 5.9），路径里可以写 `{model}` 占位符，cli 只规整斜杠，花括号与冒号原样落库，占位符在发请求之前才由网关换成模型名。`--help` 里八个协议 flag 都列出来，`--gemini` 的示例是真实形状：`lax provider add google-gemini --base-url https://generativelanguage.googleapis.com --gemini /v1beta/models/{model}:generateContent --default-protocol gemini`。没给每条路由的模型列表路径时按规则自动填：`openai`（openai-chat）路由把尾部 `/chat/completions` 换成 `/models`（`/v1/chat/completions` → `/v1/models`、`/chat/completions` → `/models`），其余协议留空表示回退到同厂商其它协议的非空值（见 5.8）。`--models-path` 是厂商级覆盖，收同样两种写法（相对路径或整条地址），整条地址同样要带主机名。`--default-protocol` 是这家的默认协议，取值是命令行写法 `anthropic`、`openai`、`responses`、`gemini`、`systemone`、`embeddings`、`speech`、`transcriptions`（也认线协议全名 `openai-chat`、`openai-responses`、`openai-embeddings`、`openai-speech`、`openai-transcriptions`，`openai` 就是 chat，`gemini` 两种写法同形），必须落在这次声明的路由上，否则整笔拒绝、退出码 1、一条路由都不落库；缺省时按固定顺序 `openai` → `responses` → `anthropic` 取第一条已声明的路由。取值参数传给空串（或只有斜杠这类规整之后为空的写法）是用法错误，删除与清空见 `provider unset`。`--auth-header` 与 `--auth-scheme` 声明这家厂商的凭据头（见 5.8）：头名按 HTTP token 校验、落库归一成小写，写法只收 `raw`、`bearer`、`bearer-semicolon`，只给头时写法缺省成 `raw`，只给写法而不给头是用法错误（没有头就没有地方写值） | 确认一行（地址、默认协议、几条路由） |
+| `model add` | `<模型> --account 账号 [--provider 厂商] [--protocol 协议]` | 手写一条「这个账号能用这个模型」，一次事务写两张表：`provider_models` 里补一行（来源 `manual`，`--protocol` 并进协议集合）与 `account_models` 里把这一行标成 `access='allowed'`（`--protocol` 同时写进账号级 `protocol`）。决策模型与不在上游清单里的模型靠它声明，写完就能选号，不需要先跑 `model sync` 或探活。可重复执行：同名再写一次结果相同，不加重复行；已有的 `allowed` 行保留 `http_status`、`error` 与 `checked_at`，从 `forbidden` / `missing` / `error` 翻回 `allowed` 时把这三项清成 0 / 空串（旧结论不再作数，下一轮照常重探）。`--provider` 不给时取账号所属厂商，给了必须与账号一致；账号不存在时报错并指向 `lax account add`。`--protocol` 只收报文协议（`anthropic`、`openai`/`openai-chat`、`responses`/`openai-responses`、`gemini`、`systemone`、`embeddings`/`openai-embeddings`、`speech`/`openai-speech`、`transcriptions`/`openai-transcriptions`），不收空值；不给就只写可达性、不动协议。写入口只有 `store.DeclareAccountModel` 一份，cli 不拼 SQL；`checked_at` 保持 0（手写不是探活结论，`model ls` 因此写「待探活」） | 确认一行（模型、厂商、账号、可达性、协议）与下一步 `lax model probe --account <账号> --model <模型>`（有效协议非空时再补 `--protocol <协议>`，只验这一条路）；`--json` 含 `model`、`provider`、`account`、`access`、`protocol`（有效协议）、`declared_protocol`（这次写进账号级的协议，没给就是空串）、`created`（这一行是不是新建的） |
+| `provider ls` | `[--verbose]` `--json` | 默认列总览：名称、来源、地址、默认协议、路由协议与备注。来源取 `providers.origin`：`builtin` 显示「内置」、`plugin` 显示「插件」、`manual` 显示「自建」；它是溯源字段，不限制用户改或删任何来源的厂商。默认的路由列只列协议名，不展开路径；`--verbose` 才显示每条路由的完整路径与模型列表路径。`base_url` 为空的厂商（它的路由与模型列表地址都是整条地址，见 5.8）地址列显示 `-`，`--json` 的 `base_url` 是空串；默认协议是该厂商的有效默认协议（显式值落在已声明路由上就用它，否则按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 取第一条，见 5.8），一条路由都没有时显示 `-`，不算错误；详细表格的模型列表列：厂商级 `models_path` 非空就显示它，否则显示各路由自己的 `models_path`（多条路由共用一个路径时只显示一次），都没有时显示 `-`；路由列与 `--json` 的 `protocols` 原样带出 gemini 路由，`path` 里的 `{model}` 占位符照库里存的写，命令行不展开它（见 5.9）；`--json` 每项含 `name`、`origin`、`base_url`、`default_protocol`、`models_path`、`auth_header`、`auth_scheme`、`protocols`（每项 `protocol`、`path`、`models_path`）、`note`，没有路由时 `default_protocol` 为空串、`protocols` 为空数组；两列凭据头声明不是秘密（头名与写法，key 在账号行上），空串表示按报文协议推导，见 5.8 | 表格（默认：名称 / 来源 / 地址 / 默认协议 / 路由 / 备注；`--verbose` 追加完整路由路径与模型列表） |
+| `provider add` | `<名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径或整条地址>] [--systemone <路径或整条地址>] [--embeddings <路径或整条地址>] [--speech <路径或整条地址>] [--transcriptions <路径或整条地址>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]` | 只新建：名称已在厂商表里时报错（「厂商 X 已存在，改用 lax provider set X 修改」），绝不顺手改已有的行。`--base-url` 可以省略，条件是这次声明的每一条路由与 `--models-path`（给了的话）都是整条地址：那时它拼不进任何地址，写一个只为过校验的地址只是无效配置（见 5.8）；有一条相对路径时缺它仍是用法错误，文案说清「这条路由是相对路径，需要 --base-url，或把它写成整条地址」，判定只有 `store` 一份（`requireBaseURLCoverage`），cli 把 `store.ErrBaseURLRequired` 包成用法错误。给了就校验并规整，走 `store.NormalizeBaseURL`（见 5.8），cli 不另写一份 scheme/主机名预检：必须是带主机名的完整地址，`https://` 这种只有 scheme 的写法是用法错误（退出码 2，文案说明缺主机名并给正确例子）；scheme 大小写不敏感（`HTTPS://host/` 能用），落库时归一成小写、路径里重复斜杠合并、末尾斜杠去掉。至少要给一条协议路由，一条都不给是用法错误（不再需要这家厂商就用 `provider rm`）。八个协议 flag 各声明 `(厂商, 协议)` 的一条路由，值可以是相对 `base_url` 的完整路径，也可以是整条地址（含 `://`，见 5.8）：相对路径只规整不拒绝，`v1/chat/completions`、`//v1//chat/completions`、`/v1/chat/completions/` 都落成同一个地址，不报错，只有规整之后为空才算缺值；整条地址校验 scheme 与主机名（`https://`、`https:///x`、`ftp://host/x` 都是用法错误，退出码 2，文案指出缺的是主机名还是 scheme 不对），路径部分照旧规整、查询串与 `#` 之后原样保留，使用时不再拼 `--base-url`。同一个 `base_url` 上不同协议落在不同域名时，协议 flag 直接写整条地址：`lax provider add myco --base-url https://api.example.com --openai https://openai.example.com/v1/chat/completions --anthropic https://claude.example.com/v1/messages`。`--gemini` 与另外七个同一套写法，声明的是 `(厂商, gemini)` 那条路由：gemini 的入站与出站都可用，非流式与流式都有（见 5.9），路径里可以写 `{model}` 占位符，cli 只规整斜杠，花括号与冒号原样落库，占位符在发请求之前才由网关换成模型名。`--help` 里八个协议 flag 都列出来，`--gemini` 的示例是真实形状：`lax provider add google-gemini --base-url https://generativelanguage.googleapis.com --gemini /v1beta/models/{model}:generateContent --default-protocol gemini`。没给每条路由的模型列表路径时按规则自动填：`openai`（openai-chat）路由把尾部 `/chat/completions` 换成 `/models`（`/v1/chat/completions` → `/v1/models`、`/chat/completions` → `/models`），其余协议留空表示回退到同厂商其它协议的非空值（见 5.8）。`--models-path` 是厂商级覆盖，收同样两种写法（相对路径或整条地址），整条地址同样要带主机名。`--default-protocol` 是这家的默认协议，取值是命令行写法 `anthropic`、`openai`、`responses`、`gemini`、`systemone`、`embeddings`、`speech`、`transcriptions`（也认报文协议全名 `openai-chat`、`openai-responses`、`openai-embeddings`、`openai-speech`、`openai-transcriptions`，`openai` 就是 chat，`gemini` 两种写法同形），必须落在这次声明的路由上，否则整笔拒绝、退出码 1、一条路由都不落库；缺省时按固定顺序 `openai` → `responses` → `anthropic` 取第一条已声明的路由。取值参数传给空串（或只有斜杠这类规整之后为空的写法）是用法错误，删除与清空见 `provider unset`。`--auth-header` 与 `--auth-scheme` 声明这家厂商的凭据头（见 5.8）：头名按 HTTP token 校验、落库归一成小写，写法只收 `raw`、`bearer`、`bearer-semicolon`，只给头时写法缺省成 `raw`，只给写法而不给头是用法错误（没有头就没有地方写值） | 确认一行（地址、默认协议、几条路由） |
 | `provider set` | `<名称> [--base-url <地址>] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径或整条地址>] [--embeddings <路径或整条地址>] [--speech <路径或整条地址>] [--transcriptions <路径或整条地址>] [--models-path <路径>] [--default-protocol <协议>] [--note <备注>]` | 只设值，不承担删除：只改传入的字段，其余一律保留。协议 flag 覆盖或新增那条路由的路径（写法与 `provider add` 同一套：相对路径只规整，整条地址校验后直接使用；gemini 路由的 `{model}` 占位符同样原样保留），`--default-protocol` 与 `--models-path` 换新值（`--models-path` 同样收两种写法），`--note` 换备注。任何取值参数传空串（例如 `--openai ""`、`--note ""`）都是用法错误、文案指向 `provider unset`，路径参数只有斜杠这类规整之后为空的写法同样算空值，不做「空串即删除」的约定：误敲一个空引号不该把已有路由或备注抹掉。改完之后默认协议必须仍指向一条存在的路由，否则整笔拒绝并提示先加路由或改默认协议。把一条路由从整条地址改成相对路径、同时没给 `--base-url`、库里也没有地址时同样整笔拒绝（文案与 `provider add` 同一份，指向「给 --base-url 或写成整条地址」；要一起改就在同一次调用里带上 `--base-url`），退出码 2。没给模型列表路径的路由按 `openai` 推导规则重算，手工填过的值保持不动。厂商不存在时报错并提示用 `provider add` 新建；一个参数都不给是用法错误。`--auth-header` 与 `--auth-scheme` 改凭据头声明，只给写法时头必须在库里已有（跨字段的判定在写入侧做，命令面看不到库里的头） | 确认一行（改了几项、现有几条路由、默认协议） |
-| `provider unset` | `<名称> <字段> [<字段>...]` | 删除必须显式声明：`anthropic`、`openai`、`responses`、`gemini`、`openai-embeddings`、`openai-speech`、`openai-transcriptions` 删掉那条协议路由，`models-path` 清掉厂商级覆盖、回到按路由取，`auth-header` 把头名与写法一起清掉（回到按线协议推导），`auth-scheme` 只清写法（头还在，写法归一到 `raw`），`default-protocol` 清掉显式值、回到 `openai` → `responses` → `anthropic` 固定顺序取第一条路由，`note` 清空备注。字段是位置参数，一次可以给多个，重复的只处理一次。要删的项本来就不存在时不报错（幂等），输出一行说明「X 本来就没有 …」。`base-url` 与厂商名不能 unset：前者清掉之后相对路径的路由就拼不出完整地址（改地址用 `provider set --base-url`，本来就不需要地址的厂商应该从一开始就省略这个参数），后者是主键、清不掉，两者都报错说明原因；未知字段、带 `--` 前缀、大小写不符报错并列出可用字段。删到一条路由都不剩时整笔拒绝并指向 `provider rm <名称>`；删掉的路由正好是默认协议时同样整笔拒绝，文案由 store 给，列出仍然声明的协议并给出 `provider set <名称> --default-protocol <协议>` 与 `provider unset <名称> default-protocol` 两条出路（cli 不另算一份回退规则），同一次调用里带上 `default-protocol` 即放行。`--json` 输出与 `provider ls` 的单项同形 | 逐项确认（清掉了什么 / 本来就没有）+ 现有几条路由与默认协议 |
+| `provider unset` | `<名称> <字段> [<字段>...]` | 删除必须显式声明：`anthropic`、`openai`、`responses`、`gemini`、`openai-embeddings`、`openai-speech`、`openai-transcriptions` 删掉那条协议路由，`models-path` 清掉厂商级覆盖、回到按路由取，`auth-header` 把头名与写法一起清掉（回到按报文协议推导），`auth-scheme` 只清写法（头还在，写法归一到 `raw`），`default-protocol` 清掉显式值、回到 `openai` → `responses` → `anthropic` 固定顺序取第一条路由，`note` 清空备注。字段是位置参数，一次可以给多个，重复的只处理一次。要删的项本来就不存在时不报错（幂等），输出一行说明「X 本来就没有 …」。`base-url` 与厂商名不能 unset：前者清掉之后相对路径的路由就拼不出完整地址（改地址用 `provider set --base-url`，本来就不需要地址的厂商应该从一开始就省略这个参数），后者是主键、清不掉，两者都报错说明原因；未知字段、带 `--` 前缀、大小写不符报错并列出可用字段。删到一条路由都不剩时整笔拒绝并指向 `provider rm <名称>`；删掉的路由正好是默认协议时同样整笔拒绝，文案由 store 给，列出仍然声明的协议并给出 `provider set <名称> --default-protocol <协议>` 与 `provider unset <名称> default-protocol` 两条出路（cli 不另算一份回退规则），同一次调用里带上 `default-protocol` 即放行。`--json` 输出与 `provider ls` 的单项同形 | 逐项确认（清掉了什么 / 本来就没有）+ 现有几条路由与默认协议 |
 | `provider rm` | `<名称> [--force]` | 删除厂商行与它的全部路由行；仍有账号指向该厂商时列出这些账号并拒绝。加 `--force` 才删，走 `store.DeleteProviderForce`：同一个事务里把这些账号停用（`enabled=0` 并写明 `last_error`，见 5.8），因为它们的地址与路由随厂商一起没了，留在选号池里必然 502；账号行、凭据与模型清单都不删，重建厂商或改账号的厂商之后 `account enable` 就能接着用 | 确认一行（删了几条路由），`--force` 时另有一行列出被停用的账号；`--json` 含 `removed`、`routes`、`accounts`（指向它的账号名） |
-| `provider header set` | `<厂商> <头名> <值> [--protocol <协议>]` | 声明上游除凭据头之外还要的附加请求头（见 5.10），覆盖语义：同一个 (厂商, 作用范围, 头名) 再写一次就是改值，不存在就新建，不报错也不留旧行。头名按 HTTP 头名的规矩校验（token 字符、大小写不敏感、落库归一成小写：写 `X-Opencode-Session` 与写 `x-opencode-session` 是同一行），值不能是空白串、也不能带 CR/LF/NUL，非法头名与空值都是用法错误（退出码 2，打出用法行）。`--protocol` 收命令行写法 `anthropic`、`openai`、`responses`、`gemini`（与 `--default-protocol` 同一套映射，落库的是线协议全名 `openai-chat` 这类），不给就是厂商级：这家厂商的每条路由都带上它；给了就是协议级：只加给这条协议，同名头覆盖厂商级。厂商不存在时报错并指向 `provider ls`（退出码 1） | 确认一行（厂商、头名、作用范围、脱敏后的值）与下一步 `provider header ls`；`--json` 含 `provider`、`protocol`（空串是厂商级）、`name`、`value`（脱敏）、`value_masked` |
+| `provider header set` | `<厂商> <头名> <值> [--protocol <协议>]` | 声明上游除凭据头之外还要的附加请求头（见 5.10），覆盖语义：同一个 (厂商, 作用范围, 头名) 再写一次就是改值，不存在就新建，不报错也不留旧行。头名按 HTTP 头名的规矩校验（token 字符、大小写不敏感、落库归一成小写：写 `X-Opencode-Session` 与写 `x-opencode-session` 是同一行），值不能是空白串、也不能带 CR/LF/NUL，非法头名与空值都是用法错误（退出码 2，打出用法行）。`--protocol` 收命令行写法 `anthropic`、`openai`、`responses`、`gemini`（与 `--default-protocol` 同一套映射，落库的是报文协议全名 `openai-chat` 这类），不给就是厂商级：这家厂商的每条路由都带上它；给了就是协议级：只加给这条协议，同名头覆盖厂商级。厂商不存在时报错并指向 `provider ls`（退出码 1） | 确认一行（厂商、头名、作用范围、脱敏后的值）与下一步 `provider header ls`；`--json` 含 `provider`、`protocol`（空串是厂商级）、`name`、`value`（脱敏）、`value_masked` |
 | `provider header unset` | `<厂商> <头名> [--protocol <协议>]` | 删掉一条声明，定位用的是 `set` 给的同一个 (厂商, `--protocol`, 头名)。删不到时报错并列出这家厂商现有的声明（多半是头名或 `--protocol` 写错了），退出码 1：与 `provider unset` 删路由「删不到也报错」一致——头没删掉，转发照旧带它，静默当成功等于让人以为解决了。删的是协议级那行而厂商级还有同名头时，输出说明转发会回退到厂商级那条 | 确认一行（厂商、头名、作用范围）与现有几条声明；`--json` 含 `provider`、`protocol`、`name`、`removed`、`remaining`（这家还剩几条） |
 | `provider header ls` | `[<厂商>]` `--json` | 列已声明的附加请求头：不给厂商就列全部厂商的，给了就只列这一家（厂商不在表里时报错、退出码 1，不把「写错厂商名」显示成「一条头都没有」）。文本四列：厂商、协议（厂商级显示 `-`）、头名、值（脱敏）。值一律走 `ProviderHeader.Masked`，只露前四位：值可能是密钥（会话 token、自定义鉴权头），完整值不打印，`--json` 也一样。厂商级与协议级各占一行，同一头名两边都有时两行都在，协议列就是区分；合并后的有效集合（协议级按同名覆盖厂商级，见 5.10）不在这里展开，转发时才算 | 表格；一条都没有时输出一行提示与一条示例命令；`--json` 是数组，每项 `provider`、`protocol`（空串是厂商级）、`name`、`value`（脱敏）、`value_masked`（恒 true，说明 `value` 不是明文） |
 | `plugin install` | `<目录\|GitHub 来源> [--trust declarative\|sandboxed] [--no-enable] [--dry-run] [--yes]` | 装一个插件，`runtime` 可以是 `declarative`（只有映射数据）或 `moejs`（带 JS 入口）。来源可以是本地目录，也可以是 GitHub 仓库里的插件目录，写法有三种：`https://github.com/<owner>/<repo>/tree/<ref>/<path>`、`github.com/<owner>/<repo>/<path>[@<ref>]`、`github:<owner>/<repo>/<path>[@<ref>]`；`<ref>` 省略时取 `HEAD`（仓库默认分支）。远程来源只接受 `github.com` / `codeload.github.com` 的 HTTPS：先下载该 ref 的 zip（归档上限 64 MiB），在临时目录里拒绝符号链接、特殊文件、重复条目与越界路径后解压（总量上限 64 MiB、最多 4096 个条目），找到 `<path>`，然后与本地目录共用同一条流水线，临时目录在命令结束时删掉。流水线固定：解析并严格校验 manifest、方言文件、模型目录与三者之间的引用（`moejs` 的 `kind` 必须是 `provider`、`entry` 必填且落在包根内、文件/进程/环境变量权限只能是 `none`，见 5.17）→ 定信任级别（`--trust` 与 manifest 的 runtime 必须一致，判定表见本节末）→ 拒掉声明式方言承载非语音操作（`checkExecutableOperations`：对话、向量化与决策操作只收 hook 方言或 `lax/` 宿主方言）→ 算包目录哈希（`plugin.PluginDirHash`）→ 版本冲突（`plugin_versions` 不可变，同一个版本再装一次直接拒）→ 方言冲突（内置方言打底，加其余已装插件的方言一起试登记：ID 撞车、冒用 `lax/` 前缀都整包拒）→ `--dry-run` 到这里返回，不复制也不写库 → 复制到 `<数据目录>/plugins/installed/<插件 ID>/<版本>/`（先落 `staging/` 再整目录 `os.Rename`；符号链接与特殊文件一律拒）→ 逐家厂商一个事务写目录（`store.ApplyPluginCatalog`：厂商、路由、模型目录、方言绑定、别名；冲突整包回滚）→ 写 `plugin_versions`（`runtime` 记安装时的那一个，网关启动按它选加载路径；`source` 记 `dir` 或 `github:<owner>/<repo>/<path>@<ref>`）与 `plugins` → `--no-enable` 时置 `disabled`；最后写一条 `install` 审计。已经装过别的版本时要 `--yes` 才切活动版本（旧版本行留着）。失败时删掉刚复制的包并提示「前面几家厂商可能已经写进去了」，用 `lax plugin rm` 或 `lax provider rm` 清。 | 确认行（插件 ID、版本、类型、信任、包目录、包哈希、权限摘要、运行时与钩子超时），每家厂商一段（地址、路由、方言、别名）加每个模型一行（客户端名、上游名、操作 → 方言）；`--json` 含 `id`、`name`、`version`、`kind`、`runtime`、`trust`、`target`、`package_sha256`、`permissions`（一句中文）、`providers`（每项 `id`、`name`、`base_url`、`routes`、`models`（每项 `model`、`upstream_id`、`operations`（操作名 → 方言 ID））、`dialects`、`aliases`）、`dry_run`、`enabled` |
@@ -193,7 +229,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 | `plugin rm` | `<插件 ID> [--purge]` | 删库里的插件行、全部版本、配置项、它带来的方言绑定与它自己的厂商（连带这些厂商的路由、模型目录、绑定与别名）。归属按 `providers.plugin_id` 与方言 ID 的 `<插件 ID>/` 前缀判，且只删 `source='plugin'` 的绑定：手写与回填的行留着。指向这些厂商的账号不删，但与 `provider rm --force` 一样停用（`last_error` 写明重新安装后 `account enable` 可恢复）。包目录默认保留，`--purge` 一起删。写一条 `remove` 审计。 | 确认一行（清掉几个版本、几条方言绑定、几家厂商）；`--json` 含 `removed`、`versions`、`dialect_bindings`、`providers`、`purged`、`package_dir` |
 | `plugin doctor` | `[<插件 ID>]` | 检查包完整性、manifest 哈希、包哈希、方言登记与状态；`moejs` 插件多两项：沙箱能否打开（入口语法、缺文件在这里露出来）与入口导出了哪几个钩子。不带 ID 时检查全部启用的插件；注册表按 ID 顺序累积，后面的插件与前面的撞名会在这里露出来。哈希与安装时记的不一致就把 `state` 写成 `tampered` 并列出两个哈希的前 12 位，网关不再加载它；哈希已经对上时把 `tampered` 恢复成 `ok`（状态只由宿主写，插件改不了自己的状态）；上次启动写成 `failed` 的那一行在本次全部检查通过后也翻回 `ok`。有检查未通过时退出码 1。 | 逐个插件一段（`ok` 或 `fail` 标记加检查项名与说明）；`--json` 是数组，每项 `name`、`ok`、`checks`（每项 `name`、`ok`、`detail`） |
 | `model sync` | `[--provider 厂商]` `[--account 账号]` `[--endpoint <路径>]` | 对选中的账号 GET 上游模型列表：地址按厂商的 `models_path` 覆盖、该账号的默认协议那条路由的 `models_path`、同厂商按协议名排序的第一条非空 `models_path` 的顺序取，都没有时按 `base_url` 后缀猜；凭据头跟「实际取到这条路径的那条路由」的协议走，不是账号的默认协议（见 5.7）。`--endpoint` 只影响这一次调用，值是相对账号的 `base_url` 的完整路径，也可以是整条地址（见 5.8；相对路径只规整，`v1/models` 与 `//v1//models/` 都可用；整条地址直接访问、不再拼 `base_url`），给了就压过厂商覆盖与路由，作用于被选中的每个账号；传空值或只有斜杠是用法错误，整条地址缺主机名、scheme 不是 http(s) 同样是用法错误（退出码 2，文案指出缺什么），不需要临时覆盖就整个去掉这个参数；解析 `{data:[{id}]}`、`{models:[{…}]}` 与顶层数组三种形状（见 5.7），按名字排序去重，空列表算该账号失败。结果写「目录 + 该账号可达性」（见 5.13）：名字进 `provider_models`（同步只说明这个名字存在，不写长度、价格与能力位），该账号在 `account_models` 里的这些名字标 `access='allowed'`；已有的行只改可达性，`http_status`、`error`、`checked_at` 与协议发现一律保留，这一轮清单里没出现的行也不删——可达性只由探活结论改动。抓取走 `gateway.SyncModelsWithEndpoint`，写库走 `store.ReplaceModels`，cli 不自己拼 SQL。某个账号失败时其余账号照常处理完 | 表格（账号 / 厂商 / 模型 / 新增 / 备注）与下一步 `model probe` 的提示；`--json` 是数组，每项 `account`、`provider`、`models`、`added`、`error`（只有失败才有） |
-| `model probe` | `[--provider 厂商]` `[--account 账号]` `[--sync]` `[--model 模型]` `[--protocol 协议]` `[--limit N]` `[--concurrency N]` `[--max-age 时长]` `[--refresh]` | 逐账号对每个模型发一条 `max_tokens=1` 的请求判定可用性，结果写 `account_models.access`（`allowed` / `forbidden` / `missing`；`error` 不再由这一轮探活写出，没拿到判定时保留原值），协议发现另写 `protocol`，每次上游调用同时写一行 `requests`（见 5.5）。选号本来就只读 `access='allowed'`（见 5.13），探活因此不再回写另一份模型清单：探完一条，这个账号能不能用这个模型当场就有答案。跳过规则不变：`allowed`、`forbidden`、`missing` 且 `checked_at` 在 `--max-age`（默认 `24h`）以内的模型跳过，不发上游请求、不写库、不出现在输出里；`error` 旧行与 `checked_at` 为 0 的照常探；`--refresh` 或 `--max-age 0` 忽略新鲜度全部重探。没有模型行或带 `--sync` 时先同步；`--model` 只探一个模型名，`--limit` 截断的是跳过之后剩下的待探模型，`--concurrency` 默认 4 且不超过待探模型数；`--protocol` 只探这一条协议（候选就是它一个，不读已发现协议、不读目录声明、不取厂商默认协议），收 `anthropic`、`openai`、`responses`、`gemini`、`systemone`、`embeddings`、`speech`、`transcriptions` 与线协议全名；它用来只验一条路，例如模型已声明 systemone 时 `--protocol systemone`；待探模型被全部跳过时一条上游请求都不发，库里已有的 `allowed` 行照旧算数，这个账号因此算作已满足；任一账号出现 401 即停止后续账号并返回错误（已经探完的行留在库里，凭据被拒的那条不写可达性、保留原值，下一轮重探）；所有账号库里都零 `allowed` 时退出码 1，错误信息带本次探活数与跳过数，并说明可达性已记录、`access` 为 `forbidden` / `missing` 的模型不会进候选 | 表格（账号 / 模型 / 状态 / HTTP / 耗时 / 备注）与该账号的「本次探活 N 个 / 跳过 M 个」、可用 / 无权 / 不存在 / 失败计数与「可达 N 个」（这个账号库里 `access='allowed'` 的行数），有未判定的模型时另多一项「未判定 N」，一项都没有时这一项不出现（输出形状不多变）；零可用的账号改说一句「库里没有可用模型；可达性已记录，`access` 为 forbidden / missing 的模型不会进候选」，不再说「模型列表保持原样」——探活的结论现在直接就是选号依据；`--json` 是数组，每项 `account`、`model`、`status`、`http_status`、`latency_ms`、`message`，只含本次被探的模型，计数只出现在人读输出里；没拿到判定（连接层失败重试之后、429/5xx、本地编码或构造失败）的那一行 `status` 是空串、`message` 写清原因，可达性保持原值（见 5.7）。人读输出在 stderr 用单行原地刷新（`\r`）打实时进度，形如 `ds1 探活中 37/94  deepseek-v4.1-flash`：账号名、已完成 / 待探总数、最近完成的那个模型（并发大于 1 时显示刚回来的那个），被跳过的模型不计入总数；账号探完补一个换行，随后照旧打印汇总行与表格。进度只在 stderr 是终端时开，非终端（管道、CI、测试）与 `--json` 一个字节都不打，标准输出始终只有结果 |
+| `model probe` | `[--provider 厂商]` `[--account 账号]` `[--sync]` `[--model 模型]` `[--protocol 协议]` `[--limit N]` `[--concurrency N]` `[--max-age 时长]` `[--refresh]` | 逐账号对每个模型发一条 `max_tokens=1` 的请求判定可用性，结果写 `account_models.access`（`allowed` / `forbidden` / `missing`；`error` 不再由这一轮探活写出，没拿到判定时保留原值），协议发现另写 `protocol`，每次上游调用同时写一行 `requests`（见 5.5）。选号本来就只读 `access='allowed'`（见 5.13），探活因此不再回写另一份模型清单：探完一条，这个账号能不能用这个模型当场就有答案。跳过规则不变：`allowed`、`forbidden`、`missing` 且 `checked_at` 在 `--max-age`（默认 `24h`）以内的模型跳过，不发上游请求、不写库、不出现在输出里；`error` 旧行与 `checked_at` 为 0 的照常探；`--refresh` 或 `--max-age 0` 忽略新鲜度全部重探。没有模型行或带 `--sync` 时先同步；`--model` 只探一个模型名，`--limit` 截断的是跳过之后剩下的待探模型，`--concurrency` 默认 4 且不超过待探模型数；`--protocol` 只探这一条协议（候选就是它一个，不读已发现协议、不读目录声明、不取厂商默认协议），收 `anthropic`、`openai`、`responses`、`gemini`、`systemone`、`embeddings`、`speech`、`transcriptions` 与报文协议全名；它用来只验一条路，例如模型已声明 systemone 时 `--protocol systemone`；待探模型被全部跳过时一条上游请求都不发，库里已有的 `allowed` 行照旧算数，这个账号因此算作已满足；任一账号出现 401 即停止后续账号并返回错误（已经探完的行留在库里，凭据被拒的那条不写可达性、保留原值，下一轮重探）；所有账号库里都零 `allowed` 时退出码 1，错误信息带本次探活数与跳过数，并说明可达性已记录、`access` 为 `forbidden` / `missing` 的模型不会进候选 | 表格（账号 / 模型 / 状态 / HTTP / 耗时 / 备注）与该账号的「本次探活 N 个 / 跳过 M 个」、可用 / 无权 / 不存在 / 失败计数与「可达 N 个」（这个账号库里 `access='allowed'` 的行数），有未判定的模型时另多一项「未判定 N」，一项都没有时这一项不出现（输出形状不多变）；零可用的账号改说一句「库里没有可用模型；可达性已记录，`access` 为 forbidden / missing 的模型不会进候选」，不再说「模型列表保持原样」——探活的结论现在直接就是选号依据；`--json` 是数组，每项 `account`、`model`、`status`、`http_status`、`latency_ms`、`message`，只含本次被探的模型，计数只出现在人读输出里；没拿到判定（连接层失败重试之后、429/5xx、本地编码或构造失败）的那一行 `status` 是空串、`message` 写清原因，可达性保持原值（见 5.7）。人读输出在 stderr 用单行原地刷新（`\r`）打实时进度，形如 `ds1 探活中 37/94  deepseek-v4.1-flash`：账号名、已完成 / 待探总数、最近完成的那个模型（并发大于 1 时显示刚回来的那个），被跳过的模型不计入总数；账号探完补一个换行，随后照旧打印汇总行与表格。进度只在 stderr 是终端时开，非终端（管道、CI、测试）与 `--json` 一个字节都不打，标准输出始终只有结果 |
 | `model dialect ls\|set\|unset` | `ls [<模型>] [--provider <厂商>]`；`set <模型> <操作> <方言 ID> [--provider <厂商>]`；`unset <模型> <操作> [--provider <厂商>]` | 读写 `model_operations` 的方言绑定（见 5.16、5.17）。`ls` 按模型名、操作排序，不给模型名就列全部；`set` 是覆盖语义（同一个 `(厂商, 模型, 操作)` 再写一次就是改绑），写 `source='manual'`，操作只收宿主认识的五个；`unset` 删不到时报错并提示用 `ls` 看现有绑定。`--provider` 不给时按目录里的模型名唯一确定，模型出现在多家厂商目录里时报错并要求指定。非语音操作绑到插件方言时 `set` 会当场提醒：提醒文案说网关会拒绝，但当前实现里 hook 方言可以承接这些操作（对话响应能解回，向量化的响应解不回来，见 5.17），声明式方言绑非语音操作仍在安装时被拒；绑宿主方言不提醒。 | `ls` 表格（模型 / 厂商 / 操作 / 方言 / 来源 / 更新时间），一条都没有时给一条 `model capability add` 的示例；`--json` 是数组，每项 `model`、`provider`、`operation`、`dialect`、`source`、`updated_at`；`set` 的 `--json` 是同一形状的一行；`unset` 的 `--json` 含 `model`、`provider`、`operation`、`removed` |
 | `model alias set` | `<别名> <目标>` | 覆盖语义：同一个别名再写一次就是改目标（`created_at` 不动），不存在就新建，不报错也不留旧行。参数个数不对、别名或目标为空（含只有空白）是用法错误（退出码 2，打出用法行）；名字里的控制字符、别名等于目标、别名与真实模型名同名，判定都在 `store.SetModelAlias` 这一处（见 5.12）。遮蔽真名是运行失败（退出码 1），文案由 store 给（写清命中的是哪个账号或哪家厂商的目录、下一步换个别名还是改哪一处），cli 原样带出、不另写一份规则。写完再解析一次：成环与超过 8 跳当场报出来，文案说明这一行已经进库并给出查看与撤掉两条命令，不等到请求时才炸。目标可以暂时没有任何账号提供：先把别名写好，之后加账号即生效 | 确认一行（`已设置别名 <别名> → <目标>`）与下一步 `lax model alias ls`；`--json` 含 `alias`、`target`、`resolved`（解析到的真实模型名）、`ok` |
 | `model alias unset` | `<别名>` | 删不到时报错并列出当前有哪些别名（多半是别名写错了），退出码 1：没删掉而静默当成功，会让人以为客户端那个名字已经能解析。一条别名都没有时把下一步写成设置一条的命令。参数个数不对与空值是用法错误（退出码 2） | 确认一行（删掉的是哪个别名、还剩几条）；`--json` 含 `alias`、`removed`、`remaining` |
@@ -383,7 +419,7 @@ $ curl -s http://127.0.0.1:4567/v1/responses \
 
 两条分界与各自的代价：
 
-- 直通（入站协议 = 出站协议）：请求体只改 `model` 字段，其余字段与值原样保留，包括文档里没列出的陌生字段；响应体与流式帧按字节原样转发。读用量不改变转发内容，由该协议的 usage scanner 从响应体或流式帧里读，缓存字段也能读到。gemini 是这条规则的例外：它的报文里没有 `model` 字段（模型名在路径里），所以直通时请求体一个字节都不改，往上写一个 `model` 只会让上游以「未知字段」拒掉整条请求。代价是只对同协议账号成立，好处是上游新加的字段与参数可以直接用。
+- 直通（入站协议 = 出站协议）：请求体只改 `model` 字段，其余字段的值原样保留，包括文档里没列出的陌生字段；但报文会重新编码，顶层的键序与空白不保证原样。响应体与流式帧按字节原样转发。读用量不改变转发内容，由该协议的 usage scanner 从响应体或流式帧里读，缓存字段也能读到。gemini 是这条规则的例外：它的报文里没有 `model` 字段（模型名在路径里），所以直通时请求体一个字节都不改，往上写一个 `model` 只会让上游以「未知字段」拒掉整条请求。代价是只对同协议账号成立，好处是上游新加的字段与参数可以直接用。
 - 转换（入站协议 ≠ 出站协议）：解码成中间表示，再按目标协议编码，请求与响应都只搬表里定义过的字段。表里没有的字段丢弃，这是有意的：陌生字段跨协议搬过去只会变成语义错位。代价是改协议就意味着表外字段消失，新增映射必须同时补用例。
 
 流式在转换路径上走增量：上游帧先解码成 `thinking`、`text`、`tool_start`、`tool_args`、`stop`、`error` 增量，再由入站协议的编码器编成客户端事件。同协议直通时逐行转发原始字节，只用 scanner 记账。
@@ -550,7 +586,7 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
   - 方法过滤：不再按 `supportedGenerationMethods` 丢掉条目。以前 embedding 一类没有 `generateContent` 的条目整条不进清单，于是向量化模型连目录都进不去；现在它们照旧进目录，只是能力位记成 `embedding`（见 5.15），能不能用由可达性与协议判定说。一个条目都没有这个字段时（ollama 的 `/api/tags`）能力位留空，不硬塞 `chat`。
   - 去前缀：条目名以 `models/` 开头时去掉一个前缀再入库，只去一个（`models/models/x` 落成 `models/x`）。这条与形状无关、对所有形状生效：路由的 `{model}` 占位符在请求时只把裸名放回路径，库里存带前缀的名字会让上游收到 `models/models/…`。
 - 分页：每个列表请求都带 `pageSize=1000`（不认识的厂商忽略这个参数），响应顶层有非空 `nextPageToken` 时带上 `pageToken` 取下一页，各页结果合并、去重、排序，最多 10 页。超过 10 页还在翻页时报错（文案说明清单过大、指出 `pageSize` 与地址），不静默截断：截断会让同步看起来成功，少掉的那几个模型永远选不到号，症状是「上游明明有这个模型却一直 404」。`nextPageToken` 是空串、只有空白或不是字符串时当作没有下一页。
-- 元数据来源：条目里除了名字还带几列模型事实，认得出就写进目录，认不出就留空——字段缺失、0、负数都算「上游没给」，不猜默认值。端点名到线协议的映射表（`internal/gateway` 的 `endpointProtocols`）放在 gateway 而不是 `translate`：它服务的是模型同步与探活这两件上游侧的事，`translate` 仍然只做协议编解码，不认识厂商清单的字段名。
+- 元数据来源：条目里除了名字还带几列模型事实，认得出就写进目录，认不出就留空——字段缺失、0、负数都算「上游没给」，不猜默认值。端点名到报文协议的映射表（`internal/gateway` 的 `endpointProtocols`）放在 gateway 而不是 `translate`：它服务的是模型同步与探活这两件上游侧的事，`translate` 仍然只做协议编解码，不认识厂商清单的字段名。
 
   | 上游 | 上下文 | 最大输出 | 支持的协议 | 其它（不解析） |
   | --- | --- | --- | --- | --- |
@@ -589,8 +625,8 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 - 厂商默认协议那一次失败时，只有可能只是路径不对的才换协议再试：`404`（路径不存在）、`405`（方法不允许）、`403`（有的网关按路径拒，commandcode 对非 `/messages` 的 `claude-*` 就是 403），以及 `400` 且错误文本指向端点、路径或「不支持该协议」。其余失败（例如明确说模型不存在、`5xx`、网络错误）直接按上表判定，不再花调用。
 - 换协议之后的那几次失败都不作数：不管是什么原因，都接着试剩下的候选，直到候选用完，结论仍回厂商默认协议那次。中途停手会让排在后面的候选永远试不到，而换协议后的 `401` 本来就是常态（凭据头形状不对）。
 - 顺序：库里已经发现过这个模型的协议（含 `model add --protocol` 写下的账号级覆盖）排最前，接着是目录里这个模型声明的协议（`provider_models.protocols`，见上面的「元数据来源」），然后厂商的有效默认协议，其余按候选列表的顺序。目录声明不再要求厂商在 `provider_routes` 里也有同名路由：模型级的声明本身就是这条路径存在的证据（systemone 的路径固定，`gateway.Endpoint` 也能按协议给出后缀），而排在这个位置上的失败不构成结论，只有 `2xx` 才算数，全部失败时结论仍取厂商默认协议的判定。声明因此排在了厂商默认协议前面，但排在已发现的协议后面：已发现的结果意味着这个账号上真的用这条协议打通过，比清单更贴近事实。账号行不存协议，所以候选里没有「账号协议」这一档。库里已有的发现结果排前面是为了让 `--refresh` 重探已知模型时不再白打一次 `404`。顺序固定，同一模型多次探活得到同一个结论，不随运行顺序变化。
-- 候选协议由 `gateway.Options.RouteProtocols`（resolver）给出：入参是账号的厂商与模型名，默认实现取该厂商在 `provider_routes` 里声明过的协议（见 5.8）；没注入、或该厂商一个路由都没声明时它们就是三条入站协议全试（gemini 不在兜底里：只有声明过 gemini 路由时才进候选；向量化与两条语音协议同样不在兜底里，同此理）。resolver 负责去重与校验，只认 `store.IsWireProtocol` 认的线协议，出现别的值直接报错——静默落进 chat 分支会把一条配置错误变成对错误地址的上游调用。循环本身不认识厂商，也不会对着不存在的端点白打一次。
-- `model probe --protocol P` 只打这一条：候选就是 `[P]`，不读已发现协议、不读目录声明、不取厂商默认协议，也不产生多协议顺序。P 必须是线协议，否则用法错误（退出码 2）。它的判定按上表算，401 也停用账号——这一次没有第二条路径可以怀疑凭据头形状，打到的就是用户指定的那条。成功时照旧把 P 写进 `account_models.protocol`。
+- 候选协议由 `gateway.Options.RouteProtocols`（resolver）给出：入参是账号的厂商与模型名，默认实现取该厂商在 `provider_routes` 里声明过的协议（见 5.8）；没注入、或该厂商一个路由都没声明时它们就是三条入站协议全试（gemini 不在兜底里：只有声明过 gemini 路由时才进候选；向量化与两条语音协议同样不在兜底里，同此理）。resolver 负责去重与校验，只认 `store.IsWireProtocol` 认的报文协议，出现别的值直接报错——静默落进 chat 分支会把一条配置错误变成对错误地址的上游调用。循环本身不认识厂商，也不会对着不存在的端点白打一次。
+- `model probe --protocol P` 只打这一条：候选就是 `[P]`，不读已发现协议、不读目录声明、不取厂商默认协议，也不产生多协议顺序。P 必须是报文协议，否则用法错误（退出码 2）。它的判定按上表算，401 也停用账号——这一次没有第二条路径可以怀疑凭据头形状，打到的就是用户指定的那条。成功时照旧把 P 写进 `account_models.protocol`。
 - 第一个 `2xx` 就是结论：可达性记 `allowed`，把这次用的协议写进 `account_models.protocol`，剩下的协议不再试。
 - `401` 一律不换协议：凭据问题与路径无关，照旧停用账号并立即停止整次探活。这一条只判厂商默认协议那一次；换协议之后的 `401` 多半是凭据头形状不对（anthropic 用 `x-api-key`，gemini 用 `x-goog-api-key`，两条 openai 协议用 `Bearer`），既不停用账号也不算凭据被拒。
 - 候选协议都没试出 `2xx` 时，结论取厂商默认协议那一次的判定（状态、HTTP 状态与错误文本），`protocol` 保持原值不动；那一次如果是连接层失败或 429/5xx，可达性不写、保留上一行结论（见上表）。协议列只在发现成功时写，一次失败不会把之前测出的协议抹掉，也不会凭空写入一个。
@@ -640,14 +676,14 @@ AES-256-GCM 加密后入库，密钥在 `secret.key`。这个方案防的是「�
 出站地址不由代码里的厂商表决定，也不靠 `base_url` 末尾有没有 `/v1` 猜后缀：同一个 `base_url` 上不同协议的路径并不一样，猜出来的地址对其中一种协议一定是错的。deepseek 的 chat 在 `/v1/chat/completions`，anthropic 在 `/anthropic/v1/messages`；commandcode 的 base 是 `https://api.commandcode.ai/provider/v1`，chat 在 `/chat/completions`、anthropic 在 `/messages`，模型列表在 `/models`。
 
 - `providers` 一行提供 `base_url`、备注、一列默认协议与一列模型列表路径覆盖；协议的路径细节一律在 `provider_routes` 上，厂商行不存转发路径。
-- `providers.plugin_id` 记这一行是哪次插件安装建起来的，`providers.origin` 另记来源（`builtin` / `plugin` / `manual`）。来源是展示用的溯源，不是权限：任何来源的厂商都可以被 `provider set` 或 `provider rm` 修改。插件安装对同名厂商分三种：没有这一行就建（地址、备注、`plugin_id` 与 `origin=plugin` 一起写）；有且地址相同、`plugin_id` 为空就补归属与来源，其余列不动；地址不同则整笔失败，文案给出「对齐 manifest 里的 `base_url`」与「先 `provider rm` 再把厂商交给插件管」两条出路；已经属于另一个插件同样整笔失败。插件带来的路由先看 manifest 的 `providers[].routes`：写了就按它落库（每项一条 `(厂商, 协议)` 路由，协议必须是已知线协议且不重复，路径与 `provider` 子命令同一套规整与校验），没写才按声明式方言的 `request.path` 推导，一条带路径的方言一条路由；hook 方言没有声明式 `request`，按线协议的默认端点建。声明了 `routes` 时，目录里每条方言的 `upstream_wire` 必须落在其中一条上，否则安装当场报错：漏一条的结果是「装得下、打不通」，没有路由的线协议拼不出地址。同一家厂商的两条方言落在同一条线协议上时只建第一条；请求时方言可以用 `Plan.Path` 换一条相对路径，但域名与凭据仍只能由厂商路由给（见 5.17）。同名路由已存在但路径不同、同名别名已指向别的目标，同样整笔失败。删除插件时按 `plugin_id` 找到它自己的厂商，连带删掉路由、模型目录、绑定与别名（见第 4 节的 `plugin rm`）。
+- `providers.plugin_id` 记这一行是哪次插件安装建起来的，`providers.origin` 另记来源（`builtin` / `plugin` / `manual`）。来源是展示用的溯源，不是权限：任何来源的厂商都可以被 `provider set` 或 `provider rm` 修改。插件安装对同名厂商分三种：没有这一行就建（地址、备注、`plugin_id` 与 `origin=plugin` 一起写）；有且地址相同、`plugin_id` 为空就补归属与来源，其余列不动；地址不同则整笔失败，文案给出「对齐 manifest 里的 `base_url`」与「先 `provider rm` 再把厂商交给插件管」两条出路；已经属于另一个插件同样整笔失败。插件带来的路由先看 manifest 的 `providers[].routes`：写了就按它落库（每项一条 `(厂商, 协议)` 路由，协议必须是已知报文协议且不重复，路径与 `provider` 子命令同一套规整与校验），没写才按声明式方言的 `request.path` 推导，一条带路径的方言一条路由；hook 方言没有声明式 `request`，按报文协议的默认端点建。声明了 `routes` 时，目录里每条方言的 `upstream_wire` 必须落在其中一条上，否则安装当场报错：漏一条的结果是「装得下、打不通」，没有路由的报文协议拼不出地址。同一家厂商的两条方言落在同一条报文协议上时只建第一条；请求时方言可以用 `Plan.Path` 换一条相对路径，但域名与凭据仍只能由厂商路由给（见 5.17）。同名路由已存在但路径不同、同名别名已指向别的目标，同样整笔失败。删除插件时按 `plugin_id` 找到它自己的厂商，连带删掉路由、模型目录、绑定与别名（见第 4 节的 `plugin rm`）。
 - `provider_routes` 按 `(厂商, 协议)` 存完整路径 `path` 与模型列表路径 `models_path`。`path` 是相对路径时，完整地址是 `base_url` 去掉末尾斜杠后直接拼它；`path` 是整条地址时直接用它，不做任何猜测与补全（两种写法见下一条）。`path` 里可以出现 `{model}` 占位符，两种写法都支持：拼好的完整地址在发请求之前把 `{model}` 换成转义后的模型名（见 5.9）。规整只合并斜杠，花括号与冒号原样落库。
 - 路由的 `path`、路由与厂商的 `models_path`、`model sync --endpoint` 三处收两种写法，判定与解释只有一份（`store.IsFullAddress` 与 `store.NormalizeEndpoint`）：含 `://` 的是整条地址，用 `url.Parse` 校验 scheme 为 `http` 或 `https`、主机名非空，规整时 scheme 归一成小写、路径合并重复斜杠去尾斜杠，授权部分、查询串与 `#` 之后原文保留，使用时不再拼 `base_url`；不含 `://` 的是相对路径，走 `NormalizePath` 拼厂商的 `base_url`（账号行不再存地址）。整条地址让同一厂商的不同协议落在不同域名上：openai 兼容端点在 `https://openai.example.com/v1/chat/completions`、anthropic 端点在 `https://claude.example.com/v1/messages`，此时 `base_url` 可以不写（见下一段的「整条地址路由不需要 base_url」）。`https://`、`https:///x` 这类只有 scheme 没有主机名的写法报错，`ftp://host/x` 这类其它 scheme 同样报错，错误文案用中文指出缺什么；写入侧（`CreateProvider`、`SetProvider`、`AddProvider`）碰到坏整条地址整笔拒绝、一个字段都不落库，读取侧（`joinEndpoint`、`modelsEndpoint`）把存量的脏值原样交给 `http.NewRequest` 报错，不改写用户数据。
 - 相对路径只规整、不拒绝输入，规则是 `store.NormalizePath`（由 `store.NormalizeEndpoint` 在取值不含 `://` 时调用）：去掉首尾空白、把连续斜杠合并成一个、补上恰好一个前导斜杠、去掉末尾斜杠；空串、只有斜杠、只有空白的输入一律视为空。`v1/chat/completions`、`//v1//chat//completions`、`/v1/chat/completions/` 因此是同一个地址，`--openai`、`--models-path`、`model sync --endpoint` 都不再要求「必须以 `/` 开头」。写入侧（`CreateProvider`、`SetProvider`、`AddProvider` 的 `path` 与 `models_path`）与读取侧（拼转发地址、拼模型列表地址、`--endpoint`）走同一个入口：库里存的永远是规整形态，读取侧拼地址时再过一遍，历史库里的不规整写法因此也拼得出正确地址。理由：路径是照着上游文档抄的，多一个或少一个斜杠是写法差异，不是用法错误；为此报错只会让人先改命令再重敲一遍，得到的仍是同一个地址。真正的用法错误是非空字段规整之后为空（删除语义归 `provider unset`），以及整条地址校验不过，那两条仍然报错。
 - 整条地址路由不需要 `base_url`：每一条声明的路由与要落库的 `models_path` 都是整条地址时，`base_url` 拼不进任何地址，写一个「为了过校验」的地址只是无效配置。`provider add` 与 `provider set` 因此允许省略 `--base-url`（库里的 `providers.base_url` 存空串）；账号行没有地址这一列，`account add` 也不需要占位地址；读取侧（`joinEndpoint`、`modelsEndpoint`）对这种行只走整条地址，不拼 `base_url`，因此不会拼出 `//` 开头的畸形地址。真实例子是 bigmodel 的三套协议分属不同 host 与路径：anthropic 在 `https://open.bigmodel.cn/api/anthropic/v1/messages`、chat 在 `https://open.bigmodel.cn/api/coding/paas/v4/chat/completions`、responses 在 `https://open.bigmodel.cn/api/v1/responses`，模型列表是 chat 那条推导出的 `https://open.bigmodel.cn/api/coding/paas/v4/models`，没有哪条地址用得上 `base_url`。`provider ls` 的地址列对空值显示 `-`。
 - 缺 `base_url` 与相对路径互斥，这一条只有一份判定（`store.requireBaseURLCoverage`，三个写入口 `CreateProvider`、`SetProvider`、`AddProvider` 都调它），cli 只把它的错误包成用法错误（`store.ErrBaseURLRequired` → 退出码 2），不另算一份：有一条路由（或厂商级 `models_path`）是相对路径又没给 `base_url` 时整笔拒绝、一个字段都不落库，文案说清是哪条路由、并给出两条出路——「需要 --base-url」或「把它写成整条地址」。`provider set` 把一条路由从整条地址改成相对路径、同时没给 `--base-url`、库里也没有地址时同样整笔拒绝（要连地址一起给就在同一次调用里带上 `--base-url`）。空的 `base_url` 加一条路由都不给仍是错误（`provider add` 至少要一条路由），行为不变。`base_url` 不在 `provider unset` 的字段里：它只能由 `provider set` 换成另一个地址。
 - `base_url` 同理只规整路径、不拒绝输入（`store.NormalizeBaseURL`），校验用 `url.Parse` 做：scheme 只认 `http` 与 `https`，大小写不敏感，落库时归一成小写；缺主机名是错误——`https://` 里没有地址，规整出来的 `https:` 拼不出可用的请求地址，不能当成一条 `base_url` 落库；缺 scheme 与别的 scheme 同样报错。规整只作用在路径部分：合并重复斜杠、补一个前导斜杠、去掉末尾斜杠，`https://api.example.com//api//paas//v4/` 落成 `https://api.example.com/api/paas/v4`——真实存在的前缀原样保留。授权部分（含端口与用户信息）、查询串与 `#` 之后的内容一个字不动：那里的连写斜杠是值的一部分，合并会改掉语义；`..` 与 `.` 段也原样保留，静默改写等于把地址换成另一个地址。拼地址时两侧（`base_url` 的路径与路由的 `path`）都过这套规则，最终地址的路径里不出现 `//`；`http://`、`https://` 里那一对斜杠不属于要合并的范围。
-- 协议由四个 flag 声明：`--anthropic`、`--openai`（openai-chat）、`--responses`（openai-responses）、`--gemini`（gemini 的入站与出站都可用，非流式与流式都有，见 5.9）。gemini 路由的 `path` 里可以写 `{model}` 占位符，写入侧只合并斜杠，花括号与冒号原样落库；没有 gemini 路由的 gemini 账号走 `base_url` 后缀兜底。`provider add` 用它们新建，`provider set` 用它们覆盖或新增一条路由，删掉一条路由是 `provider unset <名称> <协议>`：传空值是用法错误，删除只在 `unset` 里发生。`--default-protocol` 认命令行写法 `anthropic`、`openai`、`responses`、`gemini`，也认线协议全名 `openai-chat`、`openai-responses`，两种写法落到同一个线协议，输入 `openai` 就是 chat，`gemini` 两种写法同形；错误文案用命令行写法举例。
+- 协议由四个 flag 声明：`--anthropic`、`--openai`（openai-chat）、`--responses`（openai-responses）、`--gemini`（gemini 的入站与出站都可用，非流式与流式都有，见 5.9）。gemini 路由的 `path` 里可以写 `{model}` 占位符，写入侧只合并斜杠，花括号与冒号原样落库；没有 gemini 路由的 gemini 账号走 `base_url` 后缀兜底。`provider add` 用它们新建，`provider set` 用它们覆盖或新增一条路由，删掉一条路由是 `provider unset <名称> <协议>`：传空值是用法错误，删除只在 `unset` 里发生。`--default-protocol` 认命令行写法 `anthropic`、`openai`、`responses`、`gemini`，也认报文协议全名 `openai-chat`、`openai-responses`，两种写法落到同一个报文协议，输入 `openai` 就是 chat，`gemini` 两种写法同形；错误文案用命令行写法举例。
 - `models_path` 的推导只发生在写入侧，读取侧不拿它重算。写入时没给模型列表地址的路由按规则补默认值（`store.DeriveModelsPath`）：openai-chat 路由把尾部 `/chat/completions` 换成 `/models`（`/v1/chat/completions` → `/v1/models`、`/chat/completions` → `/models`；整条地址则在同一个 scheme + host 上换尾段，`https://openai.example.com/v1/chat/completions` → `https://openai.example.com/v1/models`，查询串与 `#` 之后跟着原样带过去，不换域名），其它协议留空，表示这条协议没有自己的列表接口、读取时回退到同厂商其它协议的非空值。推导值跟着路径走：改路径时只有「空」或「原本就是旧路径的推导值」才换成新推导值，手工填过的值不动。内置 `anthropic` 厂商只有 anthropic 一条路由，没有 openai 路由可以推导，它的 `/v1/models` 因此不会因为重写那条路由而消失——读取侧推导会让 anthropic 型账号彻底失去模型列表来源。
 - `providers.models_path` 是厂商级覆盖：非空时 `model sync` 直接用它，不看路由；空串表示不覆盖、按路由取。它同样收相对路径与整条地址两种写法。要改一家上游的列表地址又不想逐条写 `models_path` 时用它。
 - 模型列表的凭据头跟取到路径的那条路由的协议走（见 5.7），不是厂商的默认协议：deepseek 的 anthropic 账号用的是 chat 路由上的 `/v1/models`，就得发 `Bearer`。
@@ -854,7 +890,7 @@ gemini 的原生接口（Generative Language API 的 `generateContent`）与另�
 模型的事实（上下文长度、最大输出、支持哪些协议、能力位、厂商级价格）属于上游，与哪个账号去访问无关；账号只该回答「我能不能用这个模型」以及在个别模型上「我这里的能力/价格与目录不同」。把这两件事混在一张表里，会出现「同一个模型在三个账号下有三份重复元数据」，改一次要改三处。
 
 - `provider_models(provider, model)` 存模型事实：`source`（`sync` / `manual` / `probe` / `plugin`）、`context_window`、`max_output`、`protocols`（该模型支持的协议集合，逗号分隔）、`capabilities`（能力位，逗号分隔）、四个价格列（厂商级默认价）、`updated_at`。主键 `(provider, model)`。
-- `protocols` 的取值口径：只存四条线协议全名（`anthropic`、`openai-chat`、`openai-responses`、`gemini`，即 `store.IsWireProtocol` 认的那些），按这个固定顺序排列、去重，**空串表示上游没声明**。来源只有 `model sync` 从清单条目里认出来的那几个端点名与方法名（见 5.7 的「元数据来源」），未识别的写法一律不计。这一列只用来给探活排候选的顺序（见 5.7），不改变「这条路由存不存在」：候选范围仍由厂商的 `provider_routes` 决定。
+- `protocols` 的取值口径：只存四条报文协议全名（`anthropic`、`openai-chat`、`openai-responses`、`gemini`，即 `store.IsWireProtocol` 认的那些），按这个固定顺序排列、去重，**空串表示上游没声明**。来源只有 `model sync` 从清单条目里认出来的那几个端点名与方法名（见 5.7 的「元数据来源」），未识别的写法一律不计。这一列只用来给探活排候选的顺序（见 5.7），不改变「这条路由存不存在」：候选范围仍由厂商的 `provider_routes` 决定。
 - `capabilities` 只写上游真的声明过的两类：`chat`（出现 `supportedGenerationMethods` 里的 `generateContent`，或 `supported_endpoints` 里的 `/chat/completions`）与 `embedding`（出现 `embedContent`、`batchEmbedContents` 或端点 `/embeddings`）。**空表示未知，不表示不支持**：响应里没有这两个键时留空，`supported_parameters` 这类形状各家不同的字段仍不解析。能力位目前只有一个消费者——探活按它决定打对话还是打向量化（见 5.15），其余用途等有需求再接。同理，`context_window`、`max_output` 为空是「上游没给」，不是 0 也不是「没有限制」。
 - `account_models(account_id, model)` 存账号侧的两件事：**可达性**（`access` 取 `allowed` / `forbidden` / `missing` / `error`，另有 `http_status`、`error`、`checked_at`）与**覆盖值**（`protocol`、`context_window`、`max_output`、四个价格列，NULL 表示继承目录）。主键 `(account_id, model)`。
 - `accounts.models` 那一列删除：它等价于「该账号 `access='allowed'` 的行集合」，是派生数据。
@@ -906,7 +942,7 @@ gemini 的原生接口（Generative Language API 的 `generateContent`）与另�
 
 ### 5.14 systemone 决策协议
 
-TypeSafe 的 System One（Jev）不是对话：输入一个 `state` 加一组带名字的 `questions`，输出每个问题的答案与概率，不产文本。commandcode 的 Provider API 在 `/provider/v1/systemone` 上提供它，TypeSafe 本家是 `POST https://api.typesafe.ai/v1/systemone`。它算第五种线协议 `systemone`：入站 `POST /v1/systemone`，出站同一个路径，厂商路由的 flag 是 `--systemone`、默认协议取值是 `systemone`。
+TypeSafe 的 System One（Jev）不是对话：输入一个 `state` 加一组带名字的 `questions`，输出每个问题的答案与概率，不产文本。commandcode 的 Provider API 在 `/provider/v1/systemone` 上提供它，TypeSafe 本家是 `POST https://api.typesafe.ai/v1/systemone`。它算第五种报文协议 `systemone`：入站 `POST /v1/systemone`，出站同一个路径，厂商路由的 flag 是 `--systemone`、默认协议取值是 `systemone`。
 
 | 项 | 规则 |
 | --- | --- |
@@ -927,7 +963,7 @@ TypeSafe 的 System One（Jev）不是对话：输入一个 `state` 加一组带
 
 ### 5.15 向量化（embeddings）
 
-向量化请求没有消息序列：输入一段文本或一组文本，输出一组向量，没有角色、没有工具、没有流式。它与对话的四条协议都不相通，因而不进中间表示（5.4），只做同协议直通。它算第六条线协议 `openai-embeddings`（OpenAI 的 `POST /v1/embeddings` 报文）；gemini 的原生 `:embedContent` 用 gemini 协议本身，不另起一条线协议。
+向量化请求没有消息序列：输入一段文本或一组文本，输出一组向量，没有角色、没有工具、没有流式。它与对话的四条协议都不相通，因而不进中间表示（5.4），只做同协议直通。它算第六条报文协议 `openai-embeddings`（OpenAI 的 `POST /v1/embeddings` 报文）；gemini 的原生 `:embedContent` 用 gemini 协议本身，不另起一条报文协议。
 
 | 项 | 规则 |
 | --- | --- |
@@ -947,7 +983,7 @@ TypeSafe 的 System One（Jev）不是对话：输入一个 `state` 加一组带
 
 ### 5.16 语音（TTS 与 ASR）
 
-语音有两条线协议，报文都按 OpenAI 的形状：`openai-speech`（文本转语音）与 `openai-transcriptions`（语音转文本）。它们不进中间表示：音频字节与消息序列之间没有可定义的映射。出站形状不由网关里的厂商分支决定，而由模型绑定的**方言**决定。
+语音有两条报文协议，报文都按 OpenAI 的形状：`openai-speech`（文本转语音）与 `openai-transcriptions`（语音转文本）。它们不进中间表示：音频字节与消息序列之间没有可定义的映射。出站形状不由网关里的厂商分支决定，而由模型绑定的**方言**决定。
 
 三件事分开记：
 
@@ -955,9 +991,9 @@ TypeSafe 的 System One（Jev）不是对话：输入一个 `state` 加一组带
 - 方言绑定（`model_operations` 的 `(厂商, 模型, 操作)`）：这个模型的上游是什么形状。
 - 厂商路由（`provider_routes` 的 `(厂商, 协议)`）：这条请求发到哪个地址。
 
-操作名固定且不含线协议名：`speech.synthesize@1`、`speech.transcribe@1`。语音两条由方言分发到插件提供的映射；`chat.complete@1`、`embeddings.create@1`、`system.decide@1` 既可以绑宿主方言（宿主用 `internal/translate` 编解码、直通或走 systemone），也可以绑 hook 方言（宿主编好上游报文后交给它打补丁、解响应，见 5.17）；声明式方言只能承载语音两条。
+操作名固定且不含报文协议名：`speech.synthesize@1`、`speech.transcribe@1`。语音两条由方言分发到插件提供的映射；`chat.complete@1`、`embeddings.create@1`、`system.decide@1` 既可以绑宿主方言（宿主用 `internal/translate` 编解码、直通或走 systemone），也可以绑 hook 方言（宿主编好上游报文后交给它打补丁、解响应，见 5.17）；声明式方言只能承载语音两条。
 
-内置方言十条，随二进制发布，不经 `plugin install` 安装。前四条是语音专用的形状，后六条是「宿主自己实现」的线协议方言：绑定它们只表示这条操作由宿主编解码，`Prepare` 与 `Decode` 不会被调用。
+内置方言十条，随二进制发布，不经 `plugin install` 安装。前四条是语音专用的形状，后六条是「宿主自己实现」的报文协议方言：绑定它们只表示这条操作由宿主编解码，`Prepare` 与 `Decode` 不会被调用。
 
 | 方言 | 操作 | `upstream_wire` | 实现 |
 | --- | --- | --- | --- |
@@ -974,9 +1010,9 @@ TypeSafe 的 System One（Jev）不是对话：输入一个 `state` 加一组带
 
 插件目录里的模型可以直接引用后六条（`plugin.IsHostDialect` 认 `lax/` 前缀）：对话上游因此能靠插件装起来，路由按 `plugin.DefaultRoutePath` 推默认端点，请求仍然走宿主自己的编解码与直通，不执行任何插件提供的映射。对话操作可以绑到插件自己的 **hook** 方言上（`runtime` 是 `moejs`，宿主编好报文后交它打补丁、解响应，见 5.17）；绑到声明式方言上不行，`plugin install` 直接拒绝（见第 4 节）。
 
-`lax/` 前缀保留给内置方言，插件不能冒用（`plugin.Registry.RegisterPluginDialect` 与方言 ID 校验两处都拦）。插件方言是另一条来路：`dialects.json` 里的 `DialectDecl` 由 `plugin.CompileDialect` 编成声明式方言；`implementation.prepare` 与 `implementation.decode` 都写 `hook` 的方言只能由 `moejs` 插件承载：一半声明式一半 hook 的写法安装时被拒，沙箱打不开或入口没导出相应钩子时网关不登记它（见 5.17）。声明式方言能表达哪些形状见本节末的「声明式方言的边界」；可声明的 operation × `upstream_wire` 组合由 `internal/plugin` 的配对表判（`speech.synthesize@1` 与 `speech.transcribe@1` 除自己的语音线协议外也允许 `openai-chat`，理由见 `lessons/2026-10-31-wire-operation-table.md`）。
+`lax/` 前缀保留给内置方言，插件不能冒用（`plugin.Registry.RegisterPluginDialect` 与方言 ID 校验两处都拦）。插件方言是另一条来路：`dialects.json` 里的 `DialectDecl` 由 `plugin.CompileDialect` 编成声明式方言；`implementation.prepare` 与 `implementation.decode` 都写 `hook` 的方言只能由 `moejs` 插件承载：一半声明式一半 hook 的写法安装时被拒，沙箱打不开或入口没导出相应钩子时网关不登记它（见 5.17）。声明式方言能表达哪些形状见本节末的「声明式方言的边界」；可声明的 operation × `upstream_wire` 组合由 `internal/plugin` 的配对表判（`speech.synthesize@1` 与 `speech.transcribe@1` 除自己的语音报文协议外也允许 `openai-chat`，理由见 `lessons/2026-10-31-wire-operation-table.md`）。
 
-方言接口只有五个方法：`ID`、`Operation`、`UpstreamWire`、`Prepare(Input) (Plan, error)`、`Decode(Input, Response) (Result, error)`。宿主负责选号、凭据、路由、超时、重试、错误形状与记账，方言只描述形状：`Plan` 是上游请求体（`Body` 字节或 `JSON` 对象）加一个可选的 `Path`——`Path` 只能改相对路径（以 `/` 开头、不含 `..` 段），域名与凭据仍由厂商路由与宿主注入；`Result` 是媒体字节、纯文本或一条**出站线协议形状**的 JSON 响应体，外加一份用量事实。能逐块解上游流的方言另实现 `StreamDialect`（见 5.17）。`plugin` 包不读库、不读宿主配置，网络只经沙箱给插件的 `lax.http.request`（见 5.17），也不 import 别的内部包；依赖方向是 `gateway`、`store`、`cli` → `plugin`。
+方言接口只有五个方法：`ID`、`Operation`、`UpstreamWire`、`Prepare(Input) (Plan, error)`、`Decode(Input, Response) (Result, error)`。宿主负责选号、凭据、路由、超时、重试、错误形状与记账，方言只描述形状：`Plan` 是上游请求体（`Body` 字节或 `JSON` 对象）加一个可选的 `Path`——`Path` 只能改相对路径（以 `/` 开头、不含 `..` 段），域名与凭据仍由厂商路由与宿主注入；`Result` 是媒体字节、纯文本或一条**出站报文协议形状**的 JSON 响应体，外加一份用量事实。能逐块解上游流的方言另实现 `StreamDialect`（见 5.17）。`plugin` 包不读库、不读宿主配置，网络只经沙箱给插件的 `lax.http.request`（见 5.17），也不 import 别的内部包；依赖方向是 `gateway`、`store`、`cli` → `plugin`。
 
 #### 按绑定分发
 
@@ -995,7 +1031,7 @@ TypeSafe 的 System One（Jev）不是对话：输入一个 `state` 加一组带
 5. 绑定的方言没注册（插件被停用或删除）→ 400，**明确不回落**：静默回落到别的方言会把一次配置删除变成一次上游形状变化。文案指向 `lax plugin ls` 与重新绑定一条现有方言。
 6. 方言要打的那条厂商路由没声明（`speechRouteFor`）→ 400，文案给 `lax provider set <厂商> <协议>=<路径>`。
 
-语音路径不看 `Plan.Path`：地址只按厂商路由走（`Plan.Path` 只在非语音入站的插件方言上生效，见 5.17）。让语音方言覆写地址会把「按绑定选形状」变成「插件选域名」，而它的收益只是省一行配置。插件声明了 `providers[].routes` 时路由由它给（见 5.8），没声明才按方言的 `request.path` 或线协议默认端点推导。`Plan.Headers` 在语音路径上照旧生效：豆包每请求要 `X-Api-Request-Id`、`X-Api-Resource-Id`、`X-Api-Sequence`，这类逐请求的头只能由方言给（见 5.17）。
+语音路径不看 `Plan.Path`：地址只按厂商路由走（`Plan.Path` 只在非语音入站的插件方言上生效，见 5.17）。让语音方言覆写地址会把「按绑定选形状」变成「插件选域名」，而它的收益只是省一行配置。插件声明了 `providers[].routes` 时路由由它给（见 5.8），没声明才按方言的 `request.path` 或报文协议默认端点推导。`Plan.Headers` 在语音路径上照旧生效：豆包每请求要 `X-Api-Request-Id`、`X-Api-Resource-Id`、`X-Api-Sequence`，这类逐请求的头只能由方言给（见 5.17）。
 
 #### 绑定从哪来
 
@@ -1048,7 +1084,7 @@ TTS 的 `choices[0].message.audio.data` 解 base64 后作为音频字节写出�
 
 边界之外的转换要写 hook 方言（`runtime: "moejs"`，见 5.17）。由此有三条现在就要写清的取舍：
 
-- 同协议直通只适用于宿主直通方言（`lax/openai-speech@1` 与 `lax/openai-transcriptions@1`）。插件声明的方言即使 `upstream_wire` 与入站协议相同，也按 `request` / `response` 执行 `Prepare` 与 `Decode`；声明式方言因此能改写豆包那种同线协议、不同报文的形状。ASR 的这条分支必须排在 multipart 直通改写之前，理由见 5.16「按绑定分发」第 3 条。
+- 同协议直通只适用于宿主直通方言（`lax/openai-speech@1` 与 `lax/openai-transcriptions@1`）。插件声明的方言即使 `upstream_wire` 与入站协议相同，也按 `request` / `response` 执行 `Prepare` 与 `Decode`；声明式方言因此能改写豆包那种同报文协议、不同报文的形状。ASR 的这条分支必须排在 multipart 直通改写之前，理由见 5.16「按绑定分发」第 3 条。
 - 对话操作没有声明式映射的节点：`input` 白名单只有语音那八项，给非语音操作绑声明式方言会在安装时被拒。
 - 对话操作有 `Input.Body`：宿主编好出站报文后交给 hook 方言打补丁，方言也能从零构建报文；`Input.Messages` 还空着（宿主没填），要读消息只能解析 `ctx.body`。响应侧约定见 5.17。
 
@@ -1080,7 +1116,7 @@ lax model capability set mimo-v2.5-asr --provider mimo --capability transcriptio
 | ASR 的 `language` 不是 `auto` / `zh` / `en` | 400：上游只认这三个取值 |
 | 入站音频不是 wav / mp3（ogg/opus、silk） | 400：本版不转码，文案说明先在客户端转换 |
 
-路由：真正的 OpenAI audio 厂商靠厂商路由声明，`provider add/set --speech <路径或整条地址>` 与 `--transcriptions`，退出用 `provider unset` 加线协议全名；迁移种子给 `openai` 种上两条，其它厂商按各自文档手工声明，说 chat 形状的厂商由插件或内置方言覆盖。协议与能力的分工：**能力是模型事实**（能不能用于这个端点），**方言绑定是形状事实**（上游怎么表达），**路由是地址事实**（打哪里）。
+路由：真正的 OpenAI audio 厂商靠厂商路由声明，`provider add/set --speech <路径或整条地址>` 与 `--transcriptions`，退出用 `provider unset` 加报文协议全名；迁移种子给 `openai` 种上两条，其它厂商按各自文档手工声明，说 chat 形状的厂商由插件或内置方言覆盖。协议与能力的分工：**能力是模型事实**（能不能用于这个端点），**方言绑定是形状事实**（上游怎么表达），**路由是地址事实**（打哪里）。
 
 multipart 的转发不改整体字节：只在 `model` 那个 part 上重写值，音频 part 用 `io.Copy` 搬到新报文，不额外复制一份（请求体本身已按 32 MiB 上限读入内存，这一点与对话路径一致）。boundary 重生成而不是复用入站的：复用要把原 boundary 抄进新报文，抄错一个字符上游就只能报「找不到 boundary」。`model` 的别名解析在重写时做一次，与其余协议同一个入口。
 
@@ -1106,7 +1142,7 @@ multipart 的转发不改整体字节：只在 `model` 那个 part 上重写值�
 
 目录：端点名 `/audio/speech` 折成 `openai-speech` 协议与 `speech` 能力位，`/audio/transcriptions` 折成 `openai-transcriptions` 与 `transcription`；能力位与音色、音频格式一起进 `/v1/models`（见 5.2.1），客户端不必猜能传哪些值。
 
-CLI：`lax model speak` 发一条 TTS 请求，`lax model transcribe` 发一条 ASR 请求；`model capability add/set/unset/ls` 维护能力、音色、格式与 `--dialect` 绑定，`model dialect ls/set/unset` 直接读写绑定（见第 4 节）；`model call` 不接这两条，它发的是对话。`model add --protocol`、`model probe --protocol`、`provider --default-protocol` 接受 `speech` / `transcriptions` 两种写法（线协议全名 `openai-speech` / `openai-transcriptions` 也认）。
+CLI：`lax model speak` 发一条 TTS 请求，`lax model transcribe` 发一条 ASR 请求；`model capability add/set/unset/ls` 维护能力、音色、格式与 `--dialect` 绑定，`model dialect ls/set/unset` 直接读写绑定（见第 4 节）；`model call` 不接这两条，它发的是对话。`model add --protocol`、`model probe --protocol`、`provider --default-protocol` 接受 `speech` / `transcriptions` 两种写法（报文协议全名 `openai-speech` / `openai-transcriptions` 也认）。
 
 ### 5.17 插件运行时：沙箱、对话方言与生命周期
 
@@ -1191,7 +1227,7 @@ CLI：`lax model speak` 发一条 TTS 请求，`lax model transcribe` 发一条 
 | 键 | 内容 |
 | --- | --- |
 | `abi` | `lax.plugin/v1` |
-| `operation` / `model` / `wire` / `stream` / `dialect` | 这次操作、上游模型名、出站线协议、客户端是否要流式、方言 ID（由包装层填，插件不需要自报） |
+| `operation` / `model` / `wire` / `stream` / `dialect` | 这次操作、上游模型名、出站报文协议、客户端是否要流式、方言 ID（由包装层填，插件不需要自报） |
 | `input` | 归一后的输入：`text`、`voice`、`format`、`instructions`、`language`、`model`、`audio_container`、`chars`、`speed`、`audio_base64`、`audio_truncated` |
 | `options` | manifest 里声明的配置项取值（见下文的 `plugin config`） |
 | `limits` | `deadline_ms`、`max_input_chars`、`max_input_bytes`、`max_output_bytes`；对话与语音路径的输入输出上限都是 32 MiB，systemone 是 8 MiB；`deadline_ms` 与字符数当前都是 0 |
@@ -1244,7 +1280,7 @@ CLI：`lax model speak` 发一条 TTS 请求，`lax model transcribe` 发一条 
 
 响应侧：非流式时方言返回 `Result`，宿主按 `Kind` 分派：
 
-- `ResultJSON`：方言给的是**出站线协议形状**的整条响应体（不是入站形状）。宿主 `translate.DecodeResponse(outbound)` 解析成中间表示，再 `translate.EncodeResponse(inbound)` 编成客户端协议。让方言按四种入站各编一遍既重复又容易漏字段，所以约定只描述上游那一种。只有四条对话入站（anthropic、openai-chat、openai-responses、gemini）认这条约定；其它入站返回 502。
+- `ResultJSON`：方言给的是**出站报文协议形状**的整条响应体（不是入站形状）。宿主 `translate.DecodeResponse(outbound)` 解析成中间表示，再 `translate.EncodeResponse(inbound)` 编成客户端协议。让方言按四种入站各编一遍既重复又容易漏字段，所以约定只描述上游那一种。只有四条对话入站（anthropic、openai-chat、openai-responses、gemini）认这条约定；其它入站返回 502。
 - `ResultText`：只允许 systemone 入站（决策协议的响应不是对话结构）；其它入站返回 502，对话客户端拿到一段纯文本只会解析失败。
 - `ResultMedia`：非语音路径不接受，与其它未知种类一样按 502 记（`chatDialectSuccess` 只认 json 与 text）；语音路径的结果由 `speechDialectSuccess` 另行处理（见 5.16）。
 
@@ -1365,15 +1401,25 @@ lax route policy add --account elsa --status 401 --return --priority 5
 
 ## 6 数据模型
 
-表结构由 `internal/store/model.go` 的 GORM model 定义，建表与加列由 `AutoMigrate` 完成。`AutoMigrate` 是幂等的 schema diff，表不存在就建，缺列就 `ALTER TABLE ADD COLUMN`，不改列类型、不删列、不删索引。需要删列或改类型时不能依赖它，必须写成一次性搬迁命令。加列（例如 `providers.auth_header` 与 `providers.auth_scheme`）只改 model。`migrations/` 下的 SQL 是旧版迁移器的历史文件（编号到 `0018`），运行时不再执行，也不再维护 `PRAGMA user_version`；旧库升级由 `internal/store/legacy.go` 处理，它只读旧表、建新库、写回，不执行这些文件；测试的 `openDatabaseAt` 会按版本号执行它们。账号额度的 `quota_snapshots`、`quota_settings` 两张新表和 `route_policies` 的 `quota_order`、`quota_min_usd` 两列也走 `AutoMigrate`。这次上游失败处理策略的建表与加列同样登记进 model 与 `tables()`，并按 `AGENTS.md` 的约定另留一份 `0018_route_failure_policies.sql` 记录相同形状：改结构时 model 与迁移文件两处都要更新，运行时只由 `AutoMigrate` 建表。
+表结构由 `internal/store/model.go` 的 GORM model 定义，建表与加列由 `AutoMigrate` 完成。没有版本号，`user_version` 恒为 0。
 
-支持三种后端，由配置文件的 `driver` 与 `dsn` 决定，缺省是 SQLite 单文件：
+- **`AutoMigrate` 是幂等的 schema diff。** 表不存在就建，缺列就 `ALTER TABLE ADD COLUMN`；它不改列类型、不删列、不删索引。
+- **删列或改类型不能依赖它。** 这种改动必须写成一次性搬迁命令。
+- **加列与建表只改 model。** 例如 `providers.auth_header`、`providers.auth_scheme`、`accounts.cooldown_until_ms`，以及 `quota_snapshots`、`quota_settings`、`route_failure_policies` 三张新表和 `route_policies` 的 `quota_order`、`quota_min_usd` 两列，都不写迁移编号。
+- **`internal/store/migrations/` 留着但不参与构建**（没有 `go:embed`）。它只当搬迁用例的旧库样本：`TestMigrationChainFrom0001ToLatest` 用 `0001_init.sql` 到 `0018_route_failure_policies.sql` 建一个真正的老库，再验证搬迁结果。
+- **改表结构只动 `model.go` 的 row 定义。** 不写迁移编号，也不在 `migrations/` 补文件；`AGENTS.md` 与本节同一条口径。
 
-查询层已全部改成 GORM 链式调用：单表读写、条件查询、复合主键 UPSERT、简单 JOIN 都用 `Create`、`Where`、`Updates` 与 `clause.OnConflict`，占位符、UPSERT 语法、自增主键与列类型差异都由 GORM 翻译，调用方一律写 `?` 占位符。
+旧版数据库（带 `PRAGMA user_version > 0`、由已退场的迁移器建出来的库）在 `store.Open` 里自动搬迁，实现在 `internal/store/legacy.go`：
 
-唯一保留原始 SQL 的是 `store.Usage` 的嵌套聚合（五个 `COALESCE` 聚合加条件求和）：链式写法只会把它拆成 `.Select()` 的一段字符串，可读性反而下降。它的两处方言残留单独处理：按天分组的日期函数在 `store.dateExpr` 里按后端分支（SQLite 的 `date(…,'unixepoch','localtime')`、PostgreSQL 的 `to_char(to_timestamp(…) AT TIME ZONE …)`、MySQL 的 `DATE(FROM_UNIXTIME(…))`），布尔相加改成三方言通用的 `CASE WHEN … THEN 1 ELSE 0 END`，派生表带 `AS t`（PostgreSQL 与 MySQL 都要求子查询有别名，SQLite 不要求）。
+1. 读出八张表的全部行，按最终语义转换：`status` → `access`、孤儿账号补厂商、`default_protocol` 补齐、`accounts.models` 拆进目录与可达性、账号级价搬进覆盖列、`in_tokens_uncached` 回填。`requests` 边读边写，不落内存。
+2. 在 `<路径>.new` 上用 `AutoMigrate` 建新库并写种子，再写回转换后的行。
+3. 把原文件改名为 `.bak`，新文件改名为原路径。
 
-三个后端都跑过 `internal/store/backend_integration_test.go`：种子、账号增删读、复合主键 UPSERT、协议与价格覆盖、厂商增删与外键级联、请求记录、三种维度汇总、别名覆盖与删除。用例默认不编译（要 `-tags integration`），要连库时给 `LAX_TEST_POSTGRES_DSN` 与 `LAX_TEST_MYSQL_DSN`；不给就只跑 SQLite，`make check` 不受影响。用例结束时会 DROP 自己建的表，DSN 必须指向一次性库。
+不能让 `AutoMigrate` 直接接管旧库：旧 DDL 里的行内注释会让它的列解析出错，实测会重建三张表，`provider_models` 的重建 INSERT 列清单里缺 `context_window`，该列数据静默丢失。第 3 步之前原文件一直完整，中途失败只留下 `.new` 与 `.bak`。
+
+### 三种后端
+
+由配置文件的 `driver` 与 `dsn` 决定，缺省是 SQLite 单文件：
 
 | `driver` | 包 | 说明 |
 | --- | --- | --- |
@@ -1383,7 +1429,17 @@ lax route policy add --account elsa --status 401 --return --priority 5
 
 SQLite 后端在连接上设 `SetMaxOpenConns(1)`：单文件只有一个写者，多连接会撞 `database is locked`。另外两个后端不设上限，用驱动默认值。SQLite 的 DSN 由程序拼，另外两个后端的 DSN 由用户给。
 
-列类型由各 driver 的 `DataTypeOf` 按方言映射，下表只写语义：
+### 查询层
+
+查询层已全部改成 GORM 链式调用：单表读写、条件查询、复合主键 UPSERT、简单 JOIN 都用 `Create`、`Where`、`Updates` 与 `clause.OnConflict`，占位符、UPSERT 语法、自增主键与列类型差异都由 GORM 翻译，调用方一律写 `?` 占位符。
+
+唯一保留原始 SQL 的是 `store.Usage` 的嵌套聚合（五个 `COALESCE` 聚合加条件求和）：链式写法只会把它拆成 `.Select()` 的一段字符串，可读性反而下降。它的两处方言残留单独处理：按天分组的日期函数在 `store.dateExpr` 里按后端分支（SQLite 的 `date(…,'unixepoch','localtime')`、PostgreSQL 的 `to_char(to_timestamp(…) AT TIME ZONE …)`、MySQL 的 `DATE(FROM_UNIXTIME(…))`），布尔相加改成三方言通用的 `CASE WHEN … THEN 1 ELSE 0 END`，派生表带 `AS t`（PostgreSQL 与 MySQL 都要求子查询有别名，SQLite 不要求）。
+
+三个后端都跑过 `internal/store/backend_integration_test.go`：种子、账号增删读、复合主键 UPSERT、协议与价格覆盖、厂商增删与外键级联、请求记录、三种维度汇总、别名覆盖与删除。用例默认不编译（要 `-tags integration`），要连库时给 `LAX_TEST_POSTGRES_DSN` 与 `LAX_TEST_MYSQL_DSN`；不给就只跑 SQLite，`make check` 不受影响。用例结束时会 DROP 自己建的表，DSN 必须指向一次性库。
+
+### 列类型
+
+由各 driver 的 `DataTypeOf` 按方言映射，下表只写语义：
 
 | 语义 | SQLite | PostgreSQL | MySQL |
 | --- | --- | --- | --- |
@@ -1395,6 +1451,29 @@ SQLite 后端在连接上设 `SetMaxOpenConns(1)`：单文件只有一个写者�
 | 布尔 | `numeric` | `boolean` | `boolean` |
 
 MySQL 的文本列在有默认值或主键时落成 `varchar(191)`：这是 GORM 的 MySQL driver 为绕开「TEXT 不能有默认值」做的选择。本仓库带默认值的文本列（`provider_models.protocols`、`provider_models.capabilities`、`provider_routes.path` 等）都远短于 191 字节；新增带默认值的文本列时要确认长度。
+
+### 表一览
+
+表按主题分四组：
+
+- 账号与路由：`accounts`、`provider_models`、`account_models`、`route_policies`、`route_account_weights`、`route_stats`。
+- 请求记录：`requests`。
+- 厂商：`providers`、`provider_routes`、`provider_headers`。
+- 额度、别名与插件：`quota_snapshots`、`quota_settings`、`model_aliases`、`plugins`、`plugin_versions`、`plugin_options`、`model_operations`、`plugin_audit`、`plugin_logs`。
+
+下面逐表给列与读写规则。跨表的写入顺序统一在「写入与事务」一节。
+
+### 写入与事务
+
+一次上游尝试的账与它的结论在同一个事务里落库。`RecordAttempt` 先写 `requests` 一行，再按 `AttemptState` 做一件事：
+
+- 失败：给这次尝试的账号-模型记冷却（`account_models.fail_streak` 加一）。
+- 成功：清这个账号-模型的冷却（清零）。
+- 凭据被拒：停用账号。
+
+中途任何一步失败，整笔回滚。
+
+冷却、清零与停用的 SQL 只写在 `recordModelFailureTx`、`clearModelFailureTx`、`clearAccountFailuresTx`、`setEnabledTx` 四个函数里；`RecordFailure`、`ClearFailure`、`ClearFailures`、`SetEnabled` 与 `RecordAttempt` 都调它们，写入口仍然只有一处。
 
 ### accounts
 
@@ -1411,6 +1490,19 @@ MySQL 的文本列在有默认值或主键时落成 `varchar(191)`：这是 GORM
 | `last_error` | 文本，可空 | 最近一次失败的错误 |
 | `fail_streak` | 整数，默认 0 | 旧版账号级连续失败次数，保留列但选号不再读取；按模型累计在 `account_models.fail_streak` |
 | `created_at` | 整数 | Unix 秒 |
+
+`accounts` 不存地址与协议：`provider` 只留厂商名，地址、默认协议与路由全在 `providers` 与 `provider_routes` 上（见 5.8）。
+
+- `Account.BaseURL` 与 `Account.Protocol` 是只读派生值：`ListAccounts`、`GetAccount`、`ListAccountsByProvider` 共用 `queryAccounts` 从厂商行算出来；写入的 `CreateAccount` 不碰它们。改厂商表立刻影响所有引用它的账号。
+- `price_cache_read` 与 `price_cache_write` 由迁移 `0011` 加入，可空，空表示没填：估算花费按输入价回退。老账号升上来两列都是 NULL，金额与只有输入输出价时一致。
+
+从旧版数据库搬迁时会为「`provider` 不在 `providers` 表里」的账号补一行厂商：
+
+- 名字取账号的 `provider`。
+- `base_url` 取该账号的历史地址；同名账号有多个地址时取最小的那个，结果与行序、与重跑都无关。
+- `note` 写「由旧库搬迁从账号地址补建」。
+- `default_protocol` 取账号的历史 `protocol`，但只认四条报文协议；别的值留空，回到固定顺序回退。
+- 已有厂商一律跳过。
 
 ### requests
 
@@ -1438,6 +1530,28 @@ MySQL 的文本列在有默认值或主键时落成 `varchar(191)`：这是 GORM
 | `audio_seconds` | 整数，默认 0 | ASR 的音频秒数，上游没报时记 0 |
 | `latency_ms` | 整数，默认 0 | 上游调用耗时（毫秒） |
 | `error` | 文本，可空 | 失败原因 |
+
+`in_tokens_uncached` 由迁移 `0011` 加入，是入账时按出站协议归一化之后的输入 token（纯规则 `store.UncachedInTokens`，见 5.5），`in_tokens` 保持上游原值。
+
+- 历史行没有区分能力，迁移按当时的 `in_tokens` 回填，不写 0：写 0 会让历史花费凭空变成只算输出。
+- 花费的公式只有一份，在 `store.Usage` 的 SQL 里：
+
+```text
+in_tokens_uncached × price_in
++ cache_read × COALESCE(price_cache_read, price_in, 0)
++ cache_write × COALESCE(price_cache_write, price_in, 0)
++ out_tokens × price_out
++ reasoning_tokens_extra × price_out
+```
+
+五项之和再除以 1e6。
+
+`reasoning_tokens` 与 `reasoning_tokens_extra` 由迁移 `0012` 加入（见 5.5）。
+
+- `reasoning_tokens` 是上游上报的思考 token 原值；`reasoning_tokens_extra` 是其中被判成「输出之外的一项」的那部分，只给后者按输出价再计一次。
+- 判定只有一处，纯函数 `store.ReasoningExtra`。
+- 两列都没给历史行回填：当时上游报了什么已经无从复原，留默认值 0 让升级前后的金额完全一致。
+- anthropic 没有独立的思考字段，它的行这两列都是 0，`out_tokens` 本来就含思考。
 
 ### provider_models
 
@@ -1485,6 +1599,42 @@ MySQL 的文本列在有默认值或主键时落成 `varchar(191)`：这是 GORM
 | `price_audio_second` | 实数，可空 | 同上 |
 | `cooldown_until_ms` | 整数，可空 | 这个账号在这个模型上的冷却截止时间，Unix 毫秒；NULL 表示没在冷却 |
 | `fail_streak` | 整数，默认 0 | 这个账号在这个模型上的连续失败次数，用于冷却翻倍（见 5.3） |
+
+这张表由迁移 `0003` 建立，迁移 `0015` 把它改成上表的形状：`status` 换成 `access`（取值 `allowed`、`forbidden`、`missing`、`error`，见 5.13），并加上账号侧的覆盖值列。
+
+- `cooldown_until_ms` 与 `fail_streak` 由 `AutoMigrate` 加到这张表上，只用于账号-模型级冷却。冷却的写入口只有四个：`RecordFailure`（加一）、`ClearFailure`（清一个模型）、`ClearFailures`（清该账号全部模型）与 `RotateKey`（换凭据时清全部，见 5.6）。
+- `accounts.cooldown_until_ms` 是 5.20 的账号级策略冷却：写入口是 `RecordAttempt` 的 `AccountCooldown` 分支（`setAccountCooldownTx`），清理入口是 `ClearFailures`、`RotateKey` 与 `account enable`；它与账号-模型级冷却互不影响。
+- `accounts.cooldown_until` 与 `accounts.fail_streak` 是旧版账号级字段，保留列但不再参与选号。
+- 升级时旧账号级冷却不迁到模型行：它是短时状态，宁可让账号立刻可用，也不把同一个截止时间复制到全部模型。
+- 删除账号时 `DeleteAccount` 在同一个事务里删掉它的 `account_models` 行：SQLite 的 rowid 会被复用，遗留子行会让新账号继承旧账号的探活状态。
+- 目录 `provider_models` 是按厂商共享的，删账号不动它：另一个账号可能还在用同一批模型事实。
+
+写入口各管一行的一部分，谁都不顺手改别人的列：
+
+- `SetAccountModelAccess` 写 `access`、`http_status`、`error`、`checked_at`（探活结论，时间是调用方给的）。
+- `SetAccountModelProtocol` 只写 `protocol`。
+- `SetAccountModelOverride` 整体写六个覆盖值列，nil 就是 NULL（继承目录），不是「不动」。
+- `DeclareAccountModel` 是 `model add` 那一条，在同一个事务里写两张表（见 5.7、5.13）；已存在的 `allowed` 行保留探活三列，从其它可达性翻回来时才清掉旧的 HTTP 状态、错误与探活时间。
+- `ReplaceModels` 只把名字标成 `allowed`，不碰这几组列（见 5.13）。
+- 后三种入口在模型行还不存在时先落一行 `allowed` 占位：能测出协议、能给这个模型写覆盖值、能手写一条可达性，就说明这个账号要用它。
+
+`protocol` 由迁移 `0005` 加入，记录「这个模型该用哪种协议」，取值是 anthropic、openai-chat、openai-responses 与 gemini（见 5.9）。空字符串表示没有账号级覆盖。
+
+- 有效出站协议按「账号覆盖 → 目录里这个模型支持的协议 → 厂商的有效默认协议」算（定序见 5.13）。
+- 纯规则在 `store.resolveModelProtocol`；`store.ResolveProtocol(providerProtocol, modelProtocol)` 是它最后两步的旧写法。
+- 读库入口是 `store.EffectiveProtocol(accountID, model)`：账号行不再存协议，所以第二个参数就是模型名。行不存在、列为空、厂商行不存在或这家一条路由都没声明时都回退到空串，不报错。
+- 转发与展示只读这个有效协议，不在调用方拼规则；`cli` 要显示协议时也只调它。
+- 旧的三参数写法 `EffectiveProtocol(accountID, accountProtocol, model)` 留作兼容包装，第二个参数是已经无用的账号协议、被忽略；只为 `internal/gateway` 与 `internal/cli` 里尚未改完的调用点继续能编译，两边走的是同一条规则。
+- 这个列只有一个写入口 `SetAccountModelProtocol`（旧名 `SetModelProtocol` 是兼容包装），由探活发现协议后调用（见 5.7）。
+- `SetAccountModelAccess` 只改可达性与探活那几列，不动 `protocol` 与覆盖值；`ReplaceModels` 也不动它，同步不会覆盖已发现的协议。
+- 旧库升上来时整列默认空串，也就是全部由目录与厂商默认协议算。
+
+旧的状态词表（`synced`、`usable`、`forbidden`、`notfound`、`auth`、`error`）库里已经不再存，只在 `store` 里留了一层过渡视图：
+
+- `store.ModelUsable` 一类的常量、`AccountModel.Status` 与写入口 `SetModelStatus` 还在。
+- 读出来的 `Status` 由 `access` 与 `checked_at` 反推：`allowed` 且探过是 `usable`，没探过是 `synced`。
+- 写进去的旧词表由 `accessFromStatus` 映射回来；`auth` 与新词表没有对应，两个方向都落到 `error`。
+- 这层只为尚未改完的 `internal/gateway` 与 `internal/cli` 保留，两边改完就删掉。
 
 ### route_policies
 
@@ -1614,25 +1764,64 @@ MySQL 的文本列在有默认值或主键时落成 `varchar(191)`：这是 GORM
 | `note` | 文本，默认空串 | 备注 |
 | `default_protocol` | 文本，默认空串 | 空串表示没有显式默认协议，按固定顺序回退（见 5.8） |
 | `models_path` | 文本，默认空串 | 厂商级模型列表覆盖，相对路径或整条地址，空串表示不覆盖 |
-| `auth_header` | 文本，默认空串 | 凭据头的头名（小写）；空串表示按线协议推导（见 5.8） |
+| `auth_header` | 文本，默认空串 | 凭据头的头名（小写）；空串表示按报文协议推导（见 5.8） |
 | `auth_scheme` | 文本，默认空串 | 凭据写法：`raw` / `bearer` / `bearer-semicolon`；只有头非空时它才非空 |
 | `origin` | 文本，默认空串 | 来源：`builtin`（内嵌目录首次建库）、`plugin`（插件安装）或 `manual`（用户自建或旧库补建）。旧库打开时按 `plugin_id` 与内置目录回填一次；只用于展示与排查，不限制修改（见 5.8） |
 | `plugin_id` | 文本，默认空串 | 这一行是哪次插件安装建起来的；空串表示用户自己配的（见 5.8）。删除插件时按它找到要一起清的厂商 |
 
+`providers` 一行只提供 `base_url`、备注、默认协议与模型列表覆盖，协议细节全在 `provider_routes` 的 `(厂商, 协议)` 上。行里没有凭据，只有地址与路径。
+
+- 两者之间没有外键，删厂商行时必须连带删它的路由行：`DeleteProvider` 在一个事务里一起做。
+- `provider rm --force` 走 `DeleteProviderForce`，同一个事务里还要停用指向它的账号（见 5.8）。
+- `providers` 表为空不算错误：种子行可以被用户删光，此时所有账号回退到后缀猜测。
+
+写入口：
+
+- `CreateProvider`（`provider add`）：名称已存在时报 `ErrProviderExists`，不隐式更新。
+- `SetProvider`（`provider set` 与 `provider unset` 的共同入口）：patch 里为 nil 的字段不动；`Routes` 里传空串表示删掉那条路由，`provider unset <名称> <协议>` 就是这么调的。命令面上空值仍是用法错误。
+- `CreateProvider` 与 `SetProvider` 都在一个事务里写厂商行与路由；前者至少要一条路由，后者删到一条不剩时报错。
+- `AddProvider` 是 upsert，允许零路由。它是第二条 upsert 入口：`cli` 不走它，生产代码里也没有其它调用者，现在只有 `store` 自己的用例在用。
+- 读路由只有 `LookupProviderRoute` 一个入口，转发、模型同步与探活都经过它。
+
+`base_url` 与两列路径在写入侧统一规整：
+
+- 三个写入口都校验 `base_url` 的 scheme 与主机名并规整（只合并路径里的重复斜杠、去尾斜杠，查询串与 `#` 之后的内容不动），函数是 `store.NormalizeBaseURL`；`cli` 那层不再是唯一防线。
+- `path` 与 `models_path` 经 `store.NormalizeEndpoint` 解释后落库：相对路径只规整（`v1/chat/completions` 与 `/v1/chat/completions/` 落成同一个值），整条地址（含 `://`）校验 scheme 与主机名后按整条地址落库。
+- 读取侧拼地址时再用同一个入口过一遍，历史库里的不规整写法因此也拼得出正确地址。
+- 两列可能存整条地址，也可能存相对路径，判定只看有没有 `://`（`store.IsFullAddress`）。
+
+`default_protocol` 空字符串表示这家没有显式默认协议。有效默认协议按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 回退到第一条已声明的路由（用户自建的厂商通常不填）。
+
+- 纯规则在 `store.ResolveDefaultProtocol`：显式值必须落在已声明的路由上才用它，指不到时同样按固定顺序回退。历史脏数据因此不会静默交给后缀猜测。
+- 读库入口是 `store.EffectiveProviderProtocol(provider)`：厂商不存在返回 `ErrProviderNotFound`；厂商在但一条路由都没有时返回空串与 `ErrProviderNoRoutes`，文案留给调用方。
+- 写入侧保证不产生悬空值：`CreateProvider` 的默认协议必须落在这次声明的路由上，`SetProvider` 改完之后必须仍指向一条存在的路由，否则整笔事务拒绝。
+- `SetProvider` 收到空的 `DefaultProtocol` 表示清掉显式值、回到固定顺序，这一条只由 `provider unset <名称> default-protocol` 触发。
+- 旧库升上来时 8 家种子厂商由 `0007` 拿到显式默认协议，用户自建的厂商保持空串。
+
 ### provider_routes
 
-一家厂商的一条线协议落在哪个地址上。
+一家厂商的一条报文协议落在哪个地址上。
 
 | 列 | 语义 | 说明 |
 | --- | --- | --- |
 | `provider` | 文本，主键之一 | |
-| `protocol` | 文本，主键之一 | 线协议名，含 `openai-embeddings` |
+| `protocol` | 文本，主键之一 | 报文协议名，含 `openai-embeddings` |
 | `path` | 文本 | 相对 `base_url` 的路径，或整条地址（含 `://`），可含 `{model}` 占位符 |
 | `models_path` | 文本，默认空串 | 同上，空串表示回退到同厂商其它协议 |
 
+`path` 里的 `{model}` 是出站模型名占位符（见 5.9）：规整只合并斜杠，花括号与冒号原样保留，替换发生在网关拼好地址之后。协议取值的白名单只有一份 `store.IsWireProtocol`（四条报文协议），厂商路由、默认协议、账号的 `--protocol` 与探活候选都读它。
+
+`models_path` 是写入侧的默认值，不是读取侧的唯一来源：
+
+- `CreateProvider` / `SetProvider` 写一条没有模型列表地址的路由时按 `DeriveModelsPath` 补：只给 openai-chat 补，尾部 `/chat/completions` 换成 `/models`。其它协议留空表示「这条协议没有自己的列表接口」。
+- 空串在读取时回退到同厂商其它协议的非空值，纯规则在 `store.ResolveModelsPath`：厂商级覆盖 → 账号协议那条路由 → 协议名排序的第一条非空值。
+- 返回路径时一并返回这条路径所属的协议，模型同步按它选凭据头。
+- 推导不放在读取侧，因为内置 `anthropic` 厂商只有 anthropic 一条路由，读时推导会让 anthropic 型账号彻底失去模型列表来源。
+- gemini 路由的 `models_path` 必须显式给：写入侧的默认值只推导 openai-chat 一条（见 5.8），gemini 自己的列表路径没有推导规则。
+
 ### provider_headers
 
-一行厂商附加请求头声明（见 5.10）。`provider` 外键指向 `providers(name)`，带 `ON DELETE CASCADE`：删厂商行时它的头一起走。
+一行厂商附加请求头声明（见 5.10）。
 
 | 列 | 语义 | 说明 |
 | --- | --- | --- |
@@ -1640,6 +1829,22 @@ MySQL 的文本列在有默认值或主键时落成 `varchar(191)`：这是 GORM
 | `protocol` | 文本，主键之一 | 空串表示整个厂商，非空只加给这条协议 |
 | `name` | 文本，主键之一 | HTTP 头名，落库归一成小写 |
 | `value` | 文本 | 字面量，或 `{env:…}`、`{session}`、`{model}` 占位符 |
+
+`protocol` 空串表示整个厂商的每条路由都加，非空表示只加给这条协议。`provider` 外键指向 `providers(name)` 并带 `ON DELETE CASCADE`：SQLite 的连接串带 `foreign_keys(1)`，PostgreSQL 与 MySQL 的外键约束默认启用，所以删厂商行时它的头由数据库一起删掉；`provider_routes` 没有外键，才要在 `DeleteProvider` 里手删。
+
+写入口只有两处：
+
+- `SetProviderHeader` 是覆盖语义：同一个 `(厂商, 协议, 头名)` 再写一次就是改值（UPSERT，不报错）。
+- `DeleteProviderHeader` 删不到时按情况报 `ErrProviderHeaderNotFound`（厂商在、头不在）或 `ErrProviderNotFound`（厂商不在）。
+- 两个入口都先校验再进事务，并在事务里确认厂商行还在：外键虽然会拦住指向不存在厂商的写入，但报数据库的外键错误说不清下一步该干什么。
+- 校验规则：头名按 HTTP `token` 校验（大小写不敏感，落库归一成小写）；值不能是空白串，也不能带 CR/LF/NUL（那样拼进请求头会把一条头拆成两条）；`protocol` 只能是空串或 `IsWireProtocol` 认的四种。
+
+读入口有两个：
+
+- `ProviderHeaders` 返回这家厂商的全部声明（按 `protocol`、`name` 升序，厂商级在最前）。
+- `EffectiveProviderHeaders(厂商, 协议)` 返回那次请求真正要加的那一份：先铺厂商级，再用这个协议自己的声明按同名覆盖，返回时也按 `name` 升序。转发侧只读后者，不在调用方拼覆盖规则。
+
+附加头不进 `requests`；日志只在没发时记头名与原因，正常发送不记。`ProviderHeader.String`（值截断到前四位）只给 `provider header ls` 与错误文案用。
 
 ### model_aliases
 
@@ -1651,52 +1856,38 @@ MySQL 的文本列在有默认值或主键时落成 `varchar(191)`：这是 GORM
 | `target` | 文本 | 真实模型名，或另一个别名 |
 | `created_at` | 整数 | Unix 秒，覆盖改目标时不动 |
 
-种子数据由 `store.seed` 在 `AutoMigrate` 之后写入，来源是 `internal/store/builtin_providers.json`，写法与 `INSERT OR IGNORE` 等价（冲突就跳过，已存在的行一个字段都不动）：9 家厂商与 16 条路由（chat/语音/向量化等各协议合计）。默认协议在目录里逐家显式给出：`anthropic` 是 `anthropic`，`google-gemini` 是 `gemini`，其余七家是 `openai-chat`。种子只在首次建库时插入，用户自己建过的同名厂商原样保留；旧库新增 `origin` 列后按 `plugin_id` 与内置厂商名回填，已标过的行不再改。
+写入口只有 `SetModelAlias` 与 `DeleteModelAlias`：
 
-`account_models` 由迁移 `0003` 建立，迁移 `0015` 把它改成上表的形状：`status` 那一列换成了 `access`（取值 `allowed`、`forbidden`、`missing`、`error`，见 5.13），并加上账号侧的覆盖值列。`cooldown_until_ms` 与 `fail_streak` 由 `AutoMigrate` 加到这张表上，只用于账号-模型级冷却：写入口只有 `RecordFailure`（加一）、`ClearFailure`（清一个模型）、`ClearFailures`（清该账号全部模型）与 `RotateKey`（换凭据时清全部，见 5.6）。`accounts.cooldown_until_ms` 是 5.20 的账号级策略冷却：写入口是 `RecordAttempt` 的 `AccountCooldown` 分支（`setAccountCooldownTx`），清理入口是 `ClearFailures`、`RotateKey` 与 `account enable`；它与账号-模型级冷却互不影响。`accounts.cooldown_until` 与 `accounts.fail_streak` 是旧版账号级字段，保留列但不再参与选号；升级时旧账号级冷却不迁到模型行，它是短时状态，宁可让账号立刻可用，也不把同一个截止时间复制到全部模型。删除账号时 `DeleteAccount` 在同一个事务里删掉它的 `account_models` 行：SQLite 的 rowid 会被复用，遗留子行会让新账号继承旧账号的探活状态。目录 `provider_models` 是按厂商共享的，删账号不动它：另一个账号可能还在用同一批模型事实。
+- `SetModelAlias` 是覆盖语义：同一个别名再写一次就是改目标（UPSERT，不报错）。
+- 校验在事务里做完再落库：别名与目标去空白后不能为空、不能含控制字符、别名不等于目标。
+- 别名不能与任何账号可达的真实模型名同名（区分大小写，比的是该账号 `access='allowed'` 的行，见 5.13），否则报 `ErrModelAliasShadow`，文案列出声明了那个名字的账号，最多三个。
+- `DeleteModelAlias` 删不到时按情况报 `ErrModelAliasNotFound`。
 
-写入口各管一行的一部分，谁都不顺手改别人的列：`SetAccountModelAccess` 写 `access`、`http_status`、`error`、`checked_at`（探活结论，时间是调用方给的）；`SetAccountModelProtocol` 只写 `protocol`；`SetAccountModelOverride` 整体写六个覆盖值列，nil 就是 NULL（继承目录），不是「不动」；`DeclareAccountModel` 是 `model add` 那一条，在同一个事务里写两张表（见 5.7、5.13），已存在的 `allowed` 行保留探活三列，从其它可达性翻回来时才清掉旧的 HTTP 状态、错误与探活时间。后三个在模型行还不存在时先落一行 `allowed` 占位：能测出协议、能给这个模型写覆盖值、能手写一条可达性，就说明这个账号要用它。`ReplaceModels` 只把名字标成 `allowed`，不碰这几组列（见 5.13）。
+读入口只有 `ModelAliases` 与 `ResolveModelAlias`：
 
-旧的状态词表（`synced`、`usable`、`forbidden`、`notfound`、`auth`、`error`）库里已经不再存，只在 `store` 里留了一层过渡视图：`store.ModelUsable` 一类的常量、`AccountModel.Status` 与写入口 `SetModelStatus` 还在，读出来的 `Status` 由 `access` 与 `checked_at` 反推（`allowed` 且探过是 `usable`、没探过是 `synced`），写进去的旧词表由 `accessFromStatus` 映射回来。`auth` 与新词表没有对应，两个方向都落到 `error`。这层只为尚未改完的 `internal/gateway` 与 `internal/cli` 保留，两边改完就删掉。
+- `ModelAliases` 按别名升序返回全表（SQLite 的 TEXT 默认二进制序，也就是区分大小写）。
+- `ResolveModelAlias` 把入站名字解析成真实名字：先把全表一次读出来，再在内存里沿链走，不按跳查库，因此不会出现链走到一半表被改掉、前半段用旧目标后半段用新目标。
+- 名字不是别名时返回 `("", false, nil)`；成环报 `ErrModelAliasCycle`，超过 8 跳报 `ErrModelAliasTooDeep`，两种错误都把串起来的名字写进文案。
+- 别名与真实名字的冲突只在写入时判定，读取不做二次校验（见 5.12）。
 
-`accounts` 不存地址与协议：`provider` 只留厂商名，地址、默认协议与路由全在 `providers` 与 `provider_routes` 上（见 5.8）。`Account.BaseURL` 与 `Account.Protocol` 是只读派生值：读账号的 `ListAccounts`、`GetAccount`、`ListAccountsByProvider` 共用 `queryAccounts`，写入的 `CreateAccount` 不碰这两列。从旧版数据库搬迁时会为「`provider` 不在 `providers` 表里」的账号补一行厂商：名字取账号的 `provider`，`base_url` 取该账号的历史地址（同名账号有多个地址时取最小的那个，结果与行序、与重跑都无关），`note` 写「由旧库搬迁从账号地址补建」，`default_protocol` 取账号的历史 `protocol` 但只认四条线协议（别的值留空，回到固定顺序回退），已有厂商一律跳过。
+### 种子数据
 
-`accounts.price_cache_read`、`accounts.price_cache_write` 与 `requests.in_tokens_uncached` 由迁移 `0011` 加入。两列缓存单价可空，空表示没填：估算花费按输入价回退，老账号升上来两列都是 NULL，金额与只有输入输出价时一致。`in_tokens_uncached` 是入账时按出站协议归一化之后的输入 token（纯规则 `store.UncachedInTokens`，见 5.5），`in_tokens` 保持上游原值；历史行没有区分能力，迁移按当时的 `in_tokens` 回填，不写 0——写 0 会让历史花费凭空变成只算输出。花费的公式只有一份，在 `store.Usage` 的 SQL 里：`in_tokens_uncached × price_in + cache_read × COALESCE(price_cache_read, price_in, 0) + cache_write × COALESCE(price_cache_write, price_in, 0) + out_tokens × price_out + reasoning_tokens_extra × price_out`，五项之和再除以 1e6。
+种子数据由 `store.seed` 在 `AutoMigrate` 之后写入，来源是 `internal/store/builtin_providers.json`。
 
-`requests.reasoning_tokens` 与 `requests.reasoning_tokens_extra` 由迁移 `0012` 加入（见 5.5）。前者是上游上报的思考 token 原值，后者是其中被判成「输出之外的一项」的那部分，只给后者按输出价再计一次；判定只有一处，纯函数 `store.ReasoningExtra`。两列都没给历史行回填：当时上游报了什么已经无从复原，留默认值 0 让升级前后的金额完全一致。anthropic 没有独立的思考字段，它的行这两列都是 0，`out_tokens` 本来就含思考。
+- 写法与 `INSERT OR IGNORE` 等价：冲突就跳过，已存在的行一个字段都不动。
+- 内容是 9 家厂商与 16 条路由（chat、语音、向量化等各协议合计）。
+- 默认协议在目录里逐家显式给出：`anthropic` 是 `anthropic`，`google-gemini` 是 `gemini`，其余七家是 `openai-chat`。
+- 种子只在首次建库时插入，用户自己建过的同名厂商原样保留。
+- 旧库新增 `origin` 列后按 `plugin_id` 与内置厂商名回填，已标过的行不再改。
 
-`account_models.protocol` 由迁移 `0005` 加入，记录「这个模型该用哪种协议」，取值是 anthropic、openai-chat、openai-responses 与 gemini（见 5.9）。**空字符串表示没有账号级覆盖**：有效出站协议按「账号覆盖 → 目录里这个模型支持的协议 → 厂商的有效默认协议」算（5.13 给了定序），纯规则在 `store.resolveModelProtocol`（`store.ResolveProtocol(providerProtocol, modelProtocol)` 是它最后两步的旧写法），读库入口是 `store.EffectiveProtocol(accountID, model)`——账号行不再存协议，所以第二个参数就是模型名；行不存在、列为空、厂商行不存在或这家一条路由都没声明时都回退到空串，不报错。转发与展示只读这个有效协议，不在调用方拼规则；`cli` 要显示协议时也只调它。旧的三参数写法 `EffectiveProtocol(accountID, accountProtocol, model)` 还留着作兼容包装（第二个参数是已经无用的账号协议、被忽略），只为 `internal/gateway` 与 `internal/cli` 里尚未改完的调用点继续能编译，两边走的是同一条规则。
-
-这个列只有一个写入口 `SetAccountModelProtocol`（旧名 `SetModelProtocol` 是兼容包装），由探活发现协议后调用（见 5.7）。`SetAccountModelAccess` 只改可达性与探活那几列，不动 `protocol` 与覆盖值；`ReplaceModels` 也不动它，同步不会覆盖已发现的协议。旧库升上来时整列默认空串，也就是全部由目录与厂商默认协议算。
-
-`providers` 一行只提供 `base_url`、备注、默认协议与模型列表覆盖，协议细节全在 `provider_routes` 的 `(厂商, 协议)` 上，行里没有凭据，只有地址与路径；两者之间没有外键，所以删厂商行时必须连带删它的路由行，`DeleteProvider` 在一个事务里一起做（`provider rm --force` 走 `DeleteProviderForce`，同一个事务里还要停用指向它的账号，见 5.8）。`providers` 表为空不算错误：种子行可以被用户删光，此时所有账号回退到后缀猜测。账号行不存地址，`Account.BaseURL` 与 `Account.Protocol` 都是读的时候从厂商行派生出来的只读值（见 5.8），改厂商表立刻影响所有引用它的账号。写入口是 `CreateProvider`（`provider add`，名称已存在时报 `ErrProviderExists`，不隐式更新）与 `SetProvider`（`provider set` 与 `provider unset` 的共同入口：patch 里为 nil 的字段不动，`Routes` 里传空串表示删掉那条路由——`provider unset <名称> <协议>` 就是这么调的；命令面上空值仍是用法错误）：两者都在一个事务里写厂商行与路由，`CreateProvider` 至少要一条路由，`SetProvider` 删到一条不剩时报错，另有一个 `AddProvider`（upsert，允许零路由），它是第二条 upsert 入口：`cli` 不走它，生产代码里也没有其它调用者，现在只有 `store` 自己的用例在用；新建与改仍分别走 `CreateProvider`、`SetProvider`。读路由只有 `LookupProviderRoute` 一个入口，转发、模型同步与探活都经过它。
-
-`provider_routes.models_path` 是写入侧的默认值，不是读取侧的唯一来源：`CreateProvider`/`SetProvider` 写一条没有模型列表地址的路由时按 `DeriveModelsPath` 补（只给 openai-chat 补，尾部 `/chat/completions` 换成 `/models`），其它协议留空表示「这条协议没有自己的列表接口」。空串在读取时回退到同厂商其它协议的非空值，纯规则在 `store.ResolveModelsPath`：厂商级覆盖 → 账号协议那条路由 → 协议名排序的第一条非空值，返回路径时一并返回这条路径所属的协议，模型同步按它选凭据头。推导不放在读取侧，因为内置 `anthropic` 厂商只有 anthropic 一条路由，读时推导会让 anthropic 型账号彻底失去模型列表来源。
-
-`providers.default_protocol` **空字符串表示这家没有显式默认协议**：有效默认协议按固定顺序 `openai-chat` → `openai-responses` → `anthropic` 回退到第一条已声明的路由（用户自建的厂商通常不填）。纯规则在 `store.ResolveDefaultProtocol`：显式值必须落在已声明的路由上才用它，指不到时同样按固定顺序回退——历史脏数据因此不会静默交给后缀猜测。读库入口是 `store.EffectiveProviderProtocol(provider)`：厂商不存在返回 `ErrProviderNotFound`，厂商在但一条路由都没有时返回空串与 `ErrProviderNoRoutes`，文案留给调用方。写入侧保证不产生悬空值：`CreateProvider` 的默认协议必须落在这次声明的路由上，`SetProvider` 改完之后必须仍指向一条存在的路由，否则整笔事务拒绝；`SetProvider` 收到空的 `DefaultProtocol` 表示清掉显式值、回到固定顺序，这一条只由 `provider unset <名称> default-protocol` 触发。旧库升上来时 8 家种子厂商由 `0007` 拿到显式默认协议，用户自建的厂商保持空串。
-
-gemini 的两行由种子写入，逐字段照下表：
+gemini 的两行由种子写入，两条都用 `INSERT OR IGNORE`：
 
 | 表 | 键 | 值 |
 | --- | --- | --- |
 | `providers` | `google-gemini` | `base_url` = `https://generativelanguage.googleapis.com`，`default_protocol` = `gemini`，`models_path` 为空（不覆盖，按路由取） |
 | `provider_routes` | `(google-gemini, gemini)` | `path` = `/v1beta/models/{model}:generateContent`，`models_path` = `/v1beta/models` |
 
-gemini 路由的 `models_path` 必须显式给：写入侧的默认值只推导 openai-chat 一条（见 5.8），gemini 自己的列表路径没有推导规则。两条都用 `INSERT OR IGNORE`：升级时用户可能已经用 `provider add google-gemini` 自己建过这家（名字撞上、地址指向代理），那两行原样保留，迁移不覆盖用户的写法，也不因为主键冲突整笔失败。
-
-`provider_routes.path` 里的 `{model}` 是出站模型名占位符（见 5.9）：规整只合并斜杠，花括号与冒号原样保留，替换发生在网关拼好地址之后。协议取值的白名单只有一份 `store.IsWireProtocol`（四条线协议），厂商路由、默认协议、账号的 `--protocol` 与探活候选都读它。
-
-`model_aliases` 一行是一条别名映射：`alias` 是主键，`target` 是真实模型名（或另一个别名），`created_at` 是 Unix 秒（覆盖改目标时不动它）。写入口只有两处：`SetModelAlias` 是覆盖语义（同一个别名再写一次就是改目标，UPSERT，不报错），校验全部在事务里做完再落库：别名与目标去空白后不能为空、不能含控制字符、别名不等于目标，别名也不能与任何账号可达的真实模型名同名（区分大小写，比的是该账号 `access='allowed'` 的行，见 5.13），否则报 `ErrModelAliasShadow` 并列出声明了那个名字的账号（最多三个）；`DeleteModelAlias` 删不到时按情况报 `ErrModelAliasNotFound`。读入口也只有两处：`ModelAliases` 按别名升序返回全表（SQLite 的 TEXT 默认二进制序，也就是区分大小写），`ResolveModelAlias` 把入站名字解析成真实名字——它先把全表一次读出来，再在内存里沿链走，不按跳查库，因此不会出现链走到一半表被改掉、前半段用旧目标后半段用新目标；名字不是别名时返回 `("", false, nil)`，成环报 `ErrModelAliasCycle`、超过 8 跳报 `ErrModelAliasTooDeep`，两种错误都把串起来的名字写进文案。别名与真实名字的冲突只在写入时判定，读取不做二次校验（见 5.12）。
-
-`provider_headers`（见 5.10）一行是一条 `(厂商, 协议, 头名)` 的附加请求头声明：`protocol` 空串表示整个厂商的每条路由都加，非空表示只加给这条协议。`provider` 外键指向 `providers(name)` 并带 `ON DELETE CASCADE`：SQLite 的连接串带 `foreign_keys(1)`，PostgreSQL 与 MySQL 的外键约束默认启用，所以删厂商行时它的头由数据库一起删掉；`provider_routes` 没有外键，才要在 `DeleteProvider` 里手删。写入口只有两处：`SetProviderHeader` 是覆盖语义（同一个 `(厂商, 协议, 头名)` 再写一次就是改值，UPSERT，不报错），`DeleteProviderHeader` 删不到时按情况报 `ErrProviderHeaderNotFound`（厂商在、头不在）或 `ErrProviderNotFound`（厂商不在）。两个写入口都先校验再进事务，并在事务里确认厂商行还在：外键虽然会拦住指向不存在厂商的写入，但报数据库的外键错误说不清下一步该干什么。头名按 HTTP `token` 校验（大小写不敏感，落库归一成小写），值不能是空白串、也不能带 CR/LF/NUL（那样拼进请求头会把一条头拆成两条），`protocol` 只能是空串或 `IsWireProtocol` 认的四种。读有两个入口：`ProviderHeaders` 返回这家厂商的全部声明（按 `protocol`、`name` 升序，厂商级在最前），`EffectiveProviderHeaders(厂商, 协议)` 返回那次请求真正要加的那一份——先铺厂商级，再用这个协议自己的声明按同名覆盖，返回时也是按 `name` 升序。转发侧只读后者，不在调用方拼覆盖规则。附加头不进 `requests`，日志只在没发时记头名与原因，正常发送不记；`ProviderHeader.String`（值截断到前四位）只给 `provider header ls` 与错误文案用。
-
-`providers` 的三个写入口（`CreateProvider`、`SetProvider`、`AddProvider`）都在 `store` 里校验 `base_url` 的 scheme 与主机名并规整（只合并路径里的重复斜杠、去尾斜杠，查询串与 `#` 之后的内容不动，`store.NormalizeBaseURL`），`cli` 那层不再是唯一防线。`path` 与 `models_path` 三列同样在写入侧经 `store.NormalizeEndpoint` 解释后落库：相对路径只规整（路径写法不拒绝，`v1/chat/completions` 与 `/v1/chat/completions/` 落成同一个值），整条地址（含 `://`）校验 scheme 与主机名后按整条地址落库，读取侧拼地址时再用同一个入口过一遍，历史库里的不规整写法因此也拼得出正确地址。两列因此可能存整条地址，也可能存相对路径，判定只看有没有 `://`（`store.IsFullAddress`）。
-
-一次尝试的账与它的结论在同一个事务里落库：`RecordAttempt` 先写 `requests` 一行，再按 `AttemptState` 给这次尝试的账号-模型记冷却（`account_models.fail_streak` 加一）、清这个账号-模型的冷却（清零）或停用账号，中途失败整笔回滚。冷却、清零与停用的 SQL 只在 `recordModelFailureTx`、`clearModelFailureTx`、`clearAccountFailuresTx`、`setEnabledTx` 里，`RecordFailure`、`ClearFailure`、`ClearFailures`、`SetEnabled` 与 `RecordAttempt` 都调它们，写入口仍然只有一处。
-
-建表与加列只走 `AutoMigrate`，没有版本号。旧版数据库（带 `PRAGMA user_version`、由已退场的 `migrations/*.sql` 建出来的库）在 `store.Open` 里自动搬迁：读出八张表的全部行，按最终语义转换（`status` → `access`、孤儿账号补厂商、`default_protocol` 补齐、`accounts.models` 拆进目录与可达性、账号级价搬进覆盖列、`in_tokens_uncached` 回填），用 `AutoMigrate` 建新库写回，最后把原文件改名为 `.bak`、新文件改名为原路径。不能直接让 `AutoMigrate` 接管旧库：旧 DDL 里的行内注释会让它的列解析出错，实测会重建表并丢列数据（`provider_models.context_window`）。
-
-`migrations/` 目录留在仓库里但**不参与构建**（没有 `go:embed`），只作为搬迁用例的旧库样本：`TestMigrationChainFrom0001ToLatest` 用 `0001_init.sql` 建一个真正的老库，再验证搬迁结果；其它按版本搭库的用例走 `openDatabaseAt`，它按版本号执行迁移文件。新增或修改表结构时改 `model.go` 的 row 定义，并按 `AGENTS.md` 在 `migrations/` 补一个同形状的迁移文件；运行时只执行 `AutoMigrate`，迁移文件由测试执行。
+升级时用户可能已经用 `provider add google-gemini` 自己建过这家（名字撞上、地址指向代理）：那两行原样保留，迁移不覆盖用户的写法，也不因为主键冲突整笔失败。
 
 ### plugins
 
@@ -1813,13 +2004,13 @@ gemini 路由的 `models_path` 必须显式给：写入侧的默认值只推导 
 | M11 | 端点两种写法的命令面与凭据轮换：`--anthropic`、`--openai`、`--responses`、`--models-path` 与 `model sync --endpoint` 一律收相对路径或整条地址，校验只有 `store.NormalizeEndpoint` 一份，cli 把它的错误包成用法错误；`account set --key`（`update` 同义）换凭据并在同一事务里清掉旧凭据的冷却与失败计数、重新启用账号；`serve` 增加两个只读的模型清单接口 `GET /v1/models` 与 `GET /v1/models/{id}`（见 5.2.1），清单取 `enabled=1` 账号在 `account_models` 里 `access='allowed'` 的行，按名字去重升序，`owned_by` 取厂商名 | `provider add` 用整条地址声明 openai 路由后，`provider ls --json` 的 `path` 就是整条地址，转发与 `model sync` 都打到那个 host、`base_url` 那台一次请求都不收；`https://`、`https:///x`、`ftp://host/x` 与空值在 add、set、`--models-path`、`--endpoint` 四处都退出码 2 且不落库；`model sync --endpoint <整条地址>` 打到该地址，下一轮回到路由的 `models_path`；`account set --key` 之后 `key_cipher` 变化、旧密文不再存在，全部 `account_models.cooldown_until_ms`、`account_models.fail_streak` 与账号 `last_error` 清零且 `enabled=1`，`account_models` 的可达性、协议与覆盖值一个字段不动，新 key 能转发、`--json` 不含明文、`update` 与 `set` 输出一致；`account test` 对模型列表为空的账号退出码 0，用默认模型名探活且不 panic；`GET /v1/models` 对两个账号各自的模型去重后升序给出、同名模型取厂商名字典序第一个，停用账号的模型不出现、冷却中账号的模型出现，没有任何模型时是 200 加 `data:[]`；`GET /v1/models/{id}` 命中返回单个对象、未命中 404 且类型是 `not_found_error`；两个接口的非 GET 方法 405 并带 `Allow: GET`，不写 `requests` 行、不改账号状态，`/healthz` 与三条入站路径行为不变 |
 | M12 | gemini 出站（第一步，非流式）：`translate.ProtocolGemini` 与 `gemini.go` 的请求/响应编解码、用量读取，路由 `path` 的 `{model}` 占位符（相对路径与整条地址都支持），凭据改走 `x-goog-api-key`，`store.IsWireProtocol` 成为唯一协议白名单（账号的 `--protocol` 接受 gemini） | chat 与 anthropic 入站各打一条到 gemini 账号：上游路径含模型名、头是 `x-goog-api-key`、请求体没有 `model` 字段、响应转回入站协议且 `usageMetadata` 落到用量；`{model}` 在相对路径与整条地址两种写法里都被替换且模型名按路径段转义，不含占位符的路由字节不变；gemini 出站的流式请求把上游端点从 `:generateContent` 改写成 `:streamGenerateContent?alt=sse`（见 5.9），客户端拿到流式响应与用量；对拍用例覆盖 system、图片、工具定义、工具调用与结果、`generationConfig`、`tool_choice`、`finishReason`、`usageMetadata` 的映射 |
 | M13 | gemini 入站与出站流式：两条入站路径（`/v1beta/models/{model}:generateContent` 与 `:streamGenerateContent`，模型名与流式标志从路径注入），gemini 的响应编码与流式编码器，gemini 出站流式解码器（只有 `data:` 帧，末尾 `usageMetadata`），出站流式端点换成 `:streamGenerateContent?alt=sse`，入站直通不改请求体，非正常 `finishReason` 进 `StopNote` | gemini 入站的非流式与流式各打一条（上游分别是 chat 与 anthropic 假上游）：模型名从路径取、响应是 gemini 形状、用量从上游协议转成 `usageMetadata`；anthropic 客户端打 gemini 流式账号时上游 URI 是 `:streamGenerateContent?alt=sse`、头是 `x-goog-api-key`、客户端拿到 anthropic 事件与用量；gemini 出站流式的增量序列（文本逐帧、`functionCall` 一帧给全参数、`finishReason` 收尾）与反向（工具调用攒到收尾）由对拍用例钉住；`SAFETY` 一类映射成 `end_turn` 且原值只进日志 |
-| M14 | 向量化：第六条线协议 `openai-embeddings` 与两个入站路径（`/v1/embeddings`、gemini 的 `/v1beta/models/{model}:embedContent`，迁移 `0017` 给 `openai` 与 `ollama` 种上路由），目录不再丢 embedding 条目、改记 `capabilities`，探活按能力位打向量化请求（见 5.15） | `/v1/embeddings` 打到有效协议为 `openai-embeddings` 的假上游：只换 `model`、响应字节原样、用量从 `usage.prompt_tokens` 入账；有效协议是其它五条时 400 且文案带两条修法；`stream: true` 400；gemini 入站 `:embedContent` 打 gemini 账号时路径改写成 `:embedContent`、请求体一个字节不改、响应原样，两种动作不混；gemini 清单里只有 `embedContent` 的条目进目录且能力位是 `embedding`，`model probe` 对它打 `:embedContent` 而不是对话 |
-| M16 | 语音两条线协议与 chat 适配：能力声明（`model capability add/set/unset/ls` 写 `capabilities`、`voices`、`audio_formats`，入站只放行声明过 `speech` / `transcription` 的模型）；两种出站——同协议直通与 chat 适配（`POST /v1/audio/speech` 或 `/v1/audio/transcriptions` → `POST /v1/chat/completions`，响应解回音频字节或 `{"text":…}`）；`/v1/models` 带能力、音色与格式；本地拒绝规则（未声明能力、未声明音色/格式、ogg/silk、sse、ASR stream、srt/vtt、language）；`tts_chars` / `audio_seconds` 与两个单价列；应错结构探活；`lax model speak` 与 `lax model transcribe`（见 5.16） | `internal/gateway` 的 `TestForwardSpeechPassthrough`（只换 `model`、音频字节与 `Content-Type` 原样、`tts_chars` 入账）、`TestSpeechAliasIsResolved`、`TestSpeechWithoutRouteIsRejected`（两条各一遍，零上游调用）、`TestTranscriptionsRewritesOnlyModelField`（其余 part 与音频字节逐字节相同、boundary 重生成）、`TestTranscriptionsRejectsNonMultipart`、`TestTranscriptionsMissingFile`、`TestSpeechErrorShapeIsOpenAI`、`TestProbeSpeechWrongShape`、`TestProbeTranscriptionsMissingFile`（400 → allowed、401 → 停用、404 → missing）、`TestSpeechRejectsSSEStreamFormat`、`TestSpeechChatAdapter`（messages/audio 映射、音频 base64 解出、token 入账）、`TestSpeechChatAdapterInstructions`、`TestSpeechWithoutCapabilityRejected`（零上游调用）、`TestSpeechVoiceRejected`、`TestTranscriptionsChatAdapter`（input_audio data URL、`{"text":…}`、`usage.seconds`）、`TestTranscriptionsRejectsOGG`；`internal/store` 的 `TestProvidersSeededByMigration` 覆盖两条种子路由，`TestPriceTTSAndAudioFields` 与 `TestUsageTTSAndAudioCost` 覆盖单价与花费，`TestSetProviderModelCapability`、`TestAddProviderModelCapability`、`TestModelCapabilityRejectsUnknown`、`TestClearProviderModelCapability`、`TestModelCapabilityOrder` 覆盖能力声明的写入口；`internal/cli` 的 `TestSpeakUsageErrors` 与 `TestTranscribeUsageErrors` 覆盖命令面 |
+| M14 | 向量化：第六条报文协议 `openai-embeddings` 与两个入站路径（`/v1/embeddings`、gemini 的 `/v1beta/models/{model}:embedContent`，迁移 `0017` 给 `openai` 与 `ollama` 种上路由），目录不再丢 embedding 条目、改记 `capabilities`，探活按能力位打向量化请求（见 5.15） | `/v1/embeddings` 打到有效协议为 `openai-embeddings` 的假上游：只换 `model`、响应字节原样、用量从 `usage.prompt_tokens` 入账；有效协议是其它五条时 400 且文案带两条修法；`stream: true` 400；gemini 入站 `:embedContent` 打 gemini 账号时路径改写成 `:embedContent`、请求体一个字节不改、响应原样，两种动作不混；gemini 清单里只有 `embedContent` 的条目进目录且能力位是 `embedding`，`model probe` 对它打 `:embedContent` 而不是对话 |
+| M16 | 语音两条报文协议与 chat 适配：能力声明（`model capability add/set/unset/ls` 写 `capabilities`、`voices`、`audio_formats`，入站只放行声明过 `speech` / `transcription` 的模型）；两种出站——同协议直通与 chat 适配（`POST /v1/audio/speech` 或 `/v1/audio/transcriptions` → `POST /v1/chat/completions`，响应解回音频字节或 `{"text":…}`）；`/v1/models` 带能力、音色与格式；本地拒绝规则（未声明能力、未声明音色/格式、ogg/silk、sse、ASR stream、srt/vtt、language）；`tts_chars` / `audio_seconds` 与两个单价列；应错结构探活；`lax model speak` 与 `lax model transcribe`（见 5.16） | `internal/gateway` 的 `TestForwardSpeechPassthrough`（只换 `model`、音频字节与 `Content-Type` 原样、`tts_chars` 入账）、`TestSpeechAliasIsResolved`、`TestSpeechWithoutRouteIsRejected`（两条各一遍，零上游调用）、`TestTranscriptionsRewritesOnlyModelField`（其余 part 与音频字节逐字节相同、boundary 重生成）、`TestTranscriptionsRejectsNonMultipart`、`TestTranscriptionsMissingFile`、`TestSpeechErrorShapeIsOpenAI`、`TestProbeSpeechWrongShape`、`TestProbeTranscriptionsMissingFile`（400 → allowed、401 → 停用、404 → missing）、`TestSpeechRejectsSSEStreamFormat`、`TestSpeechChatAdapter`（messages/audio 映射、音频 base64 解出、token 入账）、`TestSpeechChatAdapterInstructions`、`TestSpeechWithoutCapabilityRejected`（零上游调用）、`TestSpeechVoiceRejected`、`TestTranscriptionsChatAdapter`（input_audio data URL、`{"text":…}`、`usage.seconds`）、`TestTranscriptionsRejectsOGG`；`internal/store` 的 `TestProvidersSeededByMigration` 覆盖两条种子路由，`TestPriceTTSAndAudioFields` 与 `TestUsageTTSAndAudioCost` 覆盖单价与花费，`TestSetProviderModelCapability`、`TestAddProviderModelCapability`、`TestModelCapabilityRejectsUnknown`、`TestClearProviderModelCapability`、`TestModelCapabilityOrder` 覆盖能力声明的写入口；`internal/cli` 的 `TestSpeakUsageErrors` 与 `TestTranscribeUsageErrors` 覆盖命令面 |
 | M15 | 模型声明与探活判定：`model add` 手写一条账号可达性并同事务写目录与 `account_models.protocol`（可重复执行），`model probe --protocol` 只探一条路，探活候选优先取模型目录里声明的协议，连接层失败先重试两次再判、且连接层失败与 429/5xx/其它 400 不改可达性，`model show` 与 `model ls --json` 给出协议、HTTP 状态、探活时间与错误 | `internal/store` 的 `TestDeclareAccountModel*` 覆盖两表写入、协议合并、幂等、旧结论清理与非法取值；`internal/gateway` 的 `TestProbeModelDeclaredProtocolOutsideRoutes`、`TestProbeModelExplicitProtocolOnly`、`TestProbeModelTransportRetrySucceeds`、`TestProbeModelTransportFailureKeepsAccess` 覆盖候选顺序、单协议与不写可达性；`internal/cli` 的 `TestModelAddWritesBothTables`、`TestModelAddIsIdempotent`、`TestModelAddErrors`、`TestModelShow`、`TestModelLsJSONProbeFacts`、`TestModelProbeProtocolOnly`、`TestModelProbeUndecidedKeepsAllowed` 与 `TestDecideMissingModelPointsToModelAdd` 覆盖命令面与 `model decide` 的下一步文案 |
-| M17 | 插件与方言：`internal/plugin`（manifest、方言文件、模型目录的严格解析与校验，声明式映射执行器，方言注册表，插件目录加载与目录哈希），`internal/pluginfetch`（GitHub 来源解析、归档下载与安全解压），`plugin.Dialect` 接口与十条内置方言（四条语音，六条宿主线协议），`model_operations` 的方言绑定，语音按绑定分发（`lax model capability add\|set --dialect`、启动回填 `BackfillSpeechDialects`），对话等操作在 M17 只收宿主方言（M18 打开 hook 方言），`plugin install/ls/show/enable/disable/rm/doctor` 与 `providers.plugin_id`（见 5.7、5.8、5.16、第 4 节） | `internal/plugin` 的 `TestLoadDir`、`TestRegisterPluginDialect`、`TestSystemDialectsAreComplete`、`TestMiMoSpeechPrepare`、`TestMiMoSpeechDecode`、`TestChatWireDeclarativeDialect`、`TestLoadChatProviderWithHostDialect`、`TestLoadRejectsUnknownHostDialect`、`TestPrepare`、`TestDecodeJSONPointer`、`TestLoadCatalogOK`、`TestDecodeManifestRejects`；`internal/pluginfetch` 的 `TestParseSource`、`TestParseSourceRejects`、`TestIsRemote`、`TestFetchExtractsPluginDir`、`TestFetchRejectsUnsafeArchives`、`TestFetchEnforcesLimitsAndStatus`、`TestDefaultArchiveURL`、`TestFetchHonorsContext`；`internal/gateway` 的 `TestSpeechDialectDrivesRequestAndResponse`（方言编请求、解响应、用量入账）、`TestSpeechDialectNotRegistered` 与 `TestSpeechWithoutDialectBinding`（两种 400、零上游调用）、`TestSpeechChatAdapter`（内置 chat 方言的映射）、`TestChatBoundToUnregisteredDialectRejected` 与 `TestChatBoundToHostDialectAllowed`（未注册的插件方言 400，宿主方言照旧）；`internal/store` 的 `TestApplyPluginCatalog*`（新建、幂等、厂商地址冲突、路由冲突、手写绑定优先、别名冲突）、`TestDeletePluginRemovesCatalog`（连带清厂商与绑定、停用账号）、`TestBackfillSpeechDialects`（选方言、行数、幂等）、`TestPluginTablesOnLegacyDatabase`（旧库升级后四张表可用）；`internal/cli` 的 `TestPluginLifecycle`（装、看、停用、启用、删）、`TestPluginInstallFromRemoteSource`（远程来源落库）、`TestPluginInstallChatProvider`（对话上游的路由、模型、宿主方言绑定与别名）、`TestPluginInstallDryRun`、`TestPluginInstallVersionRules`、`TestPluginInstallRejectsSymlink`、`TestPluginInstallRejectsUnexecutableOperation`、`TestPluginDoctorTampered` |
+| M17 | 插件与方言：`internal/plugin`（manifest、方言文件、模型目录的严格解析与校验，声明式映射执行器，方言注册表，插件目录加载与目录哈希），`internal/pluginfetch`（GitHub 来源解析、归档下载与安全解压），`plugin.Dialect` 接口与十条内置方言（四条语音，六条宿主报文协议），`model_operations` 的方言绑定，语音按绑定分发（`lax model capability add\|set --dialect`、启动回填 `BackfillSpeechDialects`），对话等操作在 M17 只收宿主方言（M18 打开 hook 方言），`plugin install/ls/show/enable/disable/rm/doctor` 与 `providers.plugin_id`（见 5.7、5.8、5.16、第 4 节） | `internal/plugin` 的 `TestLoadDir`、`TestRegisterPluginDialect`、`TestSystemDialectsAreComplete`、`TestMiMoSpeechPrepare`、`TestMiMoSpeechDecode`、`TestChatWireDeclarativeDialect`、`TestLoadChatProviderWithHostDialect`、`TestLoadRejectsUnknownHostDialect`、`TestPrepare`、`TestDecodeJSONPointer`、`TestLoadCatalogOK`、`TestDecodeManifestRejects`；`internal/pluginfetch` 的 `TestParseSource`、`TestParseSourceRejects`、`TestIsRemote`、`TestFetchExtractsPluginDir`、`TestFetchRejectsUnsafeArchives`、`TestFetchEnforcesLimitsAndStatus`、`TestDefaultArchiveURL`、`TestFetchHonorsContext`；`internal/gateway` 的 `TestSpeechDialectDrivesRequestAndResponse`（方言编请求、解响应、用量入账）、`TestSpeechDialectNotRegistered` 与 `TestSpeechWithoutDialectBinding`（两种 400、零上游调用）、`TestSpeechChatAdapter`（内置 chat 方言的映射）、`TestChatBoundToUnregisteredDialectRejected` 与 `TestChatBoundToHostDialectAllowed`（未注册的插件方言 400，宿主方言照旧）；`internal/store` 的 `TestApplyPluginCatalog*`（新建、幂等、厂商地址冲突、路由冲突、手写绑定优先、别名冲突）、`TestDeletePluginRemovesCatalog`（连带清厂商与绑定、停用账号）、`TestBackfillSpeechDialects`（选方言、行数、幂等）、`TestPluginTablesOnLegacyDatabase`（旧库升级后四张表可用）；`internal/cli` 的 `TestPluginLifecycle`（装、看、停用、启用、删）、`TestPluginInstallFromRemoteSource`（远程来源落库）、`TestPluginInstallChatProvider`（对话上游的路由、模型、宿主方言绑定与别名）、`TestPluginInstallDryRun`、`TestPluginInstallVersionRules`、`TestPluginInstallRejectsSymlink`、`TestPluginInstallRejectsUnexecutableOperation`、`TestPluginDoctorTampered` |
 
 | M18 | 插件运行时：`moejs` JS 沙箱（goja、每次 prepare/decode 新建 Runtime、同一段流复用、`Runtime.Interrupt` 超时、返回值 JSON 深拷贝与 `__proto__` 拒绝、受限 ESM、`lax` API 与不注入的全局、四道字节闸门），非语音操作的 hook 方言（宿主报文 → `Plan.Body`/`Plan.JSON` 补丁 → `ResultJSON` 按出站形状解回、`StreamDialect` 事件流），`--trust declarative\|sandboxed` 与 `plugin_versions.runtime`，生命周期命令 `update`/`rollback`/`verify`/`logs`/`reload`/`config`，`serve` 的 pid 文件与 `SIGHUP` 热加载（`gateway.SetDialects`），`plugin_audit`/`plugin_logs` 两张表与日志落库，`model dialect ls\|set\|unset`（见 5.17、第 4、6 节） | `internal/plugin` 的 `TestLoadManifestMoejs`、`TestLoadHookPlugin`、`TestRegisterHookDialect`、`TestRegisterRejectsHostDialectPrefix`、`TestRegisterMixedImplementationRejected`、`TestRegisterRollsBackWholePackage`（运行时与钩子、方言登记整包回滚）、`TestSandboxPrepareRequestShapes`、`TestSandboxDecodeResponse`、`TestSandboxDecodeStreamState`、`TestSandboxTimeout`、`TestSandboxGlobals`、`TestSandboxHTTPRequest`、`TestSandboxOutputTooLarge`、`TestSandboxProtoRejected`、`TestSandboxCache`、`TestSandboxLog`、`TestSandboxESMDefaultAndImport`、`TestSandboxImportRejected`、`TestSandboxLaxError`（hook 形状、超时后重建 Runtime、全局白名单、控制面请求的白名单/重定向/响应体上限、返回值与原型键、缓存、日志、ESM 子集）；`internal/gateway` 的 `TestChatDialectPatchesRequestAndRewritesResponse`（补丁报文 + `ResultJSON` 走 `translate` 再按入站编码）、`TestChatDialectStreamsToAnthropic` 与 `TestChatDialectStreamsToChat`（事件流跨帧）、`TestChatDialectWithoutStreamRejected`（发上游前 400）、`TestChatDialectPathOverridesEndpoint` 与 `TestChatDialectRejectsAbsolutePath`（相对路径参与选址、绝对地址拒绝）、`TestChatDialectTextResultRejected`、`TestChatDialectStreamErrorEndsStream`、`TestChatBoundToUnregisteredDialectRejected`、`TestSandboxDialectEndToEnd`（真沙箱跑一条语音请求）；`internal/cli` 的 `TestPluginInstallHookPlugin`（信任按 runtime 推断、`runtime` 入库、路由按默认端点建）、`TestPluginUpdate`、`TestPluginUpdateDryRun`、`TestPluginRollback`、`TestPluginVerify`、`TestPluginLogs`、`TestPluginReloadRequiresServe`、`TestPluginAuditLifecycle`、`TestPluginConfig`、`TestPluginConfigUsageErrors`、`TestPluginLogSink`、`TestFollowPluginLogs`、`TestModelDialectSetListUnset`、`TestModelDialectSetWarnsOnPluginChatDialect`、`TestModelDialectUsageErrors`；`internal/store` 的 `TestPluginAuditAppendAndList` |
-| M19 | 插件需要的宿主能力：厂商凭据头声明（`providers.auth_header` / `auth_scheme`，manifest 的 `providers[].auth`，`provider add/set --auth-header/--auth-scheme` 与 `unset`，`setAuth` 三个调用点）；manifest 的 `providers[].routes`（写了就不按方言推导，方言的 `upstream_wire` 必须被覆盖）；`Plan.Headers`（沙箱校验与保留头、网关在附加头之后叠加）；语音插件方言可以在自己的线协议上编请求（见 5.8、5.16、5.17） | `internal/plugin` 的 `TestManifestAuthDecl`、`TestManifestRouteDecl`、`TestSandboxPlanHeaders`（键名归一、保留头、CR/LF、条数与单值上限）；`internal/store` 的 `TestProviderAuthColumns`（读写、只给头、改法与清掉、旧库补列）、`TestAccountDerivedAuth`、`TestPluginCatalogAuthConflict`（冲突整笔回滚、空值补上）；`internal/gateway` 的 `TestProviderAuthHeader`（转发、模型列表同步、探活三个调用点、三种写法，声明后不再发 `Authorization`）、`TestSpeechHookDialectOwnWire`（语音方言在自己的线协议上编请求、`Plan.Headers` 生效但不覆盖凭据头）；`internal/cli` 的 `TestProviderAuthFlags`（add/set/unset 与只给写法的用法错误） |
+| M19 | 插件需要的宿主能力：厂商凭据头声明（`providers.auth_header` / `auth_scheme`，manifest 的 `providers[].auth`，`provider add/set --auth-header/--auth-scheme` 与 `unset`，`setAuth` 三个调用点）；manifest 的 `providers[].routes`（写了就不按方言推导，方言的 `upstream_wire` 必须被覆盖）；`Plan.Headers`（沙箱校验与保留头、网关在附加头之后叠加）；语音插件方言可以在自己的报文协议上编请求（见 5.8、5.16、5.17） | `internal/plugin` 的 `TestManifestAuthDecl`、`TestManifestRouteDecl`、`TestSandboxPlanHeaders`（键名归一、保留头、CR/LF、条数与单值上限）；`internal/store` 的 `TestProviderAuthColumns`（读写、只给头、改法与清掉、旧库补列）、`TestAccountDerivedAuth`、`TestPluginCatalogAuthConflict`（冲突整笔回滚、空值补上）；`internal/gateway` 的 `TestProviderAuthHeader`（转发、模型列表同步、探活三个调用点、三种写法，声明后不再发 `Authorization`）、`TestSpeechHookDialectOwnWire`（语音方言在自己的报文协议上编请求、`Plan.Headers` 生效但不覆盖凭据头）；`internal/cli` 的 `TestProviderAuthFlags`（add/set/unset 与只给写法的用法错误） |
 | M20 | 上游失败处理策略：`lax route policy` 的规则 CRUD、条件与动作、匹配顺序与内置兜底；`route_failure_policies` 表与 `accounts.cooldown_until_ms`（迁移 `0018`）；网关按策略重试、冷却、停用与换号；`account test` 与语音应错探活的策略匹配；账号级冷却进入选号硬过滤（见 5.20、第 4、6 节） | store 的策略建表、CRUD、JSON 往返、排序与校验，以及账号冷却的加载、写入与清理；account 的状态/账号/厂商/模型/文本/正则匹配、优先级与内置兜底、退避与上限、`InAccountCooldown` 与 `Rank` 的排除理由、`strict` 粘性命中冷却时返回 503；gateway 的计费 400 停用/冷却、模型级冷却、重试 1/3 次、401/402 与计费 403 内置兜底、`res.wrote` 不重试与策略读取失败只用内置兜底；probe 的聊天与语音 400 计费、普通 400 不改状态、用户 401 规则覆盖；CLI 的 `route policy add/ls/show/set/unset/rm/enable/disable/test`、patch 语义、`--all-errors`、互斥校验与 `--json`；`make check` 通过 |
 
 M0 到 M20 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkeleton` 用假上游验证：初始化、加账号、`model call`、`log tail`、`usage`、`doctor` 全链路走通。协议矩阵由 `internal/gateway/matrix_test.go` 与 `matrix_stream_test.go` 验证：三条入站 × 三条出站共 9 种组合的非流式与流式各跑一遍（出站 gemini 的三条另由下面 gemini 那批用例覆盖），同协议直通的「不改字节」「保留陌生字段」与跨协议的「丢弃陌生字段」单独有用例。思考内容的映射与它的代价由 `internal/translate` 的 `TestGolden` 按 `testdata/in` 与 `testdata/out` 对拍：四条协议两两之间的请求、响应与流式都有用例（gemini 那几对见本段末尾），含带签名的往返、无签名时盖回执签名再回填与请求方向不回填（`anthropic_thinking_request_to_chat_dropped`、`responses_reasoning_request_to_chat_dropped`、`chat_reasoning_response_to_anthropic_replay_signature`、`anthropic_replay_thinking_request_to_chat_reasoning_content`、`anthropic_replay_thinking_request_to_chat_without_tools_dropped`、`anthropic_replay_thinking_request_to_anthropic_dropped` 等）。工具调用的五条规则同样各有用例：`chat_tool_results_to_anthropic_user_message` 与 `responses_tool_results_to_anthropic_user_message` 钉住工具结果折叠进 user 消息，`chat_tool_result_then_user_followup_to_anthropic_merged_user` 与 `responses_tool_result_then_user_followup_to_anthropic_merged_user` 钉住工具结果之后的追问并进同一条 user 消息，`anthropic_parallel_tools_stream_to_chat_dense_index` 钉住 chat 的稠密工具序号，`chat_tool_stream_to_responses_done_events` 与 `responses_output_item_done_stream_to_anthropic` 钉住 responses 的 done 事件与 output 回填、只发 done 的上游，`chat_text_stream_to_responses_message_output`、`chat_text_tool_text_stream_to_responses_output_order` 与 `anthropic_two_text_blocks_stream_to_responses_message_items` 钉住文本 item 的 added 与 done、`completed.response.output` 的正文与顺序，1MB 上限与断流时的空 `output` 由 `TestResponsesStreamEncoderTextCap` 与 `TestResponsesStreamEncoderErrorKeepsTextOutOfOutput` 钉住，`anthropic_builtin_tool_to_chat_dropped` 钉住内置工具丢弃，请求侧的思考配置参数与工具白名单由 `anthropic_thinking_budget_to_chat_reasoning_effort`、`chat_reasoning_effort_to_anthropic_thinking_budget`、`chat_reasoning_object_to_responses_reasoning`、`gemini_thinking_budget_to_anthropic_thinking`、`anthropic_thinking_budget_to_gemini_thinking_config`、`anthropic_thinking_disabled_to_chat_dropped`、`anthropic_thinking_disabled_to_responses_dropped`、`anthropic_thinking_disabled_to_gemini_zero_budget`、`chat_tool_strict_to_responses_kept`、`responses_tool_strict_to_chat_kept`、`anthropic_allowed_tools_to_responses_allowed_tools`、`responses_allowed_tools_to_anthropic_allowed_tools`、`anthropic_allowed_tools_to_chat_auto`、`anthropic_allowed_tools_to_gemini_allowed_function_names`、`gemini_allowed_function_names_to_anthropic_allowed_tools` 钉住（规则见 5.4 的两小节）；思考与工具参数交替时的块开关由 `chat_reasoning_between_tool_args_stream_to_anthropic_reopen_block` 与 `TestAnthropicStreamEncoderKeepsDeltasOnOpenBlocks` 验证，缺 `parameters` 的工具补空 schema 由 `responses_tool_without_parameters_to_anthropic_empty_input_schema` 验证；断流时工具参数不完整的文案与 `ok=0` 由 `internal/gateway` 的 `TestConversionStreamTruncatedToolArgsNote` 与三个编码器的单元用例验证。协议降级到模型的那部分由 `internal/gateway` 的 `TestProbeModel*` 与 `TestForwardUsesModelProtocol` 验证，迁移兼容由 `internal/store` 的 `TestMigration0005*`、`TestMigration0006*`、`TestMigration0007*` 与 `TestMigrationsRunToLatestFromEmptyDB` 验证；厂商路由的解析、探活收紧与模型列表回退由 `internal/store` 的 `TestProvider*` 与 `internal/gateway` 的 `TestForwardUsesProviderRoute`、`TestEndpointFallsBackWithoutProviderRoute`、`TestProbeModelNarrowsCandidatesByProvider`、`TestProbeModelStartsFromDiscoveredProtocol`、`TestSyncModelsUsesProviderModelsPath`、`TestSyncModelsWithoutModelsPath` 验证。厂商写入口与模型列表路径由 `internal/store` 的 `TestCreateProvider*`、`TestSetProvider*`、`TestDeriveModelsPath`、`TestResolveModelsPath`、`TestRouteModelsPathDerivedOnWrite`、`TestStoreWritePathsValidateBaseURL`、`TestMigration0008*` 与 `internal/gateway` 的 `TestSyncModelsAuthFollowsModelsPathRoute`、`TestSyncModelsProviderModelsPathOverride`、`TestSyncModelsWithEndpointOverride`、`TestSyncModelsNoModelsPathAnywhere` 验证；路径与地址的规整由 `internal/store` 的 `TestNormalizePath`、`TestNormalizeBaseURL`、`TestCreateProviderNormalizesPaths`、`TestSetProviderNormalizesPaths` 与 `internal/gateway` 的 `TestJoinEndpoint` 验证；端点取值的两种写法（相对路径与整条地址）由 `internal/store` 的 `TestIsFullAddress`、`TestNormalizeEndpoint`、`TestDeriveModelsPathFullAddress`、`TestCreateProviderStoresFullAddressRoutes`、`TestSetProviderFullAddressRoutesAreIndependent`、`TestStoreWritePathsRejectBadFullAddress` 与 `internal/gateway` 的 `TestForwardUsesFullAddressRoute`、`TestForwardMixesFullAddressAndRelativeRoutes`、`TestSyncModelsFullAddressModelsPath`、`TestSyncModelsWithEndpointFullAddress`、`TestSyncModelsWithEndpointRejectsBadFullAddress` 验证；一次尝试的账与结论一起提交由 `internal/store` 的 `TestRecordAttemptWritesRowAndStateTogether` 验证；直通路径的断流结尾由 `internal/gateway` 的 `TestPassthroughStreamDisconnectKeepsLegalEnding`、`TestPassthroughCRLFTailStartsAtFrameBoundary` 逐协议验证，转换路径的干净截断与 responses 入站的 `response.failed` 由 `TestConversionStreamCleanTruncationIsFailure`、`TestConversionStreamResponsesInboundEndsFailed` 验证，收尾帧按 `type` 或 `event` 名判定（带空格、多行缩进、只写事件名）由 `TestPassthroughEndFrameShapeDoesNotMatter` 验证，完整流不被追加字节由 `TestProtocolMatrixStreaming` 的逐字节断言保证；端点两种写法在命令面上的行为与 `account set --key` 由 `internal/cli` 的 `TestProviderPathsAcceptFullAddress`、`TestProviderPathsRejectBadFullAddress`、`TestModelSyncEndpointFullAddress`、`TestModelSyncEndpointBadValues`、`TestAccountSetRotatesKey`、`TestAccountSetKeyFromStdin`、`TestAccountSetErrors`、`TestAccountSetJSONMasksKey`、`TestAccountUpdateIsSynonymForSet`、`TestAccountTestWithoutModels` 与 `internal/gateway` 的 `TestProbeEmptyModelsUsesFallbackModel`、`TestProbeEmptyModelsKeepsNoteOnFailure` 验证；模型清单接口由 `internal/gateway` 的 `TestModelsListDedupesSortsAndPicksOwner`、`TestModelsListSkipsDisabledKeepsCooling`、`TestModelsListEmpty`、`TestModelByIDHitAndMiss`、`TestModelByIDPathIsCleanedBeforeMatching`、`TestModelByIDDisabledOnlyModelIs404`、`TestModelsRejectNonGet`、`TestModelsEndpointsAreReadOnly`、`TestModelsEndpointsLeaveExistingRoutesAlone` 验证，四条入站路径 405 的 `Allow: POST` 由 `TestInboundRejectsOtherMethodsWithAllowPost` 与 `TestGeminiInboundUnknownPathAndMethod` 验证；错误体按入站协议给形状由 `internal/gateway` 的 `TestInboundErrorShapeWhenAllAccountsFail`、`TestInboundErrorShapeWhenModelMissing`、`TestInboundErrorShapeScrubsSecret`、`TestInboundStreamErrorFrameShapePerProtocol`、`TestInboundStreamErrorFrameScrubsSecretPerProtocol`、`TestReadOnlyAndUnknownPathsKeepUnifiedErrorShape` 按四条入站逐字段核对（形状、`type`/`status`/`code`/`param`、脱敏与没有入站协议的入口不变）。gemini 的映射由 `internal/translate` 的对拍用例 `chat_tools_to_gemini_function_declarations`、`anthropic_image_request_to_gemini_inline_data`、`gemini_tool_call_response_to_chat_tool_calls`、`gemini_tool_call_response_to_anthropic_tool_use`、`gemini_max_tokens_response_to_anthropic`、`gemini_contents_request_to_chat`、`gemini_request_to_chat_image_and_named_tool`、`chat_response_to_gemini_candidate`、`gemini_safety_response_to_chat_end_turn`、`gemini_stream_to_anthropic_text_and_tool`、`anthropic_stream_to_gemini_tool_call` 钉住，边界（孤立工具结果丢弃、非对象 `args` 省略、`promptFeedback.blockReason`、用量读取、非正常 `finishReason` 的 `StopNote`、入站路径解析、两端的流式增量序列）由 `internal/translate` 的 `TestGemini*` 与 `TestEncodeGemini*` 钉住，转发路径（路径里的模型名、`x-goog-api-key`、两种路由写法与占位符共存、模型名转义、不含占位符的路由不变、直通不改请求体、流式端点改写、gemini 入站的非流式与流式、错误体解包、断流收尾、探活）由 `internal/gateway` 的 `TestForwardChatToGemini`、`TestForwardAnthropicToGemini`、`TestGeminiRoutePlaceholderInFullAddress`、`TestGeminiModelNameIsPathEscaped`、`TestRouteWithoutPlaceholderUnchanged`、`TestGeminiOutboundStreamEndpoint`、`TestForwardGeminiInboundToChat`、`TestForwardGeminiInboundStreamToAnthropic`、`TestForwardGeminiOutboundStream`、`TestGeminiPassthroughKeepsBytes`、`TestGeminiInboundStreamToGeminiPassthrough`、`TestGeminiInboundErrorBodyUnwrapped`、`TestGeminiInboundModelNameIsPathUnescaped`、`TestGeminiInboundUnknownModel`、`TestGeminiStreamTruncatedEndsWithErrorAndFinish`、`TestGeminiStopNoteLogged`、`TestProbeGeminiRoute`、`TestModelEndpoint` 与 `internal/store` 的 `TestGeminiRouteKeepsModelPlaceholder` 验证。gemini 的模型列表同步由 `internal/gateway` 的 `TestSyncModelsGeminiShape`、`TestSyncModelsGeminiAuthHeader`、`TestSyncModelsGeminiPaginates`、`TestSyncModelsGeminiPageLimit`、`TestSyncModelsNoNextPageTokenStops`、`TestSyncModelsWithoutGenerationMethodsUnfiltered` 验证（方法过滤、去前缀、两页拼接、超过 10 页报错、游标为空即停、ollama 风格不受影响），种子行与升级路径由 `internal/store` 的 `TestMigration0009SeedsGeminiProvider`、`TestMigration0009UpgradesOldDatabase`、`TestMigration0009KeepsUserDefinedGeminiProvider` 与 `TestProvidersSeededByMigration` 验证。向量化的两条入站与探活由 `internal/gateway` 的 `TestForwardEmbeddingsPassthrough`、`TestEmbeddingsAliasIsResolved`、`TestEmbeddingsWithoutRouteIsRejected`、`TestEmbeddingsRejectsStream`、`TestEmbeddingsRejectsUnknownPath`、`TestEmbeddingsErrorShapeIsOpenAI`、`TestGeminiEmbedContentPassthrough`、`TestProbeEmbeddingsModelSendsEmbeddingsBody`、`TestProbeGeminiEmbeddingOnlyModelUsesEmbedContent` 验证（字节直通、别名、缺路由的 400 与零上游调用、流式拒绝、动作后缀改写、OpenAI 错误体、两条探活路径），路由种子由迁移 `0017` 与 `TestProvidersSeededByMigration` 的 `seedRoutes` 验证。语音的两条直通与探活由 `internal/gateway` 的 `TestForwardSpeechPassthrough`、`TestSpeechRejectsSSEStreamFormat`、`TestSpeechAliasIsResolved`、`TestSpeechWithoutRouteIsRejected`、`TestTranscriptionsRewritesOnlyModelField`、`TestTranscriptionsRejectsNonMultipart`、`TestTranscriptionsMissingFile`、`TestSpeechErrorShapeIsOpenAI`、`TestProbeSpeechWrongShape`、`TestProbeTranscriptionsMissingFile` 验证（字节直通、别名、缺路由的 400 与零上游调用、boundary 重生成、两种应错探活）；两个单价列与语音花费由 `internal/store` 的 `TestPriceTTSAndAudioFields` 与 `TestUsageTTSAndAudioCost` 验证，路由种子由 `TestProvidersSeededByMigration` 的 `seedRoutes`（迁移 `0018`）验证；命令面由 `internal/cli` 的 `TestSpeakUsageErrors` 与 `TestTranscribeUsageErrors` 验证。插件与方言由 `internal/plugin` 的 `TestLoadDir`、`TestRegisterPluginDialect`、`TestSystemDialectsAreComplete`、`TestMiMoSpeechPrepare`、`TestMiMoSpeechDecode`、`TestPrepare`、`TestDecodeJSONPointer` 验证（严格解析、方言登记、内置方言的形状与声明式求值），`internal/gateway` 的 `TestSpeechDialectDrivesRequestAndResponse`、`TestSpeechDialectNotRegistered`、`TestSpeechWithoutDialectBinding`、`TestSpeechChatAdapter` 验证按绑定分发与两种 400，`internal/store` 的 `TestApplyPluginCatalog*`、`TestDeletePluginRemovesCatalog`、`TestBackfillSpeechDialects`、`TestPluginTablesOnLegacyDatabase` 验证目录落库、删除级联、回填与旧库升级，命令面由 `internal/cli` 的 `TestPluginLifecycle`、`TestPluginInstallDryRun`、`TestPluginInstallVersionRules`、`TestPluginInstallRejectsSymlink`、`TestPluginDoctorTampered` 验证。上游是 `httptest` 假服务，M5、M6、M7、M8、M9 与 M10 里涉及真实厂商的那部分需要拿到 key 后手工验收。
@@ -1861,10 +2052,10 @@ M0 到 M20 的代码已落地，端到端由 `internal/cli` 的 `TestWalkingSkel
 - 控制面只有 `lax.http.request`：只放行 manifest 白名单里的 https 主机、不跟随重定向、每次 hook 最多 4 次、响应体默认 1 MiB；需要按请求算签名或先换会话 token 的上游仍接不了（与 5.10 同类）。
 - 沙箱里没有媒体通道（`lax.media.*` 调用即报错）：音频进 `ctx.input.audio_base64`、出 `result.body_base64`，受 8 MiB 注入上限约束，更大的音频解不了。
 - 插件系统本版落地声明式插件、内置方言与 `moejs` 沙箱：没有 `trusted-worker`（独立进程，以及文件、进程与环境变量权限都没有），没有 Magpie/OpenCode 导入与 `plugin import`，没有 OAuth 登录，没有插件市场与签名（`plugin_versions.signature_status` 一律 `unverified`，`source` 记 `dir` 或 `github:<owner>/<repo>/<path>@<ref>`）。
-- 语音方言只在两种情况下不走 `Prepare`/`Decode`：绑定的是宿主直通方言（`lax/openai-speech@1`、`lax/openai-transcriptions@1`），或入站不是语音两条（那条路归对话方言）。其余情况（插件方言、MiMo 的两条内置方言）都由方言编请求、解响应，**不看方言的 `upstream_wire` 是否等于入站协议**（见 5.16 与 `lessons/2026-11-01-speech-hook-wire.md`）：豆包的 TTS 入站与出站都是 `openai-speech`，形状却完全由它自己决定。代价是同一条线协议上的两种形状必须靠不同的方言 ID 区分，不能再用「同协议就是直通」推断。
+- 语音方言只在两种情况下不走 `Prepare`/`Decode`：绑定的是宿主直通方言（`lax/openai-speech@1`、`lax/openai-transcriptions@1`），或入站不是语音两条（那条路归对话方言）。其余情况（插件方言、MiMo 的两条内置方言）都由方言编请求、解响应，**不看方言的 `upstream_wire` 是否等于入站协议**（见 5.16 与 `lessons/2026-11-01-speech-hook-wire.md`）：豆包的 TTS 入站与出站都是 `openai-speech`，形状却完全由它自己决定。代价是同一条报文协议上的两种形状必须靠不同的方言 ID 区分，不能再用「同协议就是直通」推断。
 - 对话操作不能写声明式方言，但可以写 hook 方言：`chat.complete@1` 等操作的 `Input.Body` 是宿主编好的报文，方言可以补字段或从零构建；`Input.Messages` 仍是空的（宿主没填），要读消息只能解析 `ctx.body`。向量化与决策协议同样只能由 hook 方言承载：入站与出站同协议时方言返回的 `ResultJSON` 就是客户端要读的那一条响应体，宿主原样写出（`TestEmbeddingsHookDialect`）；对话入站则统一经 `translate` 转一次。对话、向量化与决策请求仍可引用 `lax/` 宿主方言，走宿主编解码与直通。
-- `Plan.Path` 只在非语音入站的插件方言上参与选址，而且只能改路径：必须以 `/` 开头、不含 `..` 段，主机与凭据只能来自厂商路由（与 `base_url`）。语音路径不看它，地址只按厂商路由走或按 manifest 的 `providers[].routes` 建；同一家厂商的两条方言落在同一条线协议上时只建第一条路由（声明了 `routes` 就按声明建，不再推导）。
-- 凭据头的声明只回答「写哪个头、怎么写」：`auth` 不给时仍按线协议推导，两个头不会同时发；插件不能通过 `Plan.Headers` 改凭据头或帧头（保留头在沙箱层被拒）。插件安装不会静默改动用户已经声明的凭据头：库里有值且与 manifest 不同就整笔失败。
+- `Plan.Path` 只在非语音入站的插件方言上参与选址，而且只能改路径：必须以 `/` 开头、不含 `..` 段，主机与凭据只能来自厂商路由（与 `base_url`）。语音路径不看它，地址只按厂商路由走或按 manifest 的 `providers[].routes` 建；同一家厂商的两条方言落在同一条报文协议上时只建第一条路由（声明了 `routes` 就按声明建，不再推导）。
+- 凭据头的声明只回答「写哪个头、怎么写」：`auth` 不给时仍按报文协议推导，两个头不会同时发；插件不能通过 `Plan.Headers` 改凭据头或帧头（保留头在沙箱层被拒）。插件安装不会静默改动用户已经声明的凭据头：库里有值且与 manifest 不同就整笔失败。
 - `plugin install` 的目录落库是逐家厂商一个事务：一个插件带多家厂商时，第 N 家失败会让前 N-1 家留在库里（刚复制的包目录会删掉），用 `lax plugin rm` 或 `lax provider rm` 清。
 - 删除插件会连带删掉它自己的厂商，并停用指向这些厂商的账号（`last_error` 写明原因）：重新安装之后账号仍然是停用的，要 `account enable` 才回到选号池。
 - 方言绑定有命令可查可删：`model dialect ls` / `set` / `unset` 直接读写 `model_operations`，但 `model capability ls` 仍只列能力位、音色与格式；`plugin rm` 只清它自己的方言绑定（`source='plugin'` 且 ID 带插件前缀）。
@@ -1895,7 +2086,7 @@ scripts/deploy-remote.sh 在目标主机校验、替换二进制、重启并做�
 .github/workflows/      CI 与 tag 触发的 Release（见 5.18）
 ```
 
-约束：`translate` 只做结构体到结构体的转换，不读环境、不发请求，便于用对拍用例覆盖；`gateway` 是唯一发上游厂商请求的地方（`account test` 的探活也走 `gateway.Probe`）；`cli` 不直接连数据库，只调 `store` 与 `account`（额度一组只调 `store` 与 `gateway`，不直接连库、不直接发 HTTP）；`internal/quota` 不 import 任何内部包，只做上游响应解析、金额折算、到期判断与设置校验；`gateway/quota.go` 是唯一发额度上游请求的地方；`account/quota.go` 是纯过滤与稳定排序，不读库、不发请求；`plugin` 不读数据库、不读宿主配置与环境变量，只读插件包自己的源文件；`pluginfetch` 只发 GitHub 归档下载请求，解压完就交差，不碰 manifest 与数据库；插件运行时唯一的网络出口是沙箱给它的 `lax.http.request`（白名单与上限都在 `plugin` 里判）；`plugin` 不 import 任何其它内部包，所以它谁都不依赖、只在标准库与 goja 之上，线协议名在它那里是字符串常量，取值与 `gateway` 的 `Protocol*` 一致；依赖方向是 `gateway`、`store`、`cli` → `plugin`，`cli` → `pluginfetch`。
+约束：`translate` 只做结构体到结构体的转换，不读环境、不发请求，便于用对拍用例覆盖；`gateway` 是唯一发上游厂商请求的地方（`account test` 的探活也走 `gateway.Probe`）；`cli` 不直接连数据库，只调 `store` 与 `account`（额度一组只调 `store` 与 `gateway`，不直接连库、不直接发 HTTP）；`internal/quota` 不 import 任何内部包，只做上游响应解析、金额折算、到期判断与设置校验；`gateway/quota.go` 是唯一发额度上游请求的地方；`account/quota.go` 是纯过滤与稳定排序，不读库、不发请求；`plugin` 不读数据库、不读宿主配置与环境变量，只读插件包自己的源文件；`pluginfetch` 只发 GitHub 归档下载请求，解压完就交差，不碰 manifest 与数据库；插件运行时唯一的网络出口是沙箱给它的 `lax.http.request`（白名单与上限都在 `plugin` 里判）；`plugin` 不 import 任何其它内部包，所以它谁都不依赖、只在标准库与 goja 之上，报文协议名在它那里是字符串常量，取值与 `gateway` 的 `Protocol*` 一致；依赖方向是 `gateway`、`store`、`cli` → `plugin`，`cli` → `pluginfetch`。
 
 包之间的依赖：`store` 为协议常量（`translate.ProtocolAnthropic`、`translate.ProtocolChat`、`translate.ProtocolResponses`、`translate.ProtocolGemini`、`translate.ProtocolSpeech`、`translate.ProtocolTranscriptions`）import `internal/translate`，只取常量，不调用编解码；`gateway`、`cli`、`account` 都经 `store` 与 `translate` 拿协议取值，不各自复制一份字符串。`store` 与 `cli` 还 import `internal/plugin`：前者用它的操作名与内置方言 ID 写 `model_operations` 与回填，后者用 `plugin.LoadDir`、`PluginDirHash` 与 `DefaultRegistry` 做安装与自检；`gateway` 用它的 `Dialect` 接口与注册表，不认识任何一家上游的语音形状。`cli` 的 `plugin install` / `plugin update` 用 `pluginfetch` 把 GitHub 来源落到临时目录，再交给 `plugin.LoadDir`；`pluginfetch` 不 import `plugin`，也不管安装。
 

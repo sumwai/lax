@@ -54,7 +54,7 @@ func tableRow(t *testing.T, out, name string) []string {
 }
 
 // TestProviderSystemOneRoute 钉住 --systemone 这条路：相对路径与整条地址两种写法都收，
-// provider ls 的 --json 与文本都带出它，--default-protocol systemone 与线协议全名同形。
+// provider ls 的 --json 与文本都带出它，--default-protocol systemone 与报文协议全名同形。
 func TestProviderSystemOneRoute(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
@@ -70,7 +70,7 @@ func TestProviderSystemOneRoute(t *testing.T) {
 		t.Fatalf("provider add --systemone 的输出 = %s，期望包含 %q", out, want)
 	}
 
-	// provider set 把默认协议补成 systemone：与线协议全名同形，一行就够。
+	// provider set 把默认协议补成 systemone：与报文协议全名同形，一行就够。
 	if code, _, stderr := run(t, "provider", "set", "typesafe", "--default-protocol", "systemone"); code != 0 {
 		t.Fatalf("provider set --default-protocol systemone 退出码 = %d，stderr = %s", code, stderr)
 	}

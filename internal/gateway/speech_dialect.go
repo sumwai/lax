@@ -14,7 +14,7 @@ import (
 // 语音请求按方言分发。
 //
 // 网关不再认识任何一家上游的语音形状：模型在 model_operations 里绑定一条方言，
-// 方言给出出站线协议。绑的是宿主的两条直通方言就原样转发，绑其它方言（插件方言，
+// 方言给出出站报文协议。绑的是宿主的两条直通方言就原样转发，绑其它方言（插件方言，
 // 以及把语音做成 chat 形状的 MiMo 内置方言）就由方言双向编解码。
 // 请求构成与响应解码都在 internal/plugin 的方言里，网关只管地址、凭据与记账。
 
@@ -22,10 +22,10 @@ import (
 // 只看语音两条入站：非语音入站的插件方言走 chatDialectApplies，两条路不能互相接上——
 // 语音的输入归一（文本、音频）与对话的报文补丁不是同一套。
 //
-// 判定不看方言的线协议是否等于入站：插件方言一律由它自己编请求、解响应，
-// 即使它与入站是同一条线协议（豆包的 TTS 就是 openai-speech 入站打自己的路径）。
+// 判定不看方言的报文协议是否等于入站：插件方言一律由它自己编请求、解响应，
+// 即使它与入站是同一条报文协议（豆包的 TTS 就是 openai-speech 入站打自己的路径）。
 // 宿主直接透传的只有两条语音直通方言（lax/openai-speech@1、lax/openai-transcriptions@1），
-// 它们的特征是宿主方言且线协议等于入站；MiMo 那两条也是宿主方言，但它们靠 Prepare/Decode
+// 它们的特征是宿主方言且报文协议等于入站；MiMo 那两条也是宿主方言，但它们靠 Prepare/Decode
 // 把语音做成 chat 的形状，因此仍走方言路径。
 func speechUsesDialect(inbound string, d plugin.Dialect) bool {
 	if d == nil || !voiceInbound(inbound) {
@@ -68,7 +68,7 @@ func (s *Server) speechRoute(a store.Account, inbound, model string) (string, pl
 	return wire, dialect, ""
 }
 
-// speechRouteFor 确认厂商声明了这条线协议的路由，返回它的路径。
+// speechRouteFor 确认厂商声明了这条报文协议的路由，返回它的路径。
 // 语音与 chat 两条出站都要求路由存在：地址与凭据头都按路由走。
 func (s *Server) speechRouteFor(provider, wire string) (string, string) {
 	route, ok, err := s.store.LookupProviderRoute(provider, wire)

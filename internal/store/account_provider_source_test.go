@@ -42,7 +42,7 @@ func accountColumns(t *testing.T, st *store.Store, table string) []string {
 
 // TestMigration0014MovesOrphanAddressToProvider 从 0013 升上来：
 // 先给 provider 不在 providers 表里的账号补一行厂商（地址取账号的 base_url，默认协议取账号的
-// protocol 且只认四条线协议），再把 accounts.base_url 与 accounts.protocol 两列删掉。
+// protocol 且只认四条报文协议），再把 accounts.base_url 与 accounts.protocol 两列删掉。
 // 已有厂商的 default_protocol 不被账号上的历史协议覆盖。
 func TestMigration0014MovesOrphanAddressToProvider(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "v13.db")
@@ -90,7 +90,7 @@ func TestMigration0014MovesOrphanAddressToProvider(t *testing.T) {
 		t.Fatalf("accounts 少了 provider 列，列清单 = %s", cols)
 	}
 
-	// 孤儿账号补出了厂商行：地址取最小的一份，默认协议取按账号名排序的第一条线协议。
+	// 孤儿账号补出了厂商行：地址取最小的一份，默认协议取按账号名排序的第一条报文协议。
 	self, err := st.GetProvider("selfco")
 	if err != nil {
 		t.Fatalf("孤儿账号没有补出厂商: %v", err)

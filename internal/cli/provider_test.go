@@ -896,7 +896,7 @@ func TestProviderAddUsageErrors(t *testing.T) {
 		if code != 2 {
 			t.Fatalf("退出码 = %d，期望 2", code)
 		}
-		// 错误文案给的是命令行写法，不是线协议名。
+		// 错误文案给的是命令行写法，不是报文协议名。
 		for _, want := range []string{"--default-protocol", "anthropic、openai、responses、gemini", "--default-protocol openai"} {
 			if !strings.Contains(stderr, want) {
 				t.Fatalf("stderr 应提到 %q: %s", want, stderr)
@@ -910,7 +910,7 @@ func TestProviderAddUsageErrors(t *testing.T) {
 }
 
 // TestProviderAddDefaultProtocol 覆盖 --default-protocol 的两种写法：
-// 命令行写法 openai 落到 openai-chat，线协议全名 openai-responses 也认；
+// 命令行写法 openai 落到 openai-chat，报文协议全名 openai-responses 也认；
 // 指不到这次声明的路由时 store 整笔拒绝，一条路由都不落库。
 func TestProviderAddDefaultProtocol(t *testing.T) {
 	sandbox(t)
@@ -1162,7 +1162,7 @@ func TestProviderSetUpdatesOnlyGivenFields(t *testing.T) {
 		t.Fatalf("只改 --models-path 时 = %+v", got)
 	}
 
-	// 改默认协议，命令行写法与线协议全名都认。
+	// 改默认协议，命令行写法与报文协议全名都认。
 	code, out, stderr = run(t, "provider", "set", "mine", "--default-protocol", "anthropic", "--json")
 	if code != 0 {
 		t.Fatalf("provider set 退出码 = %d，stderr = %s", code, stderr)

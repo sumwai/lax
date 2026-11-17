@@ -333,7 +333,7 @@ func TestProbeModelTriesEveryCandidate(t *testing.T) {
 }
 
 // TestProbeModelRouteProtocolsOption 确认 resolver 可以注入：注入后以它给的候选为准，
-// 出现线协议以外的值直接报错，不发上游请求也不写请求记录。
+// 出现报文协议以外的值直接报错，不发上游请求也不写请求记录。
 func TestProbeModelRouteProtocolsOption(t *testing.T) {
 	t.Run("按注入的候选", func(t *testing.T) {
 		f := newFixture(t)

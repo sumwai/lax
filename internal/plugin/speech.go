@@ -40,7 +40,7 @@ func (d passthroughDialect) ID() string           { return d.id }
 func (d passthroughDialect) Operation() string    { return d.op }
 func (d passthroughDialect) UpstreamWire() string { return d.wire }
 
-// Prepare 与 Decode 不会被调用：同协议直通与宿主实现线协议的请求都由宿主自己处理。
+// Prepare 与 Decode 不会被调用：同协议直通与宿主实现报文协议的请求都由宿主自己处理。
 func (d passthroughDialect) Prepare(Input) (Plan, error) {
 	return Plan{}, fmt.Errorf("方言 %s 由宿主直接编解码，不该经方言构造", d.id)
 }

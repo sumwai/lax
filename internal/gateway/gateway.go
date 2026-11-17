@@ -31,17 +31,17 @@ const (
 	ProtocolChat      = translate.ProtocolChat
 	ProtocolResponses = translate.ProtocolResponses
 	ProtocolGemini    = translate.ProtocolGemini
-	// ProtocolSystemOne 是第五条线协议：一个 state 加一组 questions，不出文本、没有流式。
+	// ProtocolSystemOne 是第五条报文协议：一个 state 加一组 questions，不出文本、没有流式。
 	// 它只与自己互通：入站是 systemone 才能出站 systemone，其它协议进不来也出不去，
 	// 因为它没有对话消息序列，转不成中间表示。
 	ProtocolSystemOne = translate.ProtocolSystemOne
-	// ProtocolEmbeddings 是第六条线协议：只做同协议直通，没有流式，也不进中间表示。
+	// ProtocolEmbeddings 是第六条报文协议：只做同协议直通，没有流式，也不进中间表示。
 	// 向量化报文只有输入与向量结果，没有对话消息序列，与任何对话协议都换不过去。
 	ProtocolEmbeddings = translate.ProtocolEmbeddings
-	// ProtocolSpeech 是第七条线协议（文本转语音）：入站是 JSON、响应是音频字节，
+	// ProtocolSpeech 是第七条报文协议（文本转语音）：入站是 JSON、响应是音频字节，
 	// 只做同协议直通。
 	ProtocolSpeech = translate.ProtocolSpeech
-	// ProtocolTranscriptions 是第八条线协议（语音转文本）：入站是 multipart/form-data、
+	// ProtocolTranscriptions 是第八条报文协议（语音转文本）：入站是 multipart/form-data、
 	// 响应是 JSON 或 SSE，同样只做同协议直通。
 	ProtocolTranscriptions = translate.ProtocolTranscriptions
 
@@ -64,7 +64,7 @@ type Options struct {
 	// 次序排好的候选（nil 表示没有意见）。不注入时用该厂商在 provider_routes 里声明过的协议，
 	// 厂商一个路由都没声明时退回 anthropic、openai-chat、openai-responses 三种全试。
 	// 厂商默认协议与库里已发现的协议由 routeProtocolOrder 排在候选前面。
-	// 取值必须是线协议，出现别的值直接报错：编码器遇见未知协议会报错，静默落进 chat 分支更糟，
+	// 取值必须是报文协议，出现别的值直接报错：编码器遇见未知协议会报错，静默落进 chat 分支更糟，
 	// 那会把一条配置错误变成对错误地址的上游调用。
 	RouteProtocols func(provider, model string) []string
 	// Sleep 是一次同账号重试前的等待。不注入时用可被 ctx 取消的定时器；测试替换成记录器，
@@ -220,7 +220,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"accounts": len(accounts),
 		"enabled":  enabled,
 		"models":   len(models),
-		// 协议清单只从 store.WireProtocols 取：新加一条线协议时这里自动跟上，
+		// 协议清单只从 store.WireProtocols 取：新加一条报文协议时这里自动跟上，
 		// 不让一份手写清单变成第二个事实来源。
 		"inbound":  store.WireProtocols(),
 		"outbound": store.WireProtocols(),
@@ -555,7 +555,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		// 在这里另算一遍优先级，两处迟早对不上，转发会打到一条账号根本没用过的路由上。
 		// 有效价格与上下文长度同理只从 store.EffectiveModels 取，网关不重算优先级。
 		// 向量化是例外：它只能同协议直通，协议由厂商声明的那一条向量化路由决定，
-		// 不按模型的有效协议猜——对话协议的有效协议与向量化的线协议不是同一回事。
+		// 不按模型的有效协议猜——对话协议的有效协议与向量化的报文协议不是同一回事。
 		var outbound string
 		switch {
 		case embedding:
@@ -608,7 +608,7 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 			s.logf("账号 %s 的模型 %s 走 %s 协议，与入站协议 %s 不相通", cand.Name, req.Model, outbound, inbound)
 			continue
 		}
-		// 方言声明的线协议必须与这次的有效出站协议一致：方言按 Input.Wire 打补丁，
+		// 方言声明的报文协议必须与这次的有效出站协议一致：方言按 Input.Wire 打补丁，
 		// 两者不一致时它扣的字段会落在另一条协议的报文上，报错比默默发出去强。
 		if dialect != nil && dialect.UpstreamWire() != outbound {
 			msg := fmt.Sprintf("模型 %s 绑定的方言 %s 声明走 %s，但这个模型的有效出站协议是 %s："+
@@ -981,7 +981,7 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound str
 	case speechUsesDialect(inbound, dialect):
 		// 语音入站 + 插件方言：入站形状解成 Input，上游请求由方言从零构建。
 		// 能力校验已经在上游调用之前做过（见 checkSpeechInbound）。
-		// 这一支必须排在转写直通之前：豆包 ASR 的出站线协议与入站同为
+		// 这一支必须排在转写直通之前：豆包 ASR 的出站报文协议与入站同为
 		// openai-transcriptions，但上游要的是 JSON，不是改写后的 multipart。
 		body, planHeaders, err = s.encodeSpeechDialect(dialect, inbound, raw, req.Model, inboundHeaders.Get("Content-Type"))
 	case outbound == ProtocolTranscriptions && inboundHeaders != nil:
@@ -1010,7 +1010,7 @@ func (s *Server) buildRequest(ctx context.Context, a store.Account, outbound str
 	}
 
 	if chatDialectApplies(inbound, dialect) {
-		// 插件方言在宿主编好的报文上再动一次：宿主负责编出这条线协议的合法报文，
+		// 插件方言在宿主编好的报文上再动一次：宿主负责编出这条报文协议的合法报文，
 		// 方言只补它认得的那几个字段（例如多一个思考开关），两个职责不混。
 		var path string
 		var perr error

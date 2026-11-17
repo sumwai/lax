@@ -296,7 +296,7 @@ type pluginInstallPlan struct {
 	Enabled     bool                 `json:"enabled"`
 }
 
-// pluginRoute 是一家厂商要打的端点：哪条方言、哪种线协议、哪个路径。
+// pluginRoute 是一家厂商要打的端点：哪条方言、哪种报文协议、哪个路径。
 type pluginRoute struct {
 	Dialect  string
 	Protocol string
@@ -307,8 +307,8 @@ type pluginRoute struct {
 //
 // 优先级只有两级：manifest 里写了 routes 就以它为准（顺序与内容原样落库），
 // 没写才按方言推导——插件方言按它的 request.path，宿主方言按 plugin.DefaultRoutePath，
-// hook 方言没有声明式 request，也只能按线协议的默认路径建。推导时同一家厂商的两条方言落在
-// 同一条线协议上只留第一条，因为地址按厂商路由走，多建的路由没地方生效。
+// hook 方言没有声明式 request，也只能按报文协议的默认路径建。推导时同一家厂商的两条方言落在
+// 同一条报文协议上只留第一条，因为地址按厂商路由走，多建的路由没地方生效。
 func dialectRoutes(pkg plugin.Plugin, decl plugin.ProviderDecl) []pluginRoute {
 	if len(decl.Routes) > 0 {
 		out := make([]pluginRoute, 0, len(decl.Routes))
@@ -365,7 +365,7 @@ func derivedDialectRoutes(pkg plugin.Plugin, providerID string) []pluginRoute {
 			if d.Request != nil {
 				path = d.Request.Path
 			} else {
-				// hook 方言不写声明式 request，端点只能按线协议的默认路径来；
+				// hook 方言不写声明式 request，端点只能按报文协议的默认路径来；
 				// 真正发去哪由每次 Plan 的 path 决定。
 				path = plugin.DefaultRoutePath(wire)
 			}

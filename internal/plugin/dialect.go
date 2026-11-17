@@ -33,7 +33,7 @@ func DecodeDialectFile(file string, data []byte) (DialectFile, error) {
 
 // wireOperations 是第一版放行的 wire × operation 组合。
 //
-// speech.* 两条除自己的语音线协议外，也允许 openai-chat：有些上游把 TTS/ASR 做成 chat
+// speech.* 两条除自己的语音报文协议外，也允许 openai-chat：有些上游把 TTS/ASR 做成 chat
 // completions 的一种形状（MiMo），方言是这条形状的唯一描述，语音入站仍然只归 speech 操作。
 var wireOperations = []struct{ wire, operation string }{
 	{WireAnthropic, OpChatComplete},
@@ -112,7 +112,7 @@ func ValidateDialectDecl(decl DialectDecl) error {
 		return fmt.Errorf("operation 是 %q：宿主认识的操作是 %s", decl.Operation, strings.Join(supportedOperationNames, "、"))
 	}
 	if !KnownWire(decl.UpstreamWire) {
-		return fmt.Errorf("upstream_wire 是 %q：宿主认识的线协议是 %s", decl.UpstreamWire, strings.Join(knownWireNames(), "、"))
+		return fmt.Errorf("upstream_wire 是 %q：宿主认识的报文协议是 %s", decl.UpstreamWire, strings.Join(knownWireNames(), "、"))
 	}
 	if !pairAllowed(decl.UpstreamWire, decl.Operation) {
 		return fmt.Errorf("upstream_wire %s 不承载 %s：允许的组合是 %s",

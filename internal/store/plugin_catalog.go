@@ -24,7 +24,7 @@ type PluginCatalog struct {
 	Provider   string          // 厂商 ID，插件内唯一
 	Name       string          // 展示名，落库到 providers.note
 	BaseURL    string          // 厂商地址，http(s) 绝对地址
-	AuthHeader string          // 凭据头名，空表示按线协议推导
+	AuthHeader string          // 凭据头名，空表示按报文协议推导
 	AuthScheme string          // 凭据写法：raw、bearer 或 bearer-semicolon
 	ModelsPath string          // 模型列表接口路径，可空
 	Routes     []ProviderRoute // 插件声明的路由（Protocol + Path）
@@ -156,7 +156,7 @@ func applyCatalogProviderTx(tx *gorm.DB, pluginID, provider, name, base, authHea
 		return fmt.Errorf("厂商 %s 已经存在，地址是 %s，插件声明的是 %s：改插件 manifest 里的 base_url 与它对齐，或先 lax provider rm %s 再把厂商交给插件管（删厂商会一并删掉它的路由与模型目录）",
 			provider, row.BaseURL, base, provider)
 	}
-	// 凭据头只在插件声明了它的时候参与比对：没声明表示「按线协议推导」，不改已有设置。
+	// 凭据头只在插件声明了它的时候参与比对：没声明表示「按报文协议推导」，不改已有设置。
 	if authHeader != "" && row.AuthHeader != "" &&
 		(row.AuthHeader != authHeader || row.AuthScheme != authScheme) {
 		return fmt.Errorf("厂商 %s 的凭据头已经是 %s（写法 %s），插件声明的是 %s（写法 %s）：改插件 manifest 里的 auth 与它对齐，或改库里的声明（lax provider set %s --auth-header %s --auth-scheme %s）",
@@ -416,7 +416,7 @@ func deletePluginProvidersTx(tx *gorm.DB, pluginID string) error {
 // pluginRemovedReason 是插件删除时停用账号写进 last_error 的话。
 const pluginRemovedReason = "插件已删除，厂商随之下线；重新安装插件后 account enable 即可恢复"
 
-// routeSetFlag 把线协议换成 `provider set` 上对应的 flag 名，错误文案据此给出能直接敲的命令。
+// routeSetFlag 把报文协议换成 `provider set` 上对应的 flag 名，错误文案据此给出能直接敲的命令。
 // 不复用 protocolFlagName：那份映射只覆盖算默认协议用得上的几条，语音两条在命令面上的 flag
 // 是 --speech 与 --transcriptions，而不是 --openai-speech。
 func routeSetFlag(protocol string) string {

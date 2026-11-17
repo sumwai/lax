@@ -8,7 +8,7 @@
 > - 第 4 节：`plugin` 命令组的子命令、参数、行为、输出列与 `--json` 字段（`install` 的 `--trust` 判定表，`update`/`rollback`/`verify`/`logs`/`reload`/`config` 六个生命周期子命令）；`model capability add|set` 的 `--dialect` 与 `model dialect ls|set|unset`。
 > - 5.7：模型目录的插件来源与按操作的方言绑定。
 > - 5.8：`providers.plugin_id`、插件路由的建立方式与冲突规则。
-> - 5.16：语音改成「操作 + 方言」——绑定来源、同协议直通与 chat 方言两条路、MiMo 迁移、启动回填、两种 400、声明式映射的边界；十条内置方言（四条语音加六条宿主线协议方言），对话上游靠引用宿主方言就能装起来。
+> - 5.16：语音改成「操作 + 方言」——绑定来源、同协议直通与 chat 方言两条路、MiMo 迁移、启动回填、两种 400、声明式映射的边界；十条内置方言（四条语音加六条宿主报文协议方言），对话上游靠引用宿主方言就能装起来。
 > - 5.17：插件运行时——`moejs` JS 沙箱的执行模型（每次 prepare/decode 新建 Runtime、同一段流复用、超时与中断、受限 ESM、注入的 `lax` API 与不注入的全局、字节闸门）、对话与流式方言（`Plan.Body`/`Plan.JSON`/`Plan.Path`、`ResultJSON` 是出站形状、`StreamDialect` 事件表）、生命周期（版本指针、`reload` 与 `SIGHUP`、pid 文件）与审计/日志。
 > - 第 6 节：`plugins`、`plugin_versions`、`plugin_options`、`model_operations`、`plugin_audit`、`plugin_logs` 六张表与 `providers.plugin_id`；建表仍只走 `AutoMigrate`，没有迁移文件与版本号。
 > - 第 7 节：M17 与 M18 里程碑，以及「已知未做」的边界清单（含沙箱没有内存硬上限、中断打不断在途原生调用）。
@@ -58,8 +58,8 @@ lax 现在把厂商差异写在 Go 代码里。每加一个上游，通常要改
 | 决策 | 结论 |
 | --- | --- |
 | 插件边界 | 语义操作 Operation，不是 HTTP 路径或厂商 JSON |
-| 线协议 | Wire Protocol 是宿主属性，不是插件操作名 |
-| 方言 | Dialect 是操作与上游线协议之间的版本化描述，不是第二套执行层 |
+| 报文协议 | Wire Protocol 是宿主属性，不是插件操作名 |
+| 方言 | Dialect 是操作与上游报文协议之间的版本化描述，不是第二套执行层 |
 | 数据面 I/O | 插件返回 `RequestPlan`，由宿主发送；插件不直接发上游请求 |
 | 控制面 I/O | 模型列表、探活、刷新等通过宿主受限的 `lax.http` |
 | 默认运行时 | `moejs` 沙箱；纯声明式插件不执行代码 |
@@ -315,7 +315,7 @@ system.decide@1
 
 规则：
 
-- operation 名称不包含 `openai`、`anthropic`、`gemini` 这类线协议名。
+- operation 名称不包含 `openai`、`anthropic`、`gemini` 这类报文协议名。
 - `speech.synthesize@1` 与 `openai-speech` 不是同义词。
 - 新增可选输入字段是次版本兼容；改变必填字段、结果类型或语义必须升主版本。
 - 同一次请求只属于一个 operation。
@@ -418,7 +418,7 @@ acquire -> call hook -> release/releaseCallData -> pool
 | `on_event(ctx)` | 修改流式事件 |
 | `on_usage(ctx)` | 只读观察用量行 |
 
-`transform` 只能处理语义层，不能直接改上游线协议，也不能改模型、账号和计费口径。
+`transform` 只能处理语义层，不能直接改上游报文协议，也不能改模型、账号和计费口径。
 
 ### 10.3 调用顺序
 
@@ -930,7 +930,7 @@ account
 - `openai-speech`：音频字节或 `speech.audio.delta`/`speech.audio.done`。
 - `openai-transcriptions`：文本、JSON 或 SSE 转写事件。
 
-插件不生成这些线协议帧，只生成语义事件。
+插件不生成这些报文协议帧，只生成语义事件。
 
 ## 15 错误模型
 
@@ -1046,7 +1046,7 @@ account
 
 Dialect 是 manifest 引用的声明文件，不是第二套运行时。它只描述：
 
-- 这个 operation 使用哪种上游线协议和传输方式。
+- 这个 operation 使用哪种上游报文协议和传输方式。
 - 请求和响应由宿主原生处理，还是由插件 hook 处理。
 - 该 dialect 的默认值、限制和兼容性要求。
 - 声明式 dialect 的有限字段映射。
@@ -1120,7 +1120,7 @@ Dialect 是 manifest 引用的声明文件，不是第二套运行时。它只�
 
 - `id` 全局唯一，建议 `<反向域名>/<名称>@<主版本>`。
 - `operation` 必须精确匹配 Operation ABI。
-- `upstream_wire` 只能取宿主认识的线协议；它用于默认头、流式解码和诊断，不决定客户端协议。
+- `upstream_wire` 只能取宿主认识的报文协议；它用于默认头、流式解码和诊断，不决定客户端协议。
 - `transport.streaming` 为 `none`、`bytes`、`sse` 或 `jsonl`。
 - `implementation.prepare` 与 `implementation.decode` 为 `hook` 或 `declarative`；一个 dialect 可以请求走 hook、响应走声明式，反过来也可以。
 - 同一个 dialect 只能属于一个 operation；同一个模型同一 operation 只能绑定一个 dialect。

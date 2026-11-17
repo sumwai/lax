@@ -146,7 +146,7 @@ func TestProbeModelExplicitProtocolOnly(t *testing.T) {
 	}
 }
 
-// TestProbeModelExplicitProtocolRejectsUnknown 钉住 `--protocol` 的校验：不是线协议时报错、
+// TestProbeModelExplicitProtocolRejectsUnknown 钉住 `--protocol` 的校验：不是报文协议时报错、
 // 不发上游请求，带出的结论标 Undecided（调用方不拿它写可达性）。
 func TestProbeModelExplicitProtocolRejectsUnknown(t *testing.T) {
 	f := newFixture(t)
@@ -162,7 +162,7 @@ func TestProbeModelExplicitProtocolRejectsUnknown(t *testing.T) {
 	}
 	for _, want := range []string{"cohere", gateway.ProtocolSystemOne} {
 		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("错误 = %v，期望包含 %q（列出可用的线协议）", err, want)
+			t.Fatalf("错误 = %v，期望包含 %q（列出可用的报文协议）", err, want)
 		}
 	}
 	if !res.Undecided || res.Access != "" {

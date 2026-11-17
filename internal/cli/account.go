@@ -1138,7 +1138,7 @@ func cmdModelProbe(e *Env, args []string) error {
 	}
 
 	if flagWasSet(fs, "protocol") && strings.TrimSpace(*protocolFlag) == "" {
-		return usagef("--protocol 传了空值：要么写一条线协议（例如 systemone），要么整个去掉；去掉时按已发现协议、目录声明与厂商默认协议排候选\n%s", modelProbeUsage)
+		return usagef("--protocol 传了空值：要么写一条报文协议（例如 systemone），要么整个去掉；去掉时按已发现协议、目录声明与厂商默认协议排候选\n%s", modelProbeUsage)
 	}
 	protocol, err := protocolFromCLIName(*protocolFlag, "--protocol", "lax model probe --account ts --model typesafe/jev --protocol systemone")
 	if err != nil {

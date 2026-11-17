@@ -106,7 +106,7 @@ func (r *Registry) unregister(id string) {
 	delete(r.dialects, id)
 }
 
-// checkDialectShape 只查注册表自己依赖的几件事：ID 非空、操作与线协议是宿主认识的。
+// checkDialectShape 只查注册表自己依赖的几件事：ID 非空、操作与报文协议是宿主认识的。
 func checkDialectShape(d Dialect) error {
 	return checkDialectFields(d.ID(), d.Operation(), d.UpstreamWire())
 }
@@ -120,7 +120,7 @@ func checkDialectFields(id, operation, wire string) error {
 	case !KnownOperation(operation):
 		return fmt.Errorf("方言 %q 的 operation %q 不是宿主认识的操作", id, operation)
 	case !KnownWire(wire):
-		return fmt.Errorf("方言 %q 的 upstream_wire %q 不是宿主认识的线协议", id, wire)
+		return fmt.Errorf("方言 %q 的 upstream_wire %q 不是宿主认识的报文协议", id, wire)
 	}
 	return nil
 }

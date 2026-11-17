@@ -86,7 +86,7 @@ type providerRow struct {
 	DefaultProtocol string `gorm:"column:default_protocol;not null;default:''"`
 	ModelsPath      string `gorm:"column:models_path;not null;default:''"`
 	// AuthHeader 与 AuthScheme 是凭据头的声明：头名小写，scheme 取 raw、bearer、
-	// bearer-semicolon。两项都为空表示按线协议推导（见 gateway.setAuth）。
+	// bearer-semicolon。两项都为空表示按报文协议推导（见 gateway.setAuth）。
 	AuthHeader string `gorm:"column:auth_header;size:191;not null;default:''"`
 	AuthScheme string `gorm:"column:auth_scheme;size:32;not null;default:''"`
 	// Origin 是 builtin、plugin 或 manual。旧库升上来先留空，由 backfillProviderOrigins 回填；
@@ -97,7 +97,7 @@ type providerRow struct {
 
 func (providerRow) TableName() string { return "providers" }
 
-// providerRouteRow 是一行厂商路由：某个线协议落在哪个地址上。
+// providerRouteRow 是一行厂商路由：某个报文协议落在哪个地址上。
 type providerRouteRow struct {
 	Provider   string `gorm:"column:provider;size:191;primaryKey"`
 	Protocol   string `gorm:"column:protocol;size:191;primaryKey"`
@@ -516,7 +516,7 @@ func loadBuiltinCatalog() ([]seedProvider, []seedRoute) {
 			panic(fmt.Sprintf("内置路由引用了不存在的厂商 %s", r.Provider))
 		}
 		if !IsWireProtocol(r.Protocol) {
-			panic(fmt.Sprintf("内置厂商 %s 的路由协议 %q 不是宿主认识的线协议", r.Provider, r.Protocol))
+			panic(fmt.Sprintf("内置厂商 %s 的路由协议 %q 不是宿主认识的报文协议", r.Provider, r.Protocol))
 		}
 		if r.Path == "" {
 			panic(fmt.Sprintf("内置厂商 %s 的 %s 路由缺少 path", r.Provider, r.Protocol))

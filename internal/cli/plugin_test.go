@@ -672,7 +672,7 @@ func TestPluginInstallHookPlugin(t *testing.T) {
 	if err != nil || len(versions) != 1 || versions[0].Runtime != "moejs" {
 		t.Fatalf("版本行 = %+v，err = %v，期望 runtime 是 moejs", versions, err)
 	}
-	// hook 方言没有声明式 request，路由按线协议的默认端点建。
+	// hook 方言没有声明式 request，路由按报文协议的默认端点建。
 	routes, err := db.ProviderRoutes("hooktts")
 	if err != nil || len(routes) != 1 || routes[0].Protocol != "openai-speech" || routes[0].Path != "/v1/audio/speech" {
 		t.Fatalf("路由 = %+v，err = %v", routes, err)

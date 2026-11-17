@@ -199,7 +199,7 @@ func headerScope(protocol string) string {
 	return protocol
 }
 
-// normalizeHeaderProtocol 校验声明的作用范围：空串（整个厂商）或五条线协议之一。
+// normalizeHeaderProtocol 校验声明的作用范围：空串（整个厂商）或五条报文协议之一。
 // 别的值一律拒绝：写成 "openai" 这类命令行别名会让这条头永远匹配不上真实协议，
 // 症状是「明明声明了却发不出去」。
 func normalizeHeaderProtocol(protocol string) (string, error) {
@@ -208,7 +208,7 @@ func normalizeHeaderProtocol(protocol string) (string, error) {
 		return "", nil
 	}
 	if !IsWireProtocol(protocol) {
-		return "", fmt.Errorf("协议 %q 不是线协议：只能是空串（整个厂商）或 %s", protocol, wireProtocolNames())
+		return "", fmt.Errorf("协议 %q 不是报文协议：只能是空串（整个厂商）或 %s", protocol, wireProtocolNames())
 	}
 	return protocol, nil
 }

@@ -152,7 +152,7 @@ func cmdUsage(e *Env, args []string) error {
 	return nil
 }
 
-// resolveInboundProtocol 把命令行上的简写换回协议名。四条线协议都能当入站用
+// resolveInboundProtocol 把命令行上的简写换回协议名。四条报文协议都能当入站用
 // （gemini 的两条入站路径由它的前缀与动作后缀区分）。
 func resolveInboundProtocol(name string) (string, bool) {
 	switch name {
@@ -366,7 +366,7 @@ func cmdCall(e *Env, args []string) error {
 	}
 	inbound, ok := resolveInboundProtocol(*protocol)
 	if !ok {
-		// systemone 是第五条线协议，但它不是对话：一条决策请求由一个 state 加一组问题组成，
+		// systemone 是第五条报文协议，但它不是对话：一条决策请求由一个 state 加一组问题组成，
 		// 没有提示词可发。这是「这个命令接不了它」，不是用法写歪了，
 		// 所以走运行失败（退出码 1）并直接指向真正该用的命令。
 		if strings.TrimSpace(*protocol) == gateway.ProtocolSystemOne {

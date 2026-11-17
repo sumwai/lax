@@ -165,7 +165,7 @@ func TestProviderAuthHeader(t *testing.T) {
 	})
 }
 
-// headerDialect 是「在自己的线协议上编请求」的插件方言：入站是 openai-speech，它也声明
+// headerDialect 是「在自己的报文协议上编请求」的插件方言：入站是 openai-speech，它也声明
 // openai-speech，但路径、请求体与请求头都由它自己给。豆包的 TTS 就是这个形状。
 type headerDialect struct{}
 
@@ -195,7 +195,7 @@ func (headerDialect) Decode(in plugin.Input, resp plugin.Response) (plugin.Resul
 	return plugin.Result{Kind: plugin.ResultJSON, JSON: []byte(`{"audio":"` + payload.Audio + `"}`)}, nil
 }
 
-// TestSpeechHookDialectOwnWire 钉住两件事：语音方言可以在自己的线协议上编请求（不再要求
+// TestSpeechHookDialectOwnWire 钉住两件事：语音方言可以在自己的报文协议上编请求（不再要求
 // upstream_wire 必须是 openai-chat），以及 Plan.Headers 生效但覆盖不了凭据头。
 func TestSpeechHookDialectOwnWire(t *testing.T) {
 	f := newFixture(t)
