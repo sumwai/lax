@@ -389,17 +389,18 @@ func cmdAccountLs(e *Env, args []string) error {
 			// protocol 与 base_url 都是厂商行派生的只读值：协议取厂商的有效默认协议
 			// 协议取厂商的有效默认协议，地址取厂商的 base_url，厂商行不在时都是空串。
 			out = append(out, map[string]any{
-				"name":             acc.Name,
-				"provider":         acc.Provider,
-				"protocol":         acc.Protocol,
-				"base_url":         acc.BaseURL,
-				"models":           acc.Models,
-				"priority":         acc.Priority,
-				"enabled":          acc.Enabled,
-				"status":           accountStatus(acc, counts[acc.ID]),
-				"cooling_models":   counts[acc.ID].Cooling,
-				"next_cooldown_ms": counts[acc.ID].NextCooldownMS,
-				"last_error":       acc.LastError,
+				"name":              acc.Name,
+				"provider":          acc.Provider,
+				"protocol":          acc.Protocol,
+				"base_url":          acc.BaseURL,
+				"models":            acc.Models,
+				"priority":          acc.Priority,
+				"enabled":           acc.Enabled,
+				"status":            accountStatus(acc, counts[acc.ID], now),
+				"cooldown_until_ms": acc.CooldownUntilMS,
+				"cooling_models":    counts[acc.ID].Cooling,
+				"next_cooldown_ms":  counts[acc.ID].NextCooldownMS,
+				"last_error":        acc.LastError,
 				// 与文本输出的「N 可用 / M 已登记」同一组计数：两个数都来自 account_models，
 				// usable 数 access='allowed' 的行，synced 数全部行。
 				"models_usable": c.Usable,
@@ -425,7 +426,7 @@ func cmdAccountLs(e *Env, args []string) error {
 			protocolCell(acc.Protocol, counts[acc.ID].Protocols),
 			modelsCell(counts[acc.ID]),
 			fmt.Sprintf("%d", acc.Priority),
-			accountStatus(acc, counts[acc.ID]),
+			accountStatus(acc, counts[acc.ID], now),
 		})
 	}
 	fmt.Fprint(e.Stdout, renderTable([]string{"名称", "厂商", "地址", "协议", "模型", "优先级", "状态"}, rows))
@@ -528,9 +529,15 @@ func modelsCell(c modelCount) string {
 	return fmt.Sprintf("%d 可用 / %d 已登记", c.Usable, c.Total)
 }
 
-func accountStatus(acc store.Account, c modelCount) string {
+// accountStatus 是 account ls 的状态列，优先级固定：
+// 停用 > 账号级冷却 > 账号-模型冷却 > 正常。账号级冷却来自失败处理策略的
+// --cooldown（没带 --model），会挡住整个账号；模型冷却只影响对应模型。
+func accountStatus(acc store.Account, c modelCount, now time.Time) string {
 	if !acc.Enabled {
 		return "停用"
+	}
+	if acc.CooldownUntilMS > now.UnixMilli() {
+		return "账号冷却中（还剩 " + routePolicyRemainingText(acc.CooldownUntilMS, now) + "）"
 	}
 	if c.Cooling > 0 {
 		return fmt.Sprintf("%d 个模型冷却", c.Cooling)
@@ -602,7 +609,7 @@ func cmdAccountTest(e *Env, args []string) error {
 	}
 
 	if e.JSON {
-		if err := e.printJSON(map[string]any{
+		payload := map[string]any{
 			"account": res.Account,
 			// stage 是判定成败的那一步：两段都跑到时是 call（凭据），列表接口自己给出结论时是 models。
 			"stage":   res.Stage,
@@ -620,7 +627,13 @@ func cmdAccountTest(e *Env, args []string) error {
 				"latency": res.List.Latency.String(),
 				"message": res.List.Message,
 			},
-		}); err != nil {
+		}
+		// 没命中策略时不加这两个键，旧输出形状保持不变；命中时把来源、id、名称与动作带给脚本。
+		if res.Policy != nil {
+			payload["policy"] = res.Policy
+			payload["policy_action"] = res.PolicyAction
+		}
+		if err := e.printJSON(payload); err != nil {
 			return err
 		}
 	} else {
@@ -643,12 +656,30 @@ func cmdAccountTest(e *Env, args []string) error {
 			res.Message,
 		}}
 		fmt.Fprint(e.Stdout, renderTable([]string{"账号", "状态", "HTTP", "耗时", "上游模型数", "备注"}, rows))
+		if res.Policy != nil {
+			fmt.Fprintf(e.Stdout, "命中策略：%s（%s）\n", probePolicyDisplay(res.Policy), res.PolicyAction)
+		}
 	}
 
 	if !res.OK {
 		return fmt.Errorf("账号 %s 探活失败（%s，%d）：%s", res.Account, probeStageLabel(res.Stage), res.Status, res.Message)
 	}
 	return nil
+}
+
+// probePolicyDisplay 是 account test 人读输出里命中规则的称呼：
+// 内置规则用它的名字，用户规则带 id 与备注，与 gateway 写进错误里的说法一致。
+func probePolicyDisplay(p *gateway.ProbePolicy) string {
+	if p == nil {
+		return ""
+	}
+	if p.Source == account.FailureSourceBuiltin {
+		return p.Name
+	}
+	if strings.TrimSpace(p.Name) != "" {
+		return fmt.Sprintf("用户规则 #%d（%s）", p.ID, p.Name)
+	}
+	return fmt.Sprintf("用户规则 #%d", p.ID)
 }
 
 // probeStageLabel 把阶段标识翻成给人看的说法：备注与错误文案里说清结论出自哪一步。

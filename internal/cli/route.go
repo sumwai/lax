@@ -18,11 +18,12 @@ var routeSubs = []groupItem{
 	{"unset", "删除一条策略，回落到默认或内置默认"},
 	{"account", "设置账号权重：ls / set / unset"},
 	{"explain", "预演一次选号，不请求上游、不写记录"},
+	{"policy", "维护上游失败处理策略：ls / show / add / set / unset / rm / enable / disable / test"},
 }
 
 func cmdRoute(e *Env, args []string) error {
 	if isHelpRequest(args) || len(args) == 0 {
-		printGroupHelp(e.Stdout, "route", "管理选号策略与账号权重", routeSubs)
+		printGroupHelp(e.Stdout, "route", "管理选号策略、账号权重与失败处理", routeSubs)
 		return nil
 	}
 	switch args[0] {
@@ -38,8 +39,10 @@ func cmdRoute(e *Env, args []string) error {
 		return cmdRouteAccount(e, args[1:])
 	case "explain":
 		return cmdRouteExplain(e, args[1:])
+	case "policy":
+		return cmdRoutePolicy(e, args[1:])
 	default:
-		return usagef("未知子命令 %q，可用：ls | show | set | unset | account | explain\n用 lax route --help 查看子命令", args[0])
+		return usagef("未知子命令 %q，可用：ls | show | set | unset | account | explain | policy\n用 lax route --help 查看子命令", args[0])
 	}
 }
 

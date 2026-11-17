@@ -23,6 +23,14 @@ const (
 	ProbeStageCall   = "call"
 )
 
+// ProbePolicy 是这次探活命中的失败处理策略来源，供 `account test` 的人类输出与 `--json` 使用。
+// 内置规则没有库里的 id（ID 为 0），用户规则带 id 与备注；Name 为空时调用方显示兜底称呼。
+type ProbePolicy struct {
+	Source string `json:"source"`
+	ID     int64  `json:"id"`
+	Name   string `json:"name"`
+}
+
 // ProbeStep 是一段探活的结论。
 type ProbeStep struct {
 	// Stage 是这一段的名字：ProbeStageModels 或 ProbeStageCall。
@@ -44,6 +52,10 @@ type ProbeStep struct {
 	// 结论取这一步时冷却按连接层那一档算（2 秒起）：连不上多半是本机网络或中转抖动；
 	// 列表那一段只退回最小调用，不打冷却。
 	Transport bool
+	// Policy 是这一步命中的失败处理策略（来源、id、名称）；没命中时为 nil。
+	// PolicyAction 是动作文案，例如「永久停用账号」「账号冷却 30m」「只换号，不改状态」。
+	Policy       *ProbePolicy `json:"policy,omitempty"`
+	PolicyAction string       `json:"policy_action,omitempty"`
 }
 
 // ProbeResult 是一次探活的结果。主结论（Stage、Status、OK、Latency、Message）取模型调用那一段：
@@ -59,7 +71,10 @@ type ProbeResult struct {
 	Latency     time.Duration
 	Message     string
 	OK          bool
-	List        ProbeStep
+	// Policy 与 PolicyAction 取判定那一步命中的策略；没命中时为空。
+	Policy       *ProbePolicy `json:"policy,omitempty"`
+	PolicyAction string       `json:"policy_action,omitempty"`
+	List         ProbeStep
 }
 
 // probeFallbackModel 是探活最小调用的最后一个模型名候选：账号没有任何 `access='allowed'` 的模型、
@@ -91,12 +106,14 @@ func (s *Server) Probe(ctx context.Context, a store.Account) (ProbeResult, error
 // resultFromStep 把一段的结论摊成 ProbeResult 的主结论。
 func resultFromStep(accountName string, step ProbeStep) ProbeResult {
 	return ProbeResult{
-		Account: accountName,
-		Stage:   step.Stage,
-		Status:  step.Status,
-		OK:      step.OK,
-		Latency: step.Latency,
-		Message: step.Message,
+		Account:      accountName,
+		Stage:        step.Stage,
+		Status:       step.Status,
+		OK:           step.OK,
+		Latency:      step.Latency,
+		Message:      step.Message,
+		Policy:       step.Policy,
+		PolicyAction: step.PolicyAction,
 	}
 }
 
@@ -187,7 +204,7 @@ func (s *Server) probeModelsEndpoint(ctx context.Context, a store.Account) (step
 
 	// 401 是凭据问题，429/5xx 要打冷却，其它 4xx 只报原话：这三种都不必再花一次调用。
 	step.Message = fmt.Sprintf("列表接口返回 %d：%s", resp.StatusCode, scrubSecret(readErrorBody(resp.Body), secretValue))
-	return step, "", true, s.applyProbeState(a, step)
+	return step, "", true, s.applyProbeState(a, &step)
 }
 
 // fallsBackToCall 判断列表接口的这个状态是否说明「这家没有列表接口，或网关把列表拦住了」：
@@ -282,7 +299,7 @@ func (s *Server) probeMinimalCall(ctx context.Context, a store.Account, listNote
 		step.Status = http.StatusBadGateway
 		step.Transport = true
 		step.Message = withNote("模型调用失败："+scrubSecret(err.Error(), secretValue), note)
-		return step, s.applyProbeState(a, step)
+		return step, s.applyProbeState(a, &step)
 	}
 	defer resp.Body.Close()
 
@@ -292,12 +309,12 @@ func (s *Server) probeMinimalCall(ctx context.Context, a store.Account, listNote
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 8<<10))
 		// 探活成功说明凭据可用，把之前因 401 停用的账号恢复回来。
 		step.Message = withNote("模型调用可用（模型 "+model+"）", note)
-		return step, s.applyProbeState(a, step)
+		return step, s.applyProbeState(a, &step)
 	}
 
 	step.Message = withNote(fmt.Sprintf("模型调用返回 %d：%s",
 		resp.StatusCode, scrubSecret(readErrorBody(resp.Body), secretValue)), note)
-	return step, s.applyProbeState(a, step)
+	return step, s.applyProbeState(a, &step)
 }
 
 // applyProbeState 按结论更新账号状态，是 `account test` 唯一的写入路径：两段都只经它落库，
@@ -307,7 +324,24 @@ func (s *Server) probeMinimalCall(ctx context.Context, a store.Account, listNote
 // 其它 4xx 只报原话、不动状态。列表那一段失败时用账号清单第一项作为冷却对象；名称都没有时
 // 只报错、不打冷却——没有模型名就定位不到账号-模型行。同一份结论永远算出同一个时长，
 // 冷却不加抖动（加了抖动，两个账号在同一时刻被限流会锁上不同的时长，排查时看不出规律）。
-func (s *Server) applyProbeState(a store.Account, step ProbeStep) error {
+func (s *Server) applyProbeState(a store.Account, step *ProbeStep) error {
+	// 拿到状态码（含连接层的 502）就先过失败处理策略：命中的停用/冷却优先于下面原有的
+	// 401/429/5xx 分支；只带换号/返回的规则不改状态，但同样不再落到旧分支。
+	if step.Status >= 400 {
+		decision, matched := account.MatchFailure(account.FailureFacts{
+			Status:    step.Status,
+			Message:   step.Message,
+			Provider:  a.Provider,
+			Model:     step.Model,
+			AccountID: a.ID,
+			Transport: step.Transport,
+		}, s.loadFailurePolicies())
+		if matched {
+			step.Policy = probePolicyRef(decision)
+			step.PolicyAction = failureActionText(decision, decision.ModelScopedCooldown && step.Model != "")
+			return s.applyProbeDecision(a, *step, decision)
+		}
+	}
 	switch {
 	case step.OK:
 		if err := s.store.SetEnabled(a.ID, true, ""); err != nil {

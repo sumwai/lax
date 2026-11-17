@@ -42,7 +42,8 @@ var seedRoutes = []struct {
 	// 0017 只给这两家种向量化路由。
 	{"openai", "https://api.openai.com", "openai-embeddings", "/v1/embeddings", "", 17},
 	{"ollama", "http://127.0.0.1:11434", "openai-embeddings", "/v1/embeddings", "", 17},
-	// 0018 给 openai 种两条语音路由（TTS 与 ASR）。
+	// 两条语音路由来自内置厂商种子（builtin_providers.json），不在这份迁移里；
+	// migration 记 18 只是给 seedRoutesBefore 搭冻结的旧库快照用。
 	{"openai", "https://api.openai.com", "openai-speech", "/v1/audio/speech", "", 18},
 	{"openai", "https://api.openai.com", "openai-transcriptions", "/v1/audio/transcriptions", "", 18},
 }
@@ -108,7 +109,7 @@ func assertSeedDefaults(t *testing.T, st *store.Store) {
 }
 
 // TestProvidersSeededByMigration 确认空库跑到最新版本后种子齐全：
-// 9 家厂商、12 条路由，每条拼出的完整地址与模型列表地址都逐一对上，默认协议也逐行对上。
+// 9 家厂商、16 条路由，每条拼出的完整地址与模型列表地址都逐一对上，默认协议也逐行对上。
 func TestProvidersSeededByMigration(t *testing.T) {
 	st := openTemp(t)
 

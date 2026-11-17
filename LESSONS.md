@@ -34,3 +34,4 @@ commit in the row so a later reader can tell whether the note still applies.
 | 2026-11-01 | GitHub-hosted runners cannot reach the Tailscale address used by local SSH | [lessons/2026-11-01-github-actions-tailscale-deploy.md](lessons/2026-11-01-github-actions-tailscale-deploy.md) | fixed in 5015185 |
 | 2026-11-01 | Follow mode must page by cursor, and every time filter must survive into the follow loop | [lessons/2026-11-01-follow-cursor-window.md](lessons/2026-11-01-follow-cursor-window.md) | fixed in ad03c2b |
 | 2026-11-14 | GORM's default logger writes record-not-found to stdout and can prefix `--json` | [lessons/2026-11-14-gorm-logger-stdout.md](lessons/2026-11-14-gorm-logger-stdout.md) | fixed in 07a662c |
+| 2026-11-17 | A billing 400 is a failed account, not a client error | [lessons/2026-11-17-billing-400-not-account-failure.md](lessons/2026-11-17-billing-400-not-account-failure.md) | fix in progress |

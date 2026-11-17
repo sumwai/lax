@@ -63,7 +63,9 @@ type RouteDecision struct {
 	StickyMiss bool
 }
 
-// Rank 按策略返回候选顺序与解释数据。硬过滤固定三条：账号启用、声明了该模型、账号-模型未冷却；
+// Rank 按策略返回候选顺序与解释数据。硬过滤固定四条，顺序也固定：账号启用、账号不在
+// 账号级冷却中、声明了该模型、账号-模型未冷却。顺序决定 route explain 显示的原因：一个
+// 停用且冷却的账号先说「已停用」，一个没声明模型的账号不会被误报成「模型冷却中」。
 // Quotas 非空时再叠加一层额度过滤（见 quotaFilter），为空时与额度功能上线前完全一致。
 func Rank(in RouteInput) RouteDecision {
 	var decision RouteDecision
@@ -72,6 +74,8 @@ func Rank(in RouteInput) RouteDecision {
 		switch {
 		case !a.Enabled:
 			decision.Excluded = append(decision.Excluded, RouteExclusion{Account: a, Reason: "账号已停用"})
+		case InAccountCooldown(a, in.Now):
+			decision.Excluded = append(decision.Excluded, RouteExclusion{Account: a, Reason: "账号冷却中"})
 		case !Supports(a, in.Model):
 			decision.Excluded = append(decision.Excluded, RouteExclusion{Account: a, Reason: "没有声明这个模型"})
 		case !AvailableForModel(a, in.Model, in.Now):
@@ -81,7 +85,7 @@ func Rank(in RouteInput) RouteDecision {
 		}
 	}
 
-	// 额度过滤排在三条硬过滤之后、粘性判断之前：strict 粘性命中的账号如果被额度排除，
+	// 额度过滤排在四条硬过滤之后、粘性判断之前：strict 粘性命中的账号如果被额度排除，
 	// 仍然走 StickyMiss 返回 503，不偷偷换号。没有额度数据时整段跳过。
 	if len(in.Quotas) > 0 {
 		var quotaExcluded []RouteExclusion

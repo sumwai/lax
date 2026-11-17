@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"lax/internal/account"
 	"lax/internal/secret"
 	"lax/internal/store"
 	"lax/internal/translate"
@@ -739,6 +740,11 @@ type probeAttempt struct {
 	start   time.Time
 	usage   probeUsage
 	retries []probeTry
+	// state 是语音应错探活命中失败规则后要写的状态，只落在得出判定的那一行上（见 recordProbeAttempts）。
+	state store.AttemptState
+	// policyStop 表示语音应错探活命中了规则：不再换协议，这次结论就是规则命中的 attempt。
+	// 这样状态动作与判定行一起落库，且不会因为后面某条协议碰巧 2xx 就把账号状态盖过去。
+	policyStop bool
 }
 
 // defaultProbeProtocols 是探活候选的兜底顺序：账号没有厂商行（或该厂商一个路由都没声明）
@@ -975,6 +981,13 @@ func (s *Server) probeOrder(ctx context.Context, a store.Account, model string,
 		att := s.probeOnce(ctx, a, model, protocol, secretValue)
 		attempts = append(attempts, att)
 
+		if att.policyStop {
+			// 语音应错探活命中了失败处理策略：状态动作与这一条判定行一起写，
+			// 不再试其它协议，也不再把这次结论当成模型的可用性。
+			s.recordProbeAttempts(a, model, attempts, i)
+			return att.res, nil
+		}
+
 		if att.res.Access == store.AccessAllowed {
 			// 2xx 就是结论：记下这次用的协议，剩下的候选不再试。
 			s.recordProbeAttempts(a, model, attempts, i)
@@ -1120,6 +1133,26 @@ func (s *Server) probeOnce(ctx context.Context, a store.Account, model, protocol
 			res.Access = ""
 			res.Status = store.ModelAuthFailed
 			return att
+		}
+		// 计费类 400/422 之类也要先过失败处理策略（5.20）：命中停用/冷却就写状态，
+		// 且不能把这次探活当成「端点可达」；只带换号/返回的规则同样不判可用。
+		// 401 与连接层失败不在这里匹配，保持上面的原有处理（见 DESIGN 5.16）。
+		if resp.StatusCode >= 400 {
+			decision, matched := account.MatchFailure(account.FailureFacts{
+				Status:    resp.StatusCode,
+				Message:   msg,
+				Provider:  a.Provider,
+				Model:     model,
+				AccountID: a.ID,
+			}, s.loadFailurePolicies())
+			if matched {
+				// 状态动作随判定行一起写（见 recordProbeAttempts）；Access 留空，
+				// 调用方不会把这一行写成 allowed，也就不会把计费失败的账号标成可用。
+				att.policyStop = true
+				att.state = s.policyAttemptState(decision, model, msg)
+				res.setUndecided()
+				return att
+			}
 		}
 		access, note, ok := speechProbeVerdict(resp.StatusCode, msg)
 		if ok {
@@ -1289,8 +1322,19 @@ func (s *Server) recordProbeAttempts(a store.Account, model string, attempts []p
 			LatencyMS:            att.res.Latency.Milliseconds(),
 			Error:                msg,
 		}
-		if err := s.store.InsertRequest(rec); err != nil {
+		if i == verdict && att.hasState() {
+			// 语音应错探活命中规则时，状态动作与判定行在同一个事务里写：
+			// 不会出现「行写了、账号没停用」或反过来。
+			if err := s.store.RecordAttempt(rec, att.state); err != nil {
+				s.logf("写探活请求记录失败: %v", err)
+			}
+		} else if err := s.store.InsertRequest(rec); err != nil {
 			s.logf("写探活请求记录失败: %v", err)
 		}
 	}
+}
+
+// hasState 表示这次探活命中规则后要写账号状态。只可能是语音应错探活设置的，见 probeOnce。
+func (att probeAttempt) hasState() bool {
+	return att.state.Disable || att.state.Failure || att.state.AccountCooldown || att.state.Clear
 }

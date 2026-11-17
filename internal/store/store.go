@@ -75,7 +75,11 @@ type Account struct {
 	// CooldownUntil 与 FailStreak 是旧的账号级冷却字段，只作只读汇总保留：
 	// 选号按 ModelFailures 里的账号-模型状态判断，不再用这两个字段。
 	CooldownUntil int64
-	LastError     string
+	// CooldownUntilMS 是账号级冷却的截止时间，Unix 毫秒；0 表示没有账号级冷却。
+	// 它来自用户的失败处理策略（--cooldown 且未限定模型），与 ModelFailures 里的
+	// 账号-模型冷却分开：账号级冷却会挡住这个账号的所有模型。
+	CooldownUntilMS int64
+	LastError       string
 	// FailStreak 是各模型连续失败次数的最大值，只用于展示与旧调用方兼容。
 	FailStreak int
 	// ModelFailures 是账号-模型级冷却状态，键是模型名。没有冷却与失败记录的模型不在表里。
@@ -264,19 +268,20 @@ func (s *Store) DB() *sql.DB { return s.db }
 // accountJoinRow 是账号与它的厂商地址的联合行，供 queryAccounts 扫描。
 // 列名与 accountSelect 的别名一一对应。
 type accountJoinRow struct {
-	ID            int64
-	Name          string
-	Provider      string
-	KeyCipher     []byte
-	Priority      int
-	Enabled       bool
-	CooldownUntil int64
-	LastError     string
-	FailStreak    int
-	CreatedAt     int64
-	BaseURL       string
-	AuthHeader    string
-	AuthScheme    string
+	ID              int64
+	Name            string
+	Provider        string
+	KeyCipher       []byte
+	Priority        int
+	Enabled         bool
+	CooldownUntil   int64
+	CooldownUntilMS int64
+	LastError       string
+	FailStreak      int
+	CreatedAt       int64
+	BaseURL         string
+	AuthHeader      string
+	AuthScheme      string
 }
 
 // CreateAccount 插入账号，名称重复时返回错误。
@@ -321,7 +326,8 @@ func (s *Store) ListAccounts() ([]Account, error) {
 func (s *Store) queryAccounts(where string, args ...any) ([]Account, error) {
 	q := s.gorm.Table("accounts AS a").
 		Select(`a.id, a.name, a.provider, a.key_cipher, a.priority, a.enabled,
-			COALESCE(a.cooldown_until, 0) AS cooldown_until, COALESCE(a.last_error, '') AS last_error,
+			COALESCE(a.cooldown_until, 0) AS cooldown_until, COALESCE(a.cooldown_until_ms, 0) AS cooldown_until_ms,
+			COALESCE(a.last_error, '') AS last_error,
 			a.fail_streak, a.created_at, COALESCE(p.base_url, '') AS base_url,
 			COALESCE(p.auth_header, '') AS auth_header, COALESCE(p.auth_scheme, '') AS auth_scheme`).
 		Joins("LEFT JOIN providers p ON p.name = a.provider")
@@ -348,19 +354,20 @@ func scanAccounts(rows []accountJoinRow) []Account {
 	out := make([]Account, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, Account{
-			ID:            r.ID,
-			Name:          r.Name,
-			Provider:      r.Provider,
-			KeyCipher:     r.KeyCipher,
-			Priority:      r.Priority,
-			Enabled:       r.Enabled,
-			CooldownUntil: r.CooldownUntil,
-			LastError:     r.LastError,
-			FailStreak:    r.FailStreak,
-			CreatedAt:     r.CreatedAt,
-			BaseURL:       r.BaseURL,
-			AuthHeader:    r.AuthHeader,
-			AuthScheme:    r.AuthScheme,
+			ID:              r.ID,
+			Name:            r.Name,
+			Provider:        r.Provider,
+			KeyCipher:       r.KeyCipher,
+			Priority:        r.Priority,
+			Enabled:         r.Enabled,
+			CooldownUntil:   r.CooldownUntil,
+			CooldownUntilMS: r.CooldownUntilMS,
+			LastError:       r.LastError,
+			FailStreak:      r.FailStreak,
+			CreatedAt:       r.CreatedAt,
+			BaseURL:         r.BaseURL,
+			AuthHeader:      r.AuthHeader,
+			AuthScheme:      r.AuthScheme,
 		})
 	}
 	return out
@@ -425,6 +432,11 @@ func (s *Store) DeleteAccount(name string) error {
 	if _, err := tx.Exec(`DELETE FROM route_stats WHERE account_id = ?`, id); err != nil {
 		return err
 	}
+	// 策略行有 ON DELETE CASCADE，这里仍显式删一遍：老库搬迁过来的表、以及其它后端上
+	// 外键是否真的建出来不该决定「删账号后还留着指向它的规则」。
+	if _, err := tx.Exec(`DELETE FROM route_failure_policies WHERE account_id = ?`, id); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM accounts WHERE id = ?`, id); err != nil {
 		return err
 	}
@@ -449,6 +461,13 @@ func (s *Store) ClearFailure(id int64, model string) error {
 // ClearFailures 清掉一个账号全部模型的冷却与连续失败次数，并清掉旧账号级字段。
 func (s *Store) ClearFailures(id int64) error {
 	return s.withTx(func(tx *gorm.DB) error { return clearAccountFailuresTx(tx, id) })
+}
+
+// SetAccountCooldown 写账号级冷却与最近一次错误。
+// 它只改 accounts 表，不写 requests：account test 的探活结论也要落库，
+// 但探活不是客户端请求，不该在用量记录里多出一行。
+func (s *Store) SetAccountCooldown(id int64, untilMS int64, lastErr string) error {
+	return s.withTx(func(tx *gorm.DB) error { return setAccountCooldownTx(tx, id, untilMS, lastErr) })
 }
 
 // SetEnabled 启用或停用账号。
@@ -508,7 +527,9 @@ func clearModelFailureTx(tx *gorm.DB, id int64, model string) error {
 	}).Error
 }
 
-// clearAccountFailuresTx 清一个账号全部模型的冷却，并顺带清掉旧账号级字段。
+// clearAccountFailuresTx 清一个账号全部模型与账号级的冷却，以及最近一次错误。
+// account enable、account test 成功与 RotateKey 都走这里（或经 setEnabledTx(true)），
+// 让账号从干净状态重新参与选号。
 func clearAccountFailuresTx(tx *gorm.DB, id int64) error {
 	if err := tx.Model(&accountModelRow{}).Where("account_id = ?", id).Updates(map[string]any{
 		"cooldown_until_ms": nil,
@@ -517,20 +538,37 @@ func clearAccountFailuresTx(tx *gorm.DB, id int64) error {
 		return err
 	}
 	return tx.Model(&accountRow{}).Where("id = ?", id).Updates(map[string]any{
-		"cooldown_until": nil,
-		"fail_streak":    0,
+		"cooldown_until":    nil,
+		"cooldown_until_ms": nil,
+		"fail_streak":       0,
+		"last_error":        "",
 	}).Error
 }
 
 // setEnabledTx 是启停的写入口，只给事务内部用。
+// 启用意味着人（或一次成功的探活）判断账号可以重新接请求，所以顺带清掉账号级冷却；
+// 停用不动冷却，冷却的清理由 ClearFailures / RotateKey 负责。
 func setEnabledTx(tx *gorm.DB, id int64, enabled bool, lastErr string) error {
-	return tx.Model(&accountRow{}).Where("id = ?", id).Updates(map[string]any{
+	updates := map[string]any{
 		"enabled":    enabled,
 		"last_error": lastErr,
+	}
+	if enabled {
+		updates["cooldown_until_ms"] = nil
+	}
+	return tx.Model(&accountRow{}).Where("id = ?", id).Updates(updates).Error
+}
+
+// setAccountCooldownTx 写账号级冷却与最近一次错误，只给事务内部用。
+// 与 recordModelFailureTx 的区别：冷却挂在整个账号上，所有模型一起被挡住。
+func setAccountCooldownTx(tx *gorm.DB, id int64, untilMS int64, lastErr string) error {
+	return tx.Model(&accountRow{}).Where("id = ?", id).Updates(map[string]any{
+		"cooldown_until_ms": untilMS,
+		"last_error":        lastErr,
 	}).Error
 }
 
-// AttemptState 是一次上游尝试对账号状态的改动。三者互斥，零值表示什么都不改。
+// AttemptState 是一次上游尝试对账号状态的改动。四个动作互斥，零值表示什么都不改。
 type AttemptState struct {
 	// Failure 为真：给这次尝试的账号-模型写入 CooldownUntilMS，并把该模型的 fail_streak 加一。
 	Failure bool
@@ -538,6 +576,9 @@ type AttemptState struct {
 	Clear bool
 	// Disable 为真：停用账号并记下 LastError。
 	Disable bool
+	// AccountCooldown 为真：给整个账号写冷却截止时间 CooldownUntilMS 与 LastError。
+	// 账号级冷却会挡住这个账号的所有模型；按模型的冷却仍用 Failure。
+	AccountCooldown bool
 	// CooldownUntilMS 是冷却截止时间，Unix 毫秒。
 	CooldownUntilMS int64
 	LastError       string
@@ -551,7 +592,8 @@ type AttemptState struct {
 // RecordAttempt 在同一个事务里写一行请求记录并更新账号状态：要么一起提交，要么都不提交。
 // 一次尝试的账（requests 一行）与它的结论（冷却、清零、停用）本来就是同一件事，
 // 分开写在中途失败时会留下「有请求行但没设冷却」或者反过来，事后对不上账。
-// 冷却、清零与停用的 SQL 只在 recordModelFailureTx、clearModelFailureTx、setEnabledTx 里，这里不另拼。
+// 冷却、清零与停用的 SQL 只在 recordModelFailureTx、clearModelFailureTx、setEnabledTx 与
+// setAccountCooldownTx 里，这里不另拼。
 func (s *Store) RecordAttempt(rec *RequestRecord, state AttemptState) error {
 	return s.withTx(func(tx *gorm.DB) error {
 		if err := insertRequestTx(tx, rec); err != nil {
@@ -563,6 +605,8 @@ func (s *Store) RecordAttempt(rec *RequestRecord, state AttemptState) error {
 			err = clearModelFailureTx(tx, rec.AccountID, rec.ModelUsed)
 		case state.Disable:
 			err = setEnabledTx(tx, rec.AccountID, false, state.LastError)
+		case state.AccountCooldown:
+			err = setAccountCooldownTx(tx, rec.AccountID, state.CooldownUntilMS, state.LastError)
 		case state.Failure:
 			err = recordModelFailureTx(tx, rec.AccountID, rec.ModelUsed, state.CooldownUntilMS, state.LastError)
 		}

@@ -11,8 +11,11 @@ package store
 // 于是这里只有行形状（*Row 后缀），业务侧仍用 catalog.go、provider.go、model_alias.go 里
 // 原来的结构体，转换在各自的读写入口里做。
 //
-// 建表与加列全部走 AutoMigrate：没有迁移文件，也没有版本号。AutoMigrate 是幂等的 schema
-// diff，表不存在就建、缺列就 ALTER TABLE ADD COLUMN，不改列类型、不删列、不删索引。
+// 运行期的建表与加列全部走 AutoMigrate：model 定义是唯一来源，没有版本号。AutoMigrate 是
+// 幂等的 schema diff，表不存在就建、缺列就 ALTER TABLE ADD COLUMN，不改列类型、不删列、不删索引。
+// migrations 目录是旧版迁移器留下的形状，旧库搬迁不执行这些文件，只有测试的 openDatabaseAt
+// 按版本号执行；按仓库约定，改结构仍要补一个迁移文件（最近的编号见目录），运行时的新库由
+// AutoMigrate 建出，不执行它，也不维护 user_version。
 
 import (
 	"bytes"
@@ -29,16 +32,19 @@ import (
 //
 // Provider 只存名字：转发用的地址、默认协议与路由都按它在 providers / provider_routes 里查。
 type accountRow struct {
-	ID            int64   `gorm:"column:id;primaryKey;autoIncrement"`
-	Name          string  `gorm:"column:name;size:191;not null;uniqueIndex"`
-	Provider      string  `gorm:"column:provider;not null"`
-	KeyCipher     []byte  `gorm:"column:key_cipher;not null"`
-	Priority      int     `gorm:"column:priority;not null;default:100"`
-	Enabled       bool    `gorm:"column:enabled;not null;default:true"`
-	CooldownUntil *int64  `gorm:"column:cooldown_until"`
-	LastError     *string `gorm:"column:last_error"`
-	FailStreak    int     `gorm:"column:fail_streak;not null;default:0"`
-	CreatedAt     int64   `gorm:"column:created_at;not null"`
+	ID            int64  `gorm:"column:id;primaryKey;autoIncrement"`
+	Name          string `gorm:"column:name;size:191;not null;uniqueIndex"`
+	Provider      string `gorm:"column:provider;not null"`
+	KeyCipher     []byte `gorm:"column:key_cipher;not null"`
+	Priority      int    `gorm:"column:priority;not null;default:100"`
+	Enabled       bool   `gorm:"column:enabled;not null;default:true"`
+	CooldownUntil *int64 `gorm:"column:cooldown_until"`
+	// CooldownUntilMS 是账号级冷却（Unix 毫秒），与旧列 CooldownUntil（秒，只读汇总）分开。
+	// 空值表示没有账号级冷却；按模型隔离的冷却仍在 account_models.cooldown_until_ms。
+	CooldownUntilMS *int64  `gorm:"column:cooldown_until_ms"`
+	LastError       *string `gorm:"column:last_error"`
+	FailStreak      int     `gorm:"column:fail_streak;not null;default:0"`
+	CreatedAt       int64   `gorm:"column:created_at;not null"`
 }
 
 func (accountRow) TableName() string { return "accounts" }
@@ -364,6 +370,43 @@ type quotaSettingsRow struct {
 
 func (quotaSettingsRow) TableName() string { return "quota_settings" }
 
+// routeFailurePolicyRow 是一行上游失败处理策略。
+//
+// 条件都是可选的，空串表示不限；statuses 与 error_contains 是 JSON 数组，空串或 [] 表示任意。
+// AccountID 为 NULL 表示不限账号；非空时挂在 accounts 上，账号删除即级联清掉。
+//
+// Priority、RetryCount、RetryBaseMS、CooldownSeconds 都允许 0 或语义上的零值，因此不能给
+// default tag：GORM 会把带 default 的零值字段当成「没给」而落成默认值（见 routePolicyRow 的注释）。
+// 默认值由 CreateRouteFailurePolicy 与 CLI 给。
+type routeFailurePolicyRow struct {
+	ID int64 `gorm:"column:id;primaryKey;autoIncrement;index:route_failure_policies_order,priority:3"`
+	// Enabled 用指针而不是 bool：带 default:true 的 bool 在插入 false 时会被 GORM 当成
+	// 「没给」而落成 true，新建停用规则就会失败。指针的 nil 才表示用列默认值。
+	Enabled  *bool `gorm:"column:enabled;not null;default:true;index:route_failure_policies_order,priority:1"`
+	Priority int   `gorm:"column:priority;not null;index:route_failure_policies_order,priority:2"`
+	// AccountID 用指针是为了落到 NULL：0 表示不限账号，而外键列写 0 会指向一个不存在的账号。
+	AccountID       *int64 `gorm:"column:account_id"`
+	Provider        string `gorm:"column:provider;not null;default:''"`
+	Model           string `gorm:"column:model;not null;default:''"`
+	Statuses        string `gorm:"column:statuses;not null;default:''"`
+	ErrorContains   string `gorm:"column:error_contains;not null;default:''"`
+	ErrorRegex      string `gorm:"column:error_regex;not null;default:''"`
+	RetryCount      int    `gorm:"column:retry_count;not null"`
+	RetryBaseMS     int64  `gorm:"column:retry_base_ms;not null"`
+	CooldownSeconds int64  `gorm:"column:cooldown_seconds;not null"`
+	Disable         bool   `gorm:"column:disable;not null;default:false"`
+	NextRoute       bool   `gorm:"column:next_route;not null;default:false"`
+	ReturnError     bool   `gorm:"column:return_error;not null;default:false"`
+	Note            string `gorm:"column:note;not null;default:''"`
+	CreatedAt       int64  `gorm:"column:created_at;not null"`
+	UpdatedAt       int64  `gorm:"column:updated_at;not null"`
+
+	// AccountRow 只用来让 AutoMigrate 建出 ON DELETE CASCADE；不参与读写。
+	AccountRow *accountRow `gorm:"foreignKey:AccountID;references:ID;constraint:OnDelete:CASCADE"`
+}
+
+func (routeFailurePolicyRow) TableName() string { return "route_failure_policies" }
+
 // tables 是 AutoMigrate 与旧库搬迁共用的表清单，顺序不影响结果（GORM 会按依赖重排）。
 func tables() []any {
 	return []any{
@@ -382,6 +425,7 @@ func tables() []any {
 		&routePolicyRow{},
 		&routeAccountWeightRow{},
 		&routeStatRow{},
+		&routeFailurePolicyRow{},
 		&quotaSnapshotRow{},
 		&quotaSettingsRow{},
 		&pluginAuditRow{},

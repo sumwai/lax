@@ -67,6 +67,12 @@ type Options struct {
 	// 取值必须是线协议，出现别的值直接报错：编码器遇见未知协议会报错，静默落进 chat 分支更糟，
 	// 那会把一条配置错误变成对错误地址的上游调用。
 	RouteProtocols func(provider, model string) []string
+	// Sleep 是一次同账号重试前的等待。不注入时用可被 ctx 取消的定时器；测试替换成记录器，
+	// 记录等待序列且不真的睡。
+	Sleep func(ctx context.Context, d time.Duration) error
+	// FailurePolicies 覆盖失败处理策略的读取，不注入时读库（ListRouteFailurePolicies）。
+	// 它只给测试注入读失败用；规则仍按 store 的启用顺序交给 account.MatchFailure。
+	FailurePolicies func() ([]store.RouteFailurePolicy, error)
 }
 
 // Server 是网关。
@@ -79,6 +85,10 @@ type Server struct {
 	dumpBodies bool
 	// routeProtocols 是 Options.RouteProtocols 的原样保存，nil 表示用库里的厂商路由。
 	routeProtocols func(provider, model string) []string
+	// sleep 是重试前的等待，默认用可取消的定时器；测试注入记录器，不真实睡眠。
+	sleep func(ctx context.Context, d time.Duration) error
+	// failurePolicies 是策略读取入口，nil 表示读库；测试用它模拟策略表打不开。
+	failurePolicies func() ([]store.RouteFailurePolicy, error)
 	// dialects 与 dialectsMu 保护方言表的整体替换：重启不是唯一的生效方式。
 	dialectsMu sync.RWMutex
 	dialects   *plugin.Registry
@@ -98,7 +108,7 @@ func New(o Options) (*Server, error) {
 	}
 	s := &Server{store: o.Store, key: o.Key, client: o.Client, logf: o.Logf, now: o.Now,
 		dumpBodies: o.DumpBodies, routeProtocols: o.RouteProtocols, dialects: o.Dialects,
-		routeSeq: map[string]uint64{}}
+		sleep: o.Sleep, failurePolicies: o.FailurePolicies, routeSeq: map[string]uint64{}}
 	if s.dialects == nil {
 		s.dialects = plugin.DefaultRegistry()
 	}
@@ -110,6 +120,9 @@ func New(o Options) (*Server, error) {
 	}
 	if s.now == nil {
 		s.now = time.Now
+	}
+	if s.sleep == nil {
+		s.sleep = sleepContext
 	}
 	return s, nil
 }
@@ -496,6 +509,17 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 	// 所有账号都失败才是 503，换个时间才有意义。混成 503 会让客户端反复重试一个永远失败的写法。
 	interopRejected := ""
 	onlyInterop := true
+	// 失败处理策略按客户端请求惰性读一次：第一次上游失败时才读，同一次请求里的候选与重试
+	// 共用这一份。读失败只用内置兜底并打日志，不让因为策略表打不开就把请求判失败。
+	policiesLoaded := false
+	var failurePolicies []store.RouteFailurePolicy
+	loadFailurePolicies := func() []store.RouteFailurePolicy {
+		if !policiesLoaded {
+			policiesLoaded = true
+			failurePolicies = s.loadFailurePolicies()
+		}
+		return failurePolicies
+	}
 	operation := operationFor(inbound, embedding)
 	for _, cand := range candidates {
 		if r.Context().Err() != nil {
@@ -597,104 +621,177 @@ func (s *Server) handleInbound(w http.ResponseWriter, r *http.Request) {
 		}
 		onlyInterop = false
 
-		attemptStart := s.now()
-		res := s.tryUpstream(r.Context(), w, cand, outbound, dialect, inbound, r.Header, raw, req, session, embedding)
-		latency := s.now().Sub(attemptStart)
-
-		// 两列正好分工：model_requested 记客户端给的名字（可能是别名），
-		// model_used 记真正发给上游的真实名字。只用一列的话，聚合用量时要么看不出客户端用了
-		// 哪个别名，要么看不出实际打的是哪个模型。
-		rec := &store.RequestRecord{
-			TS:             attemptStart.Unix(),
-			Inbound:        inbound,
-			Outbound:       outbound,
-			ModelRequested: requested,
-			ModelUsed:      req.Model,
-			AccountID:      cand.ID,
-			HTTPStatus:     res.status,
-			OK:             res.err == nil && res.status >= 200 && res.status < 300,
-			InTokens:       res.inTok,
-			// 入账时按出站协议归一化输入 token：anthropic 的 input_tokens 已排除缓存读写，
-			// chat、responses 与 gemini 的上游把命中缓存的部分也算在输入里，花费只能按归一化后的
-			// 这一列折，否则同一笔输入会被输入价与缓存价各算一次。in_tokens 仍是上游原值，
-			// 展示不变。
-			InTokensUncached: store.UncachedInTokens(outbound, res.inTok, res.cacheRead),
-			OutTokens:        res.outTok,
-			CacheRead:        res.cacheRead,
-			CacheWrite:       res.cacheWrite,
-			// 思考 token 原值整列入账，是否再按输出价计一次交给 ReasoningExtra：
-			// 判定只写在那一处，不在这里按协议猜：各家对「思考算不算输出」的做法不同，
-			// 只能按上游上报的数字判。
-			ReasoningTokens:      res.reasoning,
-			ReasoningTokensExtra: store.ReasoningExtra(res.total, res.inTok, res.outTok, res.reasoning),
-			TTSChars:             speechChars,
-			AudioSeconds:         res.audioSeconds,
-			LatencyMS:            latency.Milliseconds(),
-			Error:                res.message,
-		}
-		// 一次尝试的账（requests 一行）与它的结论（冷却、清零、停用）在同一个事务里落库，
-		// 要么都写、要么都不写（见 store.RecordAttempt）。
-		state := store.AttemptState{}
-		state.RouteSample, state.RouteSuccess = routeSample(res)
-		failStreak := account.FailStreak(cand, req.Model)
-		switch {
-		case rec.OK:
-			// 成功一次就把连续失败次数清零，冷却时长下次从头算。
-			state.Clear = true
-		case res.status == http.StatusUnauthorized:
-			// 401 说明凭据本身不行，停用账号，避免同一条错误把整个候选池刷成不可用。
-			state.Disable = true
-			state.LastError = res.message
-		case account.Retryable(res.status) && !res.wrote:
-			// 冷却档位看失败的来源：一条 HTTP 响应都没拿到的是连接层（res.transport），
-			// 拿到状态的按状态码分限流与服务端失败。
-			// 已经向客户端写出字节的失败不进冷却也不换号：流式断流（wrote 为真）发生在输出途中，
-			// 重试会把半截响应当成新请求再打一遍，而这一次的结局已经写在客户端那边了。
-			// 这类失败因此也不算连接层失败，它与「有没有拿到响应」无关。
-			state.Failure = true
-			state.CooldownUntilMS = s.now().Add(account.Cooldown(cooldownKind(res.status, res.transport),
-				failStreak)).UnixMilli()
-			state.LastError = res.message
-		}
-		if err := s.store.RecordAttempt(rec, state); err != nil {
-			s.logf("写请求记录失败: %v", err)
-		}
-		s.logf("%s %s→%s %s %s %d/%d %s%s",
-			cand.Name, inbound, outbound, req.Model,
-			fmt.Sprintf("%d", res.status), res.inTok, res.outTok,
-			latency.Round(time.Millisecond), errorSuffix(res.message))
-
-		if rec.OK {
-			return
-		}
-
-		switch {
-		case res.status == http.StatusUnauthorized:
-			writeInboundError(w, inbound, http.StatusUnauthorized, "authentication_error",
-				fmt.Sprintf("账号 %s 的凭据被上游拒绝，已停用。%s", cand.Name, res.message))
-			return
-		case res.status == http.StatusForbidden:
-			// 403 多为套餐或模型权限不对，凭据本身还能用，不停用也不再换号。
-			writeInboundError(w, inbound, http.StatusForbidden, "permission_error",
-				fmt.Sprintf("账号 %s 无权使用该模型：%s", cand.Name, res.message))
-			return
-		case state.Failure:
-			lastErr = fmt.Sprintf("%s: %s", cand.Name, res.message)
-			continue
-		case res.wrote:
-			return
-		default:
-			if inbound == ProtocolSystemOne && len(res.upstreamBody) > 0 {
-				// 上游自己的错误正文原样透传：状态码与正文都照旧，不重新包装，也不把 422 的
-				// detail 数组转成对象——这条协议的客户端读的就是上游那一层。请求记录与日志里用的
-				// 仍是解出来并脱敏过的那一句话，不是这份原文。
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(res.status)
-				_, _ = w.Write(res.upstreamBody)
+		// 同一个账号的重试循环。出站协议、方言与互通性不随重试变化，都在循环外算好。
+		// retriesUsed 按候选累计：即使重试后命中了另一条规则，也不会把已经用掉的次数退回去，
+		// 因此一个客户端请求在一个候选上最多 MaxRetryCount 次额外调用。
+		retriesUsed := 0
+		totalWait := time.Duration(0)
+		for {
+			if r.Context().Err() != nil {
 				return
 			}
-			writeInboundError(w, inbound, mapErrorStatus(res.status), errorKind(res.status), res.message)
-			return
+			attemptStart := s.now()
+			res := s.tryUpstream(r.Context(), w, cand, outbound, dialect, inbound, r.Header, raw, req, session, embedding)
+			latency := s.now().Sub(attemptStart)
+
+			// 两列正好分工：model_requested 记客户端给的名字（可能是别名），
+			// model_used 记真正发给上游的真实名字。只用一列的话，聚合用量时要么看不出客户端用了
+			// 哪个别名，要么看不出实际打的是哪个模型。
+			rec := &store.RequestRecord{
+				TS:             attemptStart.Unix(),
+				Inbound:        inbound,
+				Outbound:       outbound,
+				ModelRequested: requested,
+				ModelUsed:      req.Model,
+				AccountID:      cand.ID,
+				HTTPStatus:     res.status,
+				OK:             res.err == nil && res.status >= 200 && res.status < 300,
+				InTokens:       res.inTok,
+				// 入账时按出站协议归一化输入 token：anthropic 的 input_tokens 已排除缓存读写，
+				// chat、responses 与 gemini 的上游把命中缓存的部分也算在输入里，花费只能按归一化后的
+				// 这一列折，否则同一笔输入会被输入价与缓存价各算一次。in_tokens 仍是上游原值，
+				// 展示不变。
+				InTokensUncached: store.UncachedInTokens(outbound, res.inTok, res.cacheRead),
+				OutTokens:        res.outTok,
+				CacheRead:        res.cacheRead,
+				CacheWrite:       res.cacheWrite,
+				// 思考 token 原值整列入账，是否再按输出价计一次交给 ReasoningExtra：
+				// 判定只写在那一处，不在这里按协议猜：各家对「思考算不算输出」的做法不同，
+				// 只能按上游上报的数字判。
+				ReasoningTokens:      res.reasoning,
+				ReasoningTokensExtra: store.ReasoningExtra(res.total, res.inTok, res.outTok, res.reasoning),
+				TTSChars:             speechChars,
+				AudioSeconds:         res.audioSeconds,
+				LatencyMS:            latency.Milliseconds(),
+				Error:                res.message,
+			}
+
+			// 命中的规则只在失败时算；成功不触发策略表读取（见上面的惰性加载）。
+			var decision account.FailureDecision
+			matched := false
+			if !rec.OK {
+				decision, matched = account.MatchFailure(account.FailureFacts{
+					Status:    res.status,
+					Message:   res.message,
+					Provider:  cand.Provider,
+					Model:     req.Model,
+					AccountID: cand.ID,
+					Transport: res.transport,
+				}, loadFailurePolicies())
+			}
+
+			canRetry := matched && decision.RetryCount > 0 && !res.wrote &&
+				retriesUsed < decision.RetryCount && retriesUsed < account.MaxRetryCount &&
+				r.Context().Err() == nil
+			var delay time.Duration
+			if canRetry {
+				delay = account.RetryDelay(decision.RetryBase, retriesUsed+1)
+				if totalWait+delay > account.MaxTotalRetryWait {
+					canRetry = false
+					delay = 0
+				}
+			}
+
+			// 一次尝试的账（requests 一行）与它的结论（冷却、清零、停用）在同一个事务里落库，
+			// 要么都写、要么都不写（见 store.RecordAttempt）。中间重试只记 route sample：
+			// 状态动作要等最后一次尝试，否则重试成功时账号已经被前一次失败冷却了。
+			state := store.AttemptState{}
+			state.RouteSample, state.RouteSuccess = routeSample(res)
+			switch {
+			case rec.OK:
+				// 成功一次就把连续失败次数清零，冷却时长下次从头算。
+				state.Clear = true
+			case canRetry:
+				// 中间重试：只留这一行的 route sample，不改账号状态。
+			case matched:
+				// 命中规则替换的是状态动作，不能把这一行刚算出的选号样本一起丢掉：
+				// 5xx/429/连接层失败本来就要进 route_stats，带 --retry 时最后一次更不能不记。
+				ps := s.policyAttemptState(decision, req.Model, res.message)
+				ps.RouteSample, ps.RouteSuccess = state.RouteSample, state.RouteSuccess
+				state = ps
+			case res.status == http.StatusUnauthorized:
+				// 没有规则命中时保留旧行为：401 说明凭据本身不行，停用账号。
+				state.Disable = true
+				state.LastError = res.message
+			case account.Retryable(res.status) && !res.wrote:
+				// 冷却档位看失败的来源：一条 HTTP 响应都没拿到的是连接层（res.transport），
+				// 拿到状态的按状态码分限流与服务端失败。
+				// 已经向客户端写出字节的失败不进冷却也不换号：流式断流（wrote 为真）发生在输出途中，
+				// 重试会把半截响应当成新请求再打一遍，而这一次的结局已经写在客户端那边了。
+				// 这类失败因此也不算连接层失败，它与「有没有拿到响应」无关。
+				state.Failure = true
+				state.CooldownUntilMS = s.now().Add(account.Cooldown(cooldownKind(res.status, res.transport),
+					account.FailStreak(cand, req.Model))).UnixMilli()
+				state.LastError = res.message
+			}
+			if err := s.store.RecordAttempt(rec, state); err != nil {
+				s.logf("写请求记录失败: %v", err)
+			}
+			s.logf("%s %s→%s %s %s %d/%d %s%s",
+				cand.Name, inbound, outbound, req.Model,
+				fmt.Sprintf("%d", res.status), res.inTok, res.outTok,
+				latency.Round(time.Millisecond), errorSuffix(res.message))
+
+			if rec.OK {
+				return
+			}
+
+			if canRetry {
+				if err := s.sleep(r.Context(), delay); err != nil {
+					// 客户端取消：不再发上游，也不写任何错误体（连接已经不要了）。
+					return
+				}
+				retriesUsed++
+				totalWait += delay
+				continue
+			}
+
+			if matched {
+				if decision.NextRoute {
+					lastErr = fmt.Sprintf("%s: %s", cand.Name, res.message)
+					if res.wrote {
+						return
+					}
+					break
+				}
+				// ReturnError（显式或默认）：把上游错误写回客户端，消息里带账号与命中的规则。
+				if res.wrote {
+					return
+				}
+				writeInboundError(w, inbound, mapErrorStatus(res.status), errorKind(res.status),
+					matchedFailureMessage(cand.Name, decision, res.message))
+				return
+			}
+
+			switch {
+			case res.status == http.StatusUnauthorized:
+				writeInboundError(w, inbound, http.StatusUnauthorized, "authentication_error",
+					fmt.Sprintf("账号 %s 的凭据被上游拒绝，已停用。%s", cand.Name, res.message))
+				return
+			case res.status == http.StatusForbidden:
+				// 403 多为套餐或模型权限不对，凭据本身还能用，不停用也不再换号。
+				writeInboundError(w, inbound, http.StatusForbidden, "permission_error",
+					fmt.Sprintf("账号 %s 无权使用该模型：%s", cand.Name, res.message))
+				return
+			case state.Failure:
+				lastErr = fmt.Sprintf("%s: %s", cand.Name, res.message)
+			case res.wrote:
+				return
+			default:
+				if inbound == ProtocolSystemOne && len(res.upstreamBody) > 0 {
+					// 上游自己的错误正文原样透传：状态码与正文都照旧，不重新包装，也不把 422 的
+					// detail 数组转成对象——这条协议的客户端读的就是上游那一层。请求记录与日志里用的
+					// 仍是解出来并脱敏过的那一句话，不是这份原文。
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(res.status)
+					_, _ = w.Write(res.upstreamBody)
+					return
+				}
+				writeInboundError(w, inbound, mapErrorStatus(res.status), errorKind(res.status), res.message)
+				return
+			}
+			// 只有 state.Failure（旧冷却）会走到这里：换下一个候选。
+			break
 		}
 	}
 

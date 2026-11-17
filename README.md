@@ -214,7 +214,7 @@ lax model price unset glm-4.6 cache-read                 # 清掉某一项；清
 
 ## 选号：lax route
 
-不配置时，同一个模型有多个账号就按 `priority` 从小到大试：先试第一个，429、408、5xx 或连接失败才换下一个；429 冷却 500ms，5xx 冷却 10 秒，连接失败冷却 2 秒。失败只冷却「账号 + 模型」，同账号的其它模型不受影响。同一会话默认粘到哈希到的账号，但该账号不可用时照常换号。429 不在一次请求内等冷却后重试同一个账号：候选都试完就返回 503，把重试交给客户端。每次尝试各记一条请求记录，也各算一次选号统计。
+不配置时，同一个模型有多个账号就按 `priority` 从小到大试：先试第一个，429、408、5xx 或连接失败才换下一个；429 冷却 500ms，5xx 冷却 10 秒，连接失败冷却 2 秒。失败只冷却「账号 + 模型」，同账号的其它模型不受影响。同一会话默认粘到哈希到的账号，但该账号不可用时照常换号。429 不在一次请求内等冷却后重试同一个账号：候选都试完就返回 503，把重试交给客户端。每次尝试各记一条请求记录，也各算一次选号统计。400/403 这类默认直接返回的错误，可以交给下面的 `lax route policy` 改成重试、冷却、停用或换号；没有命中任何规则时行为与上面完全一样（计费类 400/403 由内置兜底接管，见下）。
 
 要改一个模型的选法，用 `lax route set`。它一次写整条策略，没写的参数取内置默认；改完立即生效，不用重启：
 
@@ -249,6 +249,47 @@ lax route explain glm-5.2 --session demo --seed 42
 ```
 
 它会打印候选顺序、每个账号的权重、样本数、成功率、平均延迟、得分与概率，以及被停用、没声明该模型或正在冷却的账号。softmax 用同一个 `--seed` 与同一份数据会得到同样的顺序；`--json` 给脚本用。`route explain` 只读库，不写请求记录、不改冷却。
+
+### 失败处理策略
+
+默认只对 429、408、5xx 与连接失败换号；上游用 400 报账号问题（例如余额不足）时，以前会当成客户端写错直接返回。2026-11-17 就发生过：`elsa` 在 38 秒里连续返回 16 次 `400 You have insufficient credits...`，没有冷却、没有停用，会话还一直粘在它上面，同期的 `tokenmp` 正常。`lax route policy` 用规则补上这一类失败，命中后可以重试、冷却、停用或换号，改完立即生效，不用重启：
+
+```bash
+# 5xx/429：同账号重试 1 次（等 500ms），然后返回
+lax route policy add --provider commandcode --status 5xx,429 --retry 1
+
+# 5xx/429：重试 3 次（500ms、1s、2s），然后换号
+lax route policy add --provider commandcode --status 5xx,429 --retry 3 --next_route
+
+# 余额不足：停用并换号
+lax route policy add --provider commandcode --status 400,402,403 \
+    --error-contains "insufficient credits" --disable --next_route
+
+# 余额不足：账号级冷却 30 分钟后换号
+lax route policy add --account elsa --status 400 \
+    --error-contains "insufficient credits" --cooldown 30m --next_route
+
+# 某个模型的 5xx：只冷却这个账号-模型，然后换号
+lax route policy add --provider commandcode --model deepseek/deepseek-v4.1-flash-fast \
+    --status 5xx --cooldown 1m --next_route
+
+# 401 不按内置兜底停用，直接返回；priority 更小，先于别的规则
+lax route policy add --account elsa --status 401 --return --priority 5
+```
+
+条件按 AND 组合：账号、厂商、模型、状态码、错误文本。`--status` 收 `400`–`599`、`4xx`、`5xx`；`--error-contains` 是大小写不敏感的子串，可给多次（多个值是 OR）；`--error-regex` 是 Go 正则。用户规则按 `priority` 从小到大、同值按 id 匹配，第一条命中就生效；都不命中时走内置兜底：401 永久停用并返回；402 永久停用并换号；400/403 的错误文本命中计费关键词（`insufficient credit`、`no credits`、`out of credits`、`credit balance`、`purchase more credits`、`payment required`、`insufficient_quota`、`余额不足`、`欠费`、`额度不足`、`额度已用完`、`充值` 等）时永久停用并换号。裸 `credit` 或裸 `quota` 不匹配，避免误伤。
+
+动作直接写在参数上：`--retry N` 在同一账号同一模型上再试 N 次（1–10）；`--cooldown 30m` 冷却（1 秒到 30 天）；`--disable` 永久停用；`--next_route` 换下一个账号；`--return` 把上游错误返回客户端。`--disable` 与 `--cooldown` 互斥，`--next_route` 与 `--return` 互斥；至少要给一个动作，两个流程都不写时默认 `--return`。规则是整条替换：命中的规则决定全部行为，没写的动作不做，不会和默认处理叠加。`set` 只改显式给出的字段，`unset` 清字段，流程位用 `set --return` / `set --next_route` 改。
+
+`--retry` 的等待从 `--retry-base`（默认 500ms）开始翻倍：500ms、1s、2s……单次最多等 8s，一个客户端请求在一个候选账号上累计最多等 60s；客户端断开就停。每次重试都是一次真实上游调用，也会各记一条请求记录。
+
+`--cooldown` 带了 `--model` 就只冷却这个账号的这个模型；没带就冷却整个账号，账号的所有模型都暂时选不到，`route explain` 的理由写「账号冷却中」。账号级冷却存在 `accounts.cooldown_until_ms`，和原来的模型级冷却互不影响；粘性 `prefer` 会绕过冷却中的账号，`strict` 则返回 503、不换号。`--disable` 不分模型，永远停用整个账号，恢复要 `lax account enable`。
+
+没写 `--status`、`--error-contains`、`--error-regex` 的规则会命中所有失败，必须显式带 `--all-errors`；它也不能与这三项同时出现。这条检查防的是漏写条件后把正常的 400 也停用掉。
+
+`lax route policy ls` 按生效顺序列出用户规则，再列内置兜底；`show <id>` 看一条的完整字段。`lax route policy test --status 400 --message "You have insufficient credits" --provider commandcode` 只做匹配，不碰上游、不写库；加 `--explain` 会逐条说明命中还是跳过。`account test` 与语音应错探活也会先过策略；语音探活把 400/422 当「端点可达」，但计费类 400 命中停用规则时不会再判成可用。默认行为不变：没有任何规则命中时，429/408/5xx/连接失败照旧换号，401 停用并返回，403 与普通 400 原样返回。400/401/403 仍不进 `route_stats`，被策略停用或冷却也不会改变这个口径。
+
+### 额度选号
 
 额度也能参与选号，默认关闭：`--quota-order` 默认 `off`、`--quota-min-usd` 默认 `0`，不配置时输出与旧版一致。只有「折合余额已知且低于阈值」的账号会被排除，从未刷新、汇率未知的账号一律保留；到期默认只提示（`warn`），可以改成排到末尾（`deprioritize`）或直接排除（`exclude`）。细节见下一节。
 
@@ -301,7 +342,7 @@ lax quota set cc1 --expiry-mode deprioritize
 lax route explain glm-5.2
 ```
 
-额度选号有几个默认与边界：`--quota-order` 默认 `off`、`--quota-min-usd` 默认 `0`，都不改选号；只有「折合余额已知且低于阈值」的账号才会被排除，从未刷新、汇率未知的账号一律保留；到期默认 `warn`，只展示，`exclude` 才会排除。额度排序在策略、粘性与 softmax 之后做稳定排序，未知值排最后；`strict` 粘性被额度排除时仍返回 503，不换号。额度刷新失败只更新快照状态，不停用账号、不写请求记录；只有真实请求 401 才会停用账号。
+额度选号有几个默认与边界：`--quota-order` 默认 `off`、`--quota-min-usd` 默认 `0`，都不改选号；只有「折合余额已知且低于阈值」的账号才会被排除，从未刷新、汇率未知的账号一律保留；到期默认 `warn`，只展示，`exclude` 才会排除。额度排序在策略、粘性与 softmax 之后做稳定排序，未知值排最后；`strict` 粘性被额度排除时仍返回 503，不换号。额度刷新失败只更新快照状态，不停用账号、不写请求记录；真实上游错误被 `lax route policy` 命中时可以停用或冷却账号，额度刷新失败本身不进入策略，也不停用、不冷却账号。
 
 只剩 0.069 credits 这类几乎用尽的账号，要开过滤就设一个小的最低阈值（如 `--quota-min-usd 0.5`），让它在余额低于阈值后退出选号；不要把这个数字当成默认值。
 
@@ -380,7 +421,7 @@ MiMo 的两条 chat 方言（`lax/mimo-chat-speech@1` 与 `lax/mimo-chat-asr@1`�
 
 计费分两条：直通按字符（`tts_chars`）× `--tts-char` 与音频秒（`audio_seconds`）× `--audio-second`；chat 方言按上游报的 token 计（`in_tokens` / `out_tokens` / 缓存读），`tts_chars` 与 `audio_seconds` 只记录展示、不进花费。`/v1/models` 的条目会带 `capabilities`、`voices` 与 `audio_formats`，不确定能传什么时先查它。
 
-语音模型的探活仍按对话请求打，也没接进方言分发：声明了能力的模型用 `model add` 手写可达性（`model ls` 显示「待探活」，不影响选号）；对这类模型跑 `model probe` 会因为对话请求返回 400 把 `allowed` 改写成 `forbidden`。直通路由上的应错探活规则见 DESIGN 5.16：`400` / `422` 判可达、`404` 判不存在、`401` 停用账号，而 `400` 只证明端点存在、不证明凭据有效。
+语音模型的探活仍按对话请求打，也没接进方言分发：声明了能力的模型用 `model add` 手写可达性（`model ls` 显示「待探活」，不影响选号）；对这类模型跑 `model probe` 会因为对话请求返回 400 把 `allowed` 改写成 `forbidden`。直通路由上的应错探活规则见 DESIGN 5.16：`400` / `422` 判可达、`404` 判不存在、`401` 停用账号，而 `400` 只证明端点存在、不证明凭据有效；`lax route policy` 的计费类 400 让它停用或冷却时，不再判成可达（见「失败处理策略」）。
 
 ## 插件与方言
 
@@ -594,7 +635,7 @@ Release 创建成功后，同一工作流的 `deploy` job 会把 `linux/amd64` �
 
 ## 已知边界
 
-gemini 的入站与出站都支持非流式与流式，模型列表可同步（`google-gemini` 内置，`GET /v1beta/models` 的清单去掉 `models/` 前缀、按 `nextPageToken` 翻页；只能做向量化的条目现在也进清单，能力位记 `embedding`，以前它们被 `supportedGenerationMethods` 过滤掉了）。gemini 的模型名在 URL 路径里，路由的 `path` 因此可以写 `{model}` 占位符（相对路径与整条地址都行，替换时按路径段转义）；入站 gemini 的错误体是 google 的形状（`error.code` 是 HTTP 状态码、`error.status` 是状态名），四条入站路径各自的形状见 DESIGN 5.2；非正常的 `finishReason`（`SAFETY` 一类）按正常结束转给客户端，原值只进网关日志；gemini 的内置工具（`googleSearch` 等）与思考内容（`thought` 标记、`thinkingConfig`）不搬。转换时搬运文本、图片、思考内容、工具调用与工具结果五类块：思考内容只在响应方向搬运，请求方向不回填——chat 的 `reasoning_content` 与 responses 的 `reasoning` item 是上游自己产生的字段，回填给推理模型会被以 400 拒掉整条请求；响应方向仍照旧搬运。签名只有 anthropic 有落点，没有签名的思考块不写进 anthropic 的请求与响应（不伪造签名，伪造会被上游以 400 拒绝），所以 chat 与 responses 的思考内容转到 anthropic 时丢弃；流式转换下发给 anthropic 客户端的思考块没有签名，客户端若把这些块回填进下一轮请求，上游会报 400。工具结果之后紧跟的追问并进同一条 user 消息，因为 anthropic 不接受两条相邻的 user 消息。思考配置参数（anthropic 的 `thinking`、chat 的 `reasoning_effort`）、`redacted_thinking` 的不透明 `data` 与 responses 的 `encrypted_content` 跨协议不搬，reasoning token 不单独记账（算进输出 token）。音频与文件类内容丢弃；anthropic 的服务端内置工具（`web_search` 等）跨协议时整条丢弃，chat 与 responses 的工具定义只认 function，编回 anthropic 时才原样保留 `type`；`tools[].strict` 不搬运，`is_error` 只有 anthropic 有落点，`allowed_tools` 降级为 `auto`。流式转换下断在工具参数中间时，已下发的参数片段撤不回来，收尾的错误帧会写明「工具调用参数在上游中断，内容不完整」，这一次记失败，程序不伪造闭合的 JSON。跨协议只搬运图片地址，没有其它多模态变换。不改写任何客户端配置文件；需要非标准请求头的上游通过 `provider header` 声明（见 DESIGN 5.10），例如 opencode 的 Go 端点要求 `x-opencode-session`，声明 `{session}` 即可路由，要求按请求计算的签名的上游仍然接不了；冷却按账号-模型隔离：429 首次 500 毫秒，5xx 首次 10 秒，连接层失败首次 2 秒，均按该账号该模型的连续失败次数翻倍、上限 30 分钟；探活调用不计入用量汇总；估算花费需要给模型定价（`model price set` 的 `--in` 与 `--out`，账号只在套餐不同时用 `--account` 覆盖），缓存读写按 `--cache-read` 与 `--cache-write` 折价（未填时回退到输入价，单价单位都是每百万 token）；`usage` 与 `log tail` 里仍分别显示缓存读写的 token。语音不做音频转码、不解析音频容器算时长（直通路径 TTS 按入参字符、ASR 按上游报的秒数，chat 方言按 token 记账），变化的模型名也不改写（响应里的 `model` 原样）；出站形状只由绑定的方言决定，同协议的方言不执行声明式映射，chat 形状的语音方言可以是内置的 Go 实现，也可以是插件用声明式映射或 hook 方言写的（见「插件与方言」）。
+gemini 的入站与出站都支持非流式与流式，模型列表可同步（`google-gemini` 内置，`GET /v1beta/models` 的清单去掉 `models/` 前缀、按 `nextPageToken` 翻页；只能做向量化的条目现在也进清单，能力位记 `embedding`，以前它们被 `supportedGenerationMethods` 过滤掉了）。gemini 的模型名在 URL 路径里，路由的 `path` 因此可以写 `{model}` 占位符（相对路径与整条地址都行，替换时按路径段转义）；入站 gemini 的错误体是 google 的形状（`error.code` 是 HTTP 状态码、`error.status` 是状态名），四条入站路径各自的形状见 DESIGN 5.2；非正常的 `finishReason`（`SAFETY` 一类）按正常结束转给客户端，原值只进网关日志；gemini 的内置工具（`googleSearch` 等）与思考内容（`thought` 标记、`thinkingConfig`）不搬。转换时搬运文本、图片、思考内容、工具调用与工具结果五类块：思考内容只在响应方向搬运，请求方向不回填——chat 的 `reasoning_content` 与 responses 的 `reasoning` item 是上游自己产生的字段，回填给推理模型会被以 400 拒掉整条请求；响应方向仍照旧搬运。签名只有 anthropic 有落点，没有签名的思考块不写进 anthropic 的请求与响应（不伪造签名，伪造会被上游以 400 拒绝），所以 chat 与 responses 的思考内容转到 anthropic 时丢弃；流式转换下发给 anthropic 客户端的思考块没有签名，客户端若把这些块回填进下一轮请求，上游会报 400。工具结果之后紧跟的追问并进同一条 user 消息，因为 anthropic 不接受两条相邻的 user 消息。思考配置参数（anthropic 的 `thinking`、chat 的 `reasoning_effort`）、`redacted_thinking` 的不透明 `data` 与 responses 的 `encrypted_content` 跨协议不搬，reasoning token 不单独记账（算进输出 token）。音频与文件类内容丢弃；anthropic 的服务端内置工具（`web_search` 等）跨协议时整条丢弃，chat 与 responses 的工具定义只认 function，编回 anthropic 时才原样保留 `type`；`tools[].strict` 不搬运，`is_error` 只有 anthropic 有落点，`allowed_tools` 降级为 `auto`。流式转换下断在工具参数中间时，已下发的参数片段撤不回来，收尾的错误帧会写明「工具调用参数在上游中断，内容不完整」，这一次记失败，程序不伪造闭合的 JSON。跨协议只搬运图片地址，没有其它多模态变换。不改写任何客户端配置文件；需要非标准请求头的上游通过 `provider header` 声明（见 DESIGN 5.10），例如 opencode 的 Go 端点要求 `x-opencode-session`，声明 `{session}` 即可路由，要求按请求计算的签名的上游仍然接不了；默认冷却按账号-模型隔离：429 首次 500 毫秒，5xx 首次 10 秒，连接层失败首次 2 秒，均按该账号该模型的连续失败次数翻倍、上限 30 分钟；`lax route policy` 的 `--cooldown` 不带 `--model` 时是账号级冷却，账号的所有模型都暂时选不到，恢复要等截止时间或用 `account enable`（见「失败处理策略」）；探活调用不计入用量汇总；估算花费需要给模型定价（`model price set` 的 `--in` 与 `--out`，账号只在套餐不同时用 `--account` 覆盖），缓存读写按 `--cache-read` 与 `--cache-write` 折价（未填时回退到输入价，单价单位都是每百万 token）；`usage` 与 `log tail` 里仍分别显示缓存读写的 token。语音不做音频转码、不解析音频容器算时长（直通路径 TTS 按入参字符、ASR 按上游报的秒数，chat 方言按 token 记账），变化的模型名也不改写（响应里的 `model` 原样）；出站形状只由绑定的方言决定，同协议的方言不执行声明式映射，chat 形状的语音方言可以是内置的 Go 实现，也可以是插件用声明式映射或 hook 方言写的（见「插件与方言」）。
 
 插件与方言：本版落地声明式插件、内置方言与 `moejs` 沙箱，仍没有 `trusted-worker`（独立进程，以及文件、进程、环境变量权限）、Magpie/OpenCode 导入与 `plugin import`、OAuth 登录、插件市场与签名（`plugin_versions.signature_status` 一律 `unverified`、`source` 记 `dir` 或 `github:<owner>/<repo>/<path>@<ref>`）。声明式映射只能表达 `const`、`input`、`model`、`option` 四种来源加 `map`、`default`、`omit_if_empty` 三个修饰键，没有表达式、正则、循环与脚本，`input` 白名单只有语音那八项，所以声明式方言只能给语音两条操作写映射；对话、向量化与决策请求可以绑宿主方言（`lax/` 前缀）走 Go 编解码，也可以绑 hook 方言。hook 方言的边界：`Input.Body` 是宿主编好的报文（`Input.Messages` 仍为空，读消息要解析 `ctx.body`）；向量化与决策入站的响应，方言返回的 `ResultJSON` 在入站与出站同协议时原样写回（这两个协议没有中间表示，跨协议改编不支持）；要流式就得实现 `decode_stream`，否则在发上游请求之前 400；`Plan.Path` 只能改相对路径，语音路径不看它；`Plan.Headers` 是逐请求的头（请求 ID、资源号这类），语音与非语音两条方言路径都生效，但凭据头与帧头是保留头、沙箱直接拒，凭据只由厂商的 `auth` 声明注入。沙箱没有内存硬上限（goja 不提供堆上限 API，只有源码 8 MiB、返回值 8 MiB、注入音频与流块 8 MiB、cache 1 MiB 四道字节闸门）；逐 hook 超时打不断在途的 `lax.http.request`，一个 100 ms 的 hook 可能占用几秒；ESM 只支持静态 `export`、`export default` 与相对 import，没有 `import *`、裸模块、动态 import 与顶层 `await`；联网只走 `lax.http.request` 的白名单 https，没有媒体通道。`plugin install` 逐家厂商一个事务，一个插件带多家厂商时第 N 家失败会让前 N-1 家留在库里（用 `lax plugin rm` 或 `lax provider rm` 清）。`plugin reload`（`SIGHUP`）只整表换方言注册表，不关旧沙箱，反复 reload 会积累旧实例；没有 `models` / `probe` 两个控制面钩子，模型清单与探活仍由 `model sync` / `model probe` 做。
 

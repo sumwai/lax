@@ -109,10 +109,14 @@ func SettledFresh(status string, checkedAt int64, now time.Time, maxAge time.Dur
 	return age >= 0 && age <= maxAge
 }
 
-// AvailableForModel 判断账号此刻能否接这个模型的请求：账号停用或这个账号-模型在冷却中都不行。
-// 冷却按账号-模型隔离，同账号的其它模型不受影响（见 store.ModelFailure）。
+// AvailableForModel 判断账号此刻能否接这个模型的请求：账号停用、账号级冷却中，或者这个
+// 账号-模型在冷却中都不行。账号级冷却来自 5.20 的策略，会挡住这个账号的所有模型；
+// 模型级冷却仍按账号-模型隔离，同账号的其它模型不受影响（见 store.ModelFailure）。
 func AvailableForModel(a store.Account, model string, now time.Time) bool {
 	if !a.Enabled {
+		return false
+	}
+	if InAccountCooldown(a, now) {
 		return false
 	}
 	f := a.ModelFailures[model]

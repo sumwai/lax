@@ -728,7 +728,7 @@ func TestDeleteAccountClearsModelRows(t *testing.T) {
 
 // —— 模型级协议：account_models.protocol（迁移 0005） ——
 
-// TestMigrationsRunToLatestFromEmptyDB 确认空库能一路跑到最新的 user_version，
+// TestMigrationsRunToLatestFromEmptyDB 确认空库由 AutoMigrate 建出全部表，
 // 且新列的默认值就是「继承账号协议」的空串。
 func TestMigrationsRunToLatestFromEmptyDB(t *testing.T) {
 	st := openTemp(t)
