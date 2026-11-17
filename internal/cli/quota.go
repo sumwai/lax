@@ -898,6 +898,15 @@ func mergeQuotaFacts(prev, next quota.Facts, cfg quota.Settings) quota.Facts {
 		next.Used, next.UsedKnown = prev.Used, prev.UsedKnown
 	}
 	next.Usage = mergeUpstreamUsage(prev.Usage, next.Usage)
+	// 限流窗口也是「缺字段不是清零」：credits 端点报错、或它 200 但响应里没有窗口时，
+	// 沿用上一次已知的 5 小时与每周窗口。窗口自带重置时间，旧窗口到期后界面上自然显示过期，
+	// 不能因为这一次没读到就把上一次的数字擦掉。
+	if next.FiveHour == nil {
+		next.FiveHour = prev.FiveHour
+	}
+	if next.Weekly == nil {
+		next.Weekly = prev.Weekly
+	}
 	return quota.Apply(next, cfg)
 }
 
