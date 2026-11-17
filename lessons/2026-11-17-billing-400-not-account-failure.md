@@ -80,4 +80,4 @@ patch semantics, `--all-errors` and JSON output. `make check` is the gate.
 
 ## Fix
 
-Status: `fix in progress`. Commit hash: TBD.
+Status: fixed. Commit hash: `db2b9b34c33f64a755e6588423717683b64657f9`.
