@@ -1,6 +1,6 @@
 # Clients send `role: "system"` turns mid-conversation
 
-Found: 2026-10-31, from a reported failure where Claude Code on `deepseek-flash` returned
+Found: 2026-10-31, from a reported failure where Claude Code on `model-2` returned
 `400 anthropic: 不支持的消息角色 "system"`.
 Fix: `43eb3a2`, an anthropic decode that accepts a mid-conversation `system` message as an
 IR `RoleSystem` message in place.
@@ -8,7 +8,7 @@ IR `RoleSystem` message in place.
 ## Symptom
 
 A Claude Code session pointed at a gateway model name that Claude Code does not know
-(`deepseek-flash`, routed to an `openai-chat` upstream) failed on the first turn with
+(`model-2`, routed to an `openai-chat` upstream) failed on the first turn with
 `400 anthropic: 不支持的消息角色 "system"`. Nothing reached the upstream: the anthropic decoder
 rejected the body before account selection, so no provider, key or route was involved.
 

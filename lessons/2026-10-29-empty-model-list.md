@@ -1,17 +1,17 @@
 # An empty model list must not mean "serves every model"
 
 Found: 2026-10-29, from a live failure while running `serve`: a request for
-`deepseek/deepseek-v4.1-flash` reached an account on the official DeepSeek endpoint, which
-answered with the error quoted below.
+`acme/model-1` (a model name from another vendor) reached an account on the
+upstream's endpoint, which answered with the error quoted below.
 Fixed: `30421bf`.
 
 ## Symptom
 
-`lax serve` routed a request for `deepseek/deepseek-v4.1-flash` (a Command Code model
-name) to an account on the official DeepSeek endpoint, which answered:
+`lax serve` routed a request for `acme/model-1` (a model name from another vendor) to
+an account on the upstream's endpoint, which answered:
 
 ```
-The supported API model names are deepseek-flash, deepseek-v4-pro, but you passed deepseek/deepseek-v4.1-flash.
+The supported API model names are model-2, model-1, but you passed acme/model-1.
 ```
 
 Two accounts in the pool had a synced but not yet probed model list, so their `accounts.models`

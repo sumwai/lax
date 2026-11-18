@@ -25,9 +25,11 @@
 ```bash
 lax init                                            # 建配置、数据库与密钥
 lax provider ls                                     # 看厂商来源与协议总览
-lax account add ds --provider deepseek --key sk-xxx  # 或用 --key - 从标准输入读
-lax model sync --account ds                         # 拉上游模型列表
-lax model probe --account ds                        # 逐个探活，能用的才进选号
+lax provider add acme --base-url https://api.acme.example \
+    --openai /v1/chat/completions                  # 登记一家厂商；内置预设可直接用
+lax account add acct1 --provider acme --key sk-xxx  # 或用 --key - 从标准输入读
+lax model sync --account acct1                      # 拉上游模型列表
+lax model probe --account acct1                     # 逐个探活，能用的才进选号
 lax serve                                           # 起网关，127.0.0.1:4567
 lax log tail                                        # 看请求记录
 ```
@@ -50,7 +52,7 @@ Claude Code：
 ```
 ANTHROPIC_BASE_URL=http://127.0.0.1:4567
 ANTHROPIC_AUTH_TOKEN=lax-local            # 本机网关不校验，填个非空值即可
-ANTHROPIC_MODEL=deepseek-v4-pro           # 必须是探活出来的可用模型名
+ANTHROPIC_MODEL=model-1                  # 必须是探活出来的可用模型名
 ```
 
 说 openai-chat 与 openai-responses 的客户端（含 Codex）把 base URL 填成 `http://127.0.0.1:4567/v1`。
@@ -61,7 +63,7 @@ ANTHROPIC_MODEL=deepseek-v4-pro           # 必须是探活出来的可用模型
 
 ```bash
 curl -s http://127.0.0.1:4567/v1/models
-curl -s http://127.0.0.1:4567/v1/models/deepseek-v4-pro   # 单个模型，未命中返回 404
+curl -s http://127.0.0.1:4567/v1/models/model-1  # 单个模型，未命中返回 404
 ```
 
 - 清单来自启用账号的模型列表，按名字去重升序，`owned_by` 是厂商名。
@@ -158,7 +160,7 @@ gemini 的模型名在路径里，请求体中没有 `model` 字段。
 账号只存厂商名，地址与协议都在那家厂商那一行。所以 `account add` 没有 `--base-url`：先登记厂商，再建账号。
 
 ```bash
-lax provider add myco --base-url https://api.deepseek.com \
+lax provider add acme --base-url https://api.acme.example \
     --openai /v1/chat/completions \
     --anthropic /anthropic/v1/messages \
     --default-protocol openai
@@ -190,11 +192,11 @@ lax provider add myco --base-url https://api.deepseek.com \
 模型列表不用手填。`model sync` 拉上游清单，`model probe` 逐个试，能用的才进选号。
 
 ```bash
-lax model sync --account ds                      # 拉上游模型列表
-lax model probe --account ds                     # 逐个探活
-lax model probe --account ds --limit 5           # 只探这个账号的前 5 个
-lax model alias set fast glm-4.6                 # 客户端写死的名字指到真名
-lax model price set glm-4.6 --in 0.6 --out 2.2   # 每百万 token 单价
+lax model sync --account acct1                      # 拉上游模型列表
+lax model probe --account acct1                     # 逐个探活
+lax model probe --account acct1 --limit 5           # 只探这个账号的前 5 个
+lax model alias set fast model-2                    # 客户端写死的名字指到真名
+lax model price set model-2 --in 0.6 --out 2.2      # 每百万 token 单价
 ```
 
 - 清单三种形状都认：`{data:[…]}`、`{models:[…]}`、顶层数组。
@@ -221,8 +223,8 @@ lax model price set glm-4.6 --in 0.6 --out 2.2   # 每百万 token 单价
 | `softmax` | 优先级、成功率、延迟评分后按概率抽 |
 
 ```bash
-lax route set glm-4.6 --strategy softmax --temperature 0.1 --explore 2
-lax route explain glm-4.6 --session demo --seed 42   # 不发请求，预演这次怎么选
+lax route set model-2 --strategy softmax --temperature 0.1 --explore 2
+lax route explain model-2 --session demo --seed 42   # 不发请求，预演这次怎么选
 ```
 
 - 冷却按「账号 + 模型」隔离：429 首次 500 毫秒，5xx 首次 10 秒，连接失败首次 2 秒。
@@ -239,13 +241,13 @@ lax route explain glm-4.6 --session demo --seed 42   # 不发请求，预演这�
 
 ### 账号额度
 
-只读查上游余额与到期，存一份快照给命令看。默认不自动刷新，也不参与选号。目前只支持 CommandCode 与 DeepSeek。
+只读查上游余额与到期，存一份快照给命令看。默认不自动刷新，也不参与选号。目前只支持内置的两种额度接口，具体取值见 `lax quota set --help`。
 
 ```bash
-lax quota refresh cc1              # 手动查一次
-lax quota ls                       # 所有账号的快照
-lax quota show cc1                 # 明细：余额、本期已用、周期结束
-lax quota set cc1 --fx-rate 0.14   # 非 USD 币种折 USD 的手工汇率
+lax quota refresh acct1               # 手动查一次
+lax quota ls                          # 所有账号的快照
+lax quota show acct1                  # 明细：余额、本期已用、周期结束
+lax quota set acct1 --fx-rate 0.14    # 非 USD 币种折 USD 的手工汇率
 ```
 
 - 余额不是 USD 时必须手填汇率；没给时折合 USD、剩余比例与排序都按未知处理。
@@ -263,9 +265,9 @@ lax quota set cc1 --fx-rate 0.14   # 非 USD 币种折 USD 的手工汇率
 用之前要做两件事：给模型声明能力，再绑一条方言。
 
 ```bash
-lax provider set openai openai-speech=/v1/audio/speech
-lax model capability set gpt-4o-mini-tts --capability speech \
-    --voices alloy,nova --audio-formats mp3,wav --dialect lax/openai-speech@1
+lax provider set acme openai-speech=/v1/audio/speech
+lax model capability set model-tts --capability speech \
+    --voices voice-a,voice-b --audio-formats mp3,wav --dialect lax/openai-speech@1
 ```
 
 - 没声明能力的模型在本地就回 400，一条上游调用都不发。
@@ -281,7 +283,7 @@ lax model capability set gpt-4o-mini-tts --capability speech \
 入站两条：`POST /v1/embeddings` 与 `POST /v1beta/models/{model}:embedContent`。
 
 ```bash
-lax provider set openai openai-embeddings=/v1/embeddings
+lax provider set acme openai-embeddings=/v1/embeddings
 ```
 
 没声明这条路由时 `/v1/embeddings` 回 400，并给出上面这条命令。
@@ -293,7 +295,7 @@ lax provider set openai openai-embeddings=/v1/embeddings
 systemone 是第五条报文协议，不是对话：一条请求由一个 `state` 加一组问题组成，回的是答案与概率，不产文本。
 
 ```bash
-lax model decide --model typesafe/jev --state "客户说：这个月的账单被扣了两次" \
+lax model decide --model model-decision --state "客户说：这个月的账单被扣了两次" \
     --noul "present=Is this text present?" \
     --choice "mood=这是哪一类问题?" --choice "mood:billing=账单与付款,other"
 ```
@@ -318,7 +320,7 @@ lax model decide --model typesafe/jev --state "客户说：这个月的账单被
 - `moejs` 在进程内 JS 沙箱里跑代码，可以给对话、向量化与决策请求补报文。
 
 ```bash
-lax plugin install doubao-seed-tts --trust sandboxed --yes
+lax plugin install example-tts --trust sandboxed --yes
 lax plugin ls
 lax plugin doctor
 ```
@@ -395,8 +397,8 @@ lax plugin doctor
 
 ### 账号额度监控
 
-- 只支持 CommandCode 与 DeepSeek。
-- CommandCode 的 `/alpha/*` 是未公开接口，路径与字段都可能变。
+- 只支持内置的两种额度接口，具体取值见 `lax quota set --help`。
+- 其中一种额度接口用的是未公开路径（`/alpha/*`），路径与字段都可能变。
 - 人民币折 USD 没有可靠默认汇率，必须手填。
 - 额度刷新失败只写快照状态，不停用账号、不写请求记录。
 - 额度刷新本身不是转发请求，不计入 `usage` 与 `log`。

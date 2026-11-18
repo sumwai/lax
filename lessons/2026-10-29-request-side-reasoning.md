@@ -12,8 +12,8 @@ backfill is limited there to blocks the gateway itself signed.
 
 A Claude Code session with thinking enabled sends signed `thinking` blocks back in the message
 history. When that request is routed to an account whose outbound protocol is `openai-chat`, the
-translator wrote those blocks into `assistant.reasoning_content`. Reasoning upstreams such as
-DeepSeek reject a request that echoes `reasoning_content` and answer 400, so the whole request
+translator wrote those blocks into `assistant.reasoning_content`. Reasoning upstreams can
+reject a request that echoes `reasoning_content` and answer 400, so the whole request
 failed even though the history was well formed.
 
 ## Why it was easy to miss

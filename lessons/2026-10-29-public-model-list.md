@@ -6,7 +6,7 @@ Fixed: `2ed8c7c`.
 ## Symptom
 
 `lax account test` judged an account by `GET /v1/models` first, on the reasoning that a
-model list costs no tokens and exercises credentials. Against commandcode, the list endpoint is
+model list costs no tokens and exercises credentials. Against one upstream, the list endpoint is
 public: it answers 200 with 94 models for any key, including a key that the completions endpoint
 rejects with `401 Invalid 'Authorization' header or token`. The command therefore printed `正常`
 for an account that could not serve a single request.
@@ -33,4 +33,4 @@ is reported as failing rather than as healthy.
 
 `TestProbe*` cases assert that a list-only success sends a follow-up call, that a 401 on that call
 is a failure with both stages in the message, and that a working key still reports success. A live
-run against commandcode with a revoked key shows `失败 401` with `列表接口可用` beside it.
+run against that upstream with a revoked key shows `失败 401` with `列表接口可用` beside it.

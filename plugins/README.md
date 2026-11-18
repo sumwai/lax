@@ -41,14 +41,14 @@ lax plugin install https://github.com/<owner>/<repo>/tree/<ref>/plugins/<插件�
 
 ```bash
 lax plugin ls --available                    # 先看官方仓库默认分支里有哪些包
-lax plugin install doubao-seed-tts --trust sandboxed --yes
-lax plugin install doubao-seed-tts@1.2.1 --trust sandboxed --yes
+lax plugin install example-tts --trust sandboxed --yes
+lax plugin install example-tts@1.2.1 --trust sandboxed --yes
 ```
 
 不带 `@` 时取最新版；带 `@1.2.1` 时固定到该插件的发布 tag
-`doubao-seed-tts-v1.2.1`。当前目录有同名目录且不带 `@` 时按本地目录装；
-没有才映射到 `github:sumwai/lax-plugins/plugins/doubao-seed-tts`。本地有同名目录
-又想强制取远程最新版时写 `doubao-seed-tts@main`。
+`example-tts-v1.2.1`。当前目录有同名目录且不带 `@` 时按本地目录装；
+没有才映射到 `github:sumwai/lax-plugins/plugins/example-tts`。本地有同名目录
+又想强制取远程最新版时写 `example-tts@main`。
 
 `runtime: "declarative"` 的插件用 `--trust declarative`；`moejs` 插件用
 `--trust sandboxed`。安装前可以用 `--dry-run` 只看计划，不复制、不写库：

@@ -1,6 +1,6 @@
 # Pinning `speech.*` to the speech wire protocols makes a chat-shaped vendor impossible to declare
 
-Found: 2026-10-31, while moving MiMo's speech codec out of `internal/gateway` into `internal/plugin`
+Found: 2026-10-31, while moving a vendor's speech codec out of `internal/gateway` into `internal/plugin`
 next to the declarative dialect compiler.
 
 Fix: in progress; the pair check lives in `internal/plugin/dialect.go` (`wireOperations` and
@@ -49,8 +49,8 @@ Two tests, each passing on its own, that cannot both be right:
   same pair is rejected.
 
 Whichever way the validation is written, one of them has to move. The install pipeline surfaced it
-again from the other side: a plugin with a MiMo-shaped dialect cannot be installed at all, so the
-migration that was supposed to take MiMo out of the gateway left it only in the Go built-ins.
+again from the other side: a plugin with a vendor-shaped dialect cannot be installed at all, so the
+migration that was supposed to take that vendor out of the gateway left it only in the Go built-ins.
 
 ## Decision
 
@@ -59,7 +59,7 @@ speech wire protocol. The inbound wire of a speech request stays one of the two 
 clients keep posting to `/v1/audio/speech` or `/v1/audio/transcriptions`, and the operation name is
 still derived from the inbound wire. What the pair table answers is a different question — which
 upstream wires a dialect may name for that operation. A vendor that speaks chat completions is a
-legitimate answer to it, and MiMo is the proof.
+legitimate answer to it, and a chat-shaped speech vendor is the proof.
 
 The check has to read the pair table, not `OperationForInbound`. `OperationForInbound` keeps its
 meaning (inbound wire to operation) and must not be used to validate the upstream side.

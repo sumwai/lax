@@ -1,6 +1,6 @@
 # Reasoning upstreams sometimes require their own CoT back
 
-Found: 2026-10-31, from a reported failure where Claude Code on `deepseek-flash` answered a tool
+Found: 2026-10-31, from a reported failure where Claude Code on `model-2` answered a tool
 call and then got `400 The reasoning_content in the thinking mode must be passed back to the API`.
 Fix: `992f421`, which stamps a replay signature on thinking blocks coming from chat and responses
 upstreams and writes those blocks back as `reasoning_content` when the request carries tools.
@@ -17,12 +17,12 @@ describe two different request shapes, and the earlier note generalised from one
 
 ## What the upstream actually checks
 
-DeepSeek's thinking-mode guide states the rule, and a scratch instance reproduces it:
+The upstream's thinking-mode guide states the rule, and a scratch instance reproduces it:
 
 > for requests carrying the `tools` parameter, the `reasoning_content` must be fully passed back to
 > the API in all subsequent requests — even for turns where the model did not perform a tool call.
 
-Probes against the real endpoint, all with `deepseek-flash`:
+Probes against the real endpoint, all with `model-2`:
 
 | Request shape | Result |
 | --- | --- |
@@ -39,7 +39,7 @@ exactly the request that continues a tool loop, and never the one that starts it
 
 Filling the same body with a tool-call id the endpoint issued moments earlier also returns 200,
 with or without `reasoning_content`. The upstream recognises its own recent tool-call ids and
-treats the reasoning as already known; any other id (a made-up `call_abc`, a DeepSeek-shaped
+treats the reasoning as already known; any other id (a made-up `call_abc`, a vendor-shaped
 `call_00_…` it never issued, or an id from a different vendor after switching models mid-session)
 falls back to the strict check and returns 400. Reproducing therefore has to use an id the
 endpoint does not know, or wait out whatever window it keeps.

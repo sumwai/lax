@@ -1,6 +1,6 @@
 # Speech endpoints built on chat completions need an adapter and a capability declaration
 
-Found: 2026-10-31, while wiring MiMo (`api.xiaomimimo.com`) as a speech upstream. Nothing was broken
+Found: 2026-10-31, while wiring Acme (`api.acme.example`) as a speech upstream. Nothing was broken
 in production; the entry records why the gateway cannot treat a voice model as an ordinary chat
 model, and what it now refuses locally instead of forwarding.
 Fix: `internal/gateway/speech_adapter.go` (the chat dialect codec) and `internal/store/model_capability.go`
@@ -8,22 +8,22 @@ Fix: `internal/gateway/speech_adapter.go` (the chat dialect codec) and `internal
 
 ## Symptom
 
-MiMo has no `/v1/audio/speech` and no `/v1/audio/transcriptions`. Both models are called through
+Acme has no `/v1/audio/speech` and no `/v1/audio/transcriptions`. Both models are called through
 `POST /v1/chat/completions`:
 
 ```json
-{"model":"mimo-v2.5-tts",
+{"model":"model-tts",
  "messages":[{"role":"user","content":"<style instruction>"},
              {"role":"assistant","content":"<text to read>"}],
- "audio":{"format":"wav","voice":"Chloe"}}
+ "audio":{"format":"wav","voice":"voice-a"}}
 ```
 
 The audio comes back as base64 in `choices[0].message.audio.data`; ASR takes an `input_audio` part
 and returns text in `choices[0].message.content`. Three probed facts were not what the OpenAI audio
 shape implies:
 
-- `voice: "alloy"` returns `400 Param Incorrect`. Only the vendor's own voice names work
-  (`mimo_default`, `冰糖`, `Mia`, `Chloe`, …), and the error does not say which part was wrong.
+- `voice: "alloy"` (the OpenAI default) returns `400 Param Incorrect`. Only the vendor's own voice names work
+  (`voice-a`, `voice-b`, …), and the error does not say which part was wrong.
 - An ASR request with a text part returns
   `400 "ASR request must not include text parts; text prompt is injected by the gateway"`. The
   `prompt` parameter of `/v1/audio/transcriptions` therefore has nowhere to go.
@@ -37,7 +37,7 @@ so a client written against the OpenAI audio SDK sends a request shape the upstr
 integration attempt spent a request per wrong voice name.
 
 Treating "the model exists in the catalog" as permission to accept an audio request is worse than a
-wrong guess: it turns a client-side typo (`model: deepseek-v4.1-flash` posted to
+wrong guess: it turns a client-side typo (`model: model-2` posted to
 `/v1/audio/speech`) into a forwarded chat request that the upstream bills and answers with text,
 after which the gateway fails while looking for `audio.data`.
 
@@ -58,10 +58,10 @@ after which the gateway fails while looking for `audio.data`.
 
 ## How it was verified
 
-Against the real upstream: a `POST /v1/audio/speech` with `mimo-v2.5-tts` returned 10104 bytes of
+Against the real upstream: a `POST /v1/audio/speech` with `model-tts` returned 10104 bytes of
 MP3 (`ff f3` frame sync), and posting that file as multipart to `/v1/audio/transcriptions` returned
-`{"text":"今天风很大啊。"}`. A speech request for `mimo-v2.6-flash` (a chat model) returned 400 with
-no upstream call, and `voice: "alloy"` returned 400 listing the nine declared voices.
+`{"text":"Hello world."}`. A speech request for `model-chat` (a chat model) returned 400 with
+no upstream call, and a non-vendor voice name returned 400 listing the nine declared voices.
 
 The regression tests are `TestSpeechChatAdapter`, `TestSpeechChatAdapterInstructions`,
 `TestSpeechWithoutCapabilityRejected`, `TestSpeechVoiceRejected`, `TestTranscriptionsChatAdapter`

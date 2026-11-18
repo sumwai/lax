@@ -8,7 +8,7 @@
 > - 第 4 节：`plugin` 命令组的子命令、参数、行为、输出列与 `--json` 字段（`install` 的 `--trust` 判定表，`update`/`rollback`/`verify`/`logs`/`reload`/`config` 六个生命周期子命令）；`model capability add|set` 的 `--dialect` 与 `model dialect ls|set|unset`。
 > - 5.7：模型目录的插件来源与按操作的方言绑定。
 > - 5.8：`providers.plugin_id`、插件路由的建立方式与冲突规则。
-> - 5.16：语音改成「操作 + 方言」——绑定来源、同协议直通与 chat 方言两条路、MiMo 迁移、启动回填、两种 400、声明式映射的边界；十条内置方言（四条语音加六条宿主报文协议方言），对话上游靠引用宿主方言就能装起来。
+> - 5.16：语音改成「操作 + 方言」——绑定来源、同协议直通与 chat 方言两条路、内置语音迁移、启动回填、两种 400、声明式映射的边界；十条内置方言（四条语音加六条宿主报文协议方言），对话上游靠引用宿主方言就能装起来。
 > - 5.17：插件运行时——`moejs` JS 沙箱的执行模型（每次 prepare/decode 新建 Runtime、同一段流复用、超时与中断、受限 ESM、注入的 `lax` API 与不注入的全局、字节闸门）、对话与流式方言（`Plan.Body`/`Plan.JSON`/`Plan.Path`、`ResultJSON` 是出站形状、`StreamDialect` 事件表）、生命周期（版本指针、`reload` 与 `SIGHUP`、pid 文件）与审计/日志。
 > - 第 6 节：`plugins`、`plugin_versions`、`plugin_options`、`model_operations`、`plugin_audit`、`plugin_logs` 六张表与 `providers.plugin_id`；建表仍只走 `AutoMigrate`，没有迁移文件与版本号。
 > - 第 7 节：M17 与 M18 里程碑，以及「已知未做」的边界清单（含沙箱没有内存硬上限、中断打不断在途原生调用）。
@@ -78,8 +78,8 @@ lax 现在把厂商差异写在 Go 代码里。每加一个上游，通常要改
 | Operation | 语义动作，例如 `chat.complete@1`、`speech.synthesize@1` |
 | Wire Protocol | 客户端或上游使用的报文协议，例如 `openai-chat`、`anthropic-messages` |
 | Dialect | 某个 provider 对某个 operation 的上游实现形状 |
-| Provider | 厂商或服务，例如 `mimo`、`river` |
-| Model | provider 下的模型条目，例如 `mimo/mimo-v2.5-tts` |
+| Provider | 厂商或服务，例如 `acme`、`beta` |
+| Model | provider 下的模型条目，例如 `acme/model-tts` |
 | Account | 宿主保存的凭据和选号状态 |
 | Plugin | 可安装的声明或代码包 |
 | Host | lax 进程，拥有 I/O、数据库、凭据和计费 |
@@ -183,8 +183,8 @@ my-plugin/
 ```json
 {
   "schema": "lax.plugin/v1",
-  "id": "com.example.mimo",
-  "name": "Xiaomi MiMo",
+  "id": "com.example.acme",
+  "name": "Acme",
   "version": "1.0.0",
   "kind": "provider",
   "runtime": "moejs",
@@ -200,8 +200,8 @@ my-plugin/
       "mode": "host-proxy",
       "schemes": ["https"],
       "hosts": [
-        "mimo-server-sgp.xiaomimimo.com",
-        "platform.xiaomimimo.com"
+        "api.acme.example",
+        "platform.acme.example"
       ],
       "redirects": "none",
       "max_control_calls": 8,
@@ -222,8 +222,8 @@ my-plugin/
   },
   "providers": [
     {
-      "id": "mimo",
-      "name": "Xiaomi MiMo",
+      "id": "acme",
+      "name": "Acme",
       "catalog": "./models.json",
       "dialects": "./dialects.json"
     }
@@ -259,11 +259,11 @@ my-plugin/
 
 | 名称 | 例子 | 唯一性 |
 | --- | --- | --- |
-| Plugin ID | `com.example.mimo` | 全局 |
-| Provider ID | `mimo` | lax 内唯一 |
-| Model ID | `mimo/mimo-v2.5-tts` | lax 内唯一 |
-| Upstream Model ID | `mimo-v2.5-tts` | provider 内唯一 |
-| Dialect ID | `com.example.mimo/mimo-chat-speech@1` | 全局 |
+| Plugin ID | `com.example.acme` | 全局 |
+| Provider ID | `acme` | lax 内唯一 |
+| Model ID | `acme/model-tts` | lax 内唯一 |
+| Upstream Model ID | `model-tts` | provider 内唯一 |
+| Dialect ID | `com.example.acme/chat-speech@1` | 全局 |
 
 模型在客户端侧统一使用 `provider/model`。插件内部只处理 `model.upstream_id`，不拼接客户端模型名。
 
@@ -464,29 +464,29 @@ resolve model
   "operation": "speech.synthesize@1",
   "request_id": "01J...",
   "provider": {
-    "id": "mimo",
-    "plugin_id": "com.example.mimo"
+    "id": "acme",
+    "plugin_id": "com.example.acme"
   },
   "account": {
     "id": 12,
-    "name": "mimo-1",
+    "name": "acct1",
     "auth_kind": "api-key",
     "expires_at": null
   },
   "model": {
-    "id": "mimo/mimo-v2.5-tts",
-    "upstream_id": "mimo-v2.5-tts",
+    "id": "acme/model-tts",
+    "upstream_id": "model-tts",
     "operations": {},
     "limits": {}
   },
   "dialect": {
-    "id": "com.example.mimo/mimo-chat-speech@1",
+    "id": "com.example.acme/chat-speech@1",
     "transport": "json",
     "streaming": false
   },
   "input": {
-    "text": "老大! 我们完成了 mimo 的语音模型接入啦!",
-    "voice": "冰糖",
+    "text": "老大! 我们完成了 acme 的语音模型接入啦!",
+    "voice": "voice-c",
     "format": "mp3",
     "speed": 1.2,
     "instructions": "轻快上扬，语速稍快",
@@ -592,13 +592,13 @@ XMLHttpRequest
   "body": {
     "kind": "json",
     "value": {
-      "model": "mimo-v2.5-tts",
+      "model": "model-tts",
       "messages": [
         {"role": "user", "content": "轻快上扬，语速稍快"},
-        {"role": "assistant", "content": "老大! 我们完成了 mimo 的语音模型接入啦!"}
+        {"role": "assistant", "content": "老大! 我们完成了 acme 的语音模型接入啦!"}
       ],
       "audio": {
-        "voice": "冰糖",
+        "voice": "voice-c",
         "format": "mp3"
       }
     }
@@ -606,7 +606,7 @@ XMLHttpRequest
   "auth": {
     "kind": "host"
   },
-  "dialect": "com.example.mimo/mimo-chat-speech@1",
+  "dialect": "com.example.acme/chat-speech@1",
   "response": {
     "mode": "buffered",
     "max_bytes": 33554432
@@ -838,7 +838,7 @@ account
   "media": null,
   "request": {
     "method": "POST",
-    "url": "https://api.example.com/v1/audio/speech"
+    "url": "https://api.acme.example/v1/audio/speech"
   }
 }
 ```
@@ -1032,14 +1032,14 @@ account
 | --- | --- | --- | --- |
 | Operation | 用户要做什么语义动作 | `speech.synthesize@1` | 宿主 ABI |
 | Wire Protocol | 客户端或上游的报文长什么样 | `openai-chat`、`anthropic-messages` | 宿主编解码器 |
-| Dialect | 某 provider 如何把某个 operation 映射到上游 | `com.example.mimo/mimo-chat-speech@1` | 插件 |
+| Dialect | 某 provider 如何把某个 operation 映射到上游 | `com.example.acme/chat-speech@1` | 插件 |
 | 语言变体 | 这次请求使用哪种自然语言或地区变体 | `yue`、`zh-CN`、`en-US` | 模型能力 + 请求参数 |
 
 因此：
 
 - 不能把 `sound`、`tts`、`audio` 写成 operation；它们说的是报文或资源类型。
 - 不能把 `zh-yue`、`粤语` 写成 dialect；它们是语言能力，不是协议形状。
-- 不能因为 MiMo 的 TTS 走 `openai-chat`，就把 `speech.synthesize@1` 改名为 `chat.complete@1`。
+- 不能因为某个厂商的 TTS 走 `openai-chat`，就把 `speech.synthesize@1` 改名为 `chat.complete@1`。
 - 不能因为某个语音上游换了 JSON 字段，就改核心 `speech_adapter.go`；应当发布新的 dialect 版本。
 
 ### 17.2 Dialect 的形状
@@ -1056,9 +1056,9 @@ Dialect 是 manifest 引用的声明文件，不是第二套运行时。它只�
 ```json
 {
   "schema": "lax.dialect/v1",
-  "id": "com.example.mimo/mimo-chat-speech@1",
+  "id": "com.example.acme/chat-speech@1",
   "operation": "speech.synthesize@1",
-  "display_name": "MiMo TTS over chat completions",
+  "display_name": "Acme TTS over chat completions",
   "upstream_wire": "openai-chat",
   "transport": {
     "request": "json",
@@ -1070,7 +1070,7 @@ Dialect 是 manifest 引用的声明文件，不是第二套运行时。它只�
     "decode": "hook"
   },
   "defaults": {
-    "voice": "冰糖"
+    "voice": "voice-c"
   },
   "limits": {
     "max_input_chars": 8192,
@@ -1163,17 +1163,17 @@ Dialect 是 manifest 引用的声明文件，不是第二套运行时。它只�
 
 ```json
 {
-  "provider": "mimo",
-  "model": "mimo-v2.5-tts",
-  "upstream_id": "mimo-v2.5-tts",
+  "provider": "acme",
+  "model": "model-tts",
+  "upstream_id": "model-tts",
   "operations": {
     "speech.synthesize@1": {
-      "dialect": "com.example.mimo/mimo-chat-speech@1",
+      "dialect": "com.example.acme/chat-speech@1",
       "capabilities": {
         "supported": true,
         "streaming": false,
         "formats": ["mp3", "wav", "pcm16"],
-        "voices": ["冰糖", "茉莉", "苏打"]
+        "voices": ["voice-a", "voice-b", "voice-c"]
       }
     }
   }
@@ -1274,7 +1274,7 @@ Dialect 不注册新的 Go 接口，不引入独立生命周期，也不拥有�
       "supported": true,
       "streaming": false,
       "formats": ["mp3", "wav", "pcm16"],
-      "voices": ["冰糖", "茉莉"],
+      "voices": ["voice-a", "voice-b"],
       "languages": {
         "output": {
           "mode": "list",
@@ -1380,17 +1380,17 @@ Dialect 不注册新的 Go 接口，不引入独立生命周期，也不拥有�
 
 ```json
 {
-  "id": "mimo/mimo-v2.5-tts",
+  "id": "acme/model-tts",
   "object": "model",
-  "owned_by": "mimo",
+  "owned_by": "acme",
   "lax": {
     "operations": {
       "speech.synthesize@1": {
-        "dialect": "com.example.mimo/mimo-chat-speech@1",
+        "dialect": "com.example.acme/chat-speech@1",
         "supported": true,
         "streaming": false,
         "formats": ["mp3", "wav", "pcm16"],
-        "voices": ["冰糖", "茉莉"],
+        "voices": ["voice-a", "voice-b"],
         "languages": {
           "output": {"mode": "list", "tags": ["zh-CN"]}
         },
@@ -1452,7 +1452,7 @@ $XDG_DATA_HOME/lax/
   lax.db
   plugins/
     installed/
-      com.example.mimo/
+      com.example.acme/
         1.0.0/
           lax.plugin.json
           index.js
@@ -1610,22 +1610,22 @@ download -> staging -> verify -> permission diff -> confirm
 
 ```text
 ID                    VERSION  KIND      TRUST       STATE    OPERATIONS
-com.example.mimo      1.0.0    provider  sandboxed   ok       chat.complete@1, speech.synthesize@1
-com.example.river     0.4.2    provider  declarative ok       chat.complete@1
+com.example.acme      1.0.0    provider  sandboxed   ok       chat.complete@1, speech.synthesize@1
+com.example.beta      0.4.2    provider  declarative ok       chat.complete@1
 ```
 
 `--json` 至少包含：
 
 ```json
 {
-  "id": "com.example.mimo",
+  "id": "com.example.acme",
   "version": "1.0.0",
   "kind": "provider",
   "trust": "sandboxed",
   "enabled": true,
   "state": "ok",
   "operations": ["chat.complete@1", "speech.synthesize@1"],
-  "providers": ["mimo"],
+  "providers": ["acme"],
   "permissions": {},
   "package_sha256": "…",
   "last_error": null
@@ -1653,8 +1653,8 @@ Magpie 的 provider 插件与网关中间件是两套运行时：
 - Provider 插件运行在 Bun 宿主里，拥有文件系统、`child_process`、任意 `fetch` 和宿主进程权限。
 - 网关中间件运行在 `moejs` 里，使用池化 Runtime、逐 hook 超时和受限 import。
 - Magpie 的 `/v1/audio/speech` 与 `/v1/audio/transcriptions` 最终走 provider 的 `loader.fetch`，没有独立的 TTS/ASR 语义 hook。
-- `magpie-community/plugins` 里没有现成的 TTS/ASR provider；`packages/mimo/index.mjs` 是 chat-only。
-- 用真实 River 插件探测 `moejs`：默认 Runtime 能加载 `config` 与 `loader` 的静态部分，但没有 `fetch`、`process`、`fs`、`require`；`moejs/webapi` 提供受限 fetch/stream，`moejs/node` 只提供沙箱化文件与 buffer 子集。
+- `magpie-community/plugins` 里没有现成的 TTS/ASR provider；`packages/acme/index.mjs` 是 chat-only。
+- 用一个真实插件探测 `moejs`：默认 Runtime 能加载 `config` 与 `loader` 的静态部分，但没有 `fetch`、`process`、`fs`、`require`；`moejs/webapi` 提供受限 fetch/stream，`moejs/node` 只提供沙箱化文件与 buffer 子集。
 - 静态扫描社区 provider：35 个里有 28 个直接依赖 Node/Bun 能力。因此“所有 Magpie 插件都能在 lax 里跑”不成立。
 
 所以 lax 的承诺是：**导入一个可静态证明相容的子集**，不是兼容 Bun 运行时。
@@ -1939,7 +1939,7 @@ New API 的 usage schema 对视频、音频等非 token 计费很有价值。lax
 格式：
 
 ```text
-plugin[com.example.mimo@1.0.0] level=info op=speech.synthesize@1 request=01J... msg="prepared request"
+plugin[com.example.acme@1.0.0] level=info op=speech.synthesize@1 request=01J... msg="prepared request"
 ```
 
 规则：
@@ -2019,7 +2019,7 @@ ok -> degraded -> unhealthy -> disabled
 
 ```text
 testdata/plugins/
-  com.example.mimo/
+  com.example.acme/
     manifest.json
     models.json
     dialects.json
@@ -2115,7 +2115,7 @@ RequestPlan：
 
 导入：
 
-- River 这类静态 OpenAI-compatible 包导入为 `declarative`。
+- 这类静态 OpenAI-compatible 包导入为 `declarative`。
 - 使用 `loader.fetch` 的包只有在 host 与 operation 可静态确定时才进入 `sandboxed`。
 - 28/35 依赖 Node/Bun 的样本至少被识别并归入 `manual`，不能误判为可运行。
 - `package.json` 的 `exports`/`main`/`magpie.middleware` 入口解析符合规则。
@@ -2147,17 +2147,17 @@ RequestPlan：
 | --- | --- | --- | --- |
 | 0 设计合并 | 把本文结论写进 `DESIGN.md`，列出 ABI 与 schema | 不写实现 | `DESIGN.md` 内部无矛盾；本文标记为已合并或删除 |
 | 1 声明式 provider | manifest、dialect、models、`plugin install/list/inspect/test`、声明式请求映射 | 不执行第三方 JS；不做 Magpie | 新增一个 OpenAI-compatible provider 不改 Go、不发版 |
-| 2 内置语音迁移 | 用 `system` 插件或同一 ABI 的 operation hook 承接 MiMo TTS/ASR | 不删除现有兼容路径，直到对拍通过 | 去掉“speech + chat 就是 MiMo”的核心分支；TTS/ASR 对拍与现状一致 |
+| 2 内置语音迁移 | 用 `system` 插件或同一 ABI 的 operation hook 承接内置 TTS/ASR | 不删除现有兼容路径，直到对拍通过 | 去掉“speech + chat 就是某一家”的核心分支；TTS/ASR 对拍与现状一致 |
 | 3 沙箱 provider | `moejs`、Runtime 池、`RequestPlan`、控制面 `lax.http`、媒体引用、流式 ABI | 不放宽到 Node/Bun | 一个需要动态请求的 provider 在 sandbox 中稳定运行；安全用例通过 |
 | 4 Magpie 子集 | 导入器、`loader.fetch` 桥、transform 子集、OAuth 评估 | 不承诺全部 Magpie 插件 | 至少一个静态包导入为声明式；至少一个沙箱包导入并跑通 fixture；不支持项有报告 |
 | 5 trusted-worker | 独立进程、文件/进程权限、显式授权、资源回收 | 不默认开启 | 厂商 CLI 场景可运行；越权与孤儿进程测试通过 |
 
-阶段 2 的关键不是“把 MiMo 代码搬到另一个文件”，而是改变所有权：
+阶段 2 的关键不是“把内置语音代码搬到另一个文件”，而是改变所有权：
 
-- 核心不再判断“这个模型是语音，所以按 MiMo 的 chat 形状发”。
-- MiMo 的请求构造与响应解码由插件/dialect 完成。
+- 核心不再判断“这个模型是语音，所以按某一家的 chat 形状发”。
+- 请求构造与响应解码由插件/dialect 完成。
 - 网关只负责选号、`RequestPlan` 执行、错误形状、计费和客户端编码。
-- 现有未提交的 MiMo 语音实现保留为行为参考与 fixture 来源，不在迁移完成前删除。
+- 现有未提交的语音实现保留为行为参考与 fixture 来源，不在迁移完成前删除。
 
 ### 26.2 文档更新点
 
@@ -2169,7 +2169,7 @@ RequestPlan：
 | 第 4 节 | 增加 `plugin` 命令组、参数、输出列与 `--json` 字段；退出码沿用 0/1/2 |
 | 5.7 | 模型同步增加插件目录、能力来源、按 operation 的探活 |
 | 5.8 | 厂商与路由增加 `plugin_id`、operation、dialect；内置路由兼容 |
-| 5.16 | 语音从核心适配改为 operation + dialect；写清 MiMo 迁移 |
+| 5.16 | 语音从核心适配改为 operation + dialect；写清内置语音迁移 |
 | 第 6 节 | 新表、现有表新列、索引、事务与旧库兼容；具体迁移方式按当时仓库约定 |
 | 第 7 节 | 增加插件里程碑与每阶段验收，不把本文当第二份设计 |
 | 第 8 节 | `internal/plugin`、`internal/plugin/runtime`、`internal/plugin/import` 等职责边界 |
@@ -2186,13 +2186,13 @@ RequestPlan：
 - 现有配置、数据库、账号、请求记录、三条入站协议与语音端点保持原行为。
 - 新列默认空；旧客户端与旧 CLI 不受影响。
 - 内置 provider 继续可用；插件使用新 provider ID，不能静默替换。
-- 阶段 2 的 MiMo 迁移保留旧路径作为 fallback，直到对拍用例全部通过。
+- 阶段 2 的内置语音迁移保留旧路径作为 fallback，直到对拍用例全部通过。
 - 每个阶段都可单独停用：声明式插件可禁用；沙箱插件可卸载；trusted-worker 可关闭。
 - 插件系统故障不能阻止 `serve` 启动；启动时应降级为“只使用内置 provider”，并把插件状态标为 `failed`/`incompatible`。
 
 ## 27 示例
 
-### 27.1 MiMo TTS 与 ASR 插件
+### 27.1 Acme TTS 与 ASR 插件
 
 下面是一个完整的 sandboxed provider 示例。示例只使用宿主 API，不使用 `fetch`、`process`、`fs`、`Bun` 或 Node 内置模块。
 
@@ -2201,8 +2201,8 @@ RequestPlan：
 ```json
 {
   "schema": "lax.plugin/v1",
-  "id": "com.example.mimo",
-  "name": "Xiaomi MiMo",
+  "id": "com.example.acme",
+  "name": "Acme",
   "version": "1.0.0",
   "kind": "provider",
   "runtime": "moejs",
@@ -2216,7 +2216,7 @@ RequestPlan：
     "network": {
       "mode": "host-proxy",
       "schemes": ["https"],
-      "hosts": ["mimo-server-sgp.xiaomimimo.com"],
+      "hosts": ["api.acme.example"],
       "redirects": "none",
       "max_control_calls": 4,
       "max_control_body_bytes": 1048576
@@ -2236,8 +2236,8 @@ RequestPlan：
   },
   "providers": [
     {
-      "id": "mimo",
-      "name": "Xiaomi MiMo",
+      "id": "acme",
+      "name": "Acme",
       "catalog": "./models.json",
       "dialects": "./dialects.json"
     }
@@ -2259,16 +2259,16 @@ RequestPlan：
   "schema": "lax.dialect/v1",
   "dialects": [
     {
-      "id": "com.example.mimo/mimo-chat-speech@1",
+      "id": "com.example.acme/chat-speech@1",
       "operation": "speech.synthesize@1",
       "upstream_wire": "openai-chat",
       "transport": {"request": "json", "response": "json", "streaming": "none"},
       "implementation": {"prepare": "hook", "decode": "hook"},
-      "defaults": {"voice": "冰糖"},
+      "defaults": {"voice": "voice-c"},
       "limits": {"max_input_chars": 8192, "max_response_bytes": 33554432}
     },
     {
-      "id": "com.example.mimo/mimo-chat-asr@1",
+      "id": "com.example.acme/chat-asr@1",
       "operation": "speech.transcribe@1",
       "upstream_wire": "openai-chat",
       "transport": {"request": "json", "response": "json", "streaming": "none"},
@@ -2285,16 +2285,16 @@ RequestPlan：
 {
   "models": [
     {
-      "model": "mimo-v2.5-tts",
-      "upstream_id": "mimo-v2.5-tts",
+      "model": "model-tts",
+      "upstream_id": "model-tts",
       "operations": {
         "speech.synthesize@1": {
-          "dialect": "com.example.mimo/mimo-chat-speech@1",
+          "dialect": "com.example.acme/chat-speech@1",
           "capabilities": {
             "supported": true,
             "streaming": false,
             "formats": ["mp3", "wav", "pcm16"],
-            "voices": ["冰糖", "茉莉", "苏打", "白桦"],
+            "voices": ["voice-a", "voice-b", "voice-c", "voice-d"],
             "languages": {
               "output": {"mode": "list", "tags": ["zh-CN"]}
             },
@@ -2304,11 +2304,11 @@ RequestPlan：
       }
     },
     {
-      "model": "mimo-v2.5-asr",
-      "upstream_id": "mimo-v2.5-asr",
+      "model": "model-asr",
+      "upstream_id": "model-asr",
       "operations": {
         "speech.transcribe@1": {
-          "dialect": "com.example.mimo/mimo-chat-asr@1",
+          "dialect": "com.example.acme/chat-asr@1",
           "capabilities": {
             "supported": true,
             "streaming": false,
@@ -2350,7 +2350,7 @@ function fail(code, message) {
 function ttsBody(ctx) {
   const format = ctx.input.format || "mp3";
   if (!FORMAT_TO_UPSTREAM[format]) {
-    fail("invalid_input", `MiMo TTS 不支持格式 ${format}`);
+    fail("invalid_input", `Acme TTS 不支持格式 ${format}`);
   }
 
   const messages = [];
@@ -2363,7 +2363,7 @@ function ttsBody(ctx) {
     model: ctx.model.upstream_id,
     messages,
     audio: {
-      voice: ctx.input.voice || "冰糖",
+      voice: ctx.input.voice || "voice-c",
       format: FORMAT_TO_UPSTREAM[format],
     },
   };
@@ -2431,7 +2431,7 @@ export async function decode_response(ctx) {
   if (ctx.operation === "speech.synthesize@1") {
     const data = message && message.audio && message.audio.data;
     if (!data) {
-      fail("upstream_protocol_error", "MiMo 响应缺少 audio.data");
+      fail("upstream_protocol_error", "Acme 响应缺少 audio.data");
     }
     const format = (ctx.input.format || "mp3") === "pcm16"
       ? "pcm"
@@ -2448,7 +2448,7 @@ export async function decode_response(ctx) {
 
   if (ctx.operation === "speech.transcribe@1") {
     if (!message || typeof message.content !== "string") {
-      fail("upstream_protocol_error", "MiMo ASR 响应缺少 text");
+      fail("upstream_protocol_error", "Acme ASR 响应缺少 text");
     }
     const usage = ctx.response.body.usage || {};
     return {
@@ -2478,10 +2478,10 @@ export async function decode_response(ctx) {
 ```json
 {
   "operation": "speech.synthesize@1",
-  "model": "mimo/mimo-v2.5-tts",
+  "model": "acme/model-tts",
   "input": {
-    "text": "老大! 我们完成了 mimo 的语音模型接入啦!",
-    "voice": "冰糖",
+    "text": "老大! 我们完成了 acme 的语音模型接入啦!",
+    "voice": "voice-c",
     "format": "mp3",
     "instructions": "轻快上扬，语速稍快，带着压抑不住的激动与小骄傲，声音明亮有活力",
     "language": "zh-CN"
@@ -2498,8 +2498,8 @@ export async function decode_response(ctx) {
 ```json
 {
   "schema": "lax.plugin/v1",
-  "id": "com.example.river",
-  "name": "River",
+  "id": "com.example.beta",
+  "name": "Beta",
   "version": "1.0.0",
   "kind": "provider",
   "runtime": "declarative",
@@ -2509,7 +2509,7 @@ export async function decode_response(ctx) {
     "network": {
       "mode": "host-proxy",
       "schemes": ["https"],
-      "hosts": ["api.river.ai"],
+      "hosts": ["api.beta.example"],
       "redirects": "none",
       "max_control_calls": 4
     },
@@ -2520,9 +2520,9 @@ export async function decode_response(ctx) {
   },
   "providers": [
     {
-      "id": "river",
-      "name": "River",
-      "base_url": "https://api.river.ai/v1",
+      "id": "beta",
+      "name": "Beta",
+      "base_url": "https://api.beta.example/v1",
       "catalog": "./models.json",
       "dialects": "./dialects.json"
     }
@@ -2537,7 +2537,7 @@ export async function decode_response(ctx) {
   "schema": "lax.dialect/v1",
   "dialects": [
     {
-      "id": "com.example.river/openai-chat@1",
+      "id": "com.example.beta/openai-chat@1",
       "operation": "chat.complete@1",
       "upstream_wire": "openai-chat",
       "transport": {"request": "json", "response": "json", "streaming": "sse"},
@@ -2572,11 +2572,11 @@ export async function decode_response(ctx) {
 {
   "models": [
     {
-      "model": "river/deepseek-v4.1-flash",
-      "upstream_id": "deepseek-ai/DeepSeek-V4.1-Flash",
+      "model": "beta/model-1",
+      "upstream_id": "model-1-2026-01",
       "operations": {
         "chat.complete@1": {
-          "dialect": "com.example.river/openai-chat@1",
+          "dialect": "com.example.beta/openai-chat@1",
           "capabilities": {
             "supported": true,
             "streaming": true,
@@ -2696,7 +2696,7 @@ fetch(url)
 以下问题需要在合并 `DESIGN.md` 前明确，不能留到实现时各写一套：
 
 1. **`"unknown"` 的默认行为**：本文选择默认拒绝。是否允许模型级 `allow_unknown: true` 作为迁移开关？若允许，必须默认告警并在 `plugin inspect` 标红。
-2. **内置 MiMo 的归属**：用随二进制发布的 `system` 插件，还是保留 Go 适配器但走同一 operation 接口？两者都能满足设计，但文档和代码结构只能选一个主路径。
+2. **内置语音方言的归属**：用随二进制发布的 `system` 插件，还是保留 Go 适配器但走同一 operation 接口？两者都能满足设计，但文档和代码结构只能选一个主路径。
 3. **一个插件是否允许同时有多个活动版本**：本文选择“单活动版本 + 已安装旧版本可回滚”。若未来要按模型灰度，需要把版本选择下推到模型绑定，不能偷偷改全局指针。
 4. **`loader.fetch` 是否进入第一阶段**：本文把它放到 Magpie 阶段。若提前支持，必须先有 host 白名单、流式上限和响应视图，不能先给裸 `fetch`。
 5. **OAuth 是否算第一版能力**：本文把 OAuth 放到阶段 4 评估。它需要本地回调、刷新锁和 secret 生命周期，不能只加一个 `oauth: true` 字段。
@@ -2711,8 +2711,8 @@ fetch(url)
 评审时用下列问题检验设计是否真的解耦：
 
 - 新增一个 OpenAI-compatible TTS 上游，能否只安装声明式插件，不改 Go、不发 lax 版本？
-- MiMo 的上游字段变化，能否只发 `...@2` dialect，不改网关、计费、错误形状和客户端？
-- 去掉 MiMo 核心分支后，TTS/ASR 的请求、响应、用量和错误是否与现有实现逐条对拍？
+- 内置语音上游的字段变化，能否只发 `...@2` dialect，不改网关、计费、错误形状和客户端？
+- 去掉核心分支后，TTS/ASR 的请求、响应、用量和错误是否与现有实现逐条对拍？
 - 插件能否在不知道账号 key 的情况下完成认证请求？
 - 插件能否访问 `169.254.169.254`、`127.0.0.1`、未声明 host 或通过重定向绕过白名单？
 - 插件崩溃、死循环、内存超限、返回非法 JSON 时，网关是否仍能服务其他 provider？
@@ -2729,7 +2729,7 @@ fetch(url)
 
 1. 先把本文合并进 `DESIGN.md`，尤其是第 2、4、5.7、5.8、5.16、6、7、8、9 节。
 2. 实现声明式 provider 与模型/dialect 目录，先解决“新增兼容上游不改代码”。
-3. 把 MiMo TTS/ASR 迁移到同一 ABI，用现有行为做对拍，确认核心不再认识 MiMo。
+3. 把内置 TTS/ASR 迁移到同一 ABI，用现有行为做对拍，确认核心不再认识具体厂商。
 4. 再引入 `moejs` 沙箱与 `RequestPlan`，以安全用例作为上线门槛。
 5. Magpie 导入与 `trusted-worker` 分开推进，不以“兼容全部插件”为目标。
 
@@ -2737,7 +2737,7 @@ fetch(url)
 
 ## 附录：调研来源
 
-- MiMo 语音文档：`https://mimo.mi.com/docs/zh-CN/quick-start/usage-guide/audio/Speech-Recognition`。
+- Acme 语音文档：`https://docs.acme.example/docs/zh-CN/quick-start/usage-guide/audio/Speech-Recognition`。
 - Magpie 文档与插件说明：`https://usemagpie.ai/docs/plugins`。
 - Magpie 社区插件：`https://github.com/magpie-community/plugins`。
 - moejs：`https://github.com/MoeForge/moejs`。

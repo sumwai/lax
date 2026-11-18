@@ -2,8 +2,8 @@
 
 ## Found
 
-2026-11-17, from a production incident on the `elsa` account (id 7, provider
-`commandcode`).
+2026-11-17, from a production incident on the `acct-a` account (id 7, provider
+`acme`).
 
 ## Symptom
 
@@ -16,8 +16,8 @@ You have insufficient credits to make this request. Please purchase more credits
 
 The gateway treated 400 as a malformed client request. It did not retry, did not cool the
 account or the account-model down, did not disable the account, and did not write a
-`route_stats` sample. The same sticky session stayed pinned to `elsa` and kept producing
-400s, while `tokenmp` was serving 200s at the same time. The quota snapshot for `elsa` was
+`route_stats` sample. The same sticky session stayed pinned to `acct-a` and kept producing
+400s, while `acct-b` was serving 200s at the same time. The quota snapshot for `acct-a` was
 stale, but the stale snapshot was not the cause: the account really had no credits left.
 The account was disabled manually after the incident.
 
@@ -32,7 +32,7 @@ Three details kept the incident quiet:
 
 - 400 was deliberately excluded from `route_stats`, so the failure never lowered the
   account's success rate or appeared in route samples.
-- Sticky sessions hash over account IDs, not health, so the session kept choosing `elsa`
+- Sticky sessions hash over account IDs, not health, so the session kept choosing `acct-a`
   even after another account had recovered.
 - Speech probes treat 400 and 422 as "endpoint reachable, credentials unverified", so a
   billing 400 there would not have changed account state either.

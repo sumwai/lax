@@ -1,6 +1,6 @@
 # Declared upstream audio-format names differ from the inbound OpenAI names
 
-Found: 2026-10-31, while configuring MiMo TTS (`mimo-v2.5-tts`) and running
+Found: 2026-10-31, while configuring Acme TTS (`model-tts`) and running
 `lax model speak --format pcm` against the real upstream.
 
 Fix: `internal/gateway/speech_adapter.go` (`containsSpeechFormat`); regression test
@@ -13,7 +13,7 @@ The capability declaration followed the vendor documentation and said
 locally with 400 before any upstream call:
 
 ```
-response_format "pcm" 不在模型 mimo-v2.5-tts 声明的音频格式里，可用的是 mp3、wav、pcm16
+response_format "pcm" 不在模型 model-tts 声明的音频格式里，可用的是 mp3、wav、pcm16
 ```
 
 `mp3` and `wav` worked. `lax model speak --format pcm` failed the same way, and any OpenAI client
@@ -35,7 +35,7 @@ name. The change is one extra comparison; the wire format and the catalog stay u
 
 ## How it was verified
 
-Against the real upstream, `lax model speak --model mimo-v2.5-tts --voice 冰糖 --format pcm` returned
+Against the real upstream, `lax model speak --model model-tts --voice voice-c --format pcm` returned
 76800 bytes with `Content-Type: audio/pcm`. `TestSpeechChatAdapterPCM` asserts that a request with
 `response_format: pcm` succeeds and sends `audio.format: pcm16` upstream.
 
