@@ -109,7 +109,7 @@ curl -s http://127.0.0.1:4567/v1/models/model-1  # 单个模型，未命中返�
 
 退出码：0 成功，1 运行失败，2 用法错误。
 
-参数细节用 `lax <命令> --help` 查，或看[命令行参考](https://docs.larkax.com/docs/reference/cli)。
+参数细节用 `lax <命令> --help` 查，或看[命令行参考](https://docs.larkax.com/docs/self-hosted/cli)。
 
 ## 协议与转换
 
@@ -235,7 +235,7 @@ lax route explain model-2 --session demo --seed 42   # 不发请求，预演这�
 
 细节见：
 
-- [选号](https://docs.larkax.com/docs/self-hosted/route/index)
+- [选号](https://docs.larkax.com/docs/self-hosted/route)
 - [策略](https://docs.larkax.com/docs/self-hosted/route/policies)
 - [失败处理](https://docs.larkax.com/docs/self-hosted/route/failure)
 
@@ -331,7 +331,7 @@ lax plugin doctor
 
 细节见：
 
-- [插件](https://docs.larkax.com/docs/self-hosted/plugins/index)
+- [插件](https://docs.larkax.com/docs/self-hosted/plugins)
 - [安装](https://docs.larkax.com/docs/self-hosted/plugins/install)
 - [沙箱](https://docs.larkax.com/docs/self-hosted/plugins/security)
 
@@ -427,8 +427,8 @@ Windows 不在发布范围：`serve` 与 `plugin reload` 依赖 Unix 信号。
 | --- | --- |
 | 怎么装、怎么配、怎么排障 | [自部署](https://docs.larkax.com/docs/self-hosted) |
 | 用 API Key 接公开入口 | [公开入口](https://docs.larkax.com/docs/public) |
-| Claude Code、Codex、各家 SDK | [客户端接入](https://docs.larkax.com/docs/clients) |
-| 命令参数与退出码 | [命令行参考](https://docs.larkax.com/docs/reference/cli) |
+| Claude Code、Codex、各家 SDK | [客户端接入](https://docs.larkax.com/docs/public/clients) |
+| 命令参数与退出码 | [命令行参考](https://docs.larkax.com/docs/self-hosted/cli) |
 | 术语速查 | [术语](https://docs.larkax.com/docs/reference/glossary) |
-| 常见问题 | [常见问题](https://docs.larkax.com/docs/reference/faq) |
+| 常见问题 | [常见问题](https://docs.larkax.com/docs/self-hosted/faq) |
 | 为什么这样设计 | [DESIGN.md](DESIGN.md) |
