@@ -138,7 +138,7 @@ func TestProviderSystemOneHelp(t *testing.T) {
 		"/v1/systemone",
 		"lax provider add typesafe --base-url https://api.typesafe.ai --systemone /v1/systemone",
 		"--default-protocol systemone",
-		"anthropic、openai、responses、gemini、systemone",
+		"anthropic | openai | responses | gemini | systemone",
 	} {
 		if !strings.Contains(errOut, want) {
 			t.Fatalf("provider add --help 应提到 %q: %s", want, errOut)
@@ -412,7 +412,7 @@ func TestDecideRejectsNonSystemOneModel(t *testing.T) {
 	if out != "" {
 		t.Fatalf("失败时不该写 stdout: %s", out)
 	}
-	for _, want := range []string{"m1", "openai-chat", "不是 systemone", "--systemone /v1/systemone", "lax model call"} {
+	for _, want := range []string{"m1", "openai-chat", "不支持 systemone", "--systemone /v1/systemone", "lax model call"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 		}
@@ -439,7 +439,7 @@ func TestDecideModelNotFound(t *testing.T) {
 	}
 }
 
-// TestDecideMissingModelPointsToModelAdd 钉住「有账号但没有这个模型」时的下一步：
+// TestDecideMissingModelPointsToModelAdd 钉住「有账号但没有这个模型」时的下一步:
 // 手写一条可达性走 model add（同时写目录与账号级协议），不再让人重跑 account add --models；
 // 只启用一个账号时命令里直接写出账号名，照着拄就行。
 func TestDecideMissingModelPointsToModelAdd(t *testing.T) {
@@ -563,7 +563,7 @@ func TestDecideWithoutDefaultProtocol(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("退出码 = %d，期望 1（运行失败）", code)
 	}
-	for _, want := range []string{"算不出有效出站协议", "--default-protocol systemone"} {
+	for _, want := range []string{"无法确定出站协议", "--default-protocol systemone"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 		}

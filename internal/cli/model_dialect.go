@@ -110,7 +110,12 @@ func cmdModelDialectLs(e *Env, args []string) error {
 			time.Unix(row.UpdatedAt, 0).Format("2006-01-02 15:04:05"),
 		})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"模型", "厂商", "操作", "方言", "来源", "更新时间"}, table))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"模型", "厂商", "操作", "方言", "来源", "更新时间"},
+		Rows:      table,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	return nil
 }
 
@@ -209,7 +214,7 @@ func cmdModelDialectUnset(e *Env, args []string) error {
 	}
 	fmt.Fprintf(e.Stdout, "已删掉厂商 %s 的 %s 在 %s 上的绑定\n", prov, model, operation)
 	if operation == plugin.OpSpeechSynthesize || operation == plugin.OpSpeechTranscribe {
-		fmt.Fprintln(e.Stdout, "下一步：语音请求现在会因为没有绑定而被拒；重新绑一条，或重启 lax serve 让能力回填补上默认方言")
+		fmt.Fprintln(e.Stdout, "下一步:语音请求现在会因为没有绑定而被拒；重新绑一条，或重启 lax serve 让能力回填补上默认方言")
 	}
 	return nil
 }

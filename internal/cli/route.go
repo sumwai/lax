@@ -14,7 +14,7 @@ import (
 var routeSubs = []groupItem{
 	{"ls", "列出默认策略与按模型的覆盖"},
 	{"show", "查看一个模型或默认策略最终生效的设置"},
-	{"set", "写一条模型策略或默认策略（整条覆盖）"},
+	{"set", "设置模型或默认路由策略（整条覆盖）"},
 	{"unset", "删除一条策略，回落到默认或内置默认"},
 	{"account", "设置账号权重：ls / set / unset"},
 	{"explain", "预演一次选号，不请求上游、不写记录"},
@@ -96,7 +96,13 @@ func cmdRouteLs(e *Env, args []string) error {
 			fmt.Sprintf("%.2f", p.Temperature), routePercentText(p.Explore),
 		})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"目标", "来源", "策略", "会话", "温度", "探索"}, rows))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"目标", "来源", "策略", "会话", "温度", "探索"},
+		Align:     []tableAlign{alignLeft, alignLeft, alignLeft, alignLeft, alignRight, alignRight},
+		Rows:      rows,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	fmt.Fprintln(e.Stdout, "查看一个模型的完整设置：lax route show <模型>")
 	return nil
 }
@@ -143,14 +149,19 @@ func cmdRouteShow(e *Env, args []string) error {
 		{"成功率评分", fmt.Sprintf("%.2f", item.ScoreSuccess)},
 		{"延迟评分", fmt.Sprintf("%.2f", item.ScoreLatency)},
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"项", "值"}, rows))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"项", "值"},
+		Rows:      rows,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	fmt.Fprintf(e.Stdout, "额度排序：%s / 最低折合 USD：%.2f\n", item.QuotaOrder, item.QuotaMinUSD)
 	return nil
 }
 
 func cmdRouteSet(e *Env, args []string) error {
 	defaults := store.DefaultRoutePolicy()
-	fs := newFlagSet(e, "route set", "写一条模型策略或默认策略，整条覆盖")
+	fs := newFlagSet(e, "route set", "设置模型或默认路由策略（整条覆盖）")
 	useDefault := fs.Bool("default", false, "写默认策略")
 	strategy := fs.String("strategy", "", "priority / rotate / weighted / success / softmax")
 	sticky := fs.String("sticky", defaults.Sticky, "会话粘性：prefer / off / strict")
@@ -227,7 +238,7 @@ func cmdRouteSet(e *Env, args []string) error {
 	}
 	fmt.Fprintf(e.Stdout, "已设置 %s 的选号策略：%s，会话 %s，温度 %.2f，探索 %s\n",
 		item.Target, item.Strategy, item.Sticky, item.Temperature, routePercentText(item.Explore))
-	fmt.Fprintf(e.Stdout, "下一步：%s 核对\n", routeShowCommand(target))
+	fmt.Fprintf(e.Stdout, "下一步:%s 核对\n", routeShowCommand(target))
 	return nil
 }
 
@@ -392,7 +403,13 @@ func printRouteAccountWeights(e *Env, items []routeAccountWeightJSON) error {
 	for _, item := range items {
 		rows = append(rows, []string{item.Account, item.Model, strconv.Itoa(item.Weight), routeWeightSourceText(item.Source)})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"账号", "模型", "权重", "来源"}, rows))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"账号", "模型", "权重", "来源"},
+		Align:     []tableAlign{alignLeft, alignLeft, alignRight, alignLeft},
+		Rows:      rows,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	return nil
 }
 
@@ -582,7 +599,17 @@ func cmdRouteExplain(e *Env, args []string) error {
 			}
 			rows = append(rows, cells)
 		}
-		fmt.Fprint(e.Stdout, renderTable(header, rows))
+		aligns := []tableAlign{alignRight, alignLeft, alignRight, alignRight, alignRight, alignRight, alignRight, alignRight}
+		if hasQuota {
+			aligns = append(aligns, alignLeft, alignRight, alignRight)
+		}
+		fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+			Header:    header,
+			Align:     aligns,
+			Rows:      rows,
+			Style:     newUI(e.Stdout),
+			HeaderSep: true,
+		}))
 		names := make([]string, 0, len(decision.Choices))
 		for _, c := range decision.Choices {
 			names = append(names, c.Account.Name)

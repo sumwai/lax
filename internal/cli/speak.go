@@ -225,7 +225,7 @@ func postVoice(e *Env, path string, body []byte, contentType string) (*http.Resp
 		return nil, fmt.Errorf("读插件表失败：%w", err)
 	}
 	for _, note := range notes {
-		fmt.Fprintf(e.Stderr, "警告：%s\n", note)
+		fmt.Fprintf(e.Stderr, "警告:%s\n", note)
 	}
 
 	gs, err := gateway.New(gateway.Options{Store: a.st, Key: a.key, Dialects: reg, Logf: func(string, ...any) {}})

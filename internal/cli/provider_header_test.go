@@ -425,14 +425,20 @@ func TestProviderHeaderHelp(t *testing.T) {
 		t.Fatalf("set --help 退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	// 组级帮助与顶层帮助都要提到 header 这一组。
-	for _, args := range [][]string{{"provider", "--help"}, {"--help"}} {
-		code, out, stderr := run(t, args...)
+	// 组级帮助要提到 header 这一组，顶层帮助要提到 provider。
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"provider", "--help"}, "header"},
+		{[]string{"--help"}, "provider"},
+	} {
+		code, out, stderr := run(t, tc.args...)
 		if code != 0 {
-			t.Fatalf("%v 退出码 = %d，stderr = %s", args, code, stderr)
+			t.Fatalf("%v 退出码 = %d，stderr = %s", tc.args, code, stderr)
 		}
-		if !strings.Contains(out, "header") {
-			t.Fatalf("%v 的输出应提到 header: %s", args, out)
+		if !strings.Contains(out, tc.want) {
+			t.Fatalf("%v 的输出应提到 %s: %s", tc.args, tc.want, out)
 		}
 	}
 }

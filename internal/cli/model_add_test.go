@@ -83,7 +83,7 @@ func TestModelAddWritesBothTables(t *testing.T) {
 	}
 	for _, want := range []string{
 		"已声明模型 typesafe/jev（厂商 typesafe，账号 ts，待探活，协议 systemone）",
-		"下一步：lax model probe --account ts --model typesafe/jev --protocol systemone",
+		"下一步:lax model probe --account ts --model typesafe/jev --protocol systemone",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("stdout 缺 %q: %s", want, out)

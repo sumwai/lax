@@ -223,7 +223,7 @@ func cmdProviderHeaderSet(e *Env, args []string) error {
 	}
 	fmt.Fprintf(e.Stdout, "已声明 %s 的附加头 %s（%s），值 %s\n",
 		item.provider, item.header.Name, headerScopeLabel(proto), item.header.Masked())
-	fmt.Fprintf(e.Stdout, "值可能是密钥，输出只显示前四位；下一步：lax provider header ls %s 核对\n", provider)
+	fmt.Fprintf(e.Stdout, "值可能是密钥，输出只显示前四位；下一步:lax provider header ls %s 核对\n", provider)
 	return nil
 }
 
@@ -379,6 +379,11 @@ func cmdProviderHeaderLs(e *Env, args []string) error {
 			it.provider, headerScopeCell(it.header.Protocol), it.header.Name, it.header.Masked(),
 		})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"厂商", "协议", "头名", "值（脱敏）"}, rows))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"厂商", "协议", "头名", "值（脱敏）"},
+		Rows:      rows,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	return nil
 }

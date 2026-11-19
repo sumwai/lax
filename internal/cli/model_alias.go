@@ -15,7 +15,7 @@ import (
 
 // modelAliasSubs 是 model alias 一组的子命令清单，组级帮助与错误提示都读它。
 var modelAliasSubs = []groupItem{
-	{"set", "把客户端用的名字指向真实模型名（同名再写一次就是改目标）"},
+	{"set", "配置模型别名映射（同名覆盖目标）"},
 	{"unset", "删掉一条别名"},
 	{"ls", "列别名、目标与能否解析（不给别名就列全部）"},
 }
@@ -107,7 +107,7 @@ func checkAliasName(raw, field, usageLine string) (string, error) {
 
 // cmdModelAliasSet 写一条别名，覆盖语义：同名再写一次就是改目标。
 func cmdModelAliasSet(e *Env, args []string) error {
-	fs := newFlagSet(e, "model alias set", "把客户端用的名字指向真实模型名")
+	fs := newFlagSet(e, "model alias set", "配置模型别名映射")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -153,7 +153,7 @@ func cmdModelAliasSet(e *Env, args []string) error {
 		return e.printJSON(row.toJSON())
 	}
 	fmt.Fprintf(e.Stdout, "已设置别名 %s → %s\n", alias, target)
-	fmt.Fprintln(e.Stdout, "下一步：lax model alias ls 核对")
+	fmt.Fprintln(e.Stdout, "下一步:lax model alias ls 核对")
 	return nil
 }
 
@@ -303,6 +303,11 @@ func cmdModelAliasLs(e *Env, args []string) error {
 		}
 		table = append(table, []string{r.alias, r.target, status, resolved})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"别名", "目标", "状态", "解析"}, table))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"别名", "目标", "状态", "解析"},
+		Rows:      table,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	return nil
 }

@@ -21,17 +21,17 @@ import (
 
 var commandTable = map[string]command{
 	"init":     {name: "init", summary: "初始化配置目录与数据库", run: cmdInit},
-	"serve":    {name: "serve", summary: "启动网关，前台运行", run: cmdServe},
-	"account":  {name: "account", summary: "管理上游账号：add / ls / rm / test / enable / disable", run: cmdAccount},
-	"model":    {name: "model", summary: "模型：登记、同步、探活、别名、单价与手工试打（call / decide / speak / transcribe）", run: cmdModel},
-	"route":    {name: "route", summary: "选号：模型策略、账号权重与预演（ls / show / set / unset / account / explain）", run: cmdRoute},
-	"quota":    {name: "quota", summary: "账号额度监控与到期提示：ls / show / refresh / set / unset", run: cmdQuota},
-	"provider": {name: "provider", summary: "厂商与路由：ls / add / set / unset / rm / header", run: cmdProvider},
-	"plugin":   {name: "plugin", summary: "插件：install / ls / show / enable / disable / rm / doctor / reload", run: cmdPlugin},
-	"usage":    {name: "usage", summary: "按账号、模型或日期汇总用量", run: cmdUsage},
-	"log":      {name: "log", summary: "查看请求记录：tail", run: cmdLog},
-	"doctor":   {name: "doctor", summary: "自检配置、目录与端口", run: cmdDoctor},
-	"version":  {name: "version", summary: "打印版本", run: cmdVersion},
+	"serve":    {name: "serve", summary: "启动网关服务（前台运行）", run: cmdServe},
+	"account":  {name: "account", summary: "管理上游账号", run: cmdAccount},
+	"model":    {name: "model", summary: "管理模型、别名、单价与试打", run: cmdModel},
+	"route":    {name: "route", summary: "管理路由策略与账号权重", run: cmdRoute},
+	"quota":    {name: "quota", summary: "监控账号额度与刷新周期", run: cmdQuota},
+	"provider": {name: "provider", summary: "管理厂商与协议路由", run: cmdProvider},
+	"plugin":   {name: "plugin", summary: "管理扩展插件", run: cmdPlugin},
+	"usage":    {name: "usage", summary: "汇总请求用量与费用", run: cmdUsage},
+	"log":      {name: "log", summary: "查看请求日志", run: cmdLog},
+	"doctor":   {name: "doctor", summary: "检查本地配置、目录与端口", run: cmdDoctor},
+	"version":  {name: "version", summary: "打印版本信息", run: cmdVersion},
 }
 
 var commandOrder = []string{"init", "serve", "account", "model", "route", "quota", "provider", "plugin", "usage", "log", "doctor", "version"}
@@ -82,8 +82,8 @@ func cmdInit(e *Env, args []string) error {
 			"key":    keyPath,
 		})
 	}
-	fmt.Fprintf(e.Stdout, "配置 %s\n数据库 %s\n密钥 %s\n", paths.Config, paths.DB, keyPath)
-	fmt.Fprintln(e.Stdout, "下一步：lax account add <名称> --provider <厂商> --key <key>")
+	fmt.Fprintf(e.Stdout, "配置: %s\n数据库: %s\n密钥: %s\n", paths.Config, paths.DB, keyPath)
+	fmt.Fprintln(e.Stdout, newUI(e.Stdout).dim("下一步: lax account add <名称> --provider <厂商> --key <key>"))
 	return nil
 }
 
@@ -111,19 +111,20 @@ func cmdServe(e *Env, args []string) error {
 	if err != nil {
 		return fmt.Errorf("读插件表失败: %w", err)
 	}
+	errUI := newUI(e.Stderr)
 	for _, note := range notes {
-		fmt.Fprintf(e.Stderr, "警告：%s\n", note)
+		fmt.Fprintf(e.Stderr, "%s %s\n", errUI.warn("警告:"), note)
 	}
 	// 语音能力位是手工声明的，启动时补一次方言绑定：漏绑的模型在语音入站会被挡下来。
 	// 这一步失败只记一行，管理员仍能用 lax model capability 手工绑。
 	if added, err := a.st.BackfillSpeechDialects(time.Now().Unix()); err != nil {
-		fmt.Fprintf(e.Stderr, "警告：回填语音方言绑定失败：%v\n", err)
+		fmt.Fprintf(e.Stderr, "%s 回填语音方言绑定失败: %v\n", errUI.warn("警告:"), err)
 	} else if added > 0 && !e.JSON {
 		fmt.Fprintf(e.Stdout, "补齐语音方言绑定 %d 条\n", added)
 	}
 	// route_stats 只服务选号，不是审计表：启动时丢掉 30 天以前的分钟桶，requests 仍保留完整历史。
 	if _, err := a.st.PruneRouteStats(time.Now().Unix() - store.RouteStatsRetentionSeconds); err != nil {
-		fmt.Fprintf(e.Stderr, "警告：清理选号统计失败：%v\n", err)
+		fmt.Fprintf(e.Stderr, "%s 清理选号统计失败: %v\n", errUI.warn("警告:"), err)
 	}
 
 	gs, err := gateway.New(gateway.Options{
@@ -199,12 +200,12 @@ func cmdServe(e *Env, args []string) error {
 		for range hup {
 			reloaded, reloadNotes, err := loadRegistry(a.st, dataDir, e.Stdout)
 			if err != nil {
-				fmt.Fprintf(e.Stderr, "警告：重读插件表失败，继续用当前注册表：%v\n", err)
+				fmt.Fprintf(e.Stderr, "警告:重读插件表失败，继续用当前注册表：%v\n", err)
 				continue
 			}
 			gs.SetDialects(reloaded)
 			for _, note := range reloadNotes {
-				fmt.Fprintf(e.Stderr, "警告：%s\n", note)
+				fmt.Fprintf(e.Stderr, "警告:%s\n", note)
 			}
 			auditPluginReload(e, a.st, pluginActorSIGHUP, "")
 		}
@@ -424,13 +425,20 @@ func cmdDoctor(e *Env, args []string) error {
 			return err
 		}
 	} else {
+		u := newUI(e.Stdout)
+		passed := 0
 		for _, c := range checks {
-			mark := "ok  "
+			mark := u.ok("ok  ")
+			note := u.dim(c.Note)
 			if !c.OK {
-				mark = "fail"
+				mark = u.err("fail")
+				note = c.Note
+			} else {
+				passed++
 			}
-			fmt.Fprintf(e.Stdout, "%s  %s %s\n", mark, pad(c.Name, 12), c.Note)
+			fmt.Fprintf(e.Stdout, "%s  %s  %s\n", mark, pad(c.Name, 12), note)
 		}
+		fmt.Fprintf(e.Stdout, "\n检查完成: %d 项通过, %d 项失败\n", passed, failed)
 	}
 
 	if failed > 0 {

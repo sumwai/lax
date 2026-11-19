@@ -263,7 +263,7 @@ func TestGroupWithoutSubcommandPrintsHelp(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"一级入口", nil, "子命令："},
+		{"一级入口", nil, "命令:"},
 		{"account", []string{"account"}, "add"},
 		{"model", []string{"model"}, "sync"},
 		{"provider", []string{"provider"}, "header"},
@@ -354,7 +354,7 @@ func TestUnknownFlagIsUsageError(t *testing.T) {
 	if out != "" {
 		t.Fatalf("用法错误不该写 stdout: %s", out)
 	}
-	for _, want := range []string{"-nope", "用法：", "--json"} {
+	for _, want := range []string{"-nope", "用法:", "--json"} {
 		if !strings.Contains(stderr, want) {
 			t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 		}
@@ -384,7 +384,7 @@ func TestGroupHelp(t *testing.T) {
 			if errOut != "" {
 				t.Fatalf("%s %s 的帮助不该写 stderr: %s", g.name, want, errOut)
 			}
-			if !strings.Contains(out, "用法：") || !strings.Contains(out, "子命令：") {
+			if !strings.Contains(out, "用法:") || !strings.Contains(out, "命令:") {
 				t.Fatalf("%s %s 的输出缺少用法或子命令清单: %s", g.name, want, out)
 			}
 			for _, sub := range g.subs {
@@ -408,7 +408,7 @@ func TestTopLevelHelpListsProviderGroup(t *testing.T) {
 		if errOut != "" {
 			t.Fatalf("%s 的帮助不该写 stderr: %s", arg, errOut)
 		}
-		for _, want := range []string{"provider", "厂商与路由"} {
+		for _, want := range []string{"provider", "管理厂商与协议路由"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("%s 的顶层帮助缺 %q: %s", arg, want, out)
 			}

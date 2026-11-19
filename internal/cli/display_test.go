@@ -338,7 +338,7 @@ func TestModelLsShowsCatalogMetadata(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("model ls 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"上下文长度", "最大输出", "支持协议", "200000", "8192", "openai-chat,anthropic"} {
+	for _, want := range []string{"上下文", "最大输出", "支持协议", "价格 (/1M)", "200000", "8192", "openai-chat,anthropic"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("model ls 文本输出缺 %q: %s", want, out)
 		}

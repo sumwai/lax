@@ -144,7 +144,7 @@ const pluginSandboxLogFormat = "插件 %s %s: %s"
 // 排障时既要在 serve 的输出里看见，也要能在事后按插件翻出来。
 //
 // hook 字段留空：日志入口拿不到正在跑的是哪个钩子，编一个比空着更误导。
-// 写库失败只打一行警告：插件日志不该把一次请求拖垮。
+// 写库失败只打一行警告:插件日志不该把一次请求拖垮。
 func pluginLogSink(st *store.Store, pluginID string, human io.Writer) func(format string, args ...any) {
 	return func(format string, args ...any) {
 		level, message := pluginLogFields(format, args)
@@ -155,7 +155,7 @@ func pluginLogSink(st *store.Store, pluginID string, human io.Writer) func(forma
 		}
 		err := st.AppendPluginLog(store.PluginLog{PluginID: pluginID, Level: level, Message: message})
 		if err != nil && human != nil {
-			fmt.Fprintf(human, "警告：插件 %s 的日志没写进库里：%v\n", pluginID, err)
+			fmt.Fprintf(human, "警告:插件 %s 的日志没写进库里：%v\n", pluginID, err)
 		}
 	}
 }

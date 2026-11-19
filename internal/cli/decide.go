@@ -383,17 +383,28 @@ func pickDecideTarget(st *store.Store, model string) (decideTarget, error) {
 			return decideTarget{}, err
 		}
 		if !containsProtocol(declared, gateway.ProtocolSystemOne) {
-			return decideTarget{}, fmt.Errorf("模型 %s 算不出有效出站协议：厂商 %s 没声明 systemone 路由，模型上也没有探出协议；先运行 lax model add %s --account %s --protocol systemone 把这个模型声明成 systemone（同时写模型目录与账号级协议，不依赖厂商路由），或者运行 lax provider set %s --systemone /v1/systemone 声明这条路由，再 lax model probe --account %s 把这个模型探出来",
-				resolved, provider, resolved, candidates[0].Name, provider, candidates[0].Name)
+			return decideTarget{}, formatHintError(
+				fmt.Sprintf("模型 %s 无法确定出站协议：厂商 %s 未声明 systemone 路由，且模型未探出协议", resolved, provider),
+				fmt.Sprintf("直接声明模型协议: lax model add %s --account %s --protocol systemone", resolved, candidates[0].Name),
+				fmt.Sprintf("或先添加厂商路由再探活: lax provider set %s --systemone /v1/systemone && lax model probe --account %s", provider, candidates[0].Name),
+			)
 		}
-		return decideTarget{}, fmt.Errorf("模型 %s 算不出有效出站协议：厂商 %s 声明了 systemone 路由，但默认协议是空的（回退顺序只认 openai-chat → openai-responses → anthropic，见 DESIGN 5.8）；先运行 lax model add %s --account %s --protocol systemone 把这个模型的协议定下来，或者运行 lax provider set %s --default-protocol systemone 把默认协议补上，或 lax model probe --account %s 把这个模型的协议探出来",
-			resolved, provider, resolved, candidates[0].Name, provider, candidates[0].Name)
+		return decideTarget{}, formatHintError(
+			fmt.Sprintf("模型 %s 无法确定出站协议：厂商 %s 已声明 systemone 路由，但默认协议为空", resolved, provider),
+			fmt.Sprintf("声明模型协议: lax model add %s --account %s --protocol systemone", resolved, candidates[0].Name),
+			fmt.Sprintf("或设置厂商默认协议: lax provider set %s --default-protocol systemone", provider),
+			fmt.Sprintf("或运行模型探活: lax model probe --account %s", candidates[0].Name),
+		)
 	}
-	return decideTarget{}, fmt.Errorf("模型 %s 以 %s 协议出站，不是 systemone：model decide 只发 POST %s 的决策请求，出站协议跟着账号与厂商路由走（见 DESIGN 5.13），这条协议不参与转换；要给这家厂商声明一条 systemone 路由就运行 lax provider set %s --systemone /v1/systemone 再 lax model probe --account %s，要发对话请求就改用 lax model call \"提示词\" --model %s，也可以换一个走 systemone 的模型（lax model ls 看清单）",
-		resolved, firstProtocol, systemOnePath, candidates[0].Provider, candidates[0].Name, resolved)
+	return decideTarget{}, formatHintError(
+		fmt.Sprintf("模型 %s 的有效出站协议为 %s，不支持 systemone 决策请求（POST %s）", resolved, firstProtocol, systemOnePath),
+		fmt.Sprintf("若需声明 systemone 路由: lax provider set %s --systemone /v1/systemone && lax model probe --account %s", candidates[0].Provider, candidates[0].Name),
+		fmt.Sprintf("若需发送对话请求: lax model call \"提示词\" --model %s", resolved),
+		"或切换其他 systemone 模型（运行 lax model ls 查看清单）",
+	)
 }
 
-// declareModelNextSteps 为「这个模型还没有任何账号声明」这条错误拼出按顺序敲的下一步：
+// declareModelNextSteps 为「这个模型还没有任何账号声明」这条错误拼出按顺序敲的下一步:
 // 有启用账号时直接写出 model add 的账号名（只启用一个就写启用那一个，多个写占位并指向 account ls），
 // 一个启用账号都没有时先给 account add 再给 model add。最后一条是只验这一条路的 probe：
 // 带 --protocol 时候选就是那一条，不会先去打厂商默认协议。
@@ -730,7 +741,13 @@ func cmdDecide(e *Env, args []string) error {
 			decideMetricCell(probability), decideMetricCell(confidence),
 		})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"名称", "类型", "答案", "概率", "置信度"}, rows))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"名称", "类型", "答案", "概率", "置信度"},
+		Align:     []tableAlign{alignLeft, alignLeft, alignLeft, alignRight, alignLeft},
+		Rows:      rows,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	fmt.Fprintln(e.Stdout, decideUsageLine(env.Usage))
 	return nil
 }

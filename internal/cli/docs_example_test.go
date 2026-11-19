@@ -296,7 +296,7 @@ func TestREADMEModelFlowExamples(t *testing.T) {
 // assertSyncTable 断言 model sync 的人读表格：表头五列、一行数据、下一步提示。
 func assertSyncTable(t *testing.T, out, account, provider string, models, added int) {
 	t.Helper()
-	for _, want := range []string{"账号", "厂商", "模型", "新增", "备注", "下一步：lax model probe"} {
+	for _, want := range []string{"账号", "厂商", "模型", "新增", "备注", "下一步: lax model probe"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("model sync 输出缺 %q:\n%s", want, out)
 		}

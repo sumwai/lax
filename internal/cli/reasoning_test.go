@@ -39,15 +39,15 @@ func TestLogTailShowsReasoningTokens(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("log tail 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"思考", "输出", "缓存读"} {
+	for _, want := range []string{"思考", "输出", "缓存(读/写)"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("log tail 的表头缺 %q:\n%s", want, out)
 		}
 	}
 	// 时间占两列，后面依次是协议、模型、账号、状态、输入、输出、思考。
 	think := logRowFields(t, out, "m-think")
-	if len(think) < 12 {
-		t.Fatalf("带思考的记录列数 = %d，少于 12 列：%v", len(think), think)
+	if len(think) < 11 {
+		t.Fatalf("带思考的记录列数 = %d，少于 11 列：%v", len(think), think)
 	}
 	if think[7] != "1" || think[8] != "124" {
 		t.Fatalf("带思考的记录输出与思考列 = %q / %q，期望 1 / 124：%v", think[7], think[8], think)
@@ -142,7 +142,7 @@ func TestUsageReasoningTotalsPerDimension(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("usage 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"输入 token", "输出 token", "思考 token", "缓存读 token", "估算花费", "合计"} {
+	for _, want := range []string{"输入", "输出", "思考", "缓存读", "费用", "合计"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("usage 表格缺 %q:\n%s", want, out)
 		}

@@ -118,6 +118,11 @@ func printAvailablePlugins(e *Env, rows []pluginAvailableJSON) error {
 			cellOrDash(r.InstalledVersion), status,
 		})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"名称", "仓库版本", "插件 ID", "类型", "运行时", "已装版本", "状态"}, table))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"名称", "仓库版本", "插件 ID", "类型", "运行时", "已装版本", "状态"},
+		Rows:      table,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	return nil
 }

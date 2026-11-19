@@ -331,7 +331,7 @@ func cmdRoutePolicyAdd(e *Env, args []string) error {
 	}
 	fmt.Fprintf(e.Stdout, "已新建失败处理策略 #%d\n", saved.ID)
 	printRoutePolicyDetail(e, saved, names)
-	fmt.Fprintf(e.Stdout, "下一步：lax route policy test --status 400 --explain 预演匹配；lax route policy set %d ... 修改\n", saved.ID)
+	fmt.Fprintf(e.Stdout, "下一步:lax route policy test --status 400 --explain 预演匹配；lax route policy set %d ... 修改\n", saved.ID)
 	return nil
 }
 
@@ -664,7 +664,13 @@ func cmdRoutePolicyLs(e *Env, args []string) error {
 			routePolicyNoteCell(p.Note),
 		})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"ID", "来源", "启用", "优先级", "条件", "动作", "备注"}, rows))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"ID", "来源", "启用", "优先级", "条件", "动作", "备注"},
+		Align:     []tableAlign{alignLeft, alignLeft, alignLeft, alignRight, alignLeft, alignLeft, alignLeft},
+		Rows:      rows,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	if len(policies) == 0 {
 		fmt.Fprintln(e.Stdout, "还没有用户规则；内置兜底始终生效。")
 	}
@@ -1142,7 +1148,12 @@ func printRoutePolicyDetail(e *Env, p store.RouteFailurePolicy, names map[int64]
 		{"创建时间", routePolicyTimeText(p.CreatedAt)},
 		{"更新时间", routePolicyTimeText(p.UpdatedAt)},
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"项", "值"}, rows))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"项", "值"},
+		Rows:      rows,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 }
 
 func routePolicyConditionSummary(p store.RouteFailurePolicy, names map[int64]string) string {

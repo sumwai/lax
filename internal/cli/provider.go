@@ -15,12 +15,12 @@ import (
 
 // providerSubs 是 provider 一组的子命令清单，组级帮助与错误提示都读它。
 var providerSubs = []groupItem{
-	{"ls", "列厂商来源、地址与路由概况；--verbose 看完整路径与模型列表"},
-	{"add", "新建一家厂商与它的协议路由"},
-	{"set", "改一家厂商的地址、路由、默认协议、凭据头或备注"},
-	{"unset", "删掉一条路由，或清掉凭据头声明、模型列表覆盖、默认协议、备注"},
-	{"rm", "删除厂商与它的全部路由，账号还在用时要求 --force"},
-	{"header", "声明上游除凭据头之外还要的附加请求头：set / unset / ls"},
+	{"ls", "列出厂商来源、地址与路由概况（--verbose 显示完整路径）"},
+	{"add", "新增厂商及其协议路由"},
+	{"set", "更新厂商地址、路由、默认协议、凭据头或备注"},
+	{"unset", "清除厂商路由、凭据头、模型列表覆盖或备注"},
+	{"rm", "删除厂商及其全部路由（有关联账号时需 --force）"},
+	{"header", "管理上游附加请求头（set / unset / ls）"},
 }
 
 // 六个协议 flag（`--anthropic`、`--openai`、`--responses`、`--gemini`、`--systemone`、
@@ -331,7 +331,12 @@ func cmdProviderLs(e *Env, args []string) error {
 				routeCell(s.routes), providerModelsCell(s.row, s.routes), s.json.Note,
 			})
 		}
-		fmt.Fprint(e.Stdout, renderTable([]string{"名称", "来源", "地址", "默认协议", "路由与路径", "模型列表", "备注"}, rows))
+		fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+			Header:    []string{"名称", "来源", "地址", "默认协议", "路由与路径", "模型列表", "备注"},
+			Rows:      rows,
+			Style:     newUI(e.Stdout),
+			HeaderSep: true,
+		}))
 		return nil
 	}
 	for _, s := range snaps {
@@ -340,7 +345,12 @@ func cmdProviderLs(e *Env, args []string) error {
 			providerProtocolsCell(s.routes), s.json.Note,
 		})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"名称", "来源", "地址", "默认协议", "路由", "备注"}, rows))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"名称", "来源", "地址", "默认协议", "路由", "备注"},
+		Rows:      rows,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	return nil
 }
 
@@ -358,25 +368,14 @@ type providerPathFlags struct {
 
 func newProviderPathFlags(fs *flagSet) providerPathFlags {
 	return providerPathFlags{
-		anthropic: fs.String("anthropic", "", "anthropic 协议的路由路径：相对 --base-url 的完整路径，例如 /v1/messages；也可以写整条地址，例如 https://claude.example.com/v1/messages（相对路径的斜杠写法由程序规整）"),
-		openai:    fs.String("openai", "", "openai-chat 协议的路由路径：相对 --base-url 的完整路径，例如 /v1/chat/completions；也可以写整条地址，例如 https://openai.example.com/v1/chat/completions（相对路径的斜杠写法由程序规整）"),
-		responses: fs.String("responses", "", "openai-responses 协议的路由路径：相对 --base-url 的完整路径，例如 /v1/responses；也可以写整条地址（相对路径的斜杠写法由程序规整）"),
-		gemini: fs.String("gemini", "", "gemini 协议的路由路径：相对 --base-url 的完整路径，例如 /v1beta/models/{model}:generateContent；也可以写整条地址（相对路径的斜杠写法由程序规整）。\n"+
-			"{model} 是占位符，原样落库，发请求时才换成模型名（按路径段转义），例：\n"+
-			"  lax provider add google-gemini --base-url https://generativelanguage.googleapis.com --gemini /v1beta/models/{model}:generateContent --default-protocol gemini"),
-		systemone: fs.String("systemone", "", "systemone 决策协议的路由路径：相对 --base-url 的完整路径，例如 /v1/systemone；也可以写整条地址（相对路径的斜杠写法由程序规整）。\n"+
-			"这条协议一个 state 加一组问题、不出文本，lax model decide 用它，例：\n"+
-			"  lax provider add typesafe --base-url https://api.typesafe.ai --systemone /v1/systemone\n"+
-			"  只声明 systemone 这一条时再加 --default-protocol systemone（固定回退顺序只认 openai-chat → openai-responses → anthropic）"),
-		embeddings: fs.String("embeddings", "", "openai-embeddings 向量化协议的路由路径：相对 --base-url 的完整路径，例如 /v1/embeddings；也可以写整条地址（相对路径的斜杠写法由程序规整）。\n"+
-			"向量化只做同协议直通，/v1/embeddings 入站只打声明了这条路由的厂商，例：\n"+
-			"  lax provider set openai openai-embeddings=/v1/embeddings"),
-		speech: fs.String("speech", "", "openai-speech 语音合成的路由路径：相对 --base-url 的完整路径，例如 /v1/audio/speech；也可以写整条地址（相对路径的斜杠写法由程序规整）。\n"+
-			"语音只做同协议直通，/v1/audio/speech 入站只打声明了这条路由的厂商，例：\n"+
-			"  lax provider set openai openai-speech=/v1/audio/speech"),
-		transcriptions: fs.String("transcriptions", "", "openai-transcriptions 语音转写的路由路径：相对 --base-url 的完整路径，例如 /v1/audio/transcriptions；也可以写整条地址（相对路径的斜杠写法由程序规整）。\n"+
-			"语音转写只做同协议直通，入站是 multipart/form-data，例：\n"+
-			"  lax provider set openai openai-transcriptions=/v1/audio/transcriptions"),
+		anthropic:      fs.String("anthropic", "", "anthropic 协议路由路径或完整 URL（如 /v1/messages）"),
+		openai:         fs.String("openai", "", "openai-chat 协议路由路径或完整 URL（如 /v1/chat/completions）"),
+		responses:      fs.String("responses", "", "openai-responses 协议路由路径或完整 URL（如 /v1/responses）"),
+		gemini:         fs.String("gemini", "", "gemini 协议路由路径或完整 URL（支持 {model} 占位符，如 /v1beta/models/{model}:generateContent）"),
+		systemone:      fs.String("systemone", "", "systemone 决策协议路由路径或完整 URL（如 /v1/systemone）"),
+		embeddings:     fs.String("embeddings", "", "openai-embeddings 向量化路由路径或完整 URL（如 /v1/embeddings）"),
+		speech:         fs.String("speech", "", "openai-speech 语音合成路由路径或完整 URL（如 /v1/audio/speech）"),
+		transcriptions: fs.String("transcriptions", "", "openai-transcriptions 语音转写路由路径或完整 URL（如 /v1/audio/transcriptions）"),
 	}
 }
 
@@ -537,14 +536,19 @@ func lookupUnsetField(raw string) (providerUnsetField, error) {
 
 // cmdProviderAdd 只新建一家厂商。重名时报错并指向 provider set，不顺手改已有的行。
 func cmdProviderAdd(e *Env, args []string) error {
-	fs := newFlagSet(e, "provider add", "新建一家厂商与它的协议路由（支持 anthropic、openai、responses、gemini、systemone、embeddings、speech、transcriptions 八种协议）")
-	baseURL := fs.String("base-url", "", "厂商的默认地址，如 https://api.deepseek.com（可省略：每条路由与 --models-path 都是整条地址时不需要它）")
+	fs := newFlagSet(e, "provider add", "新增厂商与协议路由")
+	baseURL := fs.String("base-url", "", "厂商默认地址（如 https://api.deepseek.com）")
 	paths := newProviderPathFlags(fs)
-	defProtocol := fs.String("default-protocol", "", "这家的默认协议：anthropic | openai | responses | gemini | systemone | embeddings | speech | transcriptions，必须落在这次声明的路由上；不给按 openai → responses → anthropic 取第一条")
-	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖，相对 --base-url 的路径（如 /v1/models）或整条地址；不给按各路由的 models_path 取（相对路径的斜杠写法由程序规整）")
-	authHeader := fs.String("auth-header", "", "凭据头的头名（如 X-Api-Key）：声明之后上游只收这一个头，不再发协议默认的 Authorization / x-api-key；不给表示按报文协议推导")
-	authScheme := fs.String("auth-scheme", "", "凭据头的写法：raw（头值就是 key）| bearer（Bearer <key>）| bearer-semicolon（Bearer;<key>）；不给按 raw")
+	defProtocol := fs.String("default-protocol", "", "默认协议（anthropic | openai | responses | gemini | systemone | embeddings | speech | transcriptions）")
+	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖（相对路径或完整 URL）")
+	authHeader := fs.String("auth-header", "", "自定义凭据头名称（如 X-Api-Key）")
+	authScheme := fs.String("auth-scheme", "", "凭据头格式：raw | bearer | bearer-semicolon")
 	note := fs.String("note", "", "备注")
+	fs.setExamples(
+		"lax provider add acme --base-url https://api.example.com --openai /v1/chat/completions",
+		"lax provider add google-gemini --base-url https://generativelanguage.googleapis.com --gemini /v1beta/models/{model}:generateContent --default-protocol gemini",
+		"lax provider add typesafe --base-url https://api.typesafe.ai --systemone /v1/systemone --default-protocol systemone",
+	)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -656,21 +660,25 @@ func cmdProviderAdd(e *Env, args []string) error {
 		return e.printJSON(snap.json)
 	}
 	fmt.Fprintf(e.Stdout, "已添加厂商 %s（%s），%d 条路由，默认协议 %s\n", snap.row.Name, baseURLSummary(snap.row.BaseURL), len(snap.routes), defaultProtocolCell(snap))
-	fmt.Fprintf(e.Stdout, "下一步：lax account add <名称> --provider %s --key <key> 用它加账号\n", name)
+	fmt.Fprintf(e.Stdout, "下一步:lax account add <名称> --provider %s --key <key> 用它加账号\n", name)
 	return nil
 }
 
 // cmdProviderSet 只设值：传了的字段改成新值，没传的字段一律保留。
 // 删除一条路由、清掉覆盖或备注走 `provider unset`：只设值不删值，一个写错的空参数不会抹掉已有配置。
 func cmdProviderSet(e *Env, args []string) error {
-	fs := newFlagSet(e, "provider set", "改一家厂商的地址、路由、默认协议或备注（支持 anthropic、openai、responses、gemini、systemone、embeddings、speech、transcriptions 八种协议）")
-	baseURL := fs.String("base-url", "", "改厂商的默认地址（带主机名的完整地址；每条路由都是整条地址时不需要它）")
+	fs := newFlagSet(e, "provider set", "更新厂商地址、路由、默认协议或备注")
+	baseURL := fs.String("base-url", "", "更新厂商默认地址")
 	paths := newProviderPathFlags(fs)
-	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖，相对 --base-url 的路径（如 /v1/models）或整条地址（相对路径的斜杠写法由程序规整）")
-	authHeader := fs.String("auth-header", "", "改凭据头的头名（如 X-Api-Key）；只给头时写法保持不动")
-	authScheme := fs.String("auth-scheme", "", "改凭据头的写法：raw | bearer | bearer-semicolon；只给写法时头必须在库里已有")
-	defProtocol := fs.String("default-protocol", "", "这家的默认协议：anthropic | openai | responses | gemini | systemone | embeddings | speech | transcriptions，必须落在已声明的路由上")
-	note := fs.String("note", "", "改备注")
+	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖（相对路径或完整 URL）")
+	authHeader := fs.String("auth-header", "", "更新凭据头名称（如 X-Api-Key）")
+	authScheme := fs.String("auth-scheme", "", "更新凭据头格式：raw | bearer | bearer-semicolon")
+	defProtocol := fs.String("default-protocol", "", "默认协议（须属于已声明的路由）")
+	note := fs.String("note", "", "更新备注")
+	fs.setExamples(
+		"lax provider set openai --embeddings /v1/embeddings",
+		"lax provider set openai --speech /v1/audio/speech --transcriptions /v1/audio/transcriptions",
+	)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -778,7 +786,7 @@ func cmdProviderSet(e *Env, args []string) error {
 	}
 	fmt.Fprintf(e.Stdout, "已修改厂商 %s：改动 %d 项（%s），现有 %d 条路由，默认协议 %s\n",
 		snap.row.Name, len(changed), strings.Join(changed, "、"), len(snap.routes), defaultProtocolCell(snap))
-	fmt.Fprintln(e.Stdout, "下一步：lax provider ls 核对")
+	fmt.Fprintln(e.Stdout, "下一步:lax provider ls 核对")
 	return nil
 }
 

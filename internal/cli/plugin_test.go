@@ -203,7 +203,7 @@ func TestPluginGroupHelp(t *testing.T) {
 		if stderr != "" {
 			t.Fatalf("plugin %s 的帮助不该写 stderr: %s", arg, stderr)
 		}
-		for _, want := range []string{"用法：", "子命令：", "install", "doctor"} {
+		for _, want := range []string{"用法:", "命令:", "install", "doctor"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("plugin %s 的输出缺 %q: %s", arg, want, out)
 			}
@@ -313,10 +313,21 @@ func TestPluginLifecycle(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("show 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"manifest", "com.example.echo/speech@1", "已装版本 1.0.0", "信任", "冲突 无"} {
+	for _, want := range []string{"概览", "权限与配置", "路由与模型", "最近事件", "com.example.echo/speech@1", "1.0.0", "信任级别", "冲突        无", "--verbose"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("show 输出缺 %q: %s", want, out)
 		}
+	}
+	if strings.Contains(out, "\"schema_version\"") {
+		t.Fatalf("默认 plugin show 不应输出完整 manifest JSON: %s", out)
+	}
+
+	code, outVerbose, stderr := run(t, "plugin", "show", "com.example.echo", "--verbose")
+	if code != 0 {
+		t.Fatalf("show --verbose 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if !strings.Contains(outVerbose, "Manifest") || !strings.Contains(outVerbose, "\"com.example.echo\"") {
+		t.Fatalf("show --verbose 应输出完整 Manifest: %s", outVerbose)
 	}
 
 	code, out, _ = run(t, "plugin", "show", "com.example.echo", "--json")

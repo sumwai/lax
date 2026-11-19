@@ -3,9 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
-	"io"
 	"math"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -142,7 +140,13 @@ func cmdQuotaLs(e *Env, args []string) error {
 		}
 		rows = append(rows, []string{item.acc.Name, item.acc.Provider, status, balance, usd, ratio, periodEnd, checkedAt, note})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"账号", "厂商", "状态", "余额", "折合 USD", "剩余比例", "周期结束", "刷新时间", "备注"}, rows))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"账号", "厂商", "状态", "余额", "折合 USD", "剩余比例", "周期结束", "刷新时间", "备注"},
+		Align:     []tableAlign{alignLeft, alignLeft, alignLeft, alignRight, alignRight, alignRight, alignLeft, alignLeft, alignLeft},
+		Rows:      rows,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	fmt.Fprintln(e.Stdout, "刷新一个账号：lax quota refresh <账号>；看明细：lax quota show <账号>")
 	return nil
 }
@@ -218,8 +222,8 @@ func cmdQuotaShow(e *Env, args []string) error {
 		return nil
 	}
 
-	ui := newQuotaUI(e.Stdout)
-	fmt.Fprint(e.Stdout, ui.renderQuota(acc, facts, state, time.Now()))
+	ui := newUI(e.Stdout)
+	fmt.Fprint(e.Stdout, renderQuota(ui, acc, facts, state, time.Now()))
 	if note := quotaFactNote(facts); note != "" {
 		fmt.Fprintf(e.Stdout, "\n%s\n", note)
 	}
@@ -243,35 +247,7 @@ type quotaSection struct {
 	rows  []quotaRow
 }
 
-// quotaUI 负责人读输出的排版。颜色只在真正的终端上开启：
-// 管道、重定向与测试传入的 buffer 都不会带 ANSI 序列。
-type quotaUI struct {
-	color bool
-}
-
-func newQuotaUI(w io.Writer) quotaUI {
-	if os.Getenv("NO_COLOR") != "" {
-		return quotaUI{}
-	}
-	f, ok := w.(*os.File)
-	if !ok {
-		return quotaUI{}
-	}
-	info, err := f.Stat()
-	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
-		return quotaUI{}
-	}
-	return quotaUI{color: true}
-}
-
-func (u quotaUI) paint(code, s string) string {
-	if !u.color || code == "" || s == "" {
-		return s
-	}
-	return "\x1b[" + code + "m" + s + "\x1b[0m"
-}
-
-func (u quotaUI) renderRows(b *strings.Builder, indent int, rows []quotaRow) {
+func renderQuotaRows(b *strings.Builder, u uiStyle, indent int, rows []quotaRow) {
 	for _, row := range rows {
 		if row.value == "" {
 			continue
@@ -286,7 +262,7 @@ func (u quotaUI) renderRows(b *strings.Builder, indent int, rows []quotaRow) {
 
 // renderQuota 按「账号 / 额度 / 周期 / 限流窗口 / 上游 / 排障」分组输出。
 // 没有内容的区块整块省略，不拿空行和 "-" 占位。
-func (u quotaUI) renderQuota(acc store.Account, f quota.Facts, state string, now time.Time) string {
+func renderQuota(u uiStyle, acc store.Account, f quota.Facts, state string, now time.Time) string {
 	var b strings.Builder
 
 	top := []quotaRow{
@@ -303,7 +279,7 @@ func (u quotaUI) renderQuota(acc store.Account, f quota.Facts, state string, now
 	if f.Source != "" && f.Source != acc.Provider {
 		top = append(top, quotaRow{"接口", quotaSourceText(f.Source), ""})
 	}
-	u.renderRows(&b, 0, top)
+	renderQuotaRows(&b, u, 0, top)
 
 	sections := []quotaSection{
 		{"额度", quotaCreditRows(f)},
@@ -317,9 +293,9 @@ func (u quotaUI) renderQuota(acc store.Account, f quota.Facts, state string, now
 			continue
 		}
 		b.WriteByte('\n')
-		b.WriteString(u.paint("1", section.title))
+		b.WriteString(u.bold(section.title))
 		b.WriteByte('\n')
-		u.renderRows(&b, 2, section.rows)
+		renderQuotaRows(&b, u, 2, section.rows)
 	}
 	return b.String()
 }
@@ -608,7 +584,12 @@ func cmdQuotaRefresh(e *Env, args []string) error {
 			}
 			table = append(table, []string{r.Account, r.Provider, quotaStatusText(r.Status), note})
 		}
-		fmt.Fprint(e.Stdout, renderTable([]string{"账号", "厂商", "状态", "备注"}, table))
+		fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+			Header:    []string{"账号", "厂商", "状态", "备注"},
+			Rows:      table,
+			Style:     newUI(e.Stdout),
+			HeaderSep: true,
+		}))
 		if failed == 0 {
 			fmt.Fprintln(e.Stdout, "额度刷新失败只更新快照状态，不会停用账号、也不写请求记录。")
 		}
@@ -1040,7 +1021,7 @@ func quotaSettingsRows(s quota.Settings) []quotaRow {
 
 func quotaSettingsReport(s quota.Settings) string {
 	var b strings.Builder
-	quotaUI{}.renderRows(&b, 2, quotaSettingsRows(s))
+	renderQuotaRows(&b, uiStyle{}, 2, quotaSettingsRows(s))
 	return b.String()
 }
 

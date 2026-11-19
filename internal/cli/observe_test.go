@@ -153,28 +153,28 @@ func TestLogTailShowsCacheTokens(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("log tail 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"输入", "输出", "思考", "缓存读", "缓存写", "耗时", "错误"} {
+	for _, want := range []string{"输入", "输出", "思考", "缓存(读/写)", "耗时", "错误"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("log tail 的表头缺 %q:\n%s", want, out)
 		}
 	}
-	// 时间占两列（日期 + 时刻），后面依次是协议、模型、账号、状态、输入、输出、思考、缓存读、缓存写、耗时。
+	// 时间占两列（日期 + 时刻），后面依次是协议、模型、账号、状态、输入、输出、思考、缓存(读/写)、耗时。
 	cached := logRowFields(t, out, "m-cache")
-	if len(cached) < 12 {
-		t.Fatalf("带缓存的记录列数 = %d，少于 12 列：%v", len(cached), cached)
+	if len(cached) < 11 {
+		t.Fatalf("带缓存的记录列数 = %d，少于 11 列：%v", len(cached), cached)
 	}
-	for i, want := range map[int]string{6: "100", 7: "20", 8: "0", 9: "1500", 10: "300"} {
+	for i, want := range map[int]string{6: "100", 7: "20", 8: "0", 9: "1500/300"} {
 		if cached[i] != want {
 			t.Fatalf("带缓存的记录第 %d 列 = %q，期望 %q：%v", i, cached[i], want, cached)
 		}
 	}
 	plain := logRowFields(t, out, "m-plain")
-	if len(plain) < 12 {
-		t.Fatalf("全 0 的记录列数 = %d，少于 12 列：%v", len(plain), plain)
+	if len(plain) < 11 {
+		t.Fatalf("全 0 的记录列数 = %d，少于 11 列：%v", len(plain), plain)
 	}
-	if plain[8] != "0" || plain[9] != "0" || plain[10] != "0" {
-		t.Fatalf("全 0 的记录思考与缓存列 = %q / %q / %q，期望都显示 0：%v",
-			plain[8], plain[9], plain[10], plain)
+	if plain[8] != "0" || plain[9] != "0" {
+		t.Fatalf("全 0 的记录思考与缓存列 = %q / %q，期望都显示 0：%v",
+			plain[8], plain[9], plain)
 	}
 
 	byModel := mustLogRows(t)
@@ -250,7 +250,7 @@ func TestUsageCacheTotalsPerDimension(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("usage 退出码 = %d，stderr = %s", code, stderr)
 	}
-	for _, want := range []string{"输入 token", "输出 token", "思考 token", "缓存读 token", "缓存写 token", "估算花费", "合计"} {
+	for _, want := range []string{"输入", "输出", "思考", "缓存读", "缓存写", "费用", "合计"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("usage 表格缺 %q:\n%s", want, out)
 		}

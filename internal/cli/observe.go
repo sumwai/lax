@@ -85,25 +85,12 @@ func cmdUsage(e *Env, args []string) error {
 	}
 
 	headerName := map[string]string{"account": "账号", "model": "模型", "day": "日期"}[*by]
-	table := make([][]string, 0, len(rows))
 	var totalReq, totalIn, totalOut, totalReasoning, totalCacheRead, totalCacheWrite int64
 	var totalTTSChars, totalAudioSeconds int64
 	var totalCost float64
 	priced := 0
 	unpriced := 0
 	for _, r := range rows {
-		table = append(table, []string{
-			r.Key,
-			fmt.Sprintf("%d", r.Requests),
-			fmt.Sprintf("%d", r.InTokens),
-			fmt.Sprintf("%d", r.OutTokens),
-			fmt.Sprintf("%d", r.ReasoningTokens),
-			fmt.Sprintf("%d", r.CacheRead),
-			fmt.Sprintf("%d", r.CacheWrite),
-			fmt.Sprintf("%d", r.TTSChars),
-			fmt.Sprintf("%d", r.AudioSeconds),
-			usage.YuanOrUnpriced(r.Cost),
-		})
 		totalReq += r.Requests
 		totalIn += r.InTokens
 		totalOut += r.OutTokens
@@ -120,11 +107,29 @@ func cmdUsage(e *Env, args []string) error {
 			unpriced++
 		}
 	}
+	hasVoice := totalTTSChars > 0 || totalAudioSeconds > 0
+	table := make([][]string, 0, len(rows))
+	for _, r := range rows {
+		row := []string{
+			r.Key,
+			fmt.Sprintf("%d", r.Requests),
+			fmt.Sprintf("%d", r.InTokens),
+			fmt.Sprintf("%d", r.OutTokens),
+			fmt.Sprintf("%d", r.ReasoningTokens),
+			fmt.Sprintf("%d", r.CacheRead),
+			fmt.Sprintf("%d", r.CacheWrite),
+		}
+		if hasVoice {
+			row = append(row, formatVoiceCell(r.TTSChars, r.AudioSeconds))
+		}
+		row = append(row, usage.YuanOrUnpriced(r.Cost))
+		table = append(table, row)
+	}
 	totalCell := "未定价"
 	if priced > 0 {
 		totalCell = usage.Yuan(totalCost)
 	}
-	table = append(table, []string{
+	totalRow := []string{
 		"合计",
 		fmt.Sprintf("%d", totalReq),
 		fmt.Sprintf("%d", totalIn),
@@ -132,22 +137,40 @@ func cmdUsage(e *Env, args []string) error {
 		fmt.Sprintf("%d", totalReasoning),
 		fmt.Sprintf("%d", totalCacheRead),
 		fmt.Sprintf("%d", totalCacheWrite),
-		fmt.Sprintf("%d", totalTTSChars),
-		fmt.Sprintf("%d", totalAudioSeconds),
-		totalCell,
-	})
-	fmt.Fprint(e.Stdout, renderTable(
-		[]string{headerName, "请求", "输入 token", "输出 token", "思考 token", "缓存读 token", "缓存写 token", "合成字符", "音频秒", "估算花费"}, table))
+	}
+	if hasVoice {
+		totalRow = append(totalRow, formatVoiceCell(totalTTSChars, totalAudioSeconds))
+	}
+	totalRow = append(totalRow, totalCell)
+
+	headers := []string{headerName, "请求", "输入", "输出", "思考", "缓存读", "缓存写"}
+	aligns := []tableAlign{alignLeft, alignRight, alignRight, alignRight, alignRight, alignRight, alignRight}
+	if hasVoice {
+		headers = append(headers, "语音")
+		aligns = append(aligns, alignRight)
+	}
+	headers = append(headers, "费用")
+	aligns = append(aligns, alignRight)
+
+	u := newUI(e.Stdout)
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    headers,
+		Align:     aligns,
+		Rows:      table,
+		Footer:    [][]string{totalRow},
+		Style:     u,
+		HeaderSep: true,
+	}))
 	if priced == 0 {
-		fmt.Fprintln(e.Stdout, "花费未定价：这些请求用到的模型没有单价，用 lax model price set <模型> --in N --out N 补上（缓存单价可选，未填时回退输入价）")
+		fmt.Fprintln(e.Stdout, u.dim("花费未定价：这些请求用到的模型没有单价，用 lax model price set <模型> --in N --out N 补上（缓存单价可选，未填时回退输入价）"))
 	} else if unpriced > 0 {
-		fmt.Fprintf(e.Stdout, "有 %d 行没有单价，它们不计入合计；补价用 lax model price set <模型> --in N --out N\n", unpriced)
+		fmt.Fprintln(e.Stdout, u.dim(fmt.Sprintf("有 %d 行没有单价，它们不计入合计；补价用 lax model price set <模型> --in N --out N", unpriced)))
 	} else if totalCost == 0 {
-		fmt.Fprintln(e.Stdout, "花费为 0：单价已填且都是 0，这些请求算免费")
+		fmt.Fprintln(e.Stdout, u.dim("花费为 0：单价已填且都是 0，这些请求算免费"))
 	}
 	if totalCacheRead+totalCacheWrite > 0 {
 		// 缓存 token 已经折进花费，不说清就会被当成只显示。
-		fmt.Fprintln(e.Stdout, "缓存读写已按模型的缓存单价计入估算花费，未填缓存单价时按输入价算")
+		fmt.Fprintln(e.Stdout, u.dim("缓存读写已按模型的缓存单价计入估算花费，未填缓存单价时按输入价算"))
 	}
 	return nil
 }
@@ -171,7 +194,7 @@ func resolveInboundProtocol(name string) (string, bool) {
 
 // logSubs 是 log 一组的子命令清单。
 var logSubs = []groupItem{
-	{"tail", "查看最近的请求记录，-n 改条数，--follow 跟随新记录"},
+	{"tail", "查看最近的请求记录（支持 -n 与 --follow）"},
 }
 
 func cmdLog(e *Env, args []string) error {
@@ -310,6 +333,14 @@ func printRecords(e *Env, records []store.RequestRecord, names map[int64]string,
 		return nil
 	}
 
+	u := newUI(e.Stdout)
+	hasVoice := false
+	for _, r := range records {
+		if r.TTSChars > 0 || r.AudioSeconds > 0 {
+			hasVoice = true
+			break
+		}
+	}
 	rows := make([][]string, 0, len(records))
 	for _, r := range records {
 		account := names[r.AccountID]
@@ -318,10 +349,14 @@ func printRecords(e *Env, records []store.RequestRecord, names map[int64]string,
 		}
 		status := fmt.Sprintf("%d", r.HTTPStatus)
 		if !r.OK {
-			status = fmt.Sprintf("%d ✗", r.HTTPStatus)
+			status = u.err(fmt.Sprintf("%d ✗", r.HTTPStatus))
 		}
-		rows = append(rows, []string{
-			time.Unix(r.TS, 0).Format("01-02 15:04:05"),
+		cacheCell := "0"
+		if r.CacheRead > 0 || r.CacheWrite > 0 {
+			cacheCell = fmt.Sprintf("%d/%d", r.CacheRead, r.CacheWrite)
+		}
+		row := []string{
+			u.dim(time.Unix(r.TS, 0).Format("01-02 15:04:05")),
 			r.Inbound + "→" + r.Outbound,
 			modelCell(r.ModelRequested, r.ModelUsed),
 			account,
@@ -329,17 +364,44 @@ func printRecords(e *Env, records []store.RequestRecord, names map[int64]string,
 			fmt.Sprintf("%d", r.InTokens),
 			fmt.Sprintf("%d", r.OutTokens),
 			fmt.Sprintf("%d", r.ReasoningTokens),
-			fmt.Sprintf("%d", r.CacheRead),
-			fmt.Sprintf("%d", r.CacheWrite),
-			fmt.Sprintf("%d", r.TTSChars),
-			fmt.Sprintf("%d", r.AudioSeconds),
-			fmt.Sprintf("%dms", r.LatencyMS),
-			truncate(r.Error, 30),
-		})
+			cacheCell,
+		}
+		if hasVoice {
+			row = append(row, formatVoiceCell(r.TTSChars, r.AudioSeconds))
+		}
+		row = append(row, fmt.Sprintf("%dms", r.LatencyMS), truncate(r.Error, 24))
+		rows = append(rows, row)
 	}
-	fmt.Fprint(e.Stdout, renderTable(
-		[]string{"时间", "协议", "模型", "账号", "状态", "输入", "输出", "思考", "缓存读", "缓存写", "合成字符", "音频秒", "耗时", "错误"}, rows))
+	headers := []string{"时间", "协议", "模型", "账号", "状态", "输入", "输出", "思考", "缓存(读/写)"}
+	aligns := []tableAlign{alignLeft, alignLeft, alignLeft, alignLeft, alignRight, alignRight, alignRight, alignRight, alignRight}
+	if hasVoice {
+		headers = append(headers, "语音")
+		aligns = append(aligns, alignRight)
+	}
+	headers = append(headers, "耗时", "错误")
+	aligns = append(aligns, alignRight, alignLeft)
+
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    headers,
+		Align:     aligns,
+		Rows:      rows,
+		Style:     u,
+		HeaderSep: true,
+	}))
 	return nil
+}
+
+func formatVoiceCell(chars, secs int64) string {
+	switch {
+	case chars > 0 && secs > 0:
+		return fmt.Sprintf("%d字/%ds", chars, secs)
+	case chars > 0:
+		return fmt.Sprintf("%d字", chars)
+	case secs > 0:
+		return fmt.Sprintf("%ds", secs)
+	default:
+		return "0"
+	}
 }
 
 // modelCell 给出「模型」列的内容。客户端给的名字与真正打出去的名字不同时写成
@@ -370,7 +432,10 @@ func cmdCall(e *Env, args []string) error {
 		// 没有提示词可发。这是「这个命令接不了它」，不是用法写歪了，
 		// 所以走运行失败（退出码 1）并直接指向真正该用的命令。
 		if strings.TrimSpace(*protocol) == gateway.ProtocolSystemOne {
-			return fmt.Errorf("systemone 不是对话协议：一条决策请求由一个 state 加一组问题组成，没有提示词可发，model call 发不了它；改用 lax model decide --model <模型> --state <文本或 JSON> --noul <名>=<问句>（见 lax model decide --help）")
+			return formatHintError(
+				"systemone 不是对话协议，不支持 model call",
+				"改用决策命令: lax model decide --model <模型> --state <文本或 JSON> --noul <名>=<问句>",
+			)
 		}
 		return usagef("不支持的入站协议 %q，可用 anthropic、chat、responses、gemini", *protocol)
 	}
@@ -408,7 +473,11 @@ func cmdCall(e *Env, args []string) error {
 	if only, err := systemOneOnlyModel(a.st, usedModel); err != nil {
 		return err
 	} else if only {
-		return fmt.Errorf("模型 %s 的有效出站协议是 systemone：这条协议一个 state 加一组问题、不出文本，没有提示词可以发给它，所以 model call 发不了；改用 lax model decide --model %s --state <文本或 JSON> --noul <名>=<问句>，或换一个走对话协议的模型（lax model ls 看清单）", usedModel, usedModel)
+		return formatHintError(
+			fmt.Sprintf("模型 %s 的有效出站协议为 systemone，不支持对话请求", usedModel),
+			fmt.Sprintf("改用决策命令: lax model decide --model %s --state <文本或 JSON> --noul <名>=<问句>", usedModel),
+			"或切换其他对话模型（运行 lax model ls 查看清单）",
+		)
 	}
 
 	logf := func(string, ...any) {}

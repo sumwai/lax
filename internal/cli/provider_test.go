@@ -1112,10 +1112,10 @@ func TestProviderAddHelpMentionsGemini(t *testing.T) {
 		"--speech",
 		"--transcriptions",
 		"/v1beta/models/{model}:generateContent",
-		"{model} 是占位符",
+		"{model} 占位符",
 		"lax provider add google-gemini --base-url https://generativelanguage.googleapis.com",
 		"--default-protocol gemini",
-		"anthropic、openai、responses、gemini",
+		"anthropic | openai | responses | gemini",
 	} {
 		if !strings.Contains(errOut, want) {
 			t.Fatalf("provider add --help 应提到 %q: %s", want, errOut)

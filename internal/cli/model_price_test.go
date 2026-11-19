@@ -117,7 +117,7 @@ func TestModelPriceSetProviderAndAccount(t *testing.T) {
 	if !strings.Contains(out, "厂商 mine 的厂商级标价") || !strings.Contains(out, "m1 输入价 0.60、输出价 2.20") {
 		t.Fatalf("确认行应写清作用域、模型与写入的几项价: %s", out)
 	}
-	if !strings.Contains(out, "下一步：lax model ls") {
+	if !strings.Contains(out, "下一步:lax model ls") {
 		t.Fatalf("确认行之后应给出下一步: %s", out)
 	}
 	row := providerPrice(t, "mine", "m1")

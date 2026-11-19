@@ -151,7 +151,7 @@ func cmdModelCapabilityWrite(e *Env, args []string, additive bool) error {
 	for _, op := range sortedKeys(bindings) {
 		fmt.Fprintf(e.Stdout, "已把 %s 的 %s 绑到方言 %s\n", row.Model, op, bindings[op])
 	}
-	fmt.Fprintln(e.Stdout, "下一步：lax model capability ls 查看全部声明，或 lax model ls 确认模型已可用")
+	fmt.Fprintln(e.Stdout, "下一步:lax model capability ls 查看全部声明，或 lax model ls 确认模型已可用")
 	return nil
 }
 
@@ -360,7 +360,12 @@ func cmdModelCapabilityLs(e *Env, args []string) error {
 			orDash(r.AudioFormats),
 		})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"模型", "厂商", "能力", "音色", "音频格式"}, table))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"模型", "厂商", "能力", "音色", "音频格式"},
+		Rows:      table,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	return nil
 }
 

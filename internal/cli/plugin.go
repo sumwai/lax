@@ -129,7 +129,7 @@ func auditPlugin(e *Env, st *store.Store, entry store.PluginAudit) {
 		entry.Actor = pluginActorCLI
 	}
 	if err := st.AppendPluginAudit(entry); err != nil {
-		fmt.Fprintf(e.Stderr, "警告：写插件审计失败（%s %s）：%v\n", entry.PluginID, entry.Action, err)
+		fmt.Fprintf(e.Stderr, "警告:写插件审计失败（%s %s）：%v\n", entry.PluginID, entry.Action, err)
 	}
 }
 
@@ -162,7 +162,7 @@ func activePermissionsJSON(st *store.Store, id string) string {
 func auditPluginReload(e *Env, st *store.Store, actor, only string) {
 	plugins, err := st.ListPlugins()
 	if err != nil {
-		fmt.Fprintf(e.Stderr, "警告：读插件表失败，热加载审计没写成：%v\n", err)
+		fmt.Fprintf(e.Stderr, "警告:读插件表失败，热加载审计没写成：%v\n", err)
 		return
 	}
 	for _, p := range plugins {
@@ -546,7 +546,7 @@ func capabilitiesJSON(caps *plugin.Capabilities) string {
 func checkDialectConflicts(st *store.Store, dataDir string, pkg plugin.Plugin) error {
 	// 先查这一包自己的规则：ID 归属、形状、包内重复、hook 方言与 runtime 是否配套。
 	if err := pkg.CheckDialects(nil); err != nil {
-		return fmt.Errorf("%v\n下一步：把 dialects.json 里那条方言改对（插件方言必须用 <插件 ID>/ 前缀），或把 manifest 的 runtime 改成 moejs", err)
+		return fmt.Errorf("%v\n下一步:把 dialects.json 里那条方言改对（插件方言必须用 <插件 ID>/ 前缀），或把 manifest 的 runtime 改成 moejs", err)
 	}
 	taken := map[string]string{}
 	for _, id := range plugin.DefaultRegistry().IDs() {
@@ -571,7 +571,7 @@ func checkDialectConflicts(st *store.Store, dataDir string, pkg plugin.Plugin) e
 	}
 	for _, decl := range pkg.Dialects {
 		if owner, exists := taken[decl.ID]; exists {
-			return fmt.Errorf("方言 %s 已经由%s占用：一个 ID 只能有一个实现\n下一步：把插件 dialects.json 里的方言 ID 换一个，或先 lax plugin rm 掉占用它的插件", decl.ID, owner)
+			return fmt.Errorf("方言 %s 已经由%s占用：一个 ID 只能有一个实现\n下一步:把插件 dialects.json 里的方言 ID 换一个，或先 lax plugin rm 掉占用它的插件", decl.ID, owner)
 		}
 	}
 	return nil
@@ -865,15 +865,15 @@ func printInstallPlan(e *Env, plan pluginInstallPlan, action string) error {
 	}
 	switch {
 	case plan.DryRun && action == pluginActionUpdate:
-		fmt.Fprintf(e.Stdout, "下一步：加 --yes 把活动版本切到 %s（只打印不写库用 --dry-run）\n", plan.Version)
+		fmt.Fprintf(e.Stdout, "下一步:加 --yes 把活动版本切到 %s（只打印不写库用 --dry-run）\n", plan.Version)
 	case plan.DryRun:
-		fmt.Fprintln(e.Stdout, "下一步：去掉 --dry-run 真正安装")
+		fmt.Fprintln(e.Stdout, "下一步:去掉 --dry-run 真正安装")
 	case !plan.Enabled:
-		fmt.Fprintf(e.Stdout, "下一步：lax plugin enable %s 启用它，或直接 lax plugin doctor %s 复核\n", plan.ID, plan.ID)
+		fmt.Fprintf(e.Stdout, "下一步:lax plugin enable %s 启用它，或直接 lax plugin doctor %s 复核\n", plan.ID, plan.ID)
 	case action == pluginActionUpdate:
-		fmt.Fprintf(e.Stdout, "下一步：lax plugin doctor %s 复核新版本，lax plugin reload %s 让正在跑的网关换上新版本\n", plan.ID, plan.ID)
+		fmt.Fprintf(e.Stdout, "下一步:lax plugin doctor %s 复核新版本，lax plugin reload %s 让正在跑的网关换上新版本\n", plan.ID, plan.ID)
 	default:
-		fmt.Fprintf(e.Stdout, "下一步：lax plugin doctor %s 复核包完整性，重启 lax serve 后网关会加载它的方言\n", plan.ID)
+		fmt.Fprintf(e.Stdout, "下一步:lax plugin doctor %s 复核包完整性，重启 lax serve 后网关会加载它的方言\n", plan.ID)
 	}
 	return nil
 }
@@ -1135,7 +1135,7 @@ func cmdPluginRollback(e *Env, args []string) error {
 	}
 	fmt.Fprintf(e.Stdout, "已回滚插件 %s：%s → %s\n", id, cellOrDash(p.ActiveVersion), target)
 	fmt.Fprintf(e.Stdout, "包目录 %s，重写了 %d 家厂商的目录事实\n", dir, len(catalogs))
-	fmt.Fprintf(e.Stdout, "下一步：lax plugin doctor %s 核对包哈希，lax plugin reload %s 让正在跑的网关换回去\n", id, id)
+	fmt.Fprintf(e.Stdout, "下一步:lax plugin doctor %s 核对包哈希，lax plugin reload %s 让正在跑的网关换回去\n", id, id)
 	return nil
 }
 
@@ -1245,7 +1245,13 @@ func cmdPluginLs(e *Env, args []string) error {
 			cellOrNone(r.Providers), fmt.Sprintf("%d", r.DialectCount),
 		})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"ID", "版本", "类型", "运行时", "信任", "状态", "厂商", "方言数"}, table))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"ID", "版本", "类型", "运行时", "信任", "状态", "厂商", "方言数"},
+		Align:     []tableAlign{alignLeft, alignLeft, alignLeft, alignLeft, alignLeft, alignLeft, alignLeft, alignRight},
+		Rows:      table,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	return nil
 }
 
@@ -1285,12 +1291,13 @@ type pluginShowJSON struct {
 }
 
 func cmdPluginShow(e *Env, args []string) error {
-	fs := newFlagSet(e, "plugin show", "显示一个插件的 manifest、权限、版本、厂商与方言")
+	fs := newFlagSet(e, "plugin show", "查看插件概览、权限、路由与最近事件")
+	verbose := fs.Bool("verbose", false, "显示完整 manifest JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 || strings.TrimSpace(fs.Arg(0)) == "" {
-		return usagef("用法：lax plugin show <插件 ID>\n插件 ID 用 lax plugin ls 看")
+		return usagef("用法: lax plugin show <插件 ID> [--verbose]\n插件 ID 可通过 lax plugin ls 查看")
 	}
 	id := strings.TrimSpace(fs.Arg(0))
 
@@ -1361,34 +1368,76 @@ func cmdPluginShow(e *Env, args []string) error {
 		return e.printJSON(out)
 	}
 
-	fmt.Fprintf(e.Stdout, "插件 %s %s（%s，%s）\n", p.ID, cellOrDash(p.ActiveVersion), cellOrDash(p.Kind), cellOrDash(p.Trust))
-	fmt.Fprintf(e.Stdout, "信任 %s    状态 %s    启用 %s\n", cellOrDash(p.Trust), p.State, boolCell(p.Enabled))
+	u := newUI(e.Stdout)
+	var b strings.Builder
+
+	b.WriteString(u.bold("概览"))
+	b.WriteByte('\n')
+	stateColor := "32"
+	if p.State != "ok" {
+		stateColor = "31"
+	}
+	overview := []kvRow{
+		{"插件", fmt.Sprintf("%s %s", p.ID, cellOrDash(p.ActiveVersion)), ""},
+		{"类型", cellOrDash(p.Kind), ""},
+		{"状态", fmt.Sprintf("%s（启用: %s）", p.State, boolCell(p.Enabled)), stateColor},
+		{"已装版本", fmt.Sprintf("%s（活动: %s）", cellOrNone(out.Versions), cellOrDash(p.ActiveVersion)), ""},
+	}
 	if p.ActiveVersion != "" {
-		fmt.Fprintf(e.Stdout, "包目录 %s\n", pluginVersionDir(dataDir, p.ID, p.ActiveVersion))
+		overview = append(overview, kvRow{"包目录", pluginVersionDir(dataDir, p.ID, p.ActiveVersion), "90"})
 	}
-	fmt.Fprintf(e.Stdout, "权限 %s\n", permissionSummary(out.Permissions))
-	fmt.Fprintf(e.Stdout, "已装版本 %s（活动 %s）\n", cellOrNone(out.Versions), cellOrDash(p.ActiveVersion))
 	if p.LastError != "" {
-		fmt.Fprintf(e.Stdout, "最近错误 %s\n", p.LastError)
+		overview = append(overview, kvRow{"最近错误", p.LastError, "31"})
 	}
-	for _, prov := range out.Providers {
-		fmt.Fprintf(e.Stdout, "厂商 %s · %s · %s\n", prov.ID, prov.Name, prov.BaseURL)
-		fmt.Fprintf(e.Stdout, "  路由 %s\n", cellOrNone(prov.Routes))
-		fmt.Fprintf(e.Stdout, "  方言 %s\n", cellOrNone(prov.Dialects))
-		fmt.Fprintf(e.Stdout, "  模型 %s\n", cellOrNone(prov.Models))
+	renderKV(&b, u, 2, 10, overview)
+
+	b.WriteByte('\n')
+	b.WriteString(u.bold("权限与配置"))
+	b.WriteByte('\n')
+	permRows := []kvRow{
+		{"信任级别", cellOrDash(p.Trust), ""},
+		{"权限", permissionSummary(out.Permissions), ""},
 	}
 	if len(out.Conflicts) == 0 {
-		fmt.Fprintln(e.Stdout, "冲突 无")
+		permRows = append(permRows, kvRow{"冲突", "无", "32"})
 	} else {
-		for _, c := range out.Conflicts {
-			fmt.Fprintf(e.Stdout, "冲突 %s\n", c)
+		for i, c := range out.Conflicts {
+			label := "冲突"
+			if i > 0 {
+				label = ""
+			}
+			permRows = append(permRows, kvRow{label, c, "31"})
 		}
 	}
+	renderKV(&b, u, 2, 10, permRows)
+
+	if len(out.Providers) > 0 {
+		b.WriteByte('\n')
+		b.WriteString(u.bold("路由与模型"))
+		b.WriteByte('\n')
+		for _, prov := range out.Providers {
+			fmt.Fprintf(&b, "  %s · %s · %s\n", u.bold(prov.ID), prov.Name, prov.BaseURL)
+			renderKV(&b, u, 4, 6, []kvRow{
+				{"路由", cellOrNone(prov.Routes), ""},
+				{"方言", cellOrNone(prov.Dialects), ""},
+				{"模型", cellOrNone(prov.Models), ""},
+			})
+		}
+	}
+
+	b.WriteByte('\n')
+	b.WriteString(u.bold("最近事件"))
+	b.WriteByte('\n')
+	fmt.Fprint(e.Stdout, b.String())
 	printRecentAudit(e, out.Audit)
 	printRecentLogs(e, out.Logs)
+
 	if len(out.Manifest) > 0 {
-		fmt.Fprintln(e.Stdout, "manifest")
-		fmt.Fprintln(e.Stdout, indentJSON(out.Manifest))
+		if *verbose {
+			fmt.Fprintf(e.Stdout, "\n%s\n%s\n", u.bold("Manifest"), indentJSON(out.Manifest))
+		} else {
+			fmt.Fprintf(e.Stdout, "\n%s\n", u.dim("提示: 使用 --verbose 查看完整 manifest，或 --json 获取完整元数据"))
+		}
 	}
 	return nil
 }
@@ -1506,8 +1555,9 @@ func logRows(entries []store.PluginLog) []pluginLogJSON {
 }
 
 func printRecentAudit(e *Env, rows []pluginAuditJSON) {
+	u := newUI(e.Stdout)
 	if len(rows) == 0 {
-		fmt.Fprintln(e.Stdout, "最近审计 无")
+		fmt.Fprintln(e.Stdout, "最近审计 "+u.dim("无"))
 		return
 	}
 	fmt.Fprintf(e.Stdout, "最近审计（%d 条）\n", len(rows))
@@ -1517,7 +1567,7 @@ func printRecentAudit(e *Env, rows []pluginAuditJSON) {
 			result = "ok"
 		}
 		line := fmt.Sprintf("  %s %s %s 结果 %s",
-			time.Unix(a.At, 0).Format("01-02 15:04:05"), a.Action, cellOrDash(a.Version), result)
+			u.dim(time.Unix(a.At, 0).Format("01-02 15:04:05")), a.Action, cellOrDash(a.Version), result)
 		if a.Actor != "" {
 			line += " 发起 " + a.Actor
 		}
@@ -1529,14 +1579,15 @@ func printRecentAudit(e *Env, rows []pluginAuditJSON) {
 }
 
 func printRecentLogs(e *Env, rows []pluginLogJSON) {
+	u := newUI(e.Stdout)
 	if len(rows) == 0 {
-		fmt.Fprintln(e.Stdout, "最近日志 无")
+		fmt.Fprintln(e.Stdout, "最近日志 "+u.dim("无"))
 		return
 	}
 	fmt.Fprintf(e.Stdout, "最近日志（%d 条）\n", len(rows))
 	for _, l := range rows {
 		fmt.Fprintf(e.Stdout, "  %s %s %s\n",
-			time.Unix(l.At, 0).Format("01-02 15:04:05"), pad(cellOrDash(l.Level), 6), l.Message)
+			u.dim(time.Unix(l.At, 0).Format("01-02 15:04:05")), pad(cellOrDash(l.Level), 6), l.Message)
 	}
 }
 
@@ -1598,14 +1649,20 @@ func cmdPluginVerify(e *Env, args []string) error {
 			return err
 		}
 	} else if len(results) == 0 {
-		fmt.Fprintln(e.Stdout, "还没有安装插件，没什么可校验的：lax plugin ls 看已装插件")
+		fmt.Fprintln(e.Stdout, newUI(e.Stdout).dim("没有已安装的插件（运行 lax plugin ls 查看清单）"))
 	} else {
+		u := newUI(e.Stdout)
 		for _, r := range results {
-			fmt.Fprintf(e.Stdout, "%s  %s\n", marks(r.OK), r.Name)
+			fmt.Fprintf(e.Stdout, "%s  %s\n", styledMark(u, r.OK), u.bold(r.Name))
 			for _, c := range r.Checks {
-				fmt.Fprintf(e.Stdout, "  %s  %s %s\n", marks(c.OK), pad(c.Name, 12), c.Detail)
+				detail := u.dim(c.Detail)
+				if !c.OK {
+					detail = c.Detail
+				}
+				fmt.Fprintf(e.Stdout, "  %s  %s  %s\n", styledMark(u, c.OK), pad(c.Name, 12), detail)
 			}
 		}
+		fmt.Fprintf(e.Stdout, "\n检查完成: %d 个插件通过, %d 个插件失败\n", len(results)-failed, failed)
 	}
 	if failed > 0 {
 		return fmt.Errorf("%d 个插件的校验未通过", failed)
@@ -1817,7 +1874,12 @@ func printPluginLogs(e *Env, rows []store.PluginLog) error {
 			truncate(l.Message, 100),
 		})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"时间", "级别", "消息"}, table))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"时间", "级别", "消息"},
+		Rows:      table,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	return nil
 }
 
@@ -1880,7 +1942,7 @@ func cmdPluginReload(e *Env, args []string) error {
 		target = only + "（实际是整表重载）"
 	}
 	fmt.Fprintf(e.Stdout, "已让 lax serve（pid %d）重读插件表：%s\n", pid, target)
-	fmt.Fprintln(e.Stdout, "下一步：lax plugin logs <插件 ID> 看新版本有没有报错")
+	fmt.Fprintln(e.Stdout, "下一步:lax plugin logs <插件 ID> 看新版本有没有报错")
 	return nil
 }
 
@@ -1965,11 +2027,11 @@ func cmdPluginToggle(e *Env, args []string, enable bool) error {
 			fmt.Fprintf(e.Stdout, "包内容与安装时记的哈希不一致，网关仍然不会加载它：先跑 lax plugin doctor %s 看哪一项没过\n", id)
 			return nil
 		}
-		fmt.Fprintf(e.Stdout, "下一步：重启 lax serve 让它加载这个插件的方言\n")
+		fmt.Fprintf(e.Stdout, "下一步:重启 lax serve 让它加载这个插件的方言\n")
 		return nil
 	}
 	fmt.Fprintf(e.Stdout, "已停用插件 %s %s（状态 %s）\n", id, cellOrDash(p.ActiveVersion), state)
-	fmt.Fprintln(e.Stdout, "下一步：重启 lax serve 后不再加载它的方言；绑定它方言的模型会报「方言没有注册」，用 lax plugin ls 核对")
+	fmt.Fprintln(e.Stdout, "下一步:重启 lax serve 后不再加载它的方言；绑定它方言的模型会报「方言没有注册」，用 lax plugin ls 核对")
 	return nil
 }
 
@@ -2044,7 +2106,7 @@ func cmdPluginRm(e *Env, args []string) error {
 	} else {
 		fmt.Fprintf(e.Stdout, "包目录保留在 %s：要一起删就加 --purge\n", packageDir)
 	}
-	fmt.Fprintln(e.Stdout, "下一步：lax plugin ls 核对；重启 lax serve 后网关不再加载它的方言")
+	fmt.Fprintln(e.Stdout, "下一步:lax plugin ls 核对；重启 lax serve 后网关不再加载它的方言")
 	return nil
 }
 
@@ -2142,14 +2204,20 @@ func cmdPluginDoctor(e *Env, args []string) error {
 			return err
 		}
 	} else if len(results) == 0 {
-		fmt.Fprintln(e.Stdout, "没有启用的插件，没什么可检查的：lax plugin ls 看已装插件")
+		fmt.Fprintln(e.Stdout, newUI(e.Stdout).dim("没有已启用的插件（运行 lax plugin ls 查看清单）"))
 	} else {
+		u := newUI(e.Stdout)
 		for _, r := range results {
-			fmt.Fprintf(e.Stdout, "%s  %s\n", marks(r.OK), r.Name)
+			fmt.Fprintf(e.Stdout, "%s  %s\n", styledMark(u, r.OK), u.bold(r.Name))
 			for _, c := range r.Checks {
-				fmt.Fprintf(e.Stdout, "  %s  %s %s\n", marks(c.OK), pad(c.Name, 12), c.Detail)
+				detail := u.dim(c.Detail)
+				if !c.OK {
+					detail = c.Detail
+				}
+				fmt.Fprintf(e.Stdout, "  %s  %s  %s\n", styledMark(u, c.OK), pad(c.Name, 12), detail)
 			}
 		}
+		fmt.Fprintf(e.Stdout, "\n检查完成: %d 个插件通过, %d 个插件失败\n", len(results)-failed, failed)
 	}
 	if failed > 0 {
 		return fmt.Errorf("%d 个插件的检查未通过", failed)
@@ -2163,6 +2231,13 @@ func marks(ok bool) string {
 		return "ok  "
 	}
 	return "fail"
+}
+
+func styledMark(u uiStyle, ok bool) string {
+	if ok {
+		return u.ok("ok  ")
+	}
+	return u.err("fail")
 }
 
 // checkPlugin 检查一个插件，并把「包被改过」写回库里：状态由宿主写，插件自己改不了。

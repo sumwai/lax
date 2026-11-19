@@ -22,13 +22,13 @@ import (
 
 // accountSubs 是 account 一组的子命令清单，组级帮助与错误提示都读它。
 var accountSubs = []groupItem{
-	{"add", "新增一个上游账号，key 加密后入库"},
+	{"add", "新增上游账号并加密存储凭据"},
 	{"ls", "列出账号、模型数与当前状态"},
-	{"set", "换掉账号的凭据，冷却与失败计数随之清零并重新启用"},
-	{"rm", "删除账号，历史请求记录保留"},
-	{"test", "先 GET 模型列表、不通时用最小请求，探活一个账号"},
-	{"enable", "启用账号并清掉冷却"},
-	{"disable", "停用账号，不再参与选号"},
+	{"set", "更新账号凭据，重置冷却与失败计数并重新启用"},
+	{"rm", "删除账号（保留历史请求记录）"},
+	{"test", "检测账号连通性与凭据有效性"},
+	{"enable", "启用账号并清除冷却状态"},
+	{"disable", "停用账号（不再参与选号）"},
 }
 
 func cmdAccount(e *Env, args []string) error {
@@ -128,7 +128,7 @@ func cmdAccountSet(e *Env, args []string) error {
 	if err := rejectRetiredFlags(args, retiredAccountPriceFlags, accountSetUsage); err != nil {
 		return err
 	}
-	fs := newFlagSet(e, "account set", "换掉账号的凭据，冷却与失败计数随之清零并重新启用")
+	fs := newFlagSet(e, "account set", "更新账号凭据，重置冷却与失败计数并重新启用")
 	key := fs.String("key", "", "新的上游 API key；给 - 从标准输入读，留空则读环境变量 LAX_KEY")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -429,7 +429,13 @@ func cmdAccountLs(e *Env, args []string) error {
 			accountStatus(acc, counts[acc.ID], now),
 		})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"名称", "厂商", "地址", "协议", "模型", "优先级", "状态"}, rows))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"名称", "厂商", "地址", "协议", "模型", "优先级", "状态"},
+		Align:     []tableAlign{alignLeft, alignLeft, alignLeft, alignLeft, alignLeft, alignRight, alignLeft},
+		Rows:      rows,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	return nil
 }
 
@@ -576,7 +582,7 @@ func cmdAccountRm(e *Env, args []string) error {
 // 对任何 key 都回 200，光凭列表判不出凭据。两段都通过才判正常，状态与退出码按调用那段算。
 // 它只判凭据与连通性，某个模型能不能用由 `model probe` 决定。
 func cmdAccountTest(e *Env, args []string) error {
-	fs := newFlagSet(e, "account test", "先 GET 模型列表证明地址通，再发一条最小请求证明凭据有效")
+	fs := newFlagSet(e, "account test", "检测账号连通性与凭据有效性")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -655,7 +661,13 @@ func cmdAccountTest(e *Env, args []string) error {
 			models,
 			res.Message,
 		}}
-		fmt.Fprint(e.Stdout, renderTable([]string{"账号", "状态", "HTTP", "耗时", "上游模型数", "备注"}, rows))
+		fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+			Header:    []string{"账号", "状态", "HTTP", "耗时", "上游模型数", "备注"},
+			Align:     []tableAlign{alignLeft, alignLeft, alignRight, alignRight, alignRight, alignLeft},
+			Rows:      rows,
+			Style:     newUI(e.Stdout),
+			HeaderSep: true,
+		}))
 		if res.Policy != nil {
 			fmt.Fprintf(e.Stdout, "命中策略：%s（%s）\n", probePolicyDisplay(res.Policy), res.PolicyAction)
 		}
@@ -692,19 +704,19 @@ func probeStageLabel(stage string) string {
 
 // modelSubs 是 model 一组的子命令清单。
 var modelSubs = []groupItem{
-	{"ls", "列出网关可提供的模型、账号状态与目录里的元数据"},
-	{"show", "按账号看一个模型的可达性事实"},
-	{"add", "手写一条账号能用的模型（同事务写目录与可达性）"},
-	{"sync", "从上游拉取模型列表，名字进模型目录并把这个账号标成可用"},
-	{"probe", "逐个模型探活（对话模型发一条 max_tokens=1 的请求，决策模型发一条最小决策请求），把可达性写进账号"},
-	{"alias", "维护模型别名：客户端写死的模型名指到真实模型名上（set / unset / ls）"},
-	{"price", "模型单价：目录里的厂商级标价与某账号的覆盖价（set / unset / ls）"},
-	{"capability", "模型能力声明：能力位、音色与音频格式（add / set / unset / ls）"},
-	{"dialect", "方言绑定：模型的上游形状由哪条方言描述（ls / set / unset）"},
-	{"call", "手工发一条对话请求，打印选号过程（anthropic / openai-chat / openai-responses / gemini 入站）"},
-	{"decide", "手工发一条 systemone 决策请求，打印每个问题的答案与概率"},
-	{"speak", "手工发一条语音合成请求，音频写标准输出或文件"},
-	{"transcribe", "手工发一条语音转写请求，响应体原样输出"},
+	{"ls", "列出可用模型、账号状态与目录元数据"},
+	{"show", "查看模型在各账号下的可达性详情"},
+	{"add", "手动声明账号可用模型（同步写入目录与可达性）"},
+	{"sync", "从上游拉取模型列表并写入目录"},
+	{"probe", "探测模型连通性并更新可达性状态"},
+	{"alias", "配置模型别名映射（set / unset / ls）"},
+	{"price", "管理模型单价与账号覆盖价（set / unset / ls）"},
+	{"capability", "声明模型能力位、音色与音频格式（add / set / unset / ls）"},
+	{"dialect", "管理模型方言绑定（ls / set / unset）"},
+	{"call", "发送对话试打请求并输出选号过程"},
+	{"decide", "发送 systemone 决策试打请求并输出结果"},
+	{"speak", "发送语音合成试打请求"},
+	{"transcribe", "发送语音转写试打请求"},
 }
 
 // modelSubCommands 是「可用子命令」那条错误文案里的清单，与 modelSubs 同序。
@@ -909,7 +921,13 @@ func cmdModelLs(e *Env, args []string) error {
 			price,
 		})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"模型", "账号", "协议", "上下文长度", "最大输出", "支持协议", "输入价 / 输出价（每百万 token）"}, rows))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"模型", "账号", "协议", "上下文", "最大输出", "支持协议", "价格 (/1M)"},
+		Align:     []tableAlign{alignLeft, alignLeft, alignLeft, alignRight, alignRight, alignLeft, alignRight},
+		Rows:      rows,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	return nil
 }
 
@@ -1107,8 +1125,14 @@ func cmdModelSync(e *Env, args []string) error {
 				truncate(r.Error, 48),
 			})
 		}
-		fmt.Fprint(e.Stdout, renderTable([]string{"账号", "厂商", "模型", "新增", "备注"}, table))
-		fmt.Fprintln(e.Stdout, "下一步：lax model probe（对话模型发一条 max_tokens=1 的请求，决策模型发一条最小决策请求）")
+		fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+			Header:    []string{"账号", "厂商", "模型", "新增", "备注"},
+			Align:     []tableAlign{alignLeft, alignLeft, alignRight, alignRight, alignLeft},
+			Rows:      table,
+			Style:     newUI(e.Stdout),
+			HeaderSep: true,
+		}))
+		fmt.Fprintln(e.Stdout, newUI(e.Stdout).dim("下一步: lax model probe"))
 	}
 
 	if failed > 0 {
@@ -1344,7 +1368,13 @@ func cmdModelProbe(e *Env, args []string) error {
 			})
 		}
 		if len(table) > 0 {
-			fmt.Fprint(e.Stdout, renderTable([]string{"账号", "模型", "状态", "HTTP", "耗时", "备注"}, table))
+			fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+				Header:    []string{"账号", "模型", "状态", "HTTP", "耗时", "备注"},
+				Align:     []tableAlign{alignLeft, alignLeft, alignLeft, alignRight, alignRight, alignLeft},
+				Rows:      table,
+				Style:     newUI(e.Stdout),
+				HeaderSep: true,
+			}))
 		}
 	}
 

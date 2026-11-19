@@ -58,13 +58,14 @@ type command struct {
 func Run(args []string, stdout, stderr io.Writer) int {
 	env := &Env{Stdout: stdout, Stderr: stderr}
 
+	ui := newUI(stderr)
 	rest, err := env.parseGlobals(args)
 	if errors.Is(err, flag.ErrHelp) {
 		printUsage(stdout)
 		return exitOK
 	}
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintf(stderr, "%s: %v\n", ui.err(appName), err)
 		return exitUsage
 	}
 	if len(rest) == 0 {
@@ -75,7 +76,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 
 	cmd, ok := commandTable[rest[0]]
 	if !ok {
-		fmt.Fprintf(stderr, "未知子命令 %q\n\n", rest[0])
+		fmt.Fprintf(stderr, "%s: 未知子命令 %q\n\n", ui.err(appName), rest[0])
 		printUsage(stderr)
 		return exitUsage
 	}
@@ -83,7 +84,12 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		if errors.Is(err, flag.ErrHelp) {
 			return exitOK
 		}
-		fmt.Fprintf(stderr, "%s: %v\n", cmd.name, err)
+		var he hintError
+		if errors.As(err, &he) {
+			fmt.Fprintf(stderr, "%s: %s\n", ui.err(cmd.name), he.formatWithUI(ui))
+		} else {
+			fmt.Fprintf(stderr, "%s: %v\n", ui.err(cmd.name), err)
+		}
 		var ue usageError
 		if errors.As(err, &ue) {
 			return exitUsage
@@ -121,7 +127,10 @@ func (e *Env) parseGlobals(args []string) ([]string, error) {
 }
 
 func printUsage(w io.Writer) {
-	fmt.Fprintf(w, "%s %s — 本机模型总机\n\n用法：\n  %s <子命令> [参数]\n\n子命令：\n", appName, version, appName)
+	u := newUI(w)
+	fmt.Fprintf(w, "%s %s本机模型网关\n\n", u.bold(appName), u.dim(version+" — "))
+	fmt.Fprintf(w, "%s\n  %s <命令> [选项]\n\n", u.bold("用法:"), appName)
+	fmt.Fprintf(w, "%s\n", u.bold("命令:"))
 	for _, name := range commandOrder {
 		c, ok := commandTable[name]
 		if !ok {
@@ -129,8 +138,14 @@ func printUsage(w io.Writer) {
 		}
 		fmt.Fprintf(w, "  %-9s %s\n", c.name, c.summary)
 	}
-	fmt.Fprintf(w, "\n分组子命令的清单：%s <组> --help\n", appName)
-	fmt.Fprint(w, "\n全局参数：\n  --json     以 JSON 输出\n  --config   指定配置文件路径\n  --db       指定数据库路径\n")
+	fmt.Fprintf(w, "\n%s\n", u.bold("选项:"))
+	fmt.Fprintln(w, "  --json           以 JSON 格式输出")
+	fmt.Fprintln(w, "  --config <路径>  指定配置文件路径")
+	fmt.Fprintln(w, "  --db <路径>      指定数据库路径")
+	fmt.Fprintf(w, "\n%s\n", u.bold("示例:"))
+	fmt.Fprintln(w, u.dim("  "+appName+" init"))
+	fmt.Fprintln(w, u.dim("  "+appName+" account --help"))
+	fmt.Fprintln(w, u.dim("  "+appName+" model ls --json"))
 }
 
 // groupItem 描述一个组里的子命令，供组级帮助使用。
@@ -150,27 +165,49 @@ func isHelpRequest(args []string) bool {
 // 只留一条「未知子命令」算用法错误。名字列宽按最长的那几个（capability、transcribe、
 // transcriptions 一类）留到 11 列。
 func printGroupHelp(w io.Writer, name, purpose string, items []groupItem) {
-	fmt.Fprintf(w, "%s %s — %s\n\n用法：\n  %s %s <子命令> [参数]\n\n子命令：\n", appName, name, purpose, appName, name)
+	u := newUI(w)
+	fmt.Fprintf(w, "%s %s — %s\n\n", u.bold(appName), u.bold(name), purpose)
+	fmt.Fprintf(w, "%s\n  %s %s <命令> [选项]\n\n", u.bold("用法:"), appName, name)
+	fmt.Fprintf(w, "%s\n", u.bold("命令:"))
 	for _, it := range items {
 		fmt.Fprintf(w, "  %-11s %s\n", it.name, it.summary)
 	}
-	fmt.Fprintf(w, "\n查看某个子命令的参数：%s %s <子命令> --help\n", appName, name)
+	fmt.Fprintf(w, "\n%s\n", u.bold("示例:"))
+	if len(items) > 0 {
+		fmt.Fprintln(w, u.dim(fmt.Sprintf("  %s %s %s --help", appName, name, items[0].name)))
+	} else {
+		fmt.Fprintln(w, u.dim(fmt.Sprintf("  %s %s --help", appName, name)))
+	}
 }
 
 func newFlagSet(e *Env, name, summary string) *flagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(e.Stderr)
-	fs.BoolVar(&e.JSON, "json", e.JSON, "以 JSON 输出")
+	fs.BoolVar(&e.JSON, "json", e.JSON, "以 JSON 格式输出")
+	out := &flagSet{FlagSet: fs}
+	u := newUI(e.Stderr)
 	fs.Usage = func() {
-		fmt.Fprintf(e.Stderr, "%s %s — %s\n\n用法：\n  %s %s [参数]\n\n参数：\n", appName, name, summary, appName, name)
-		printFlagDefaults(e.Stderr, fs)
+		fmt.Fprintf(e.Stderr, "%s %s — %s\n\n", u.bold(appName), u.bold(name), summary)
+		fmt.Fprintf(e.Stderr, "%s\n  %s %s [选项]\n\n", u.bold("用法:"), appName, name)
+		fmt.Fprintf(e.Stderr, "%s\n", u.bold("选项:"))
+		printFlagDefaults(e.Stderr, u, fs)
+		if len(out.examples) > 0 {
+			fmt.Fprintf(e.Stderr, "\n%s\n", u.bold("示例:"))
+			for _, ex := range out.examples {
+				fmt.Fprintln(e.Stderr, u.dim("  "+ex))
+			}
+		}
 	}
-	return &flagSet{FlagSet: fs}
+	return out
+}
+
+func (f *flagSet) setExamples(lines ...string) {
+	f.examples = append(f.examples, lines...)
 }
 
 // printFlagDefaults 打印参数清单。flag 自带的 PrintDefaults 只印一个短横线，
 // 与本程序其它地方的写法不一致，所以自己印。
-func printFlagDefaults(w io.Writer, fs *flag.FlagSet) {
+func printFlagDefaults(w io.Writer, u uiStyle, fs *flag.FlagSet) {
 	fs.VisitAll(func(f *flag.Flag) {
 		placeholder, usage := flag.UnquoteUsage(f)
 		line := "  --" + f.Name
@@ -186,9 +223,9 @@ func printFlagDefaults(w io.Writer, fs *flag.FlagSet) {
 		line += strings.ReplaceAll(usage, "\n", "\n    \t")
 		if !zeroDefault(f, placeholder) {
 			if placeholder == "string" {
-				line += fmt.Sprintf(" (default %q)", f.DefValue)
+				line += u.dim(fmt.Sprintf(" (默认: %q)", f.DefValue))
 			} else {
-				line += fmt.Sprintf(" (default %s)", f.DefValue)
+				line += u.dim(fmt.Sprintf(" (默认: %s)", f.DefValue))
 			}
 		}
 		fmt.Fprintln(w, line)
@@ -215,7 +252,8 @@ func zeroDefault(f *flag.Flag, placeholder string) bool {
 // flagSet 让位置参数可以出现在参数前后任意位置，与常见命令行习惯一致。
 type flagSet struct {
 	*flag.FlagSet
-	pos []string
+	pos      []string
+	examples []string
 }
 
 // Parse 逐段解析：每遇到一个位置参数就收起来，继续解析它后面的参数。

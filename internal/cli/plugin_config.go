@@ -107,7 +107,12 @@ func cmdPluginConfigGet(e *Env, args []string) error {
 	for _, name := range sortedStringKeys(values) {
 		table = append(table, []string{name, values[name]})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"配置项", "取值"}, table))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"配置项", "取值"},
+		Rows:      table,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	return nil
 }
 
@@ -160,7 +165,7 @@ func cmdPluginConfigSet(e *Env, args []string) error {
 		return e.printJSON(map[string]any{"plugin": id, "key": key, "value": value, "stored": true})
 	}
 	fmt.Fprintf(e.Stdout, "插件 %s 的 %s = %s\n", id, key, value)
-	fmt.Fprintln(e.Stdout, "下一步：对运行中的 serve 发 lax plugin reload 让新取值生效")
+	fmt.Fprintln(e.Stdout, "下一步:对运行中的 serve 发 lax plugin reload 让新取值生效")
 	return nil
 }
 

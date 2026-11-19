@@ -104,7 +104,7 @@ func cmdModelAdd(e *Env, args []string) error {
 		model, acc.Provider, acc.Name,
 		modelAccessText(row.Access, row.CheckedAt, row.CooldownUntilMS, time.Now()), dashIfEmpty(effective))
 	// 下一步只探这一条路：声明过的协议排在候选最前面，写出来省掉一次猜。
-	next := fmt.Sprintf("下一步：lax model probe --account %s --model %s", acc.Name, model)
+	next := fmt.Sprintf("下一步:lax model probe --account %s --model %s", acc.Name, model)
 	if effective != "" {
 		next += " --protocol " + effective
 	}
@@ -173,7 +173,7 @@ func cmdModelShow(e *Env, args []string) error {
 	if *provider != "" || *accountName != "" {
 		accounts, err = selectAccounts(a.st, *provider, *accountName)
 		if err != nil {
-			// 判定与 model sync / model probe 同一套，只补一条下一步：这一条是只读视图，
+			// 判定与 model sync / model probe 同一套，只补一条下一步:这一条是只读视图，
 			// 筛不到行时先看清单里到底有哪些账号与厂商。
 			return fmt.Errorf("%v；用 lax account ls 看账号名与厂商，或去掉 --provider / --account 看全部账号", err)
 		}
@@ -237,7 +237,13 @@ func cmdModelShow(e *Env, args []string) error {
 			dashIfEmpty(r.Error),
 		})
 	}
-	fmt.Fprint(e.Stdout, renderTable([]string{"账号", "模型", "协议", "状态", "HTTP", "探活时间", "备注"}, table))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    []string{"账号", "模型", "协议", "状态", "HTTP", "探活时间", "备注"},
+		Align:     []tableAlign{alignLeft, alignLeft, alignLeft, alignLeft, alignRight, alignLeft, alignLeft},
+		Rows:      table,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	return nil
 }
 

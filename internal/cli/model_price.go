@@ -323,7 +323,7 @@ func cmdModelPriceSet(e *Env, args []string) error {
 		scope = fmt.Sprintf("账号 %s（%s）的覆盖价", account, dashIfEmpty(prov))
 	}
 	fmt.Fprintf(e.Stdout, "已写入%s：%s %s（token 价每百万 token，合成价每百万字符，转写价每秒）\n", scope, model, priceFieldText(prices))
-	fmt.Fprintln(e.Stdout, "下一步：lax model ls")
+	fmt.Fprintln(e.Stdout, "下一步:lax model ls")
 	return nil
 }
 
@@ -728,7 +728,13 @@ func cmdModelPriceLs(e *Env, args []string) error {
 			priceColumnCell(r.catalog.audioSec, r.account.audioSec, account != ""),
 		})
 	}
-	fmt.Fprint(e.Stdout, renderTable(header, table))
+	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
+		Header:    header,
+		Align:     []tableAlign{alignLeft, alignLeft, alignRight, alignRight, alignRight, alignRight, alignRight},
+		Rows:      table,
+		Style:     newUI(e.Stdout),
+		HeaderSep: true,
+	}))
 	return nil
 }
 
