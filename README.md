@@ -86,18 +86,25 @@ curl -s http://127.0.0.1:4567/v1/models/model-1   # 查询单个模型，未命�
 
 ## 协议与转换
 
-`lax` 识别八条报文协议，通过入站 HTTP 路径自动区分。所有入站路径同时开放，单台网关可并发服务多类客户端：
+`lax` 识别八条报文协议，通过入站 HTTP 路径自动区分。所有入站路径同时开放，单台网关可并发服务多类客户端。
 
-| 入站路径 | 入站协议 | 典型客户端 | 转发模式 |
-| --- | --- | --- | --- |
-| `POST /v1/messages` | `anthropic` | Claude Code | 四协议互转 / 直通 |
-| `POST /v1/chat/completions` | `openai-chat` | 常规 OpenAI SDK | 四协议互转 / 直通 |
-| `POST /v1/responses` | `openai-responses` | Codex | 四协议互转 / 直通 |
-| `POST /v1beta/models/{model}:generateContent` 等 | `gemini` | Google SDK 或原生客户端 | 四协议互转 / 直通 |
-| `POST /v1/systemone` | `systemone` | 决策客户端（见[决策请求](#决策请求)） | 仅同协议直通 |
-| `POST /v1/embeddings` | `openai-embeddings` | 向量化 OpenAI SDK | 仅同协议直通 |
-| `POST /v1/audio/speech` | `openai-speech` | `audio.speech.create` 客户端 | 仅同协议直通 |
-| `POST /v1/audio/transcriptions` | `openai-transcriptions` | `audio.transcriptions.create` 客户端 | 仅同协议直通 |
+**对话协议（支持两两互转，共 16 种组合；同协议时直通）**
+
+| 协议 | 入站路径 | 典型客户端 |
+| --- | --- | --- |
+| `anthropic` | `POST /v1/messages` | Claude Code |
+| `openai-chat` | `POST /v1/chat/completions` | 常规 OpenAI SDK |
+| `openai-responses` | `POST /v1/responses` | Codex |
+| `gemini` | `POST /v1beta/models/{model}:generateContent` 等 | Google SDK 或原生客户端 |
+
+**专用协议（仅同协议直通，不跨协议转换）**
+
+| 协议 | 入站路径 | 典型客户端 |
+| --- | --- | --- |
+| `systemone` | `POST /v1/systemone` | 决策客户端（见[决策请求](#决策请求)） |
+| `openai-embeddings` | `POST /v1/embeddings` | 向量化 OpenAI SDK |
+| `openai-speech` | `POST /v1/audio/speech` | `audio.speech.create` 客户端 |
+| `openai-transcriptions` | `POST /v1/audio/transcriptions` | `audio.transcriptions.create` 客户端 |
 
 - **`gemini` 路径规则**：模型名位于 URL 路径中，请求体不含 `model` 字段。`:` 后的后缀不计入模型名，是否启用流式由 `:streamGenerateContent` 后缀决定。
 - **直通模式**：入站与出站协议相同时触发。请求体仅替换 `model` 字段，响应按字节原样透传。
