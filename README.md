@@ -48,7 +48,7 @@ lax log tail                                        # 查看近期请求记录
 > [!TIP]
 > 更换上游密钥时使用 `lax account set`，无需删号重建。探活结果、协议发现与历史请求记录的账号归属均会保留，同时冷却状态与失败计数清零。
 
-完整安装步骤与首次配置请参考：[安装指南](https://docs.larkax.com/docs/self-hosted/install) · [快速开始](https://docs.larkax.com/docs/self-hosted/quickstart)。
+完整安装步骤与首次配置请参考：[安装指南](https://docs.larkax.com/self-hosted/install) · [快速开始](https://docs.larkax.com/self-hosted/quickstart)。
 
 ---
 
@@ -111,7 +111,7 @@ curl -s http://127.0.0.1:4567/v1/models/model-1   # 查询单个模型，未命�
 - **转换模式**：入站与出站协议不同时，经中间表示进行转换。仅映射转换表内定义的字段，表外字段直接丢弃；四条对话协议两两可转（共 16 种组合），流式与非流式均支持。
 - **错误处理**：未知路径返回 `404`；请求体解析失败返回 `400`，错误消息带有对应协议名前缀。
 
-深入阅读：[协议说明](https://docs.larkax.com/docs/self-hosted/gateway/protocols) · [协议转换](https://docs.larkax.com/docs/self-hosted/gateway/conversion)。
+深入阅读：[协议说明](https://docs.larkax.com/self-hosted/gateway) · [协议转换](https://docs.larkax.com/self-hosted/gateway/conversion)。
 
 ---
 
@@ -135,7 +135,7 @@ lax provider add acme --base-url https://api.acme.example \
 - **单一数据源**：修改供应商地址或默认协议会立即生效于所有关联账号。
 - **请求头与凭据**：凭据头默认按报文协议自动推导，非标准上游可在供应商上显式声明；附加请求头通过 `provider header set` 配置，支持四种取值：字面量、`{env:NAME}`（环境变量）、`{session}`（当前会话键）、`{model}`（当前请求模型名）。
 
-详情参见：[供应商与路由](https://docs.larkax.com/docs/self-hosted/configure/providers) · [请求头配置](https://docs.larkax.com/docs/self-hosted/gateway/headers)。
+详情参见：[供应商与路由](https://docs.larkax.com/self-hosted/configure/providers) · [请求头配置](https://docs.larkax.com/self-hosted/gateway/conversion)。
 
 ### 模型管理
 
@@ -153,7 +153,7 @@ lax model price set model-2 --in 0.6 --out 2.2      # 设置每百万 token 输�
 - **探活行为**：真实向目标上游发送探测请求；遇到 `401` 将直接停用该账号，遇到 `403`、`404` 或明确提示模型不存在的 `400` 标记为不可用。若某账号未探出任何可用模型，仅写入探活结果，保留其原有模型列表不变。
 - **别名与定价**：别名仅作用于请求方向，响应中的模型名仍保持上游真名；单价默认挂在模型上，仅当账号间套餐费率确实存在差异时才需配置单账号覆盖价。
 
-详情参见：[模型管理](https://docs.larkax.com/docs/self-hosted/configure/models) · [模型定价](https://docs.larkax.com/docs/self-hosted/configure/pricing)。
+详情参见：[模型管理](https://docs.larkax.com/self-hosted/configure/models) · [模型定价](https://docs.larkax.com/self-hosted/configure/pricing)。
 
 ### 路由与选号
 
@@ -176,7 +176,7 @@ lax route explain model-2 --session demo --seed 42   # 预演选号过程，不�
 - **快速失败**：所有候选账号尝试完毕仍失败时返回 `503`，将重试决策交还客户端，网关不在单次请求内阻塞等待冷却。
 - **只读预演与额度**：`route explain` 仅读取数据库，不写入请求记录、不改变冷却状态；如需让账号额度参与选号排序，可通过 `route set --quota-order` 开启（默认关闭）。
 
-详情参见：[选号机制](https://docs.larkax.com/docs/self-hosted/route) · [路由策略](https://docs.larkax.com/docs/self-hosted/route/policies) · [失败处理](https://docs.larkax.com/docs/self-hosted/route/failure)。
+详情参见：[选号机制](https://docs.larkax.com/self-hosted/route) · [路由策略](https://docs.larkax.com/self-hosted/route/policies) · [失败处理](https://docs.larkax.com/self-hosted/route/failure)。
 
 ### 账号额度
 
@@ -190,7 +190,7 @@ lax quota set acct1 --fx-rate 0.14    # 为非 USD 币种设置折算 USD 的手
 ```
 
 - 非 USD 计价的账号须手动设置汇率；未设置时，折合 USD 金额、剩余比例与排序均按未知处理。
-- 额度接口与刷新限制见[已知边界](#已知边界)及 [账号额度文档](https://docs.larkax.com/docs/self-hosted/route/quota)。
+- 额度接口与刷新限制见[已知边界](#已知边界)及 [账号额度文档](https://docs.larkax.com/self-hosted/route/quota)。
 
 ---
 
@@ -210,7 +210,7 @@ lax model capability set model-tts --capability speech \
 - 出站请求形态由绑定的方言决定：`lax/` 前缀为宿主内置方言，自定义格式可通过插件扩展。
 - 不支持音频转码与流式语音传输；TTS 的 `stream_format: "sse"` 与 ASR 的 `stream: true` 均返回 `400`。
 
-详情参见：[语音能力](https://docs.larkax.com/docs/self-hosted/gateway/speech)。
+详情参见：[语音能力](https://docs.larkax.com/self-hosted/gateway/non-chat)。
 
 ### 向量化
 
@@ -220,7 +220,7 @@ lax model capability set model-tts --capability speech \
 lax provider set acme openai-embeddings=/v1/embeddings
 ```
 
-若未声明 `openai-embeddings` 路由，请求 `/v1/embeddings` 将返回 `400` 并提示执行上述配置命令。详情参见：[向量化文档](https://docs.larkax.com/docs/self-hosted/gateway/embeddings)。
+若未声明 `openai-embeddings` 路由，请求 `/v1/embeddings` 将返回 `400` 并提示执行上述配置命令。详情参见：[向量化文档](https://docs.larkax.com/self-hosted/gateway/non-chat)。
 
 ### 决策请求
 
@@ -237,7 +237,7 @@ lax model decide --model model-decision \
 - 入站与出站均为 `POST /v1/systemone`，仅同协议互通。
 - 决策模型不会出现在上游清单中，需通过 `lax model add --protocol systemone` 手动声明；有效出站协议非 `systemone` 的模型将被拒绝。
 
-详情参见：[决策请求文档](https://docs.larkax.com/docs/self-hosted/gateway/decision)。
+详情参见：[决策请求文档](https://docs.larkax.com/self-hosted/gateway/non-chat)。
 
 ### 插件
 
@@ -255,7 +255,7 @@ lax plugin ls
 lax plugin doctor
 ```
 
-插件来源支持本地目录、GitHub 仓库中的插件子路径，或官方 `lax-plugins` 仓库中的裸插件名。沙箱权限与运行时约束详见[已知边界](#已知边界)及文档：[插件概览](https://docs.larkax.com/docs/self-hosted/plugins) · [安装指南](https://docs.larkax.com/docs/self-hosted/plugins/install) · [沙箱安全](https://docs.larkax.com/docs/self-hosted/plugins/security)。
+插件来源支持本地目录、GitHub 仓库中的插件子路径，或官方 `lax-plugins` 仓库中的裸插件名。沙箱权限与运行时约束详见[已知边界](#已知边界)及文档：[插件概览与安装](https://docs.larkax.com/self-hosted/plugins) · [沙箱安全](https://docs.larkax.com/self-hosted/plugins/security)。
 
 ---
 
@@ -285,7 +285,7 @@ lax plugin doctor
 - `quota`：`ls`、`show`、`refresh`、`set`、`unset`
 - `plugin`：安装与升级（`install`、`update`、`rollback`、`verify`）；查看与诊断（`ls`、`show`、`logs`、`doctor`）；配置与启停（`config`、`reload`、`enable`、`disable`、`rm`）
 
-**CLI 约定**：所有命令均支持 `--json` 输出；正常结果输出至 `stdout`，错误信息输出至 `stderr`，二者严格分离。不带子命令执行（如 `lax`、`lax model`、`lax plugin`）等同于 `--help`，输出帮助至 `stdout` 并以 `0` 退出。退出码：`0` 成功、`1` 运行失败、`2` 用法错误。完整参数说明见 `lax <命令> --help` 或[命令行参考](https://docs.larkax.com/docs/self-hosted/cli)。
+**CLI 约定**：所有命令均支持 `--json` 输出；正常结果输出至 `stdout`，错误信息输出至 `stderr`，二者严格分离。不带子命令执行（如 `lax`、`lax model`、`lax plugin`）等同于 `--help`，输出帮助至 `stdout` 并以 `0` 退出。退出码：`0` 成功、`1` 运行失败、`2` 用法错误。完整参数说明见 `lax <命令> --help` 或[命令行参考](https://docs.larkax.com/self-hosted/cli)。
 
 ---
 
@@ -302,7 +302,7 @@ lax plugin doctor
 - **数据库后端**：默认使用 SQLite 单文件；如需切换至 PostgreSQL 或 MySQL，修改配置文件中的 `driver` 与 `dsn` 两项即可，表结构通过 `AutoMigrate` 自动迁移，无需手工建表。
 - **凭据安全**：上游密钥使用 `AES-256-GCM` 加密后落盘，旨在防范备份文件或日志导出导致的凭据泄漏，不防同一台主机上以相同用户身份运行的本地进程读取。
 
-详情参见：[数据与备份](https://docs.larkax.com/docs/self-hosted/operate/data)。
+详情参见：[数据与备份](https://docs.larkax.com/self-hosted/operate/data-upgrade)。
 
 ---
 
@@ -397,10 +397,10 @@ make build        # 编译生成带版本号的 ./lax 二进制文件
 
 | 关注主题 | 对应文档 |
 | --- | --- |
-| 安装、配置与故障排查 | [自部署指南](https://docs.larkax.com/docs/self-hosted) |
-| 使用 API Key 接入公开入口 | [公开入口](https://docs.larkax.com/docs/public) |
-| Claude Code、Codex 与各语言 SDK 配置 | [客户端接入](https://docs.larkax.com/docs/public/clients) |
-| 命令参数与退出码明细 | [命令行参考](https://docs.larkax.com/docs/self-hosted/cli) |
-| 核心概念与术语速查 | [术语表](https://docs.larkax.com/docs/reference/glossary) |
-| 常见报错与使用疑问 | [常见问题](https://docs.larkax.com/docs/self-hosted/faq) |
+| 安装、配置与故障排查 | [自部署指南](https://docs.larkax.com/self-hosted) |
+| 使用 API Key 接入公开入口 | [公开入口](https://docs.larkax.com/) |
+| Claude Code、Codex 与各语言 SDK 配置 | [客户端接入](https://docs.larkax.com/clients) |
+| 命令参数与退出码明细 | [命令行参考](https://docs.larkax.com/self-hosted/cli) |
+| 核心概念与术语速查 | [术语表](https://docs.larkax.com/reference/glossary) |
+| 常见报错与使用疑问 | [常见问题](https://docs.larkax.com/self-hosted/faq) |
 | 架构取舍与设计背景 | [DESIGN.md](DESIGN.md) |
