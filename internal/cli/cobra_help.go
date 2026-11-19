@@ -24,7 +24,10 @@ func finalizeLeafCommand(e *Env, cmd *cobra.Command, summary string, examples ..
 			return err
 		}
 		// 旧版 flag 包在解析出错时先把整个用法写到 stderr；这里保持同样的形状。
-		printCobraCommandUsage(e.Stderr, c, summary, examples...)
+		// --json 时错误流只留 Run 写的一个对象，不再混入用法文本。
+		if !e.JSON && !e.jsonRequested {
+			printCobraCommandUsage(e.Stderr, c, summary, examples...)
+		}
 		return usagef("%v", err)
 	})
 }

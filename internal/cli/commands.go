@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -106,9 +107,12 @@ func cmdServe(e *Env, fs *leafFlags, args []string) error {
 		listen = *addr
 	}
 	dataDir := filepath.Dir(a.paths.DB)
+	// --json 时 stdout 只留启动状态那一个对象：之后的网关、插件与额度刷新日志都走 stderr，
+	// 脚本按行读 stdout 不会在 JSON 后面撞上时间戳文本。
+	logOut := serveLogWriter(e)
 
 	// 插件加载失败只提示一句：一个装坏的插件不该让网关起不来，别的厂商还在用。
-	dialects, notes, err := loadRegistry(a.st, dataDir, e.Stdout)
+	dialects, notes, err := loadRegistry(a.st, dataDir, logOut)
 	if err != nil {
 		return fmt.Errorf("读插件表失败: %w", err)
 	}
@@ -133,7 +137,7 @@ func cmdServe(e *Env, fs *leafFlags, args []string) error {
 		Key:      a.key,
 		Dialects: dialects,
 		Logf: func(format string, logArgs ...any) {
-			fmt.Fprintf(e.Stdout, "%s %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, logArgs...))
+			fmt.Fprintf(logOut, "%s %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, logArgs...))
 		},
 	})
 	if err != nil {
@@ -189,7 +193,7 @@ func cmdServe(e *Env, fs *leafFlags, args []string) error {
 	// 额度自动刷新只刷新 auto_refresh=true 的账号，默认一个都不刷；它与 serve 共用同一个
 	// 信号 ctx，退出时一起停。失败只打日志并写快照状态，不改账号启用状态、不写请求记录。
 	go startQuotaAutoRefresh(ctx, a.st, gs, func(format string, logArgs ...any) {
-		fmt.Fprintf(e.Stdout, "%s %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, logArgs...))
+		fmt.Fprintf(logOut, "%s %s\n", time.Now().Format("15:04:05"), fmt.Sprintf(format, logArgs...))
 	}, quotaAutoRefreshInterval)
 
 	// SIGHUP 热加载：重建注册表并整表换掉，在途请求手里拿的仍是换表前取到的方言。
@@ -199,7 +203,7 @@ func cmdServe(e *Env, fs *leafFlags, args []string) error {
 	defer signal.Stop(hup)
 	go func() {
 		for range hup {
-			reloaded, reloadNotes, err := loadRegistry(a.st, dataDir, e.Stdout)
+			reloaded, reloadNotes, err := loadRegistry(a.st, dataDir, logOut)
 			if err != nil {
 				fmt.Fprintf(e.Stderr, "警告:重读插件表失败，继续用当前注册表：%v\n", err)
 				continue
@@ -213,6 +217,15 @@ func cmdServe(e *Env, fs *leafFlags, args []string) error {
 	}()
 
 	return gs.Serve(ctx, ln)
+}
+
+// serveLogWriter 是 serve 运行时日志的去处。普通模式写 stdout，与启动信息同一路；
+// --json 模式 stdout 已经交出去当机器输出，日志只能写 stderr。
+func serveLogWriter(e *Env) io.Writer {
+	if e.JSON {
+		return e.Stderr
+	}
+	return e.Stdout
 }
 
 // servePidName 是 serve 的 pid 文件名。它放在数据目录里：`plugin reload` 按同一个

@@ -1761,7 +1761,8 @@ func cmdPluginLogs(e *Env, fs *leafFlags, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := printPluginLogs(e, rows); err != nil {
+	// --follow 时整条输出是一条持续流：--json 也用 NDJSON，初始行与后续新行同形。
+	if err := printPluginLogs(e, rows, *follow); err != nil {
 		return err
 	}
 	if !*follow {
@@ -1800,7 +1801,7 @@ func followPluginLogs(ctx context.Context, e *Env, st *store.Store, id string, q
 				if len(fresh) == 0 {
 					break
 				}
-				if err := printPluginLogs(e, fresh); err != nil {
+				if err := printPluginLogs(e, fresh, true); err != nil {
 					return err
 				}
 				lastID = fresh[len(fresh)-1].ID
@@ -1812,8 +1813,13 @@ func followPluginLogs(ctx context.Context, e *Env, st *store.Store, id string, q
 	}
 }
 
-func printPluginLogs(e *Env, rows []store.PluginLog) error {
+// printPluginLogs 打印一批插件日志。streamJSON 为真时 --json 走 NDJSON：
+// --follow 是持续流，每批都美化成一个数组会让下游按行读到的全是半截对象。
+func printPluginLogs(e *Env, rows []store.PluginLog, streamJSON bool) error {
 	if e.JSON {
+		if streamJSON {
+			return printPluginLogsNDJSON(e, rows)
+		}
 		return e.printJSON(logRows(rows))
 	}
 	if len(rows) == 0 {
@@ -1835,6 +1841,19 @@ func printPluginLogs(e *Env, rows []store.PluginLog) error {
 		Style:     newUI(e.Stdout),
 		HeaderSep: true,
 	}))
+	return nil
+}
+
+// printPluginLogsNDJSON 每条日志一行紧凑 JSON。空列表什么都不写：
+// 流里没有新行就是没有，不该隔一秒吐一个空数组。
+func printPluginLogsNDJSON(e *Env, rows []store.PluginLog) error {
+	enc := json.NewEncoder(e.Stdout)
+	enc.SetEscapeHTML(false)
+	for _, row := range logRows(rows) {
+		if err := enc.Encode(row); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

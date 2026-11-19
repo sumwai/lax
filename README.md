@@ -285,7 +285,7 @@ lax plugin doctor
 - `quota`：`ls`、`show`、`refresh`、`set`、`unset`
 - `plugin`：安装与升级（`install`、`update`、`rollback`、`verify`）；查看与诊断（`ls`、`show`、`logs`、`doctor`）；配置与启停（`config`、`reload`、`enable`、`disable`、`rm`）
 
-**CLI 约定**：所有命令均支持 `--json` 输出；全局参数 `--json`、`--config <路径>` 与 `--db <路径>` 写在子命令前后任意位置都生效。正常结果输出至 `stdout`，错误信息输出至 `stderr`，二者严格分离。不带子命令执行（如 `lax`、`lax model`、`lax plugin`）等同于 `--help`，输出帮助至 `stdout` 并以 `0` 退出。退出码：`0` 成功、`1` 运行失败、`2` 用法错误。用 `lax completion bash|zsh|fish|powershell` 生成补全脚本。`lax help <命令>` 与 `lax <命令> --help` 等价。完整参数说明见 `lax <命令> --help` 或[命令行参考](https://docs.larkax.com/self-hosted/cli)。
+**CLI 约定**：所有命令均支持 `--json` 输出；全局参数 `--json`、`--config <路径>` 与 `--db <路径>` 写在子命令前后任意位置都生效。正常结果输出至 `stdout`，错误信息输出至 `stderr`，二者严格分离。不带子命令执行（如 `lax`、`lax model`、`lax plugin`）等同于 `--help`，输出帮助至 `stdout` 并以 `0` 退出。退出码：`0` 成功、`1` 运行失败、`2` 用法错误。`--json` 失败时 `stderr` 只有一个对象（`error`、`hint`、`command`、`exit_code`），`stdout` 保持为空；`serve --json` 的启动状态写 `stdout`，之后的运行时日志走 `stderr`；`plugin logs --follow --json` 输出 NDJSON，一行一个对象。用 `lax completion bash|zsh|fish|powershell` 生成补全脚本，`lax completion help` 显示它自己的帮助。`lax help <命令>` 与 `lax <命令> --help` 等价；`lax help <组> <不存在的子命令>` 报没有命令并退出 `2`。补全命令的未知参数与多余位置参数同样是用法错误（退出码 `2`）。完整参数说明见 `lax <命令> --help` 或[命令行参考](https://docs.larkax.com/self-hosted/cli)。
 
 ---
 

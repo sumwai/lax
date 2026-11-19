@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"path/filepath"
 	"strings"
@@ -94,6 +95,96 @@ func TestPluginLogSink(t *testing.T) {
 	}
 	if !utf8.ValidString(rows[0].Message) {
 		t.Fatalf("截断把字符切碎了: %q", rows[0].Message[max(0, len(rows[0].Message)-8):])
+	}
+}
+
+// TestPrintPluginLogsFollowJSONIsNDJSON 钉住 --follow --json 的行形状：
+// 每条日志一行紧凑 JSON，正文里的换行不会把对象拆成两行；空列表不写空数组。
+func TestPrintPluginLogsFollowJSONIsNDJSON(t *testing.T) {
+	rows := []store.PluginLog{
+		{ID: 1, Level: "info", Message: "第一行\n第二行", At: 100},
+		{ID: 2, Level: "warn", Message: "第三条", At: 101},
+	}
+	var out bytes.Buffer
+	e := &Env{Stdout: &out, Stderr: io.Discard, JSON: true}
+	if err := printPluginLogs(e, rows, true); err != nil {
+		t.Fatalf("printPluginLogs: %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("应是一行一个对象，实际 %d 行: %q", len(lines), out.String())
+	}
+	for i, line := range lines {
+		var got pluginLogJSON
+		if err := json.Unmarshal([]byte(line), &got); err != nil {
+			t.Fatalf("第 %d 行不是单个 JSON 对象: %q: %v", i+1, line, err)
+		}
+		if got.ID != int64(i+1) {
+			t.Fatalf("第 %d 行的 id = %d", i+1, got.ID)
+		}
+	}
+	if !strings.Contains(lines[0], `"message":"第一行\n第二行"`) {
+		t.Fatalf("正文里的换行应被 JSON 转义在同一行: %s", lines[0])
+	}
+
+	out.Reset()
+	if err := printPluginLogs(e, nil, true); err != nil {
+		t.Fatalf("空列表: %v", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("空列表不该写任何行: %q", out.String())
+	}
+}
+
+// TestFollowPluginLogsJSONIsNDJSON 走真正的跟随循环：新到的行也必须是
+// 一行一个对象，不能是一段美化过的数组。
+func TestFollowPluginLogsJSONIsNDJSON(t *testing.T) {
+	st := pluginLogTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	out := &lockedBuffer{}
+	e := &Env{Stdout: out, Stderr: io.Discard, JSON: true}
+	done := make(chan error, 1)
+	go func() {
+		done <- followPluginLogs(ctx, e, st.Store, "com.example.echo", pluginLogQuery{Limit: 10}, 0)
+	}()
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		_ = st.AppendPluginLog(store.PluginLog{
+			PluginID: "com.example.echo", Level: "info", Message: "跟随到的一行", At: time.Now().Unix(),
+		})
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(out.String(), "跟随到的一行") {
+		if time.Now().After(deadline) {
+			t.Fatalf("--follow 没读到新行，输出 = %q", out.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("--follow 返回错误: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("取消之后 --follow 没有退出")
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		t.Fatal("--follow --json 没写出任何行")
+	}
+	for i, line := range lines {
+		var got pluginLogJSON
+		if err := json.Unmarshal([]byte(line), &got); err != nil {
+			t.Fatalf("第 %d 行不是单个 JSON 对象: %q: %v", i+1, line, err)
+		}
+		if got.Message == "" {
+			t.Fatalf("第 %d 行缺 message: %s", i+1, line)
+		}
 	}
 }
 

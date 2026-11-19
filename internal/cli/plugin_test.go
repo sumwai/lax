@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"lax/internal/config"
 	"lax/internal/plugin"
@@ -832,6 +833,46 @@ func TestPluginDoctorTampered(t *testing.T) {
 	}
 	if len(results[0].Checks) == 0 {
 		t.Fatalf("doctor --json 没有逐项检查: %+v", results[0])
+	}
+}
+
+// TestPluginLogsFollowJSONIsNDJSON 从命令面确认 --follow --json 的整条流
+// 都是一行一个对象：初始行与后续行同形，不是几段美化的 JSON 数组。
+func TestPluginLogsFollowJSONIsNDJSON(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+	src := writePluginFixture(t)
+	if code, _, stderr := run(t, "plugin", "install", src); code != 0 {
+		t.Fatalf("安装失败: %s", stderr)
+	}
+	db := storetest.Open(t)
+	if err := db.AppendPluginLog(store.PluginLog{
+		PluginID: "com.example.echo", Level: "info", Message: "初始行", At: time.Now().Unix() - 2,
+	}); err != nil {
+		t.Fatalf("写插件日志: %v", err)
+	}
+
+	// --to 取一秒前：跟随循环第一次醒来就到点退出，测试不用发信号。
+	until := time.Now().Add(-time.Second).Format("2006-01-02 15:04:05")
+	code, out, stderr := run(t, "plugin", "logs", "com.example.echo", "--follow", "--json", "--to", until)
+	if code != 0 {
+		t.Fatalf("plugin logs --follow --json 退出码 = %d，stdout = %s，stderr = %s", code, out, stderr)
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		t.Fatalf("没有输出日志行: %q", out)
+	}
+	for i, line := range lines {
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatalf("第 %d 行不是单个 JSON 对象: %q: %v", i+1, line, err)
+		}
+		if _, ok := row["message"]; !ok {
+			t.Fatalf("第 %d 行缺 message: %s", i+1, line)
+		}
+	}
+	if !strings.Contains(out, "初始行") {
+		t.Fatalf("初始行没写出来: %s", out)
 	}
 }
 

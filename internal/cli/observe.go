@@ -2,11 +2,9 @@ package cli
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os/signal"
@@ -477,19 +475,6 @@ func cmdCall(e *Env, fs *leafFlags, args []string) error {
 		}
 	}
 
-	gs, err := gateway.New(gateway.Options{Store: a.st, Key: a.key, Logf: logf, DumpBodies: *debug})
-	if err != nil {
-		return err
-	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = gs.Serve(ctx, ln) }()
-
 	ir := &translate.Request{
 		Model:     usedModel,
 		MaxTokens: *maxTokens,
@@ -507,65 +492,61 @@ func cmdCall(e *Env, fs *leafFlags, args []string) error {
 		return err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"http://"+ln.Addr().String()+inboundPath(inbound, usedModel, *stream), bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
+	header := http.Header{}
 	if *stream {
-		httpReq.Header.Set("Accept", "text/event-stream")
+		header.Set("Accept", "text/event-stream")
 	}
-
-	resp, err := http.DefaultClient.Do(httpReq)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
-		return fmt.Errorf("网关返回 %d：%s", resp.StatusCode, strings.TrimSpace(string(msg)))
-	}
-
-	if *stream {
-		// gemini 的流式帧要解码后才能给人看（帧里没有 event 名，一次响应就是若干 data 帧），
-		// 其余三条协议原样转出 SSE，与之前一致。
-		if inbound == translate.ProtocolGemini {
-			return printGeminiStream(e, resp.Body)
+	return callEphemeralGateway(ephemeralRequest{
+		options:     gateway.Options{Store: a.st, Key: a.key, Logf: logf, DumpBodies: *debug},
+		path:        inboundPath(inbound, usedModel, *stream),
+		body:        body,
+		contentType: "application/json",
+		header:      header,
+	}, func(resp *http.Response) error {
+		if resp.StatusCode != http.StatusOK {
+			msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+			return fmt.Errorf("网关返回 %d：%s", resp.StatusCode, strings.TrimSpace(string(msg)))
 		}
-		_, err := io.Copy(e.Stdout, resp.Body)
-		return err
-	}
 
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	if e.JSON {
-		fmt.Fprintln(e.Stdout, string(raw))
-		return nil
-	}
+		if *stream {
+			// gemini 的流式帧要解码后才能给人看（帧里没有 event 名，一次响应就是若干 data 帧），
+			// 其余三条协议原样转出 SSE，与之前一致。
+			if inbound == translate.ProtocolGemini {
+				return printGeminiStream(e, resp.Body)
+			}
+			_, err := io.Copy(e.Stdout, resp.Body)
+			return err
+		}
 
-	res, err := translate.DecodeResponse(inbound, raw, usedModel)
-	if err != nil {
-		return fmt.Errorf("响应不是合法 %s 报文: %w", inbound, err)
-	}
-	for _, block := range res.Blocks {
-		switch block.Kind {
-		case translate.BlockText:
-			fmt.Fprintln(e.Stdout, block.Text)
-		case translate.BlockToolUse:
-			if block.ToolUse != nil {
-				fmt.Fprintf(e.Stdout, "[tool_use] %s %s\n", block.ToolUse.Name, string(block.ToolUse.Input))
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return err
+		}
+		if e.JSON {
+			fmt.Fprintln(e.Stdout, string(raw))
+			return nil
+		}
+
+		res, err := translate.DecodeResponse(inbound, raw, usedModel)
+		if err != nil {
+			return fmt.Errorf("响应不是合法 %s 报文: %w", inbound, err)
+		}
+		for _, block := range res.Blocks {
+			switch block.Kind {
+			case translate.BlockText:
+				fmt.Fprintln(e.Stdout, block.Text)
+			case translate.BlockToolUse:
+				if block.ToolUse != nil {
+					fmt.Fprintf(e.Stdout, "[tool_use] %s %s\n", block.ToolUse.Name, string(block.ToolUse.Input))
+				}
 			}
 		}
-	}
-	if *debug {
-		fmt.Fprintf(e.Stderr, "· 用量 输入 %d / 输出 %d（缓存 %d），结束原因 %s，模型 %s\n",
-			res.Usage.In, res.Usage.Out, res.Usage.CacheRead, res.StopReason, res.Model)
-	}
-	return nil
+		if *debug {
+			fmt.Fprintf(e.Stderr, "· 用量 输入 %d / 输出 %d（缓存 %d），结束原因 %s，模型 %s\n",
+				res.Usage.In, res.Usage.Out, res.Usage.CacheRead, res.StopReason, res.Model)
+		}
+		return nil
+	})
 }
 
 // inboundPath 给出这条请求要打的入站路径。gemini 的模型名在路径里、流式由后缀决定

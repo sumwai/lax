@@ -108,7 +108,7 @@ func cmdAccountSet(e *Env, fs *leafFlags, args []string) error {
 
 	// 换凭据是这条子命令唯一的作用，因此在动库之前就要能解析出凭据。
 	// 三种给法与 account add 完全一致，共用 resolveKey：两处判定不一致时，换 key 会突然多出一个坑。
-	keyValue, err := resolveKey(*key, "lax account set "+name+" --key - < key.txt", accountSetUsage)
+	keyValue, err := e.resolveKey(*key, "lax account set "+name+" --key - < key.txt", accountSetUsage)
 	if err != nil {
 		return err
 	}
@@ -214,7 +214,7 @@ func cmdAccountAdd(e *Env, fs *leafFlags, args []string) error {
 		return usagef("--provider 必填，例如 --provider deepseek\n%s", accountAddUsage)
 	}
 
-	keyValue, err := resolveKey(*key, "lax account add x --provider p --key - < key.txt", accountAddUsage)
+	keyValue, err := e.resolveKey(*key, "lax account add x --provider p --key - < key.txt", accountAddUsage)
 	if err != nil {
 		return err
 	}
@@ -299,13 +299,13 @@ func envKey() string {
 // 留空读环境变量 LAX_KEY（兼容 LAX_API_KEY）。account add 与 account set 共用一份，
 // 两处判定不一致时，换 key 会突然多出一个坑。stdinExample 是「从管道读」错误文案里的示例命令，
 // usageLine 是这个子命令的用法行：缺凭据是用法错误，输出要带上正确用法（见 AGENTS.md）。
-func resolveKey(flagValue, stdinExample, usageLine string) (string, error) {
+func (e *Env) resolveKey(flagValue, stdinExample, usageLine string) (string, error) {
 	value := flagValue
 	if value == "" {
 		value = envKey()
 	}
 	if value == "-" || value == "--" {
-		v, err := readKeyFromStdin(stdinExample)
+		v, err := e.readKeyFromStdin(stdinExample)
 		if err != nil {
 			return "", err
 		}
@@ -318,13 +318,17 @@ func resolveKey(flagValue, stdinExample, usageLine string) (string, error) {
 }
 
 // readKeyFromStdin 从标准输入读凭据，去掉首尾空白，example 是用在错误文案里的示例命令。
-// 直接在终端上运行且没有管道时报错，避免命令挂起等输入。
-func readKeyFromStdin(example string) (string, error) {
-	info, statErr := os.Stdin.Stat()
-	if statErr == nil && info.Mode()&os.ModeCharDevice != 0 {
-		return "", usagef("--key - 需要从管道或文件读入，例如 %s", example)
+// 直接在终端上运行且没有管道时报错，避免命令挂起等输入；只有输入就是 os.Stdin 时才做
+// 这个终端判断，测试塞进来的 Reader 没有文件模式。
+func (e *Env) readKeyFromStdin(example string) (string, error) {
+	in := e.stdin()
+	if f, ok := in.(*os.File); ok && f == os.Stdin {
+		info, statErr := f.Stat()
+		if statErr == nil && info.Mode()&os.ModeCharDevice != 0 {
+			return "", usagef("--key - 需要从管道或文件读入，例如 %s", example)
+		}
 	}
-	b, err := io.ReadAll(io.LimitReader(os.Stdin, 8<<10))
+	b, err := io.ReadAll(io.LimitReader(in, 8<<10))
 	if err != nil {
 		return "", fmt.Errorf("读取标准输入失败: %w", err)
 	}

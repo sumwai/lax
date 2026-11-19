@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"sort"
 	"strings"
 
@@ -109,7 +108,7 @@ func cmdPluginConfigSet(e *Env, fs *leafFlags, args []string) error {
 		value = fs.Arg(2)
 	}
 	if *stdin {
-		raw, err := io.ReadAll(io.LimitReader(os.Stdin, 64<<10))
+		raw, err := io.ReadAll(io.LimitReader(e.stdin(), 64<<10))
 		if err != nil {
 			return fmt.Errorf("读标准输入失败：%v", err)
 		}
@@ -175,6 +174,10 @@ func cmdPluginConfigUnset(e *Env, fs *leafFlags, args []string) error {
 	}
 	if _, existed := stored[key]; !existed {
 		// 本来就没有不是错误：删它是幂等的，但要把「现在生效的是默认值」说清楚。
+		// --json 与真正删掉一条时同一个形状，只把 removed 写成 false。
+		if e.JSON {
+			return e.printJSON(map[string]any{"plugin": id, "key": key, "removed": false})
+		}
 		if len(decl.Default) > 0 {
 			fmt.Fprintf(e.Stdout, "%s 本来就没有设置，现在生效的是默认值 %s\n", key, decodeOptionDefault(decl.Default))
 		} else {

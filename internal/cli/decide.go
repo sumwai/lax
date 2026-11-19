@@ -2,12 +2,10 @@ package cli
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"math"
-	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -659,45 +657,31 @@ func cmdDecide(e *Env, fs *leafFlags, args []string) error {
 
 	// 日志一律不写：网关每转发一次就打一行「账号 协议 模型 …」，而 decide 自己已经把这几个事实
 	// 印在首行上了；call 也是这么做的。真的是失败时（写请求记录失败一类）靠 log tail 查。
-	gs, err := gateway.New(gateway.Options{Store: a.st, Key: a.key, Logf: func(string, ...any) {}})
-	if err != nil {
-		return err
-	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return err
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go func() { _ = gs.Serve(ctx, ln) }()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+ln.Addr().String()+systemOnePath, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
 	started := time.Now()
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("连本进程的网关失败：%v；网关起不来时先运行 lax doctor 看端口与数据库", err)
-	}
-	defer resp.Body.Close()
-
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("读网关响应失败：%v；用 lax log tail 看这一次的记录", err)
-	}
-	latency := time.Since(started)
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return decideHTTPError(resp.StatusCode, raw, target.account)
-	}
-
 	var env decideResponse
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return fmt.Errorf("响应不是合法 JSON：%v；上游回来的可能是 HTML 错误页，用 lax log tail 看这一次的记录，或 lax account test %s 核对地址与凭据", err, target.account)
+	var latency time.Duration
+	err = callEphemeralGateway(ephemeralRequest{
+		options:     gateway.Options{Store: a.st, Key: a.key, Logf: func(string, ...any) {}},
+		path:        systemOnePath,
+		body:        body,
+		contentType: "application/json",
+	}, func(resp *http.Response) error {
+		raw, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("读网关响应失败：%v；用 lax log tail 看这一次的记录", err)
+		}
+		latency = time.Since(started)
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return decideHTTPError(resp.StatusCode, raw, target.account)
+		}
+		if err := json.Unmarshal(raw, &env); err != nil {
+			return fmt.Errorf("响应不是合法 JSON：%v；上游回来的可能是 HTML 错误页，用 lax log tail 看这一次的记录，或 lax account test %s 核对地址与凭据", err, target.account)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	if e.JSON {

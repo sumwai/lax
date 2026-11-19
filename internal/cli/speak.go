@@ -2,12 +2,10 @@ package cli
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -72,19 +70,21 @@ func cmdSpeak(e *Env, fs *leafFlags, args []string) error {
 		return err
 	}
 
-	resp, err := postVoice(e, gateway.SpeechPath(), body, "application/json")
-	if err != nil {
+	var audio []byte
+	var contentType string
+	if err := postVoice(e, gateway.SpeechPath(), body, "application/json", func(resp *http.Response) error {
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return voiceHTTPError(resp)
+		}
+		var readErr error
+		audio, readErr = io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("读网关响应失败：%v；用 lax log tail 看这一次的记录", readErr)
+		}
+		contentType = resp.Header.Get("Content-Type")
+		return nil
+	}); err != nil {
 		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return voiceHTTPError(resp)
-	}
-
-	audio, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("读网关响应失败：%v；用 lax log tail 看这一次的记录", err)
 	}
 
 	if *out != "" {
@@ -96,7 +96,7 @@ func cmdSpeak(e *Env, fs *leafFlags, args []string) error {
 		}
 		if !e.JSON {
 			fmt.Fprintf(e.Stderr, "已写入 %s（模型 %s，%d 字节，%s）\n",
-				*out, *model, len(audio), dashIfEmpty(resp.Header.Get("Content-Type")))
+				*out, *model, len(audio), dashIfEmpty(contentType))
 		}
 	}
 
@@ -107,7 +107,7 @@ func cmdSpeak(e *Env, fs *leafFlags, args []string) error {
 			"format":       *format,
 			"out":          *out,
 			"bytes":        len(audio),
-			"content_type": resp.Header.Get("Content-Type"),
+			"content_type": contentType,
 			"chars":        len([]rune(*text)),
 		})
 	}
@@ -141,7 +141,7 @@ func cmdTranscribe(e *Env, fs *leafFlags, args []string) error {
 	var audio []byte
 	fileName := filepath.Base(source)
 	if source == "-" {
-		data, err := io.ReadAll(os.Stdin)
+		data, err := io.ReadAll(e.stdin())
 		if err != nil {
 			return fmt.Errorf("读标准输入失败：%v", err)
 		}
@@ -186,106 +186,47 @@ func cmdTranscribe(e *Env, fs *leafFlags, args []string) error {
 		return err
 	}
 
-	resp, err := postVoice(e, gateway.TranscriptionsPath(), buf.Bytes(), writer.FormDataContentType())
+	// 响应体原样写到标准输出：json 是 JSON、text 是纯文本、srt 与 vtt 是字幕。
+	// 不再包一层 JSON（那会把字幕弄成转义过的字符串），也不重新格式化上游的 JSON。
+	return postVoice(e, gateway.TranscriptionsPath(), buf.Bytes(), writer.FormDataContentType(), func(resp *http.Response) error {
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return voiceHTTPError(resp)
+		}
+		if _, err := io.Copy(e.Stdout, resp.Body); err != nil {
+			return fmt.Errorf("写转写结果失败：%v", err)
+		}
+		return nil
+	})
+}
+
+// postVoice 在本进程起一个临时网关并打一条语音请求，把响应交给 handle 处理。
+// 网关日志关掉：每个命令自己已经把这次请求的事实印出来了，失败时靠 lax log tail 查。
+//
+// 数据库开着交给 callEphemeralGateway 收尾：它会等 Serve 返回，而 Serve 的 Shutdown
+// 会等正在处理的请求结束，那之后这一次的 requests 行已经落库。
+func postVoice(e *Env, path string, body []byte, contentType string, handle func(*http.Response) error) error {
+	a, err := openApp(e, true)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return voiceHTTPError(resp)
-	}
-
-	// 响应体原样写到标准输出：json 是 JSON、text 是纯文本、srt 与 vtt 是字幕。
-	// 不再包一层 JSON（那会把字幕弄成转义过的字符串），也不重新格式化上游的 JSON。
-	if _, err := io.Copy(e.Stdout, resp.Body); err != nil {
-		return fmt.Errorf("写转写结果失败：%v", err)
-	}
-	return nil
-}
-
-// postVoice 在本进程起一个临时网关并打一条语音请求，返回上游响应。
-// 网关日志关掉：每个命令自己已经把这次请求的事实印出来了，失败时靠 lax log tail 查。
-//
-// 收尾（取消 ctx、等 Serve 返回、关数据库）都挂在响应体的 Close 上：请求记录是在
-// 响应写完之后才落库的，读完响应体就把数据库关掉会让这一次的账漏记。
-func postVoice(e *Env, path string, body []byte, contentType string) (*http.Response, error) {
-	a, err := openApp(e, true)
-	if err != nil {
-		return nil, err
-	}
+	defer a.Close()
 
 	// 方言注册表要跟着网关走：语音模型的绑定可能是插件方言（豆包的 TTS 走它自己的路径），
 	// 不传这张表时网关只认识内置方言，插件方言的模型会报「方言没有注册」。
 	reg, notes, err := loadRegistry(a.st, pluginDataDirOf(a.paths), nil)
 	if err != nil {
-		a.Close()
-		return nil, fmt.Errorf("读插件表失败：%w", err)
+		return fmt.Errorf("读插件表失败：%w", err)
 	}
 	for _, note := range notes {
 		fmt.Fprintf(e.Stderr, "警告:%s\n", note)
 	}
 
-	gs, err := gateway.New(gateway.Options{Store: a.st, Key: a.key, Dialects: reg, Logf: func(string, ...any) {}})
-	if err != nil {
-		a.Close()
-		return nil, err
-	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		a.Close()
-		return nil, err
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		serveErr := gs.Serve(ctx, ln)
-		close(done)
-		if serveErr != nil {
-			_ = serveErr
-		}
-	}()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+ln.Addr().String()+path, bytes.NewReader(body))
-	if err != nil {
-		cancel()
-		<-done
-		a.Close()
-		return nil, err
-	}
-	req.Header.Set("Content-Type", contentType)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		cancel()
-		<-done
-		a.Close()
-		return nil, fmt.Errorf("连本进程的网关失败：%v；网关起不来时先运行 lax doctor 看端口与数据库", err)
-	}
-	// 临时网关与数据库的生命周期跟响应体走：Serve 的 Shutdown 会等正在处理的请求结束，
-	// 那之后这一次的 requests 行已经落库。
-	resp.Body = &voiceCloser{
-		ReadCloser: resp.Body,
-		cleanup: func() {
-			cancel()
-			<-done
-			a.Close()
-		},
-	}
-	return resp, nil
-}
-
-// voiceCloser 在响应体关闭时收尾：取消临时网关、等它退出、关闭数据库。
-type voiceCloser struct {
-	io.ReadCloser
-	cleanup func()
-}
-
-func (c *voiceCloser) Close() error {
-	err := c.ReadCloser.Close()
-	c.cleanup()
-	return err
+	return callEphemeralGateway(ephemeralRequest{
+		options:     gateway.Options{Store: a.st, Key: a.key, Dialects: reg, Logf: func(string, ...any) {}},
+		path:        path,
+		body:        body,
+		contentType: contentType,
+	}, handle)
 }
 
 // voiceHTTPError 把非 2xx 的语音响应变成一条错误（退出码 1），文案取 openai 的

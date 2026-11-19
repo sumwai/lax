@@ -22,6 +22,15 @@ func run(t *testing.T, args ...string) (int, string, string) {
 	return code, out.String(), errOut.String()
 }
 
+// runWithStdin 与 run 相同，但从给定 Reader 提供标准输入。
+// 命令内部走 e.stdin()，用例因此不必再改全局 os.Stdin。
+func runWithStdin(t *testing.T, stdin io.Reader, args ...string) (int, string, string) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	code := cli.RunWithInput(args, stdin, &out, &errOut)
+	return code, out.String(), errOut.String()
+}
+
 func sandbox(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
@@ -168,19 +177,9 @@ func TestAccountAddReadsKeyFromStdin(t *testing.T) {
 		t.Fatalf("init 失败: %s", stderr)
 	}
 
-	saved := os.Stdin
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("建管道: %v", err)
-	}
-	if _, err := w.WriteString("  sk-test\n\n"); err != nil {
-		t.Fatalf("写管道: %v", err)
-	}
-	_ = w.Close()
-	os.Stdin = r
-	t.Cleanup(func() { os.Stdin = saved; _ = r.Close() })
-
-	code, _, errOut := addAccount(t, "ds1", "custom", up.URL, "", "--key", "-", "--models", "m1")
+	ensureProvider(t, "custom", up.URL, routeFlagsForProtocol("")...)
+	code, _, errOut := runWithStdin(t, strings.NewReader("  sk-test\n\n"),
+		"account", "add", "ds1", "--provider", "custom", "--key", "-", "--models", "m1")
 	if code != 0 {
 		t.Fatalf("account add --key - 退出码 = %d，stderr = %s", code, errOut)
 	}
@@ -316,6 +315,99 @@ func TestUsageErrorExitCode(t *testing.T) {
 	if !strings.Contains(errOut, "lax init") {
 		t.Fatalf("stderr 应给出下一步命令: %s", errOut)
 	}
+}
+
+// TestJSONErrorsAreStructured 钉住 --json 失败时的机器契约：stdout 不写，
+// stderr 只有一个对象，四个字段固定；--json 写在未知参数后面也照样认。
+func TestJSONErrorsAreStructured(t *testing.T) {
+	sandbox(t)
+
+	type jsonFailure struct {
+		Error    string `json:"error"`
+		Hint     string `json:"hint"`
+		Command  string `json:"command"`
+		ExitCode int    `json:"exit_code"`
+	}
+	decode := func(t *testing.T, code int, out, stderr string, wantCode int) jsonFailure {
+		t.Helper()
+		if code != wantCode {
+			t.Fatalf("退出码 = %d，期望 %d；stderr = %s", code, wantCode, stderr)
+		}
+		if out != "" {
+			t.Fatalf("失败时 stdout 应当为空: %s", out)
+		}
+		var got jsonFailure
+		trimmed := strings.TrimSpace(stderr)
+		if err := json.Unmarshal([]byte(trimmed), &got); err != nil {
+			t.Fatalf("stderr 应只有一个 JSON 对象: %v，原文 %q", err, stderr)
+		}
+		if got.ExitCode != wantCode {
+			t.Fatalf("exit_code = %d，期望 %d: %s", got.ExitCode, wantCode, trimmed)
+		}
+		return got
+	}
+
+	t.Run("运行失败", func(t *testing.T) {
+		code, out, stderr := run(t, "account", "ls", "--json")
+		got := decode(t, code, out, stderr, 1)
+		if !strings.Contains(got.Error, "lax init") {
+			t.Fatalf("error 应给出下一步: %+v", got)
+		}
+		if got.Command != "lax account ls" {
+			t.Fatalf("command = %q，期望 lax account ls", got.Command)
+		}
+		if got.Hint != "" {
+			t.Fatalf("没有额外建议时 hint 应为空串: %q", got.Hint)
+		}
+	})
+
+	t.Run("未知参数写在 json 前面", func(t *testing.T) {
+		code, out, stderr := run(t, "account", "ls", "--nope", "--json")
+		got := decode(t, code, out, stderr, 2)
+		if !strings.Contains(got.Error, "--nope") {
+			t.Fatalf("error 应提到未知参数: %+v", got)
+		}
+		if got.Command != "lax account ls" {
+			t.Fatalf("command = %q，期望 lax account ls", got.Command)
+		}
+	})
+
+	t.Run("未知一级命令", func(t *testing.T) {
+		code, out, stderr := run(t, "nope", "--json")
+		got := decode(t, code, out, stderr, 2)
+		if !strings.Contains(got.Error, "未知子命令") || !strings.Contains(got.Hint, "lax --help") {
+			t.Fatalf("error/hint 不对: %+v", got)
+		}
+		if got.Command != "lax" {
+			t.Fatalf("command = %q，期望 lax", got.Command)
+		}
+	})
+
+	t.Run("json=false 仍走纯文本", func(t *testing.T) {
+		code, out, stderr := run(t, "nope", "--json=false")
+		if code != 2 || out != "" {
+			t.Fatalf("退出码 = %d，stdout = %q", code, out)
+		}
+		if !strings.Contains(stderr, "未知子命令") || json.Valid([]byte(strings.TrimSpace(stderr))) {
+			t.Fatalf("--json=false 应走纯文本: %s", stderr)
+		}
+	})
+
+	// `--` 之后全是位置参数，里面的 --json / --json=false 不能再翻输出格式。
+	t.Run("双横线之后的 json 不算参数", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"nope", "--", "--json"},
+			{"nope", "--", "--json=false"},
+		} {
+			code, out, stderr := run(t, args...)
+			if code != 2 || out != "" {
+				t.Fatalf("%v 的退出码 = %d，stdout = %q", args, code, out)
+			}
+			if !strings.Contains(stderr, "未知子命令") || json.Valid([]byte(strings.TrimSpace(stderr))) {
+				t.Fatalf("%v 应走纯文本: %s", args, stderr)
+			}
+		}
+	})
 }
 
 func TestAccountAddRejectsMissingKey(t *testing.T) {
@@ -480,6 +572,71 @@ func TestCompletionCommand(t *testing.T) {
 	if !strings.Contains(errOut, "未知的 shell") {
 		t.Fatalf("completion nope 应报未知 shell: %s", errOut)
 	}
+
+	// 多余的参数同样是中文用法错误：不是 Cobra 的英文 NoArgs 报错，也不落到顶层帮助。
+	for _, args := range [][]string{
+		{"completion", "bash", "extra"},
+		{"completion", "zsh", "extra"},
+		{"completion", "fish", "extra"},
+		{"completion", "powershell", "extra"},
+	} {
+		code, out, errOut := run(t, args...)
+		if code != 2 {
+			t.Fatalf("%v 的退出码 = %d，期望 2（用法错误）", args, code)
+		}
+		if out != "" {
+			t.Fatalf("用法错误不该写 stdout: %s", out)
+		}
+		if !strings.Contains(errOut, "多余的参数") || strings.Contains(errOut, "本机模型网关") {
+			t.Fatalf("%v 应报中文用法错误且不落到顶层用法: %s", args, errOut)
+		}
+	}
+
+	// 参数写错时打 completion 自己的用法，而不是顶层 lax 用法。
+	for _, args := range [][]string{
+		{"completion", "--nope"},
+		{"completion", "bash", "--nope"},
+	} {
+		code, out, errOut := run(t, args...)
+		if code != 2 {
+			t.Fatalf("%v 的退出码 = %d，期望 2", args, code)
+		}
+		if out != "" {
+			t.Fatalf("用法错误不该写 stdout: %s", out)
+		}
+		if !strings.Contains(errOut, "completion") || !strings.Contains(errOut, "--nope") {
+			t.Fatalf("%v 应打 completion 的用法并提到未知参数: %s", args, errOut)
+		}
+		if strings.Contains(errOut, "本机模型网关") {
+			t.Fatalf("%v 打成了顶层 lax 用法: %s", args, errOut)
+		}
+	}
+
+	// help 当作位置参数时显示 completion 帮助，退出码 0、stdout。
+	code, out, errOut = run(t, "completion", "help")
+	if code != 0 {
+		t.Fatalf("completion help 的退出码 = %d，期望 0；stderr = %s", code, errOut)
+	}
+	if errOut != "" {
+		t.Fatalf("completion help 的帮助不该写 stderr: %s", errOut)
+	}
+	for _, want := range []string{"bash", "zsh", "fish", "powershell"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("completion help 缺少 %q:\n%s", want, out)
+		}
+	}
+
+	// help 后面再跟位置参数不能静默成功：help 不是 shell 名，多余参数是用法错误。
+	code, out, errOut = run(t, "completion", "help", "nope")
+	if code != 2 {
+		t.Fatalf("completion help nope 的退出码 = %d，期望 2", code)
+	}
+	if out != "" {
+		t.Fatalf("用法错误不该写 stdout: %s", out)
+	}
+	if !strings.Contains(errOut, "多余的参数") || strings.Contains(errOut, "本机模型网关") {
+		t.Fatalf("completion help nope 应报中文用法错误且不落到顶层用法: %s", errOut)
+	}
 }
 
 // TestGroupGlobalFlagsWithoutSubcommand 钉住组级全局参数：不带叶子子命令时
@@ -560,5 +717,17 @@ func TestHelpCommandAndTopLevelFlagErrors(t *testing.T) {
 	}
 	if !strings.Contains(errOut, "没有命令") {
 		t.Fatalf("help nope 应报没有命令: %s", errOut)
+	}
+
+	// 已知组的未知子命令不能被静默忽略：Find 只走到 account，nope 没人认领。
+	code, out, errOut = run(t, "help", "account", "nope")
+	if code != 2 {
+		t.Fatalf("help account nope 的退出码 = %d，期望 2", code)
+	}
+	if out != "" {
+		t.Fatalf("用法错误不该写 stdout: %s", out)
+	}
+	if !strings.Contains(errOut, "没有命令") || !strings.Contains(errOut, "account nope") {
+		t.Fatalf("help account nope 应报没有命令并带上完整路径: %s", errOut)
 	}
 }

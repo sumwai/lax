@@ -3,7 +3,6 @@ package cli_test
 import (
 	"bytes"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -493,19 +492,8 @@ func TestAccountSetKeyFromStdin(t *testing.T) {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	saved := os.Stdin
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("建管道: %v", err)
-	}
-	if _, err := w.WriteString("  sk-test\n\n"); err != nil {
-		t.Fatalf("写管道: %v", err)
-	}
-	_ = w.Close()
-	os.Stdin = r
-	t.Cleanup(func() { os.Stdin = saved; _ = r.Close() })
-
-	if code, _, stderr := run(t, "account", "set", "ds1", "--key", "-"); code != 0 {
+	if code, _, stderr := runWithStdin(t, strings.NewReader("  sk-test\n\n"),
+		"account", "set", "ds1", "--key", "-"); code != 0 {
 		t.Fatalf("account set --key - 退出码 = %d，stderr = %s", code, stderr)
 	}
 	// 首尾空白被去掉、新 key 生效：假上游只认 Bearer sk-test。

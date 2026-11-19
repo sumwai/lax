@@ -81,18 +81,8 @@ func TestPluginConfig(t *testing.T) {
 	}
 
 	// --stdin 写值。
-	saved := os.Stdin
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("建管道: %v", err)
-	}
-	if _, err := w.WriteString("true\n"); err != nil {
-		t.Fatalf("写管道: %v", err)
-	}
-	_ = w.Close()
-	os.Stdin = r
-	t.Cleanup(func() { os.Stdin = saved; _ = r.Close() })
-	if code, _, stderr := run(t, "plugin", "config", "set", "com.example.echo", "verbose", "--stdin"); code != 0 {
+	if code, _, stderr := runWithStdin(t, strings.NewReader("true\n"),
+		"plugin", "config", "set", "com.example.echo", "verbose", "--stdin"); code != 0 {
 		t.Fatalf("--stdin 退出码 = %d，stderr = %s", code, stderr)
 	}
 	if code, out, _ := run(t, "plugin", "config", "get", "com.example.echo", "verbose"); code != 0 || !strings.Contains(out, "true") {
@@ -109,6 +99,39 @@ func TestPluginConfig(t *testing.T) {
 	}
 	if code, _, _ := run(t, "plugin", "config", "unset", "com.example.echo", "region"); code != 0 {
 		t.Fatalf("重复 unset 应当是幂等的，退出码 = %d", code)
+	}
+}
+
+// TestPluginConfigUnsetJSONWhenNotSet 钉住幂等删的 --json 形状：没设置过也返回
+// 与真正删掉时同一个对象，只把 removed 写成 false，stdout 不混中文提示。
+func TestPluginConfigUnsetJSONWhenNotSet(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+	src := writePluginWithOptions(t)
+	if code, _, stderr := run(t, "plugin", "install", src); code != 0 {
+		t.Fatalf("安装失败: %s", stderr)
+	}
+
+	code, out, stderr := run(t, "plugin", "config", "unset", "com.example.echo", "region", "--json")
+	if code != 0 {
+		t.Fatalf("unset --json 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if stderr != "" {
+		t.Fatalf("成功时不该写 stderr: %s", stderr)
+	}
+	var got struct {
+		Plugin  string `json:"plugin"`
+		Key     string `json:"key"`
+		Removed *bool  `json:"removed"`
+	}
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("unset --json 不是 JSON: %v，%s", err, out)
+	}
+	if got.Plugin != "com.example.echo" || got.Key != "region" {
+		t.Fatalf("unset --json = %+v", got)
+	}
+	if got.Removed == nil || *got.Removed {
+		t.Fatalf("没设置过时 removed 应是 false: %s", out)
 	}
 }
 
