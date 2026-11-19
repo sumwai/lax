@@ -36,8 +36,7 @@ var speakFormats = map[string]bool{
 	"mp3": true, "opus": true, "aac": true, "flac": true, "wav": true, "pcm": true,
 }
 
-func cmdSpeak(e *Env, args []string) error {
-	fs := newFlagSet(e, "model speak", "发一条语音合成请求（POST /v1/audio/speech），音频写标准输出或文件")
+func cmdSpeak(e *Env, fs *leafFlags, args []string) error {
 	model := fs.String("model", "", "模型名：有效出站协议必须是 openai-speech")
 	text := fs.String("text", "", "要合成的文本")
 	voice := fs.String("voice", "alloy", "音色：交给上游判，不认的音色由上游报 400")
@@ -123,8 +122,7 @@ func cmdSpeak(e *Env, args []string) error {
 	return nil
 }
 
-func cmdTranscribe(e *Env, args []string) error {
-	fs := newFlagSet(e, "model transcribe", "发一条语音转写请求（POST /v1/audio/transcriptions），响应体原样输出")
+func cmdTranscribe(e *Env, fs *leafFlags, args []string) error {
 	model := fs.String("model", "", "模型名：有效出站协议必须是 openai-transcriptions")
 	language := fs.String("language", "", "音频语言的 ISO-639-1 代码，例如 zh、en；不给就交给上游自动判断")
 	prompt := fs.String("prompt", "", "提示词：给上游一点上下文（专有名词、标点风格）")

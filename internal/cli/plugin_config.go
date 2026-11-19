@@ -22,29 +22,7 @@ const (
 	pluginConfigUnsetUsage = "用法：lax plugin config unset <插件 ID> <键>"
 )
 
-func cmdPluginConfig(e *Env, args []string) error {
-	if isHelpRequest(args) || len(args) == 0 {
-		printGroupHelp(e.Stdout, "plugin config", "插件配置项：manifest 里声明的 options", []groupItem{
-			{"get", "读取配置项，没写过的显示 manifest 的默认值"},
-			{"set", "写一个配置项"},
-			{"unset", "删掉一个配置项，回到默认值"},
-		})
-		return nil
-	}
-	switch args[0] {
-	case "get":
-		return cmdPluginConfigGet(e, args[1:])
-	case "set":
-		return cmdPluginConfigSet(e, args[1:])
-	case "unset":
-		return cmdPluginConfigUnset(e, args[1:])
-	default:
-		return usagef("未知子命令 %q，可用：get | set | unset", args[0])
-	}
-}
-
-func cmdPluginConfigGet(e *Env, args []string) error {
-	fs := newFlagSet(e, "plugin config get", "读取插件的配置项")
+func cmdPluginConfigGet(e *Env, fs *leafFlags, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -116,8 +94,7 @@ func cmdPluginConfigGet(e *Env, args []string) error {
 	return nil
 }
 
-func cmdPluginConfigSet(e *Env, args []string) error {
-	fs := newFlagSet(e, "plugin config set", "写一个插件配置项")
+func cmdPluginConfigSet(e *Env, fs *leafFlags, args []string) error {
 	stdin := fs.Bool("stdin", false, "从标准输入读取值")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -169,8 +146,7 @@ func cmdPluginConfigSet(e *Env, args []string) error {
 	return nil
 }
 
-func cmdPluginConfigUnset(e *Env, args []string) error {
-	fs := newFlagSet(e, "plugin config unset", "删掉一个插件配置项")
+func cmdPluginConfigUnset(e *Env, fs *leafFlags, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

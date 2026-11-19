@@ -49,24 +49,6 @@ func printModelPriceHelp(w io.Writer) {
 	_, _ = io.WriteString(w, b.String())
 }
 
-// cmdModelPrice 是 model price 这一组子命令的入口。
-func cmdModelPrice(e *Env, args []string) error {
-	if isHelpRequest(args) || len(args) == 0 {
-		printModelPriceHelp(e.Stdout)
-		return nil
-	}
-	switch args[0] {
-	case "set":
-		return cmdModelPriceSet(e, args[1:])
-	case "unset":
-		return cmdModelPriceUnset(e, args[1:])
-	case "ls":
-		return cmdModelPriceLs(e, args[1:])
-	default:
-		return usagef("未知子命令 %q，可用：set | unset | ls\n用 lax model price --help 查看用法", args[0])
-	}
-}
-
 // priceFieldLabels 是四个字段在人读输出里的名字。字段名本身（in / out / cache-read /
 // cache-write）只由 store.PriceFieldNames 给，这里只负责翻译成中文，不另存一份字段清单。
 var priceFieldLabels = map[store.PriceField]string{
@@ -130,7 +112,7 @@ func (v priceValues) count() int {
 
 // priceFlagValue 把一个价格参数变成增量写入值：命令行没给就是 nil（这一项不动），
 // 给了 0 就是 0（免费是合法值）。flag 包的默认值 0 不能被当成「填了 0 元」。
-func priceFlagValue(fs *flagSet, name string, v *float64) *float64 {
+func priceFlagValue(fs *leafFlags, name string, v *float64) *float64 {
 	if !flagWasSet(fs, name) {
 		return nil
 	}
@@ -240,8 +222,7 @@ type modelPriceSetJSON struct {
 
 // cmdModelPriceSet 写模型单价：给 --account 写该账号的覆盖价，否则写厂商级标价。
 // 只写命令行上给过的那几项，没给的留空（表示继承），不做「一次写四个」。
-func cmdModelPriceSet(e *Env, args []string) error {
-	fs := newFlagSet(e, "model price set", "写模型单价（每百万 token）")
+func cmdModelPriceSet(e *Env, fs *leafFlags, args []string) error {
 	provider := fs.String("provider", "", "厂商；与 --account 互斥，不给时按模型名唯一确定")
 	accountName := fs.String("account", "", "账号名；给定时写该账号在这个模型上的覆盖价")
 	in := fs.Float64("in", 0, "输入价，每百万 token；0 合法（免费）")
@@ -338,22 +319,18 @@ type modelPriceUnsetJSON struct {
 	Remaining int      `json:"remaining"`
 }
 
-// rejectDashPriceFields 拦下把字段写成 `--in` 这类参数写法：flag 包只会说「参数不认识」，
-// 这里能说清字段是位置参数并列出可用的四个。
-func rejectDashPriceFields(args []string) error {
-	for _, arg := range args {
-		if !strings.HasPrefix(arg, "-") {
-			continue
-		}
-		name := strings.TrimLeft(arg, "-")
-		if i := strings.IndexByte(name, '='); i >= 0 {
-			name = name[:i]
-		}
-		for _, f := range store.PriceFieldNames() {
-			if name == f {
-				return usagef("未知的价格字段 %q：字段是位置参数，不带 -- 前缀，可用的是 %s\n%s",
-					arg, strings.Join(store.PriceFieldNames(), "、"), modelPriceUnsetUsage)
-			}
+// rejectDashPriceFields 拦下把字段写成 `--in` 这类参数写法：pflag 只会说「参数不认识」，
+// 这里把四个字段登记成隐藏开关，执行时能说清字段是位置参数并列出来。
+func rejectDashPriceFields(fs *leafFlags) error {
+	fields := store.PriceFieldNames()
+	for _, name := range fields {
+		fs.Bool(name, false, "")
+		_ = fs.cmd.Flags().MarkHidden(name)
+	}
+	for _, name := range fields {
+		if fs.Changed(name) {
+			return usagef("未知的价格字段 %q：字段是位置参数，不带 -- 前缀，可用的是 %s\n%s",
+				"--"+name, strings.Join(fields, "、"), modelPriceUnsetUsage)
 		}
 	}
 	return nil
@@ -389,11 +366,10 @@ func fieldNames(fields []store.PriceField) []string {
 
 // cmdModelPriceUnset 清掉某一项或几项：账号级清掉回到厂商级标价（不是免费），
 // 厂商级清掉表示这一项未知。本来为空的不报错（幂等），输出说明「本来就没有」。
-func cmdModelPriceUnset(e *Env, args []string) error {
-	if err := rejectDashPriceFields(args); err != nil {
+func cmdModelPriceUnset(e *Env, fs *leafFlags, args []string) error {
+	if err := rejectDashPriceFields(fs); err != nil {
 		return err
 	}
-	fs := newFlagSet(e, "model price unset", "清掉模型单价的一项或几项")
 	provider := fs.String("provider", "", "厂商；与 --account 互斥，不给时按模型名唯一确定")
 	accountName := fs.String("account", "", "账号名；给定时清该账号在这个模型上的覆盖价")
 	if err := fs.Parse(args); err != nil {
@@ -574,8 +550,7 @@ type priceRow struct {
 
 // cmdModelPriceLs 列目录里的模型单价：不给模型就列所有有价格的目录行（按模型名升序），
 // 给了就只列这一个。给 --account 时并排显示该账号覆盖后的有效价。
-func cmdModelPriceLs(e *Env, args []string) error {
-	fs := newFlagSet(e, "model price ls", "列目录里的模型单价")
+func cmdModelPriceLs(e *Env, fs *leafFlags, args []string) error {
 	provider := fs.String("provider", "", "只看这家厂商的目录")
 	accountName := fs.String("account", "", "并排显示这个账号覆盖后的有效价")
 	if err := fs.Parse(args); err != nil {

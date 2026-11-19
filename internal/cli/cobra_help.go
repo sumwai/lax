@@ -1,0 +1,132 @@
+package cli
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"sort"
+	"strings"
+	"unicode"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+)
+
+// finalizeLeafCommand 统一叶子命令的帮助与参数错误行为：
+// --help 打该命令自己的用法（写 stderr），参数写错也打同一份用法并算用法错误（退出码 2）。
+// newLeafCommand 与 quota 的五个原生子命令都走这里，避免帮助版式与退出码分成两套。
+func finalizeLeafCommand(e *Env, cmd *cobra.Command, summary string, examples ...string) {
+	cmd.SetHelpFunc(func(c *cobra.Command, _ []string) {
+		printCobraCommandUsage(e.Stderr, c, summary, examples...)
+	})
+	cmd.SetFlagErrorFunc(func(c *cobra.Command, err error) error {
+		if errors.Is(err, pflag.ErrHelp) {
+			return err
+		}
+		// 旧版 flag 包在解析出错时先把整个用法写到 stderr；这里保持同样的形状。
+		printCobraCommandUsage(e.Stderr, c, summary, examples...)
+		return usagef("%v", err)
+	})
+}
+
+// printCobraDefaultHelp 复刻 Cobra 的默认帮助模板，给 completion 这类自带命令用：
+// 它们不是本程序定义的命令，帮助保持 Cobra 原文，写 stdout 并以 0 退出。
+func printCobraDefaultHelp(w io.Writer, cmd *cobra.Command) {
+	text := cmd.Long
+	if text == "" {
+		text = cmd.Short
+	}
+	text = strings.TrimRightFunc(text, unicode.IsSpace)
+	if text != "" {
+		fmt.Fprintln(w, text)
+		fmt.Fprintln(w)
+	}
+	if cmd.Runnable() || cmd.HasSubCommands() {
+		fmt.Fprint(w, cmd.UsageString())
+	}
+}
+
+type cobraFlagLine struct {
+	name        string
+	placeholder string
+	usage       string
+	defValue    string
+}
+
+// printCobraCommandUsage 打印原生子命令的「用法 + 选项」。参数按名字排序，
+// 只列本地参数与 --json（--config/--db 不在这里重复）；examples 非空时附在选项后面。
+// 叶子命令的帮助写 stderr，这是参数说明而不是命令结果。
+func printCobraCommandUsage(w io.Writer, cmd *cobra.Command, summary string, examples ...string) {
+	u := newUI(w)
+	name := strings.TrimPrefix(cmd.CommandPath(), appName+" ")
+	fmt.Fprintf(w, "%s %s — %s\n\n", u.bold(appName), u.bold(name), summary)
+	fmt.Fprintf(w, "%s\n  %s %s [选项]\n\n", u.bold("用法:"), appName, name)
+	fmt.Fprintf(w, "%s\n", u.bold("选项:"))
+	for _, f := range cobraFlagLines(cmd) {
+		line := "  --" + f.name
+		if f.placeholder != "" {
+			line += " " + f.placeholder
+		}
+		if f.placeholder == "" && len(f.name) == 1 {
+			line += "\t"
+		} else {
+			line += "\n    \t"
+		}
+		line += strings.ReplaceAll(f.usage, "\n", "\n    \t")
+		if !zeroCobraDefault(f) {
+			if f.placeholder == "string" {
+				line += u.dim(fmt.Sprintf(" (默认: %q)", f.defValue))
+			} else {
+				line += u.dim(fmt.Sprintf(" (默认: %s)", f.defValue))
+			}
+		}
+		fmt.Fprintln(w, line)
+	}
+	if len(examples) > 0 {
+		fmt.Fprintf(w, "\n%s\n", u.bold("示例:"))
+		for _, ex := range examples {
+			fmt.Fprintln(w, u.dim("  "+ex))
+		}
+	}
+}
+
+// cobraFlagLines 收集要展示的参数。Cobra 在解析时会把 root 的持久参数并进
+// cmd.Flags()；这里同时读 InheritedFlags，避免帮助路径没合并时漏掉 --json。
+func cobraFlagLines(cmd *cobra.Command) []cobraFlagLine {
+	seen := map[string]bool{}
+	lines := make([]cobraFlagLine, 0, 8)
+	add := func(f *pflag.Flag) {
+		if seen[f.Name] || f.Name == "help" || f.Hidden {
+			return
+		}
+		switch f.Name {
+		case "config", "db":
+			return
+		}
+		seen[f.Name] = true
+		placeholder, usage := pflag.UnquoteUsage(f)
+		lines = append(lines, cobraFlagLine{name: f.Name, placeholder: placeholder, usage: usage, defValue: f.DefValue})
+	}
+	cmd.Flags().VisitAll(add)
+	cmd.InheritedFlags().VisitAll(add)
+	if !seen["json"] {
+		lines = append(lines, cobraFlagLine{name: "json", usage: "以 JSON 格式输出", defValue: "false"})
+	}
+	sort.Slice(lines, func(i, j int) bool { return lines[i].name < lines[j].name })
+	return lines
+}
+
+// zeroCobraDefault 与 zeroDefault 同一个判断，只是输入换成了 pflag 的名称与默认值。
+func zeroCobraDefault(f cobraFlagLine) bool {
+	switch f.placeholder {
+	case "string":
+		return f.defValue == ""
+	case "":
+		return f.defValue == "false"
+	case "duration":
+		return f.defValue == "0s"
+	case "int", "int64", "uint", "uint64", "float", "float64":
+		return f.defValue == "0"
+	}
+	return f.defValue == ""
+}

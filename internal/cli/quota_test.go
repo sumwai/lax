@@ -2,6 +2,7 @@ package cli_test
 
 import (
 	"math"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -311,6 +312,60 @@ func TestQuotaCommands(t *testing.T) {
 		t.Fatalf("refresh --all 结果 = %+v", refreshRows)
 	}
 	quotaAssertNoSecret(t, "quota refresh --all", out)
+}
+
+// TestQuotaUnknownFlagShowsQuotaUsage 钉住 quota 子命令自己的参数错误：
+// 打的是 quota set 的用法，不是顶层帮助；退出码 2。
+func TestQuotaUnknownFlagShowsQuotaUsage(t *testing.T) {
+	sandbox(t)
+
+	code, out, stderr := run(t, "quota", "set", "cc1", "--nope")
+	if code != 2 {
+		t.Fatalf("未知参数的退出码 = %d，期望 2", code)
+	}
+	if out != "" {
+		t.Fatalf("用法错误不该写 stdout: %s", out)
+	}
+	if !strings.Contains(stderr, "lax quota set") {
+		t.Fatalf("stderr 应打 quota set 的用法: %s", stderr)
+	}
+	if strings.Contains(stderr, "本机模型网关") {
+		t.Fatalf("不该落到顶层用法: %s", stderr)
+	}
+}
+
+// TestQuotaGlobalFlagsAfterSubcommand 钉住 quota 迁到 Cobra 后的参数落点：
+// --db / --config 写在子命令之后也要生效，不能只认写在子命令之前的那一份。
+// 独立库里的账号能被列出来，就说明 quota ls 用的是后置参数指向的库，而不是默认库。
+func TestQuotaGlobalFlagsAfterSubcommand(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+
+	other := t.TempDir()
+	cfgPath := filepath.Join(other, "config.json")
+	dbPath := filepath.Join(other, "lax.db")
+	if code, _, stderr := run(t, "--config", cfgPath, "--db", dbPath, "init"); code != 0 {
+		t.Fatalf("初始化独立配置退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := run(t, "--config", cfgPath, "--db", dbPath,
+		"provider", "add", "custom", "--base-url", "http://127.0.0.1:9",
+		"--openai", "/v1/chat/completions"); code != 0 {
+		t.Fatalf("建厂商退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := run(t, "--config", cfgPath, "--db", dbPath,
+		"account", "add", "c1", "--provider", "custom", "--key", "sk-1"); code != 0 {
+		t.Fatalf("建账号退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	code, out, stderr := run(t, "quota", "ls", "--db", dbPath, "--config", cfgPath, "--json")
+	if code != 0 {
+		t.Fatalf("quota ls 后置全局参数的退出码 = %d，stderr = %s", code, stderr)
+	}
+	var rows []map[string]any
+	mustJSON(t, out, &rows)
+	if len(rows) != 1 || rows[0]["account"] != "c1" {
+		t.Fatalf("后置 --db/--config 没有指向独立库: %+v", rows)
+	}
 }
 
 // TestQuotaSourceOffClearsSnapshot 钉住 quota set --source off 后不再显示旧快照，

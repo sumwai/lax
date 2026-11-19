@@ -98,28 +98,10 @@ func printProviderHeaderHelp(w io.Writer) {
 	_, _ = w.Write([]byte(b.String()))
 }
 
-// cmdProviderHeader 是 provider header 这一组子命令的入口。
-func cmdProviderHeader(e *Env, args []string) error {
-	if isHelpRequest(args) || len(args) == 0 {
-		printProviderHeaderHelp(e.Stdout)
-		return nil
-	}
-	switch args[0] {
-	case "set":
-		return cmdProviderHeaderSet(e, args[1:])
-	case "unset":
-		return cmdProviderHeaderUnset(e, args[1:])
-	case "ls":
-		return cmdProviderHeaderLs(e, args[1:])
-	default:
-		return usagef("未知子命令 %q，可用：set | unset | ls\n用 lax provider header --help 查看用法", args[0])
-	}
-}
-
 // headerProtocolFlag 把 --protocol 的取值换成报文协议，不给（或没出现在命令行上）就是厂商级（空串）。
 // 映射与 --default-protocol 同一份（protocolFromCLIName），落到报文协议全名：store 只认报文协议，
 // 命令行写法 `openai` 直接落库会让这条头永远匹配不上真实协议，等于这条头从来没生效过。
-func headerProtocolFlag(fs *flagSet, raw, usageLine string) (string, error) {
+func headerProtocolFlag(fs *leafFlags, raw, usageLine string) (string, error) {
 	if !flagWasSet(fs, "protocol") {
 		return "", nil
 	}
@@ -175,8 +157,7 @@ func checkHeaderValue(raw, usageLine string) error {
 }
 
 // cmdProviderHeaderSet 声明一条附加头，覆盖语义：同名同作用范围再写一次就是改值。
-func cmdProviderHeaderSet(e *Env, args []string) error {
-	fs := newFlagSet(e, "provider header set", "声明或覆盖一家厂商的一条附加请求头")
+func cmdProviderHeaderSet(e *Env, fs *leafFlags, args []string) error {
 	protocol := fs.String("protocol", "", "只加给这条协议：anthropic | openai | responses | gemini；不给就是厂商级，这家厂商的每条路由都带上它")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -229,8 +210,7 @@ func cmdProviderHeaderSet(e *Env, args []string) error {
 
 // cmdProviderHeaderUnset 删掉一条声明。删不到时报错并列出这家厂商现有的声明：
 // 多半是头名或协议写错了，光说一句「没有这条头」看不出下一步该改哪个参数。
-func cmdProviderHeaderUnset(e *Env, args []string) error {
-	fs := newFlagSet(e, "provider header unset", "删掉一条声明过的附加请求头")
+func cmdProviderHeaderUnset(e *Env, fs *leafFlags, args []string) error {
 	protocol := fs.String("protocol", "", "删的是哪一条：anthropic | openai | responses | gemini；不给就是厂商级那条")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -316,8 +296,7 @@ func headerNotFoundError(st *store.Store, provider, proto, name string) error {
 }
 
 // cmdProviderHeaderLs 列已声明的附加头。不给厂商就列全部厂商的，一次看全。
-func cmdProviderHeaderLs(e *Env, args []string) error {
-	fs := newFlagSet(e, "provider header ls", "列已声明的附加请求头（值脱敏）")
+func cmdProviderHeaderLs(e *Env, fs *leafFlags, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

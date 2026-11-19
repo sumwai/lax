@@ -15,48 +15,33 @@ import (
 	"lax/internal/store"
 )
 
+// quota 一组的摘要文本。组级帮助、Cobra 组与子命令共用同一份，避免两处漂移。
+const (
+	quotaLsSummary      = "列出各账号的额度快照"
+	quotaShowSummary    = "查看一个账号的额度明细；加 --settings 看监控设置"
+	quotaRefreshSummary = "手动刷新一个账号或全部账号的额度"
+	quotaSetSummary     = "修改账号的额度监控设置（只改显式给出的项）"
+	quotaUnsetSummary   = "清除账号的额度监控设置（整行或某一项）"
+
+	// 子命令 --help 的摘要与组级清单历来是两句略有出入的话，照原样保留。
+	quotaSetHelpSummary   = "修改账号的额度监控设置，只改显式给出的项"
+	quotaUnsetHelpSummary = "清除账号的额度监控设置，恢复默认"
+)
+
 // quotaSubs 是 quota 一组的子命令清单，组级帮助与错误提示都读它。
 var quotaSubs = []groupItem{
-	{"ls", "列出各账号的额度快照"},
-	{"show", "查看一个账号的额度明细；加 --settings 看监控设置"},
-	{"refresh", "手动刷新一个账号或全部账号的额度"},
-	{"set", "修改账号的额度监控设置（只改显式给出的项）"},
-	{"unset", "清除账号的额度监控设置（整行或某一项）"},
+	{"ls", quotaLsSummary},
+	{"show", quotaShowSummary},
+	{"refresh", quotaRefreshSummary},
+	{"set", quotaSetSummary},
+	{"unset", quotaUnsetSummary},
 }
 
 // quotaAutoRefreshInterval 是 serve 里自动刷新的间隔。自动刷新默认关闭，
 // 只有设置了 auto_refresh=true 的账号会被刷；启动后先刷一次，再按这个间隔走。
 const quotaAutoRefreshInterval = 30 * time.Minute
 
-func cmdQuota(e *Env, args []string) error {
-	if isHelpRequest(args) || len(args) == 0 {
-		printGroupHelp(e.Stdout, "quota", "账号额度监控与到期提示（只读，不改选号行为）", quotaSubs)
-		return nil
-	}
-	switch args[0] {
-	case "ls":
-		return cmdQuotaLs(e, args[1:])
-	case "show":
-		return cmdQuotaShow(e, args[1:])
-	case "refresh":
-		return cmdQuotaRefresh(e, args[1:])
-	case "set":
-		return cmdQuotaSet(e, args[1:])
-	case "unset":
-		return cmdQuotaUnset(e, args[1:])
-	default:
-		return usagef("未知子命令 %q，可用：ls | show | refresh | set | unset\n用 lax quota --help 查看子命令", args[0])
-	}
-}
-
-func cmdQuotaLs(e *Env, args []string) error {
-	fs := newFlagSet(e, "quota ls", "列出各账号的额度快照")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 0 {
-		return usagef("用法：lax quota ls [--json]\n看一个账号的明细用 lax quota show <账号>")
-	}
+func runQuotaLs(e *Env) error {
 	a, err := openApp(e, true)
 	if err != nil {
 		return err
@@ -151,24 +136,16 @@ func cmdQuotaLs(e *Env, args []string) error {
 	return nil
 }
 
-func cmdQuotaShow(e *Env, args []string) error {
-	fs := newFlagSet(e, "quota show", "查看一个账号的额度明细；加 --settings 看监控设置")
-	settingsOnly := fs.Bool("settings", false, "只看监控设置，不显示额度快照")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 1 {
-		return usagef("用法：lax quota show <账号> [--settings] [--json]")
-	}
+func runQuotaShow(e *Env, account string, settingsOnly bool) error {
 	a, err := openApp(e, true)
 	if err != nil {
 		return err
 	}
 	defer a.Close()
 
-	acc, err := a.st.GetAccount(fs.Arg(0))
+	acc, err := a.st.GetAccount(account)
 	if err != nil {
-		return fmt.Errorf("账号 %q 不存在；用 lax account ls 看现有账号", fs.Arg(0))
+		return fmt.Errorf("账号 %q 不存在；用 lax account ls 看现有账号", account)
 	}
 	cfg, _, err := a.st.QuotaSettings(acc.ID)
 	if err != nil {
@@ -177,7 +154,7 @@ func cmdQuotaShow(e *Env, args []string) error {
 
 	// 监控设置是配置，不是额度事实：默认不跟快照混在一起，
 	// 需要时用 --settings 单独看，避免在明细下面再叠一张配置表。
-	if *settingsOnly {
+	if settingsOnly {
 		if e.JSON {
 			return e.printJSON(map[string]any{
 				"account":  acc.Name,
@@ -469,20 +446,7 @@ func quotaFactNote(f quota.Facts) string {
 	return "说明：5 小时/每周窗口是限流窗口，不是月度总额；上游用量是所有客户端合计，仅供查看，不参与选号。"
 }
 
-func cmdQuotaRefresh(e *Env, args []string) error {
-	fs := newFlagSet(e, "quota refresh", "手动刷新一个账号或全部账号的额度")
-	all := fs.Bool("all", false, "刷新全部账号")
-	usage := "用法：lax quota refresh <账号> | lax quota refresh --all"
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *all && fs.NArg() != 0 {
-		return usagef("--all 与账号名不能一起写\n%s", usage)
-	}
-	if !*all && fs.NArg() != 1 {
-		return usagef("要写一个账号名，或加 --all\n%s", usage)
-	}
-
+func runQuotaRefresh(e *Env, account string, all bool) error {
 	a, err := openApp(e, true)
 	if err != nil {
 		return err
@@ -490,7 +454,7 @@ func cmdQuotaRefresh(e *Env, args []string) error {
 	defer a.Close()
 
 	var accounts []store.Account
-	if *all {
+	if all {
 		accounts, err = a.st.ListAccounts()
 		if err != nil {
 			return err
@@ -503,9 +467,9 @@ func cmdQuotaRefresh(e *Env, args []string) error {
 			return nil
 		}
 	} else {
-		acc, err2 := a.st.GetAccount(fs.Arg(0))
+		acc, err2 := a.st.GetAccount(account)
 		if err2 != nil {
-			return fmt.Errorf("账号 %q 不存在；用 lax account ls 看现有账号", fs.Arg(0))
+			return fmt.Errorf("账号 %q 不存在；用 lax account ls 看现有账号", account)
 		}
 		accounts = []store.Account{acc}
 	}
@@ -600,30 +564,32 @@ func cmdQuotaRefresh(e *Env, args []string) error {
 	return nil
 }
 
-func cmdQuotaSet(e *Env, args []string) error {
-	fs := newFlagSet(e, "quota set", "修改账号的额度监控设置，只改显式给出的项")
-	source := fs.String("source", "", "监控来源：auto / commandcode / deepseek / off")
-	fxRate := fs.Float64("fx-rate", 0, "非 USD 币种折 USD 的手工汇率，例如 CNY 填 0.14")
-	autoRefresh := fs.Bool("auto-refresh", false, "serve 时是否定时刷新这个账号的额度")
-	expiryMode := fs.String("expiry-mode", "", "到期处理：warn / deprioritize / exclude")
-	expiryDays := fs.Int("expiry-days", 0, "临近到期的提前天数，默认 3")
-	baseURL := fs.String("base-url", "", "额度接口地址；留空时用账号所属厂商的 base_url")
-	usage := "用法：lax quota set <账号> [--source auto|commandcode|deepseek|off] [--fx-rate N] " +
-		"[--auto-refresh[=true|false]] [--expiry-mode warn|deprioritize|exclude] [--expiry-days N] [--base-url <地址>]"
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 1 {
-		return usagef("%s\n账号名要写一个", usage)
-	}
+// quotaSetPatch 记录 quota set 在命令行上显式给出的项；*Set 为 true 才写回配置。
+type quotaSetPatch struct {
+	source      string
+	expiryMode  string
+	baseURL     string
+	fxRate      float64
+	expiryDays  int
+	autoRefresh bool
+
+	sourceSet      bool
+	fxRateSet      bool
+	autoRefreshSet bool
+	expiryModeSet  bool
+	expiryDaysSet  bool
+	baseURLSet     bool
+}
+
+func runQuotaSet(e *Env, account string, patch quotaSetPatch) error {
 	a, err := openApp(e, true)
 	if err != nil {
 		return err
 	}
 	defer a.Close()
-	acc, err := a.st.GetAccount(fs.Arg(0))
+	acc, err := a.st.GetAccount(account)
 	if err != nil {
-		return fmt.Errorf("账号 %q 不存在；用 lax account ls 看现有账号", fs.Arg(0))
+		return fmt.Errorf("账号 %q 不存在；用 lax account ls 看现有账号", account)
 	}
 	cfg, _, err := a.st.QuotaSettings(acc.ID)
 	if err != nil {
@@ -632,36 +598,36 @@ func cmdQuotaSet(e *Env, args []string) error {
 	oldSource := cfg.Source
 
 	changed := false
-	if fs.Changed("source") {
-		cfg.Source = strings.TrimSpace(*source)
+	if patch.sourceSet {
+		cfg.Source = strings.TrimSpace(patch.source)
 		changed = true
 	}
-	if fs.Changed("fx-rate") {
-		v := *fxRate
+	if patch.fxRateSet {
+		v := patch.fxRate
 		cfg.FXRate = &v
 		changed = true
 	}
-	if fs.Changed("auto-refresh") {
-		cfg.AutoRefresh = *autoRefresh
+	if patch.autoRefreshSet {
+		cfg.AutoRefresh = patch.autoRefresh
 		changed = true
 	}
-	if fs.Changed("expiry-mode") {
-		cfg.ExpiryMode = strings.TrimSpace(*expiryMode)
+	if patch.expiryModeSet {
+		cfg.ExpiryMode = strings.TrimSpace(patch.expiryMode)
 		changed = true
 	}
-	if fs.Changed("expiry-days") {
-		cfg.ExpiryDays = *expiryDays
+	if patch.expiryDaysSet {
+		cfg.ExpiryDays = patch.expiryDays
 		changed = true
 	}
-	if fs.Changed("base-url") {
-		cfg.BaseURL = strings.TrimSpace(*baseURL)
+	if patch.baseURLSet {
+		cfg.BaseURL = strings.TrimSpace(patch.baseURL)
 		changed = true
 	}
 	if !changed {
-		return usagef("至少给一个要改的项\n%s", usage)
+		return usagef("至少给一个要改的项\n%s", quotaSetUsage)
 	}
 	if err := quota.ValidateSettings(cfg); err != nil {
-		return usagef("%v\n%s", err, usage)
+		return usagef("%v\n%s", err, quotaSetUsage)
 	}
 	if err := a.st.SetQuotaSettings(acc.ID, cfg); err != nil {
 		return err
@@ -680,32 +646,15 @@ func cmdQuotaSet(e *Env, args []string) error {
 	return nil
 }
 
-func cmdQuotaUnset(e *Env, args []string) error {
-	fs := newFlagSet(e, "quota unset", "清除账号的额度监控设置，恢复默认")
-	usage := "用法：lax quota unset <账号> [source|fx_rate|auto_refresh|expiry_mode|expiry_days|base_url]"
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() < 1 || fs.NArg() > 2 {
-		return usagef("%s\n不写字段时删掉整行设置；写字段时只把那一项恢复默认", usage)
-	}
-	field := ""
-	if fs.NArg() == 2 {
-		field = strings.TrimSpace(fs.Arg(1))
-		switch field {
-		case "source", "fx_rate", "auto_refresh", "expiry_mode", "expiry_days", "base_url":
-		default:
-			return usagef("不认识的字段 %q，可用 source、fx_rate、auto_refresh、expiry_mode、expiry_days、base_url\n%s", field, usage)
-		}
-	}
+func runQuotaUnset(e *Env, account, field string) error {
 	a, err := openApp(e, true)
 	if err != nil {
 		return err
 	}
 	defer a.Close()
-	acc, err := a.st.GetAccount(fs.Arg(0))
+	acc, err := a.st.GetAccount(account)
 	if err != nil {
-		return fmt.Errorf("账号 %q 不存在；用 lax account ls 看现有账号", fs.Arg(0))
+		return fmt.Errorf("账号 %q 不存在；用 lax account ls 看现有账号", account)
 	}
 	cfg, found, err := a.st.QuotaSettings(acc.ID)
 	if err != nil {

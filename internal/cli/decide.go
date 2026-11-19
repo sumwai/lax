@@ -42,6 +42,10 @@ func (r *repeatedFlag) Set(v string) error {
 	return nil
 }
 
+// laxValues / setLaxValues 让执行遍拿到声明遍收集到的取值，见 leafFlags.Var。
+func (r *repeatedFlag) laxValues() []string     { return r.values }
+func (r *repeatedFlag) setLaxValues(v []string) { r.values = v }
+
 // decideItem 是 choice 的一个选项或 score 的一级级别：key 是判据本身，desc 是可选说明。
 // 写法是逗号分隔的 `key` 或 `key=说明`，`key=说明` 时说明是给人读的判据标签。
 type decideItem struct {
@@ -573,8 +577,7 @@ func rawCell(raw json.RawMessage) string {
 
 // cmdDecide 是 systemone 决策请求的入口：把 state 与问题组发给本进程，打印每个问题的答案与概率。
 // 起网关的方式与 call 一致（起一个只监听回环地址的临时网关），不另写一套连接方式。
-func cmdDecide(e *Env, args []string) error {
-	fs := newFlagSet(e, "model decide", "发一条 systemone 决策请求：一个 state 加一组问题，打印每个问题的答案与概率")
+func cmdDecide(e *Env, fs *leafFlags, args []string) error {
 	model := fs.String("model", "", "模型名：有效出站协议必须是 systemone（别名先按 model alias 解析）")
 	state := fs.String("state", "", "决策要看的材料：纯文本按字符串发；首字符是 {、[ 或 \" 时按 JSON 解析")
 	questionsJSON := fs.String("questions", "", "整块 questions 对象（JSON）：给了它就不再拼问题，与 --noul/--choice/--score 互斥")

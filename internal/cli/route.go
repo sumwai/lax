@@ -21,33 +21,7 @@ var routeSubs = []groupItem{
 	{"policy", "维护上游失败处理策略：ls / show / add / set / unset / rm / enable / disable / test"},
 }
 
-func cmdRoute(e *Env, args []string) error {
-	if isHelpRequest(args) || len(args) == 0 {
-		printGroupHelp(e.Stdout, "route", "管理选号策略、账号权重与失败处理", routeSubs)
-		return nil
-	}
-	switch args[0] {
-	case "ls":
-		return cmdRouteLs(e, args[1:])
-	case "show":
-		return cmdRouteShow(e, args[1:])
-	case "set":
-		return cmdRouteSet(e, args[1:])
-	case "unset":
-		return cmdRouteUnset(e, args[1:])
-	case "account":
-		return cmdRouteAccount(e, args[1:])
-	case "explain":
-		return cmdRouteExplain(e, args[1:])
-	case "policy":
-		return cmdRoutePolicy(e, args[1:])
-	default:
-		return usagef("未知子命令 %q，可用：ls | show | set | unset | account | explain | policy\n用 lax route --help 查看子命令", args[0])
-	}
-}
-
-func cmdRouteLs(e *Env, args []string) error {
-	fs := newFlagSet(e, "route ls", "列出默认策略与按模型的覆盖")
+func cmdRouteLs(e *Env, fs *leafFlags, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -107,8 +81,7 @@ func cmdRouteLs(e *Env, args []string) error {
 	return nil
 }
 
-func cmdRouteShow(e *Env, args []string) error {
-	fs := newFlagSet(e, "route show", "查看一个模型或默认策略最终生效的设置")
+func cmdRouteShow(e *Env, fs *leafFlags, args []string) error {
 	useDefault := fs.Bool("default", false, "查看默认策略")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -159,9 +132,8 @@ func cmdRouteShow(e *Env, args []string) error {
 	return nil
 }
 
-func cmdRouteSet(e *Env, args []string) error {
+func cmdRouteSet(e *Env, fs *leafFlags, args []string) error {
 	defaults := store.DefaultRoutePolicy()
-	fs := newFlagSet(e, "route set", "设置模型或默认路由策略（整条覆盖）")
 	useDefault := fs.Bool("default", false, "写默认策略")
 	strategy := fs.String("strategy", "", "priority / rotate / weighted / success / softmax")
 	sticky := fs.String("sticky", defaults.Sticky, "会话粘性：prefer / off / strict")
@@ -242,8 +214,7 @@ func cmdRouteSet(e *Env, args []string) error {
 	return nil
 }
 
-func cmdRouteUnset(e *Env, args []string) error {
-	fs := newFlagSet(e, "route unset", "删除一条策略，回落到默认或内置默认")
+func cmdRouteUnset(e *Env, fs *leafFlags, args []string) error {
 	useDefault := fs.Bool("default", false, "删除默认策略")
 	usage := "用法：lax route unset <模型> | lax route unset --default"
 	if err := fs.Parse(args); err != nil {
@@ -290,29 +261,7 @@ func cmdRouteUnset(e *Env, args []string) error {
 	return nil
 }
 
-func cmdRouteAccount(e *Env, args []string) error {
-	if isHelpRequest(args) || len(args) == 0 {
-		printGroupHelp(e.Stdout, "route account", "设置账号在选号里的权重", []groupItem{
-			{"ls", "列出显式权重，或看一个模型上所有账号的最终权重"},
-			{"set", "设置账号默认权重或账号在某个模型上的权重"},
-			{"unset", "删除一条账号权重，回落到账号默认或 1"},
-		})
-		return nil
-	}
-	switch args[0] {
-	case "ls":
-		return cmdRouteAccountLs(e, args[1:])
-	case "set":
-		return cmdRouteAccountSet(e, args[1:])
-	case "unset":
-		return cmdRouteAccountUnset(e, args[1:])
-	default:
-		return usagef("未知子命令 %q，可用：ls | set | unset\n用 lax route account --help 查看子命令", args[0])
-	}
-}
-
-func cmdRouteAccountLs(e *Env, args []string) error {
-	fs := newFlagSet(e, "route account ls", "列出账号权重，或看一个模型上所有账号的最终权重")
+func cmdRouteAccountLs(e *Env, fs *leafFlags, args []string) error {
 	model := fs.String("model", "", "只看这个模型上的最终权重")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -413,8 +362,7 @@ func printRouteAccountWeights(e *Env, items []routeAccountWeightJSON) error {
 	return nil
 }
 
-func cmdRouteAccountSet(e *Env, args []string) error {
-	fs := newFlagSet(e, "route account set", "设置账号默认权重或账号在某个模型上的权重")
+func cmdRouteAccountSet(e *Env, fs *leafFlags, args []string) error {
 	model := fs.String("model", "", "只覆盖这个模型；不写就是账号默认")
 	weight := fs.Int("weight", 1, "权重，1 到 1000")
 	usage := "用法：lax route account set <账号> [--model <模型>] --weight N"
@@ -465,8 +413,7 @@ func cmdRouteAccountSet(e *Env, args []string) error {
 	return nil
 }
 
-func cmdRouteAccountUnset(e *Env, args []string) error {
-	fs := newFlagSet(e, "route account unset", "删除一条账号权重，回落到账号默认或 1")
+func cmdRouteAccountUnset(e *Env, fs *leafFlags, args []string) error {
 	model := fs.String("model", "", "删除这个模型上的覆盖；不写就删账号默认")
 	usage := "用法：lax route account unset <账号> [--model <模型>]"
 	if err := fs.Parse(args); err != nil {
@@ -516,8 +463,7 @@ func cmdRouteAccountUnset(e *Env, args []string) error {
 	return nil
 }
 
-func cmdRouteExplain(e *Env, args []string) error {
-	fs := newFlagSet(e, "route explain", "预演一次选号，不请求上游、不写记录")
+func cmdRouteExplain(e *Env, fs *leafFlags, args []string) error {
 	session := fs.String("session", "", "会话键，用来演示粘性")
 	seed := fs.Int64("seed", 1, "softmax 的随机种子；同一个种子与同样数据得到同样顺序")
 	usage := "用法：lax route explain <模型> [--session <会话键>] [--seed N] [--json]"
@@ -629,7 +575,7 @@ func cmdRouteExplain(e *Env, args []string) error {
 	return nil
 }
 
-func routeTargetArg(fs *flagSet, useDefault bool, usage string) (string, error) {
+func routeTargetArg(fs *leafFlags, useDefault bool, usage string) (string, error) {
 	if useDefault && fs.NArg() > 0 {
 		return "", usagef("--default 与模型名不能一起写\n%s", usage)
 	}

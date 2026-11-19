@@ -28,23 +28,6 @@ var dialectSubs = []groupItem{
 	{"unset", "删掉一条绑定"},
 }
 
-func cmdModelDialect(e *Env, args []string) error {
-	if isHelpRequest(args) || len(args) == 0 {
-		printGroupHelp(e.Stdout, "model dialect", "方言绑定：模型的上游形状由哪条方言描述", dialectSubs)
-		return nil
-	}
-	switch args[0] {
-	case "ls":
-		return cmdModelDialectLs(e, args[1:])
-	case "set":
-		return cmdModelDialectSet(e, args[1:])
-	case "unset":
-		return cmdModelDialectUnset(e, args[1:])
-	default:
-		return usagef("未知子命令 %q，可用：ls | set | unset\n用 lax model dialect --help 查看子命令", args[0])
-	}
-}
-
 // dialectLsJSON 是 ls 的一行。
 type dialectLsJSON struct {
 	Model     string `json:"model"`
@@ -55,8 +38,7 @@ type dialectLsJSON struct {
 	UpdatedAt int64  `json:"updated_at"`
 }
 
-func cmdModelDialectLs(e *Env, args []string) error {
-	fs := newFlagSet(e, "model dialect ls", "列出模型绑定的方言")
+func cmdModelDialectLs(e *Env, fs *leafFlags, args []string) error {
 	provider := fs.String("provider", "", "只看这家厂商")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -119,8 +101,7 @@ func cmdModelDialectLs(e *Env, args []string) error {
 	return nil
 }
 
-func cmdModelDialectSet(e *Env, args []string) error {
-	fs := newFlagSet(e, "model dialect set", "把模型的一个操作绑到一条方言")
+func cmdModelDialectSet(e *Env, fs *leafFlags, args []string) error {
 	provider := fs.String("provider", "", "厂商；不给时按模型名唯一确定")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -169,8 +150,7 @@ func cmdModelDialectSet(e *Env, args []string) error {
 	return nil
 }
 
-func cmdModelDialectUnset(e *Env, args []string) error {
-	fs := newFlagSet(e, "model dialect unset", "删掉一条方言绑定")
+func cmdModelDialectUnset(e *Env, fs *leafFlags, args []string) error {
 	provider := fs.String("provider", "", "厂商；不给时按模型名唯一确定")
 	if err := fs.Parse(args); err != nil {
 		return err

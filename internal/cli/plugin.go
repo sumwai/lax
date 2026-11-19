@@ -82,44 +82,6 @@ const (
 	pluginActorSIGHUP = "sighup"
 )
 
-// cmdPlugin 是 plugin 这一组子命令的入口。
-func cmdPlugin(e *Env, args []string) error {
-	if isHelpRequest(args) || len(args) == 0 {
-		printGroupHelp(e.Stdout, "plugin", "插件：安装、升级、回滚、校验、日志、启停、卸载与自检", pluginSubs)
-		return nil
-	}
-	switch args[0] {
-	case "install":
-		return cmdPluginInstall(e, args[1:])
-	case "update":
-		return cmdPluginUpdate(e, args[1:])
-	case "rollback":
-		return cmdPluginRollback(e, args[1:])
-	case "verify":
-		return cmdPluginVerify(e, args[1:])
-	case "logs":
-		return cmdPluginLogs(e, args[1:])
-	case "reload":
-		return cmdPluginReload(e, args[1:])
-	case "config":
-		return cmdPluginConfig(e, args[1:])
-	case "ls":
-		return cmdPluginLs(e, args[1:])
-	case "show":
-		return cmdPluginShow(e, args[1:])
-	case "enable":
-		return cmdPluginToggle(e, args[1:], true)
-	case "disable":
-		return cmdPluginToggle(e, args[1:], false)
-	case "rm":
-		return cmdPluginRm(e, args[1:])
-	case "doctor":
-		return cmdPluginDoctor(e, args[1:])
-	default:
-		return usagef("未知子命令 %q，可用：install | update | rollback | verify | logs | reload | ls | show | enable | disable | rm | doctor\n用 lax plugin --help 查看子命令", args[0])
-	}
-}
-
 // ---------------------------------------------------------------- 审计
 
 // auditPlugin 写一条审计。写不进去只在 stderr 打一行：
@@ -603,8 +565,7 @@ func resolveTrust(m plugin.Manifest, requested string) (string, error) {
 }
 
 // cmdPluginInstall 是安装流水线：解析校验 → 查版本与方言冲突 → 复制到 installed/ → 写目录 → 写版本行 → 启停。
-func cmdPluginInstall(e *Env, args []string) error {
-	fs := newFlagSet(e, "plugin install", "从本地目录、GitHub 仓库或官方插件名安装插件，登记它的厂商、模型与方言")
+func cmdPluginInstall(e *Env, fs *leafFlags, args []string) error {
 	noEnable := fs.Bool("no-enable", false, "只安装，不启用")
 	trust := fs.String("trust", "", "信任级别：declarative 或 sandboxed，默认按 manifest 的 runtime 推断")
 	dryRun := fs.Bool("dry-run", false, "只打印将要写入的厂商、路由、模型、方言、别名与权限，不写库也不复制文件")
@@ -896,8 +857,7 @@ const pluginUpdateUsage = "用法：lax plugin update <插件 ID> --source <目�
 //
 // 流水线与 install 是同一套：解析校验 → 版本与方言冲突 → 复制到 installed/ → 写目录与版本行。
 // 区别在失败的时候：活动版本只在最后一步（版本行入库）才切，包或目录写不进去时旧版本仍然可服务。
-func cmdPluginUpdate(e *Env, args []string) error {
-	fs := newFlagSet(e, "plugin update", "把已装插件升到来源里的新版本")
+func cmdPluginUpdate(e *Env, fs *leafFlags, args []string) error {
 	source := fs.String("source", "", "新版本的包目录、GitHub 来源或官方插件名，里面要有 lax.plugin.json")
 	dryRun := fs.Bool("dry-run", false, "只打印将要写入的变化，不复制也不写库")
 	yes := fs.Bool("yes", false, "确实要切换活动版本；不给时只打印将发生的变化")
@@ -1050,8 +1010,7 @@ func cmdPluginUpdate(e *Env, args []string) error {
 //
 // 切换活动指针与写目录事实是两件事：指针先切（任务要求的顺序），目录写不进去时把指针改回来，
 // 否则库里的「活动版本」会指着一个没有目录事实的版本。
-func cmdPluginRollback(e *Env, args []string) error {
-	fs := newFlagSet(e, "plugin rollback", "把活动版本切回一个已装过的旧版本")
+func cmdPluginRollback(e *Env, fs *leafFlags, args []string) error {
 	version := fs.String("version", "", "要切回的已装版本号")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1177,8 +1136,7 @@ func installedRuntime(st *store.Store, p store.Plugin) string {
 	return pv.Runtime
 }
 
-func cmdPluginLs(e *Env, args []string) error {
-	fs := newFlagSet(e, "plugin ls", "列出已装插件，或官方插件仓库里可安装的插件")
+func cmdPluginLs(e *Env, fs *leafFlags, args []string) error {
 	onlyEnabled := fs.Bool("enabled", false, "只列启用的插件")
 	available := fs.Bool("available", false, "列出官方插件仓库里可安装的插件（会联网，读默认分支）")
 	if err := fs.Parse(args); err != nil {
@@ -1290,8 +1248,7 @@ type pluginShowJSON struct {
 	Logs        []pluginLogJSON          `json:"logs"`
 }
 
-func cmdPluginShow(e *Env, args []string) error {
-	fs := newFlagSet(e, "plugin show", "查看插件概览、权限、路由与最近事件")
+func cmdPluginShow(e *Env, fs *leafFlags, args []string) error {
 	verbose := fs.Bool("verbose", false, "显示完整 manifest JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1597,8 +1554,7 @@ func printRecentLogs(e *Env, rows []pluginLogJSON) {
 //
 // 与 doctor 的分工：doctor 会写状态、会开沙箱调钩子，是「现在还能用吗」；
 // verify 只看静态事实（哈希、方言声明、运行时），是「跟装的时候还一样吗」，可以随时跑。
-func cmdPluginVerify(e *Env, args []string) error {
-	fs := newFlagSet(e, "plugin verify", "只做校验不改库：包哈希、manifest 哈希、方言与运行时")
+func cmdPluginVerify(e *Env, fs *leafFlags, args []string) error {
 	all := fs.Bool("all", false, "校验全部已装插件")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1756,8 +1712,7 @@ type pluginLogQuery struct {
 // pluginFollowInterval 是 --follow 的轮询间隔，与 log tail --follow 一致。
 const pluginFollowInterval = time.Second
 
-func cmdPluginLogs(e *Env, args []string) error {
-	fs := newFlagSet(e, "plugin logs", "查看插件的运行日志")
+func cmdPluginLogs(e *Env, fs *leafFlags, args []string) error {
 	level := fs.String("level", "", "只显示某个级别：debug | info | warn | error")
 	timeRange := addTimeRangeFlags(fs, "")
 	limit := fs.Int("limit", 50, "最多显示多少条")
@@ -1889,8 +1844,7 @@ func printPluginLogs(e *Env, rows []store.PluginLog) error {
 //
 // 不重启进程：在途请求不断，换表后新请求按新版本走。pid 从数据目录里的 lax.pid 读，
 // 读不到或进程不在时直接报错，不猜。
-func cmdPluginReload(e *Env, args []string) error {
-	fs := newFlagSet(e, "plugin reload", "让正在运行的 lax serve 重读插件表")
+func cmdPluginReload(e *Env, fs *leafFlags, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1964,12 +1918,11 @@ func reloadedPluginIDs(st *store.Store, only string) []string {
 
 // ---------------------------------------------------------------- enable / disable
 
-func cmdPluginToggle(e *Env, args []string, enable bool) error {
-	name, summary := "plugin disable", "停用一个插件，网关重启后不再加载它的方言"
+func cmdPluginToggle(e *Env, fs *leafFlags, args []string, enable bool) error {
+	name := "plugin disable"
 	if enable {
-		name, summary = "plugin enable", "启用一个插件，网关重启后加载它的方言"
+		name = "plugin enable"
 	}
-	fs := newFlagSet(e, name, summary)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -2037,8 +1990,7 @@ func cmdPluginToggle(e *Env, args []string, enable bool) error {
 
 // ---------------------------------------------------------------- rm
 
-func cmdPluginRm(e *Env, args []string) error {
-	fs := newFlagSet(e, "plugin rm", "卸载插件，默认保留包目录")
+func cmdPluginRm(e *Env, fs *leafFlags, args []string) error {
 	purge := fs.Bool("purge", false, "连同 installed/<插件 ID> 下的包一起删除")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -2143,8 +2095,7 @@ type pluginDoctorResult struct {
 	Checks []pluginCheck `json:"checks"`
 }
 
-func cmdPluginDoctor(e *Env, args []string) error {
-	fs := newFlagSet(e, "plugin doctor", "检查已装插件：包完整性、manifest 哈希、方言登记与状态")
+func cmdPluginDoctor(e *Env, fs *leafFlags, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

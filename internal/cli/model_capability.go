@@ -36,25 +36,6 @@ var capabilitySubs = []groupItem{
 	{"ls", "列出已声明能力、音色与音频格式的模型"},
 }
 
-func cmdModelCapability(e *Env, args []string) error {
-	if isHelpRequest(args) || len(args) == 0 {
-		printGroupHelp(e.Stdout, "model capability", "模型能力声明：入站端点能不能用这个模型、能用哪些音色", capabilitySubs)
-		return nil
-	}
-	switch args[0] {
-	case "add":
-		return cmdModelCapabilityWrite(e, args[1:], true)
-	case "set":
-		return cmdModelCapabilityWrite(e, args[1:], false)
-	case "unset":
-		return cmdModelCapabilityUnset(e, args[1:])
-	case "ls":
-		return cmdModelCapabilityLs(e, args[1:])
-	default:
-		return usagef("未知子命令 %q，可用：add | set | unset | ls\n用 lax model capability --help 查看子命令", args[0])
-	}
-}
-
 // capabilityWriteJSON 是 add 与 set 的 --json 形状：报的是合并之后整行的事实。
 // Dialects 只在本次给了 --dialect 时出现，键是操作名。
 type capabilityWriteJSON struct {
@@ -66,16 +47,11 @@ type capabilityWriteJSON struct {
 	Dialects     map[string]string `json:"dialects,omitempty"`
 }
 
-func cmdModelCapabilityWrite(e *Env, args []string, additive bool) error {
-	name := "model capability set"
+func cmdModelCapabilityWrite(e *Env, fs *leafFlags, args []string, additive bool) error {
 	usageLine := modelCapabilitySetUsage
-	summary := "用新列表替换能力声明，命令行没给的字段不动"
 	if additive {
-		name = "model capability add"
 		usageLine = modelCapabilityAddUsage
-		summary = "把能力、音色或音频格式并进现有声明"
 	}
-	fs := newFlagSet(e, name, summary)
 	provider := fs.String("provider", "", "厂商；不给时按模型名唯一确定")
 	var capabilityFlags repeatedFlag
 	fs.Var(&capabilityFlags, "capability", "能力位：chat | embedding | speech | transcription，可重复或逗号分隔")
@@ -211,8 +187,7 @@ type capabilityUnsetJSON struct {
 	AudioFormats []string `json:"audio_formats"`
 }
 
-func cmdModelCapabilityUnset(e *Env, args []string) error {
-	fs := newFlagSet(e, "model capability unset", "清掉一项能力声明")
+func cmdModelCapabilityUnset(e *Env, fs *leafFlags, args []string) error {
 	provider := fs.String("provider", "", "厂商；不给时按模型名唯一确定")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -270,8 +245,7 @@ type capabilityLsJSON struct {
 	AudioFormats []string `json:"audio_formats"`
 }
 
-func cmdModelCapabilityLs(e *Env, args []string) error {
-	fs := newFlagSet(e, "model capability ls", "列出已声明能力、音色与音频格式的模型")
+func cmdModelCapabilityLs(e *Env, fs *leafFlags, args []string) error {
 	provider := fs.String("provider", "", "只看这家厂商")
 	if err := fs.Parse(args); err != nil {
 		return err

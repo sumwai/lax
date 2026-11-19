@@ -4,7 +4,6 @@ package cli
 import (
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"strings"
@@ -51,79 +50,88 @@ type Env struct {
 type command struct {
 	name    string
 	summary string
-	run     func(*Env, []string) error
 }
 
 // Run 是 CLI 入口，返回进程退出码。
+//
+// 参数解析全部交给 Cobra：--json / --config / --db 是 root 的持久参数，
+// 写在子命令前后都生效。这里只保留两条旧约定：未知一级命令仍打中文提示加顶层帮助；
+// 错误的退出码与「<一级命令>: <错误>」前缀与旧分发器一致。
 func Run(args []string, stdout, stderr io.Writer) int {
 	env := &Env{Stdout: stdout, Stderr: stderr}
+	root := newRootCommand(env)
 
 	ui := newUI(stderr)
-	rest, err := env.parseGlobals(args)
-	if errors.Is(err, flag.ErrHelp) {
-		printUsage(stdout)
-		return exitOK
-	}
+	name, err := firstCommandName(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "%s: %v\n", ui.err(appName), err)
-		return exitUsage
-	}
-	if len(rest) == 0 {
-		// 不带子命令与 --help 等价：打印帮助算成功，退出码 0，与 --help 一致。
-		printUsage(stdout)
-		return exitOK
-	}
-
-	cmd, ok := commandTable[rest[0]]
-	if !ok {
-		fmt.Fprintf(stderr, "%s: 未知子命令 %q\n\n", ui.err(appName), rest[0])
+		fmt.Fprintf(stderr, "%s: %v\n\n", ui.err(appName), err)
 		printUsage(stderr)
 		return exitUsage
 	}
-	if err := cmd.run(env, rest[1:]); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return exitOK
-		}
-		var he hintError
-		if errors.As(err, &he) {
-			fmt.Fprintf(stderr, "%s: %s\n", ui.err(cmd.name), he.formatWithUI(ui))
+	// 一级命令名先核一遍：Cobra 对未知命令的英文建议文案不是本程序的输出约定，
+	// 未知与拼错都仍走「未知子命令 + 顶层帮助」。completion 与 help 是 Cobra 自带的。
+	if name != "" && !knownCommandName(name) {
+		if strings.HasPrefix(name, "-") {
+			fmt.Fprintf(stderr, "%s: 未知参数 %q\n\n", ui.err(appName), name)
 		} else {
-			fmt.Fprintf(stderr, "%s: %v\n", ui.err(cmd.name), err)
+			fmt.Fprintf(stderr, "%s: 未知子命令 %q\n\n", ui.err(appName), name)
 		}
-		var ue usageError
-		if errors.As(err, &ue) {
-			return exitUsage
-		}
-		return exitFail
+		printUsage(stderr)
+		return exitUsage
 	}
-	return exitOK
+
+	root.SetArgs(args)
+	cmd, err := root.ExecuteC()
+	if err == nil {
+		return exitOK
+	}
+	if errors.Is(err, errReported) {
+		return exitUsage
+	}
+	// 旧分发器的前缀是一级命令名（quota ls 出错也写 quota），这里保持一致。
+	name = topLevelCommandName(cmd)
+	var he hintError
+	if errors.As(err, &he) {
+		fmt.Fprintf(stderr, "%s: %s\n", ui.err(name), he.formatWithUI(ui))
+	} else {
+		fmt.Fprintf(stderr, "%s: %v\n", ui.err(name), err)
+	}
+	var ue usageError
+	if errors.As(err, &ue) {
+		return exitUsage
+	}
+	return exitFail
 }
 
-// parseGlobals 只消费子命令之前的全局参数，返回剩余参数。
-func (e *Env) parseGlobals(args []string) ([]string, error) {
+// firstCommandName 找出第一个位置参数（也就是一级命令名），跳过全局参数及其取值。
+// 返回值是空串表示整条命令行只有全局参数或没有参数。
+func firstCommandName(args []string) (string, error) {
 	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--json":
-			e.JSON = true
-		case "--config":
+		arg := args[i]
+		switch {
+		case arg == "--json" || strings.HasPrefix(arg, "--json="):
+		case arg == "--config" || arg == "--db":
 			if i+1 >= len(args) {
-				return nil, errors.New("--config 需要一个路径")
+				return "", fmt.Errorf("%s 需要一个路径", arg)
 			}
-			e.Config = args[i+1]
 			i++
-		case "--db":
-			if i+1 >= len(args) {
-				return nil, errors.New("--db 需要一个路径")
-			}
-			e.DB = args[i+1]
-			i++
-		case "-h", "--help", "help":
-			return nil, flag.ErrHelp
+		case strings.HasPrefix(arg, "--config=") || strings.HasPrefix(arg, "--db="):
 		default:
-			return args[i:], nil
+			return arg, nil
 		}
 	}
-	return nil, nil
+	return "", nil
+}
+
+// knownCommandName 判断一级命令名是否可执行。help、completion 与 __complete* 是
+// Cobra 自带命令，其余在 commandTable 里核对。
+func knownCommandName(name string) bool {
+	switch name {
+	case "help", "-h", "--help", "completion", "__complete", "__completeNoDesc":
+		return true
+	}
+	_, ok := commandTable[name]
+	return ok
 }
 
 func printUsage(w io.Writer) {
@@ -155,7 +163,6 @@ type groupItem struct {
 }
 
 // isHelpRequest 判断组级参数是不是在求帮助：-h、--help、help 三种写法等价。
-// 子命令自己的帮助仍走 newFlagSet 那条路径，不受影响。
 func isHelpRequest(args []string) bool {
 	return len(args) > 0 && (args[0] == "-h" || args[0] == "--help" || args[0] == "help")
 }
@@ -178,127 +185,6 @@ func printGroupHelp(w io.Writer, name, purpose string, items []groupItem) {
 	} else {
 		fmt.Fprintln(w, u.dim(fmt.Sprintf("  %s %s --help", appName, name)))
 	}
-}
-
-func newFlagSet(e *Env, name, summary string) *flagSet {
-	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	fs.SetOutput(e.Stderr)
-	fs.BoolVar(&e.JSON, "json", e.JSON, "以 JSON 格式输出")
-	out := &flagSet{FlagSet: fs}
-	u := newUI(e.Stderr)
-	fs.Usage = func() {
-		fmt.Fprintf(e.Stderr, "%s %s — %s\n\n", u.bold(appName), u.bold(name), summary)
-		fmt.Fprintf(e.Stderr, "%s\n  %s %s [选项]\n\n", u.bold("用法:"), appName, name)
-		fmt.Fprintf(e.Stderr, "%s\n", u.bold("选项:"))
-		printFlagDefaults(e.Stderr, u, fs)
-		if len(out.examples) > 0 {
-			fmt.Fprintf(e.Stderr, "\n%s\n", u.bold("示例:"))
-			for _, ex := range out.examples {
-				fmt.Fprintln(e.Stderr, u.dim("  "+ex))
-			}
-		}
-	}
-	return out
-}
-
-func (f *flagSet) setExamples(lines ...string) {
-	f.examples = append(f.examples, lines...)
-}
-
-// printFlagDefaults 打印参数清单。flag 自带的 PrintDefaults 只印一个短横线，
-// 与本程序其它地方的写法不一致，所以自己印。
-func printFlagDefaults(w io.Writer, u uiStyle, fs *flag.FlagSet) {
-	fs.VisitAll(func(f *flag.Flag) {
-		placeholder, usage := flag.UnquoteUsage(f)
-		line := "  --" + f.Name
-		if placeholder != "" {
-			line += " " + placeholder
-		}
-		if placeholder == "" && len(f.Name) == 1 {
-			// 单个字母的开关参数值不值一行，跟在名字后面。
-			line += "\t"
-		} else {
-			line += "\n    \t"
-		}
-		line += strings.ReplaceAll(usage, "\n", "\n    \t")
-		if !zeroDefault(f, placeholder) {
-			if placeholder == "string" {
-				line += u.dim(fmt.Sprintf(" (默认: %q)", f.DefValue))
-			} else {
-				line += u.dim(fmt.Sprintf(" (默认: %s)", f.DefValue))
-			}
-		}
-		fmt.Fprintln(w, line)
-	})
-}
-
-// zeroDefault 判断参数默认值是否等于该类型的零值，是就不写进参数清单。
-// 清单里只列非零默认值：每一行都挂一个 (default false) 会把真正需要注意的默认值淹掉。
-func zeroDefault(f *flag.Flag, placeholder string) bool {
-	switch placeholder {
-	case "string":
-		return f.DefValue == ""
-	case "":
-		// 布尔 flag 没有占位符，零值是 "false"：默认值是真时才值得在清单里写出来。
-		return f.DefValue == "false"
-	case "duration":
-		return f.DefValue == "0s"
-	case "int", "int64", "uint", "uint64", "float", "float64":
-		return f.DefValue == "0"
-	}
-	return f.DefValue == ""
-}
-
-// flagSet 让位置参数可以出现在参数前后任意位置，与常见命令行习惯一致。
-type flagSet struct {
-	*flag.FlagSet
-	pos      []string
-	examples []string
-}
-
-// Parse 逐段解析：每遇到一个位置参数就收起来，继续解析它后面的参数。
-// 参数名写错、取值解析不了都是用法错误（退出码 2）：flag 包在出错时已经把
-// 这个子命令的用法行与参数清单写到 stderr 了，这里只把错误包成用法错误，让退出码对得上。
-func (f *flagSet) Parse(args []string) error {
-	for {
-		if err := f.FlagSet.Parse(args); err != nil {
-			if errors.Is(err, flag.ErrHelp) {
-				return err
-			}
-			return usagef("%v", err)
-		}
-		rest := f.FlagSet.Args()
-		if len(rest) == 0 {
-			return nil
-		}
-		f.pos = append(f.pos, rest[0])
-		args = rest[1:]
-		if len(args) == 0 {
-			return nil
-		}
-	}
-}
-
-func (f *flagSet) NArg() int { return len(f.pos) }
-
-func (f *flagSet) Arg(i int) string {
-	if i < 0 || i >= len(f.pos) {
-		return ""
-	}
-	return f.pos[i]
-}
-
-func (f *flagSet) Args() []string { return f.pos }
-
-// Changed 判断某个参数在命令行上显式出现过，用来区分默认值与用户写入。
-func (f *flagSet) Changed(name string) bool {
-	changed := false
-	f.Visit(func(fl *flag.Flag) {
-		if fl.Name == name {
-			changed = true
-		}
-	})
-	return changed
 }
 
 func (e *Env) printJSON(v any) error {

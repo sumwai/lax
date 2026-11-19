@@ -22,7 +22,7 @@ type timeRange struct {
 	Text  string
 }
 
-func addTimeRangeFlags(fs *flagSet, defaultSince string) *timeRangeFlags {
+func addTimeRangeFlags(fs *leafFlags, defaultSince string) *timeRangeFlags {
 	return &timeRangeFlags{
 		since:        fs.String("since", defaultSince, "相对时间范围：30s、15m、24h、7d、3w；也收 11:00、-1d 11:00 与绝对时间（与 --from/--to 互斥）"),
 		from:         fs.String("from", "", "起始时间：11:00、-1d 11:00、RFC3339、YYYY-MM-DD HH:MM[:SS] 或 YYYY-MM-DD（本地时区）"),
@@ -33,7 +33,7 @@ func addTimeRangeFlags(fs *flagSet, defaultSince string) *timeRangeFlags {
 
 // parse 把三个参数解成一个 [Since, Until) 区间。since 显式出现时与 from/to 互斥；
 // 只有 from 时上界不限，只有 to 时下界不限。解析失败与冲突都是用法错误。
-func (f *timeRangeFlags) parse(fs *flagSet, now time.Time) (timeRange, error) {
+func (f *timeRangeFlags) parse(fs *leafFlags, now time.Time) (timeRange, error) {
 	from := strings.TrimSpace(*f.from)
 	to := strings.TrimSpace(*f.to)
 	if fs.Changed("since") && (from != "" || to != "") {

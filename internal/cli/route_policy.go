@@ -33,36 +33,6 @@ const (
 	routePolicyMaxRegexLen  = 512
 )
 
-// cmdRoutePolicy 是 route policy 一组的入口。
-func cmdRoutePolicy(e *Env, args []string) error {
-	if isHelpRequest(args) || len(args) == 0 {
-		printGroupHelp(e.Stdout, "route policy", "维护上游失败处理策略", routePolicySubs)
-		return nil
-	}
-	switch args[0] {
-	case "ls":
-		return cmdRoutePolicyLs(e, args[1:])
-	case "show":
-		return cmdRoutePolicyShow(e, args[1:])
-	case "add":
-		return cmdRoutePolicyAdd(e, args[1:])
-	case "set":
-		return cmdRoutePolicySet(e, args[1:])
-	case "unset":
-		return cmdRoutePolicyUnset(e, args[1:])
-	case "rm":
-		return cmdRoutePolicyRm(e, args[1:])
-	case "enable":
-		return cmdRoutePolicyToggle(e, args[1:], "enable", true)
-	case "disable":
-		return cmdRoutePolicyToggle(e, args[1:], "disable", false)
-	case "test":
-		return cmdRoutePolicyTest(e, args[1:])
-	default:
-		return usagef("未知子命令 %q，可用：ls | show | add | set | unset | rm | enable | disable | test\n用 lax route policy --help 查看子命令", args[0])
-	}
-}
-
 // stringListFlag 是可重复的字符串参数：--status 5xx --status 429 与
 // --status 5xx,429 两种写法都收，最终交给 store.ParseStatusTokens 归一。
 type stringListFlag struct {
@@ -76,6 +46,10 @@ func (f *stringListFlag) Set(value string) error {
 	return nil
 }
 
+// laxValues / setLaxValues 让执行遍拿到声明遍收集到的取值，见 leafFlags.Var。
+func (f *stringListFlag) laxValues() []string     { return f.values }
+func (f *stringListFlag) setLaxValues(v []string) { f.values = v }
+
 // routePolicyConditionFlags 是一组规则条件的参数。add 与 set 共用。
 type routePolicyConditionFlags struct {
 	account   *string
@@ -87,7 +61,7 @@ type routePolicyConditionFlags struct {
 	allErrors *bool
 }
 
-func addRoutePolicyConditionFlags(fs *flagSet) *routePolicyConditionFlags {
+func addRoutePolicyConditionFlags(fs *leafFlags) *routePolicyConditionFlags {
 	f := &routePolicyConditionFlags{
 		statuses: &stringListFlag{},
 		contains: &stringListFlag{},
@@ -114,14 +88,14 @@ type routePolicyConditionInput struct {
 }
 
 // routePolicyConditionFlagsChanged 判断命令行是否显式给了状态或错误条件。
-func routePolicyConditionFlagsChanged(fs *flagSet) bool {
+func routePolicyConditionFlagsChanged(fs *leafFlags) bool {
 	return fs.Changed("status") || fs.Changed("error-contains") || fs.Changed("error-regex")
 }
 
 // resolveRoutePolicyConditions 解析账号、厂商、模型与文本条件。
 // 账号与厂商必须已存在；模型别名走 resolveRouteModel；状态一律过 ParseStatusTokens，
 // 这样落库的 token 是小写、去重后的规范写法。
-func resolveRoutePolicyConditions(a *app, f *routePolicyConditionFlags, fs *flagSet, usage string) (routePolicyConditionInput, error) {
+func resolveRoutePolicyConditions(a *app, f *routePolicyConditionFlags, fs *leafFlags, usage string) (routePolicyConditionInput, error) {
 	var in routePolicyConditionInput
 
 	if fs.Changed("account") || strings.TrimSpace(*f.account) != "" {
@@ -202,7 +176,7 @@ func routePolicyHasConditions(p store.RouteFailurePolicy) bool {
 	return len(p.Statuses) > 0 || len(p.ErrorContains) > 0 || p.ErrorRegex != ""
 }
 
-func validateRoutePolicyRetryFlags(fs *flagSet, retry int, retryBase time.Duration, usage string) error {
+func validateRoutePolicyRetryFlags(fs *leafFlags, retry int, retryBase time.Duration, usage string) error {
 	if fs.Changed("retry") && (retry < 1 || retry > account.MaxRetryCount) {
 		return usagef("--retry 必须在 1 到 %d 之间，当前是 %d\n%s", account.MaxRetryCount, retry, usage)
 	}
@@ -212,7 +186,7 @@ func validateRoutePolicyRetryFlags(fs *flagSet, retry int, retryBase time.Durati
 	return nil
 }
 
-func validateRoutePolicyCooldownFlag(fs *flagSet, cooldown time.Duration, usage string) error {
+func validateRoutePolicyCooldownFlag(fs *leafFlags, cooldown time.Duration, usage string) error {
 	if !fs.Changed("cooldown") {
 		return nil
 	}
@@ -226,7 +200,7 @@ func validateRoutePolicyCooldownFlag(fs *flagSet, cooldown time.Duration, usage 
 	return nil
 }
 
-func validateRoutePolicyConditionMode(f *routePolicyConditionFlags, fs *flagSet, usage string) error {
+func validateRoutePolicyConditionMode(f *routePolicyConditionFlags, fs *leafFlags, usage string) error {
 	conditionGiven := routePolicyConditionFlagsChanged(fs)
 	if *f.allErrors && conditionGiven {
 		return usagef("--all-errors 不能和 --status、--error-contains、--error-regex 同时使用\n%s", usage)
@@ -238,8 +212,7 @@ func validateRoutePolicyConditionMode(f *routePolicyConditionFlags, fs *flagSet,
 }
 
 // cmdRoutePolicyAdd 新建一条用户规则。
-func cmdRoutePolicyAdd(e *Env, args []string) error {
-	fs := newFlagSet(e, "route policy add", "新建一条上游失败处理规则")
+func cmdRoutePolicyAdd(e *Env, fs *leafFlags, args []string) error {
 	c := addRoutePolicyConditionFlags(fs)
 	priority := fs.Int("priority", 100, "匹配优先级，越小越先匹配；同优先级按 id 升序")
 	note := fs.String("note", "", "备注，不要写密钥或明文凭据")
@@ -336,8 +309,7 @@ func cmdRoutePolicyAdd(e *Env, args []string) error {
 }
 
 // cmdRoutePolicySet 修改一条规则。只改命令行上显式给出的字段。
-func cmdRoutePolicySet(e *Env, args []string) error {
-	fs := newFlagSet(e, "route policy set", "修改一条规则，只改显式给出的字段")
+func cmdRoutePolicySet(e *Env, fs *leafFlags, args []string) error {
 	c := addRoutePolicyConditionFlags(fs)
 	priority := fs.Int("priority", 100, "匹配优先级，越小越先匹配")
 	note := fs.String("note", "", "备注，不要写密钥或明文凭据")
@@ -482,8 +454,7 @@ func cmdRoutePolicySet(e *Env, args []string) error {
 }
 
 // cmdRoutePolicyUnset 清除一条规则里的指定字段。字段用开关表示，不接受空串当删除信号。
-func cmdRoutePolicyUnset(e *Env, args []string) error {
-	fs := newFlagSet(e, "route policy unset", "清除一条规则里的指定字段")
+func cmdRoutePolicyUnset(e *Env, fs *leafFlags, args []string) error {
 	accountFlag := fs.Bool("account", false, "清除账号条件")
 	providerFlag := fs.Bool("provider", false, "清除厂商条件")
 	modelFlag := fs.Bool("model", false, "清除模型条件")
@@ -597,8 +568,7 @@ func cmdRoutePolicyUnset(e *Env, args []string) error {
 }
 
 // cmdRoutePolicyLs 列出用户规则与内置兜底。
-func cmdRoutePolicyLs(e *Env, args []string) error {
-	fs := newFlagSet(e, "route policy ls", "按生效顺序列出用户规则，再列内置兜底")
+func cmdRoutePolicyLs(e *Env, fs *leafFlags, args []string) error {
 	all := fs.Bool("all", false, "同时列出已停用的用户规则")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -679,8 +649,7 @@ func cmdRoutePolicyLs(e *Env, args []string) error {
 }
 
 // cmdRoutePolicyShow 查看一条用户规则的完整字段。
-func cmdRoutePolicyShow(e *Env, args []string) error {
-	fs := newFlagSet(e, "route policy show", "查看一条用户规则的完整字段")
+func cmdRoutePolicyShow(e *Env, fs *leafFlags, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -717,8 +686,7 @@ func cmdRoutePolicyShow(e *Env, args []string) error {
 }
 
 // cmdRoutePolicyRm 删除一条用户规则。内置兜底不在库里，删不掉。
-func cmdRoutePolicyRm(e *Env, args []string) error {
-	fs := newFlagSet(e, "route policy rm", "删除一条用户规则")
+func cmdRoutePolicyRm(e *Env, fs *leafFlags, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -752,8 +720,7 @@ func cmdRoutePolicyRm(e *Env, args []string) error {
 }
 
 // cmdRoutePolicyToggle 启用或停用一条用户规则。
-func cmdRoutePolicyToggle(e *Env, args []string, sub string, enabled bool) error {
-	fs := newFlagSet(e, "route policy "+sub, "启用或停用一条用户规则")
+func cmdRoutePolicyToggle(e *Env, fs *leafFlags, args []string, sub string, enabled bool) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -806,8 +773,7 @@ type routePolicyExplainEntry struct {
 }
 
 // cmdRoutePolicyTest 按给定事实预演匹配。这里只读数据库，绝不请求上游、绝不写库。
-func cmdRoutePolicyTest(e *Env, args []string) error {
-	fs := newFlagSet(e, "route policy test", "按给定事实预演匹配，不请求上游、不写库")
+func cmdRoutePolicyTest(e *Env, fs *leafFlags, args []string) error {
 	statusRaw := fs.String("status", "", "上游状态码，400 到 599；例如 400、429、503")
 	message := fs.String("message", "", "上游错误文本，按网关已脱敏并截断后的形状给")
 	provider := fs.String("provider", "", "厂商名；只校验存在，不写库")

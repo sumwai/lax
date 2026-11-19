@@ -440,3 +440,125 @@ func TestGroupUnknownSubcommandHints(t *testing.T) {
 		t.Fatalf("子命令帮助应列出自己的参数: %s", errOut)
 	}
 }
+
+// TestCompletionCommand 钉住 Cobra 自带的 completion：帮助走 stdout 且退 0，
+// 未知 shell 是用法错误（退 2），不能落到顶层帮助或运行失败。
+func TestCompletionCommand(t *testing.T) {
+	sandbox(t)
+
+	code, out, errOut := run(t, "completion", "--help")
+	if code != 0 {
+		t.Fatalf("completion --help 的退出码 = %d，期望 0；stderr = %s", code, errOut)
+	}
+	if errOut != "" {
+		t.Fatalf("completion --help 的帮助不该写 stderr: %s", errOut)
+	}
+	for _, want := range []string{"bash", "zsh", "fish", "powershell"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("completion --help 缺少 %q:\n%s", want, out)
+		}
+	}
+
+	code, out, errOut = run(t, "completion", "bash", "--help")
+	if code != 0 {
+		t.Fatalf("completion bash --help 的退出码 = %d，期望 0；stderr = %s", code, errOut)
+	}
+	if errOut != "" {
+		t.Fatalf("completion bash --help 的帮助不该写 stderr: %s", errOut)
+	}
+	if !strings.Contains(out, "bash") {
+		t.Fatalf("completion bash --help 应说明 bash:\n%s", out)
+	}
+
+	code, out, errOut = run(t, "completion", "nope")
+	if code != 2 {
+		t.Fatalf("completion nope 的退出码 = %d，期望 2", code)
+	}
+	if out != "" {
+		t.Fatalf("用法错误不该写 stdout: %s", out)
+	}
+	if !strings.Contains(errOut, "未知的 shell") {
+		t.Fatalf("completion nope 应报未知 shell: %s", errOut)
+	}
+}
+
+// TestGroupGlobalFlagsWithoutSubcommand 钉住组级全局参数：不带叶子子命令时
+// --db / --json 不能被当成未知子命令，帮助仍写 stdout 并退 0。
+func TestGroupGlobalFlagsWithoutSubcommand(t *testing.T) {
+	sandbox(t)
+	db := filepath.Join(t.TempDir(), "lax.db")
+
+	for _, c := range []struct {
+		name string
+		args []string
+	}{
+		{"--db 后跟 --help", []string{"account", "--db", db, "--help"}},
+		{"只有 --json", []string{"account", "--json"}},
+		{"quota 只有 --db", []string{"quota", "--db", db}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			code, out, errOut := run(t, c.args...)
+			if code != 0 {
+				t.Fatalf("退出码 = %d，期望 0；stderr = %s", code, errOut)
+			}
+			if errOut != "" {
+				t.Fatalf("组级帮助不该写 stderr: %s", errOut)
+			}
+			if !strings.Contains(out, "用法:") || !strings.Contains(out, "命令:") {
+				t.Fatalf("stdout 应是组级帮助:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestHelpCommandAndTopLevelFlagErrors 覆盖顶层 help 与顶层参数写错：
+// 未知参数与缺值的全局参数都要打用法并退 2；help 带命令名时显示那个命令的帮助。
+func TestHelpCommandAndTopLevelFlagErrors(t *testing.T) {
+	sandbox(t)
+
+	code, out, errOut := run(t, "--nope")
+	if code != 2 {
+		t.Fatalf("未知参数的退出码 = %d，期望 2", code)
+	}
+	if out != "" {
+		t.Fatalf("用法错误不该写 stdout: %s", out)
+	}
+	if !strings.Contains(errOut, "未知参数") || !strings.Contains(errOut, "用法:") {
+		t.Fatalf("stderr 应报未知参数并给出用法: %s", errOut)
+	}
+
+	code, out, errOut = run(t, "--config")
+	if code != 2 {
+		t.Fatalf("--config 缺值的退出码 = %d，期望 2", code)
+	}
+	if out != "" {
+		t.Fatalf("用法错误不该写 stdout: %s", out)
+	}
+	if !strings.Contains(errOut, "--config 需要一个路径") || !strings.Contains(errOut, "用法:") {
+		t.Fatalf("stderr 应说明缺值并给出用法: %s", errOut)
+	}
+
+	code, out, errOut = run(t, "help", "account")
+	if code != 0 {
+		t.Fatalf("help account 的退出码 = %d，期望 0；stderr = %s", code, errOut)
+	}
+	if !strings.Contains(out, "管理上游账号") {
+		t.Fatalf("help account 应显示组级帮助: %s", out)
+	}
+
+	code, _, errOut = run(t, "help", "account", "ls")
+	if code != 0 {
+		t.Fatalf("help account ls 的退出码 = %d，期望 0；stderr = %s", code, errOut)
+	}
+	if !strings.Contains(errOut, "account ls") {
+		t.Fatalf("help account ls 应显示子命令帮助: %s", errOut)
+	}
+
+	code, _, errOut = run(t, "help", "nope")
+	if code != 2 {
+		t.Fatalf("help nope 的退出码 = %d，期望 2", code)
+	}
+	if !strings.Contains(errOut, "没有命令") {
+		t.Fatalf("help nope 应报没有命令: %s", errOut)
+	}
+}

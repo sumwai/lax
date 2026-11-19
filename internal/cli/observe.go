@@ -20,8 +20,7 @@ import (
 	"lax/internal/usage"
 )
 
-func cmdUsage(e *Env, args []string) error {
-	fs := newFlagSet(e, "usage", "按账号、模型或日期汇总用量")
+func cmdUsage(e *Env, fs *leafFlags, args []string) error {
 	timeRange := addTimeRangeFlags(fs, "7d")
 	by := fs.String("by", "account", "维度：account | model | day")
 	account := fs.String("account", "", "只统计这个账号")
@@ -197,19 +196,11 @@ var logSubs = []groupItem{
 	{"tail", "查看最近的请求记录（支持 -n 与 --follow）"},
 }
 
-func cmdLog(e *Env, args []string) error {
-	if isHelpRequest(args) || len(args) == 0 {
-		printGroupHelp(e.Stdout, "log", "查看请求记录", logSubs)
-		return nil
-	}
-	if args[0] != "tail" {
-		return usagef("未知子命令 %q，可用：tail\n用 lax log --help 查看子命令", args[0])
-	}
-	fs := newFlagSet(e, "log tail", "查看最近的请求记录")
+func cmdLogTail(e *Env, fs *leafFlags, args []string) error {
 	n := fs.Int("n", 20, "条数")
 	follow := fs.Bool("follow", false, "持续输出新记录")
 	timeRange := addTimeRangeFlags(fs, "")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
@@ -415,8 +406,7 @@ func modelCell(requested, used string) string {
 	return truncate(requested, 24) + " → " + truncate(used, 24)
 }
 
-func cmdCall(e *Env, args []string) error {
-	fs := newFlagSet(e, "model call", "手工发一条请求，打印选号过程")
+func cmdCall(e *Env, fs *leafFlags, args []string) error {
 	model := fs.String("model", "", "模型名，留空取第一个账号的第一个模型")
 	protocol := fs.String("protocol", "anthropic", "入站协议：anthropic | chat | responses | gemini，gemini 的模型名走路径")
 	stream := fs.Bool("stream", false, "流式请求")

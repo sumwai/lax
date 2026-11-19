@@ -76,24 +76,6 @@ func printModelAliasHelp(w io.Writer) {
 	_, _ = io.WriteString(w, b.String())
 }
 
-// cmdModelAlias 是 model alias 这一组子命令的入口。
-func cmdModelAlias(e *Env, args []string) error {
-	if isHelpRequest(args) || len(args) == 0 {
-		printModelAliasHelp(e.Stdout)
-		return nil
-	}
-	switch args[0] {
-	case "set":
-		return cmdModelAliasSet(e, args[1:])
-	case "unset":
-		return cmdModelAliasUnset(e, args[1:])
-	case "ls":
-		return cmdModelAliasLs(e, args[1:])
-	default:
-		return usagef("未知子命令 %q，可用：set | unset | ls\n用 lax model alias --help 查看用法", args[0])
-	}
-}
-
 // checkAliasName 在做任何事之前判一遍别名：空值（含只有空白）算用法错误、退出码 2。
 // store 的写入口也会去空白并判一次，这里的重复只为在动库之前把「命令写错了」与
 // 「运行失败」分开——用法错误要打出用法行。
@@ -106,8 +88,7 @@ func checkAliasName(raw, field, usageLine string) (string, error) {
 }
 
 // cmdModelAliasSet 写一条别名，覆盖语义：同名再写一次就是改目标。
-func cmdModelAliasSet(e *Env, args []string) error {
-	fs := newFlagSet(e, "model alias set", "配置模型别名映射")
+func cmdModelAliasSet(e *Env, fs *leafFlags, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -159,8 +140,7 @@ func cmdModelAliasSet(e *Env, args []string) error {
 
 // cmdModelAliasUnset 删掉一条别名。删不到时报错并列出当前有哪些别名：
 // 多半是别名写错了，光说一句「没有这条别名」看不出下一步该改哪个参数（与 provider header unset 同一做法）。
-func cmdModelAliasUnset(e *Env, args []string) error {
-	fs := newFlagSet(e, "model alias unset", "删掉一条别名")
+func cmdModelAliasUnset(e *Env, fs *leafFlags, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -222,8 +202,7 @@ func aliasNotFoundError(st *store.Store, alias string) error {
 }
 
 // cmdModelAliasLs 列别名、目标与能不能解析。不给别名就列全部（按别名升序），给了就只列这一条。
-func cmdModelAliasLs(e *Env, args []string) error {
-	fs := newFlagSet(e, "model alias ls", "列别名、目标与能否解析")
+func cmdModelAliasLs(e *Env, fs *leafFlags, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

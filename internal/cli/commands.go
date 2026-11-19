@@ -19,25 +19,27 @@ import (
 	"lax/internal/store"
 )
 
+// commandTable 是顶层帮助与一级命令名核对的唯一清单。命令本身由 cobra_root.go
+// 里的构造器接上，这里只留名字与一句话说明。
 var commandTable = map[string]command{
-	"init":     {name: "init", summary: "初始化配置目录与数据库", run: cmdInit},
-	"serve":    {name: "serve", summary: "启动网关服务（前台运行）", run: cmdServe},
-	"account":  {name: "account", summary: "管理上游账号", run: cmdAccount},
-	"model":    {name: "model", summary: "管理模型、别名、单价与试打", run: cmdModel},
-	"route":    {name: "route", summary: "管理路由策略与账号权重", run: cmdRoute},
-	"quota":    {name: "quota", summary: "监控账号额度与刷新周期", run: cmdQuota},
-	"provider": {name: "provider", summary: "管理厂商与协议路由", run: cmdProvider},
-	"plugin":   {name: "plugin", summary: "管理扩展插件", run: cmdPlugin},
-	"usage":    {name: "usage", summary: "汇总请求用量与费用", run: cmdUsage},
-	"log":      {name: "log", summary: "查看请求日志", run: cmdLog},
-	"doctor":   {name: "doctor", summary: "检查本地配置、目录与端口", run: cmdDoctor},
-	"version":  {name: "version", summary: "打印版本信息", run: cmdVersion},
+	"init":       {name: "init", summary: "初始化配置目录与数据库"},
+	"serve":      {name: "serve", summary: "启动网关服务（前台运行）"},
+	"account":    {name: "account", summary: "管理上游账号"},
+	"model":      {name: "model", summary: "管理模型、别名、单价与试打"},
+	"route":      {name: "route", summary: "管理路由策略与账号权重"},
+	"quota":      {name: "quota", summary: "监控账号额度与刷新周期"},
+	"provider":   {name: "provider", summary: "管理厂商与协议路由"},
+	"plugin":     {name: "plugin", summary: "管理扩展插件"},
+	"usage":      {name: "usage", summary: "汇总请求用量与费用"},
+	"log":        {name: "log", summary: "查看请求日志"},
+	"doctor":     {name: "doctor", summary: "检查本地配置、目录与端口"},
+	"version":    {name: "version", summary: "打印版本信息"},
+	"completion": {name: "completion", summary: "生成 shell 补全脚本"},
 }
 
-var commandOrder = []string{"init", "serve", "account", "model", "route", "quota", "provider", "plugin", "usage", "log", "doctor", "version"}
+var commandOrder = []string{"init", "serve", "account", "model", "route", "quota", "provider", "plugin", "usage", "log", "doctor", "version", "completion"}
 
-func cmdInit(e *Env, args []string) error {
-	fs := newFlagSet(e, "init", "初始化配置目录与数据库")
+func cmdInit(e *Env, fs *leafFlags, args []string) error {
 	force := fs.Bool("force", false, "覆盖已有配置文件")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -87,8 +89,7 @@ func cmdInit(e *Env, args []string) error {
 	return nil
 }
 
-func cmdServe(e *Env, args []string) error {
-	fs := newFlagSet(e, "serve", "启动网关，前台运行")
+func cmdServe(e *Env, fs *leafFlags, args []string) error {
 	addr := fs.String("addr", "", "监听地址，留空用配置里的值")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -252,8 +253,7 @@ func readServePid(path string) (int, error) {
 	return pid, nil
 }
 
-func cmdVersion(e *Env, args []string) error {
-	fs := newFlagSet(e, "version", "打印版本")
+func cmdVersion(e *Env, fs *leafFlags, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -337,8 +337,7 @@ func legacyMoveNote(paths config.Paths, dataDir string) string {
 	return note
 }
 
-func cmdDoctor(e *Env, args []string) error {
-	fs := newFlagSet(e, "doctor", "自检配置、目录与端口")
+func cmdDoctor(e *Env, fs *leafFlags, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

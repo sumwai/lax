@@ -54,9 +54,11 @@ func TestRenderTableWithSpecAlignAndFooter(t *testing.T) {
 func TestFlagDefaultsUseChineseLabel(t *testing.T) {
 	var out, errOut bytes.Buffer
 	e := &Env{Stdout: &out, Stderr: &errOut}
-	fs := newFlagSet(e, "log tail", "查看请求日志")
-	fs.Int("n", 20, "条数")
-	fs.Usage()
+	cmd := newLeafCommand(e, "log tail", "查看请求日志", func(e *Env, fs *leafFlags, args []string) error {
+		fs.Int("n", 20, "条数")
+		return fs.Parse(args)
+	})
+	printCobraCommandUsage(&errOut, cmd, "查看请求日志")
 	if !strings.Contains(errOut.String(), "(默认: 20)") {
 		t.Fatalf("flag 默认值应为 (默认: 20)，实际:\n%s", errOut.String())
 	}

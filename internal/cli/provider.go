@@ -2,7 +2,6 @@ package cli
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"strings"
 	"unicode"
@@ -65,30 +64,6 @@ var providerUnsetFields = []providerUnsetField{
 	{"models-path", "模型列表覆盖", ""},
 	{"default-protocol", "显式默认协议", ""},
 	{"note", "备注", ""},
-}
-
-// cmdProvider 是 provider 这一组子命令的入口。
-func cmdProvider(e *Env, args []string) error {
-	if isHelpRequest(args) || len(args) == 0 {
-		printGroupHelp(e.Stdout, "provider", "厂商与路由", providerSubs)
-		return nil
-	}
-	switch args[0] {
-	case "ls":
-		return cmdProviderLs(e, args[1:])
-	case "add":
-		return cmdProviderAdd(e, args[1:])
-	case "set":
-		return cmdProviderSet(e, args[1:])
-	case "unset":
-		return cmdProviderUnset(e, args[1:])
-	case "rm":
-		return cmdProviderRm(e, args[1:])
-	case "header":
-		return cmdProviderHeader(e, args[1:])
-	default:
-		return usagef("未知子命令 %q，可用：ls | add | set | unset | rm | header\n用 lax provider --help 查看子命令", args[0])
-	}
 }
 
 // providerRouteJSON 是 provider ls --json 里的一条路由。
@@ -282,8 +257,7 @@ func baseURLSummary(base string) string {
 	return base
 }
 
-func cmdProviderLs(e *Env, args []string) error {
-	fs := newFlagSet(e, "provider ls", "列出厂商来源与路由概况；--verbose 看完整路径与模型列表")
+func cmdProviderLs(e *Env, fs *leafFlags, args []string) error {
 	verbose := fs.Bool("verbose", false, "显示每条路由的完整路径与模型列表路径")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -366,7 +340,7 @@ type providerPathFlags struct {
 	transcriptions *string
 }
 
-func newProviderPathFlags(fs *flagSet) providerPathFlags {
+func newProviderPathFlags(fs *leafFlags) providerPathFlags {
 	return providerPathFlags{
 		anthropic:      fs.String("anthropic", "", "anthropic 协议路由路径或完整 URL（如 /v1/messages）"),
 		openai:         fs.String("openai", "", "openai-chat 协议路由路径或完整 URL（如 /v1/chat/completions）"),
@@ -389,7 +363,7 @@ type providerPathFlag struct {
 
 // pairs 按 anthropic、openai、responses、gemini、systemone、embeddings、speech、
 // transcriptions 的固定顺序列出八个 flag，报错顺序因此稳定。
-func (p providerPathFlags) pairs(fs *flagSet) []providerPathFlag {
+func (p providerPathFlags) pairs(fs *leafFlags) []providerPathFlag {
 	return []providerPathFlag{
 		{"anthropic", gateway.ProtocolAnthropic, *p.anthropic, flagWasSet(fs, "anthropic")},
 		{"openai", gateway.ProtocolChat, *p.openai, flagWasSet(fs, "openai")},
@@ -535,8 +509,7 @@ func lookupUnsetField(raw string) (providerUnsetField, error) {
 }
 
 // cmdProviderAdd 只新建一家厂商。重名时报错并指向 provider set，不顺手改已有的行。
-func cmdProviderAdd(e *Env, args []string) error {
-	fs := newFlagSet(e, "provider add", "新增厂商与协议路由")
+func cmdProviderAdd(e *Env, fs *leafFlags, args []string) error {
 	baseURL := fs.String("base-url", "", "厂商默认地址（如 https://api.deepseek.com）")
 	paths := newProviderPathFlags(fs)
 	defProtocol := fs.String("default-protocol", "", "默认协议（anthropic | openai | responses | gemini | systemone | embeddings | speech | transcriptions）")
@@ -666,8 +639,7 @@ func cmdProviderAdd(e *Env, args []string) error {
 
 // cmdProviderSet 只设值：传了的字段改成新值，没传的字段一律保留。
 // 删除一条路由、清掉覆盖或备注走 `provider unset`：只设值不删值，一个写错的空参数不会抹掉已有配置。
-func cmdProviderSet(e *Env, args []string) error {
-	fs := newFlagSet(e, "provider set", "更新厂商地址、路由、默认协议或备注")
+func cmdProviderSet(e *Env, fs *leafFlags, args []string) error {
 	baseURL := fs.String("base-url", "", "更新厂商默认地址")
 	paths := newProviderPathFlags(fs)
 	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖（相对路径或完整 URL）")
@@ -792,8 +764,7 @@ func cmdProviderSet(e *Env, args []string) error {
 
 // cmdProviderUnset 删掉一条路由，或清掉模型列表覆盖、默认协议、备注。
 // 要清的那一项本来就不存在时不报错：再跑一遍同一条命令的结果一样，输出会说明这次什么都没动。
-func cmdProviderUnset(e *Env, args []string) error {
-	fs := newFlagSet(e, "provider unset", "删掉一条路由，或清掉模型列表覆盖、默认协议、备注")
+func cmdProviderUnset(e *Env, fs *leafFlags, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -911,8 +882,7 @@ func applyUnset(patch *store.ProviderPatch, f providerUnsetField) {
 	}
 }
 
-func cmdProviderRm(e *Env, args []string) error {
-	fs := newFlagSet(e, "provider rm", "删除厂商与它的全部路由")
+func cmdProviderRm(e *Env, fs *leafFlags, args []string) error {
 	force := fs.Bool("force", false, "仍有账号用这个厂商时也删除")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -981,15 +951,7 @@ func isWireProtocol(proto string) bool {
 }
 
 // flagWasSet 判断某个参数有没有在命令行上出现过：用来区分「给了空值」与「没给」。
-func flagWasSet(fs *flagSet, name string) bool {
-	seen := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == name {
-			seen = true
-		}
-	})
-	return seen
-}
+func flagWasSet(fs *leafFlags, name string) bool { return fs.Changed(name) }
 
 // unknownProviderError 说明厂商表里没有这一行，并给出最接近的已知厂商与下一步命令。
 // 账号的地址与默认协议只在厂商行上，所以出路只有一条：先把厂商登记进去。

@@ -18,8 +18,7 @@ const modelAddUsage = "用法：lax model add <模型> --account <账号> [--pro
 //
 // 一次事务写两张表的事全在 store.DeclareAccountModel 里，cli 不拼 SQL、也不自己决定写哪张表。
 // 写完再读一遍这一行：可达性状态与有效协议都取库里的派生值，输出与 `model show` 说的是同一份事实。
-func cmdModelAdd(e *Env, args []string) error {
-	fs := newFlagSet(e, "model add", "手写一条账号能用的模型（同事务写目录与可达性）")
+func cmdModelAdd(e *Env, fs *leafFlags, args []string) error {
 	accountName := fs.String("account", "", "账号名，必填：可达性写在账号上，没有账号就没有可写的那一行")
 	provider := fs.String("provider", "", "厂商名，可省略；给了必须与账号所属厂商一致")
 	protocolFlag := fs.String("protocol", "", "这个模型在这个账号上的协议，只收报文协议；不给就只写可达性、不动协议")
@@ -146,8 +145,7 @@ type modelShowRow struct {
 }
 
 // cmdModelShow 按账号列出一个模型的可达性事实。只读库：不发上游请求，也不写可达性。
-func cmdModelShow(e *Env, args []string) error {
-	fs := newFlagSet(e, "model show", "按账号看一个模型的可达性事实")
+func cmdModelShow(e *Env, fs *leafFlags, args []string) error {
 	provider := fs.String("provider", "", "只看这个厂商的账号")
 	accountName := fs.String("account", "", "只看这个账号")
 	if err := fs.Parse(args); err != nil {
