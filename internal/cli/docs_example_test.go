@@ -99,12 +99,11 @@ func TestREADMEProviderExamples(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
 
-	// README 的 myco 示例：两条路由 + 命令行写法的默认协议。
+	// README 的 myco 示例：两条路由（默认协议自动推导为 openai-chat）。
 	code, out, stderr := run(t, "provider", "add", "myco",
 		"--base-url", "https://api.deepseek.com",
 		"--openai", "/v1/chat/completions",
-		"--anthropic", "/anthropic/v1/messages",
-		"--default-protocol", "openai")
+		"--anthropic", "/anthropic/v1/messages")
 	if code != 0 {
 		t.Fatalf("README 示例 provider add myco 退出码 = %d，stderr = %s", code, stderr)
 	}
@@ -112,14 +111,14 @@ func TestREADMEProviderExamples(t *testing.T) {
 		t.Fatalf("provider add myco 的输出与 README 不符：\n得到 %s\n期望包含 %q", out, want)
 	}
 
-	// README：补一条 responses 路由，并把默认协议换掉。
+	// README：补一条 responses 路由。
 	if code, _, stderr = run(t, "provider", "set", "myco",
-		"--responses", "/v1/responses", "--default-protocol", "responses"); code != 0 {
+		"--responses", "/v1/responses"); code != 0 {
 		t.Fatalf("README 示例 provider set myco 退出码 = %d，stderr = %s", code, stderr)
 	}
 	myco := mustProviderLs(t)["myco"]
-	if len(myco.Protocols) != 3 || myco.DefaultProtocol != "openai-responses" {
-		t.Fatalf("README 示例跑完后 myco = %+v，期望 3 条路由、默认协议 openai-responses", myco)
+	if len(myco.Protocols) != 3 || myco.DefaultProtocol != "openai-chat" {
+		t.Fatalf("README 示例跑完后 myco = %+v，期望 3 条路由、默认协议 openai-chat", myco)
 	}
 
 	// README：删一条路由。
@@ -160,18 +159,14 @@ func TestREADMEProviderGeminiExample(t *testing.T) {
 	// google-gemini 已经内置（迁移 0009），README 的示例改成指向自建代理的一家同名形状的厂商。
 	code, out, stderr := run(t, "provider", "add", "gem-proxy",
 		"--base-url", "https://gemini-proxy.example.com",
-		"--gemini", "/v1beta/models/{model}:generateContent",
-		"--default-protocol", "gemini")
+		"--gemini", "/v1beta/models/{model}:generateContent")
 	if code != 0 {
 		t.Fatalf("README 示例 provider add gem-proxy 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if want := "已添加厂商 gem-proxy（https://gemini-proxy.example.com），1 条路由，默认协议 gemini"; !strings.Contains(out, want) {
+	if want := "已添加厂商 gem-proxy（https://gemini-proxy.example.com），1 条路由"; !strings.Contains(out, want) {
 		t.Fatalf("provider add gem-proxy 的输出与 README 不符：\n得到 %s\n期望包含 %q", out, want)
 	}
 	got := mustProviderLs(t)["gem-proxy"]
-	if got.DefaultProtocol != "gemini" {
-		t.Fatalf("README 示例的默认协议 = %q，期望 gemini", got.DefaultProtocol)
-	}
 	if route := routeMap(got)["gemini"]; route.Path != "/v1beta/models/{model}:generateContent" {
 		t.Fatalf("README 示例的 gemini 路由 = %+v", route)
 	}

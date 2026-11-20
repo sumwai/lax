@@ -70,14 +70,9 @@ func TestProviderSystemOneRoute(t *testing.T) {
 		t.Fatalf("provider add --systemone 的输出 = %s，期望包含 %q", out, want)
 	}
 
-	// provider set 把默认协议补成 systemone：与报文协议全名同形，一行就够。
-	if code, _, stderr := run(t, "provider", "set", "typesafe", "--default-protocol", "systemone"); code != 0 {
-		t.Fatalf("provider set --default-protocol systemone 退出码 = %d，stderr = %s", code, stderr)
-	}
-
 	added := mustProviderLs(t)["typesafe"]
-	if added.DefaultProtocol != "systemone" {
-		t.Fatalf("默认协议 = %q，期望 systemone", added.DefaultProtocol)
+	if added.DefaultProtocol != "" {
+		t.Fatalf("仅声明 systemone 路由时默认协议应为空，实际 %q", added.DefaultProtocol)
 	}
 	route, ok := routeMap(added)["systemone"]
 	if !ok {
@@ -98,7 +93,7 @@ func TestProviderSystemOneRoute(t *testing.T) {
 
 	// 整条地址的写法：与相对路径走同一套校验与规整。
 	code, _, stderr = run(t, "provider", "add", "typesafe-full",
-		"--systemone", "https://api.typesafe.ai/v1/systemone", "--default-protocol", "systemone")
+		"--systemone", "https://api.typesafe.ai/v1/systemone")
 	if code != 0 {
 		t.Fatalf("provider add --systemone 整条地址退出码 = %d，stderr = %s", code, stderr)
 	}
@@ -137,8 +132,6 @@ func TestProviderSystemOneHelp(t *testing.T) {
 		"--systemone",
 		"/v1/systemone",
 		"lax provider add typesafe --base-url https://api.typesafe.ai --systemone /v1/systemone",
-		"--default-protocol systemone",
-		"anthropic | openai | responses | gemini | systemone",
 	} {
 		if !strings.Contains(errOut, want) {
 			t.Fatalf("provider add --help 应提到 %q: %s", want, errOut)
@@ -154,8 +147,7 @@ func TestProviderSystemOneUnset(t *testing.T) {
 
 	if code, _, stderr := run(t, "provider", "add", "ts",
 		"--base-url", "https://api.typesafe.ai",
-		"--openai", "/v1/chat/completions", "--systemone", "/v1/systemone",
-		"--default-protocol", "openai"); code != 0 {
+		"--openai", "/v1/chat/completions", "--systemone", "/v1/systemone"); code != 0 {
 		t.Fatalf("provider add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
@@ -177,24 +169,6 @@ func TestProviderSystemOneUnset(t *testing.T) {
 	code, out, stderr = run(t, "provider", "unset", "ts", "systemone")
 	if code != 0 || !strings.Contains(out, "ts 本来就没有 systemone 路由") {
 		t.Fatalf("幂等 unset 退出码 = %d，输出 = %s，stderr = %s", code, out, stderr)
-	}
-
-	// 默认协议换成 systemone 之后再删它：整笔拒绝，提示先改默认协议。
-	if code, _, stderr := run(t, "provider", "set", "ts", "--systemone", "/v1/systemone", "--default-protocol", "systemone"); code != 0 {
-		t.Fatalf("provider set --systemone --default-protocol systemone 退出码 = %d，stderr = %s", code, stderr)
-	}
-	code, out, stderr = run(t, "provider", "unset", "ts", "systemone")
-	if code != 1 {
-		t.Fatalf("删默认协议那条路由的退出码 = %d，期望 1（运行失败，store 整笔拒绝）", code)
-	}
-	if out != "" {
-		t.Fatalf("被拒绝时不该写 stdout: %s", out)
-	}
-	if !strings.Contains(stderr, "default-protocol") {
-		t.Fatalf("拒绝文案应指向 --default-protocol: %s", stderr)
-	}
-	if _, ok := routeMap(mustProviderLs(t)["ts"])["systemone"]; !ok {
-		t.Fatal("被拒绝之后 systemone 路由应该还在")
 	}
 }
 

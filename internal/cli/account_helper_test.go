@@ -1,6 +1,12 @@
 package cli_test
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"lax/internal/store"
+)
 
 // 这个文件是建账号的测试入口。账号只存厂商名，地址与默认协议都在厂商行上，
 // 所以每个要建账号的用例都得先把厂商登记好；把这些步骤收在一处，用例里就不会再冒出
@@ -50,10 +56,9 @@ func routeFlagsForProtocol(protocol string) []string {
 	case "openai-responses":
 		return []string{"--responses", "/v1/responses"}
 	case "gemini":
-		return []string{"--gemini", "/v1beta/models/{model}:generateContent", "--default-protocol", "gemini"}
+		return []string{"--gemini", "/v1beta/models/{model}:generateContent"}
 	case "systemone":
-		// 决策协议没有固定顺序可回退（固定回退只认聊天那三条），默认协议因此要显式给。
-		return []string{"--systemone", "/v1/systemone", "--default-protocol", "systemone"}
+		return []string{"--systemone", "/v1/systemone"}
 	default:
 		return []string{"--openai", "/v1/chat/completions"}
 	}
@@ -65,5 +70,18 @@ func routeFlagsForProtocol(protocol string) []string {
 func addAccount(t *testing.T, name, provider, baseURL, protocol string, extra ...string) (int, string, string) {
 	t.Helper()
 	ensureProvider(t, provider, baseURL, routeFlagsForProtocol(protocol)...)
+	if protocol == "gemini" || protocol == "systemone" {
+		dbPath := filepath.Join(os.Getenv("XDG_DATA_HOME"), "lax", "lax.db")
+		st, err := store.Open(dbPath)
+		if err != nil {
+			t.Fatalf("打开测试库设置默认协议失败: %v", err)
+		}
+		p := protocol
+		if err := st.SetProvider(provider, store.ProviderPatch{DefaultProtocol: &p}); err != nil {
+			st.Close()
+			t.Fatalf("设置测试厂商默认协议失败: %v", err)
+		}
+		st.Close()
+	}
 	return run(t, append([]string{"account", "add", name, "--provider", provider}, extra...)...)
 }

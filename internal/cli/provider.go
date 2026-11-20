@@ -517,18 +517,18 @@ func lookupUnsetField(raw string) (providerUnsetField, error) {
 func cmdProviderAdd(e *Env, fs *leafFlags, args []string) error {
 	baseURL := fs.String("base-url", "", "厂商默认地址（如 https://api.deepseek.com）")
 	paths := newProviderPathFlags(fs)
-	defProtocol := fs.String("default-protocol", "", "默认协议（anthropic | openai | responses | gemini | systemone | embeddings | speech | transcriptions）")
 	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖（相对路径或完整 URL）")
 	authHeader := fs.String("auth-header", "", "自定义凭据头名称（如 X-Api-Key）")
 	authScheme := fs.String("auth-scheme", "", "凭据头格式：raw | bearer | bearer-semicolon")
 	note := fs.String("note", "", "备注")
-	fs.flagGroup("基础与鉴权", "base-url", "default-protocol", "models-path", "auth-header", "auth-scheme")
+	fs.flagGroup("基础与鉴权", "base-url", "models-path", "auth-header", "auth-scheme")
 	fs.flagGroup("协议路由", "anthropic", "openai", "responses", "gemini", "systemone", "embeddings", "speech", "transcriptions")
 	fs.flagGroup("通用", "note")
 	fs.setExamples(
+		"lax provider add my-relay --base-url https://api.example.com",
 		"lax provider add acme --base-url https://api.example.com --openai /v1/chat/completions",
-		"lax provider add google-gemini --base-url https://generativelanguage.googleapis.com --gemini /v1beta/models/{model}:generateContent --default-protocol gemini",
-		"lax provider add typesafe --base-url https://api.typesafe.ai --systemone /v1/systemone --default-protocol systemone",
+		"lax provider add google-gemini --base-url https://generativelanguage.googleapis.com --gemini /v1beta/models/{model}:generateContent",
+		"lax provider add typesafe --base-url https://api.typesafe.ai --systemone /v1/systemone",
 	)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -579,9 +579,6 @@ func cmdProviderAdd(e *Env, fs *leafFlags, args []string) error {
 	if authSchemeName != "" && authHeadName == "" {
 		return usagef("--auth-scheme 要跟 --auth-header 一起给：没有头就没有地方写凭据，例如 --auth-header X-Api-Key --auth-scheme raw\n%s", providerAddUsage)
 	}
-	if flagWasSet(fs, "default-protocol") && strings.TrimSpace(*defProtocol) == "" {
-		return emptyValueError(false, "default-protocol", providerAddUsage)
-	}
 	if flagWasSet(fs, "models-path") {
 		if err := checkModelsPathFlag(*modelsPath, false, providerAddUsage); err != nil {
 			return err
@@ -601,13 +598,12 @@ func cmdProviderAdd(e *Env, fs *leafFlags, args []string) error {
 		routes = append(routes, store.ProviderRoute{Provider: name, Protocol: f.protocol, Path: f.value})
 	}
 	if len(routes) == 0 {
-		return usagef("缺少协议路由：--anthropic、--openai、--responses、--gemini、--systemone、--embeddings、--speech、--transcriptions 至少给一条，例如 lax provider add %s --base-url https://api.example.com --openai /v1/chat/completions；不再需要这家厂商就用 lax provider rm %s\n%s", name, name, providerAddUsage)
+		if *baseURL == "" {
+			return usagef("缺少地址或协议路由：请提供 --base-url（将自动配置核心对话协议），或至少给一条协议路径（--anthropic、--openai、--responses、--gemini、--systemone、--embeddings、--speech、--transcriptions），例如 lax provider add %s --base-url https://api.example.com；不再需要这家厂商就用 lax provider rm %s\n%s", name, name, providerAddUsage)
+		}
+		routes = defaultChatRoutes(name, *baseURL)
 	}
 
-	def, err := protocolFromCLI(*defProtocol)
-	if err != nil {
-		return err
-	}
 	// 没给 --models-path 时厂商级覆盖为空，按各路由的 models_path 取。
 	models := ""
 	if flagWasSet(fs, "models-path") {
@@ -620,7 +616,7 @@ func cmdProviderAdd(e *Env, fs *leafFlags, args []string) error {
 	}
 	defer a.Close()
 
-	p := store.Provider{Name: name, BaseURL: *baseURL, Note: *note, DefaultProtocol: def, ModelsPath: models,
+	p := store.Provider{Name: name, BaseURL: *baseURL, Note: *note, ModelsPath: models,
 		AuthHeader: authHeadName, AuthScheme: authSchemeName}
 	// 默认协议指不到这次声明的路由、或有相对路径而缺 base_url 时 store 整笔拒绝，
 	// 错误文案已经写清缺哪条、下一步敲什么；缺 base_url 是命令写法的问题，包成用法错误（退出码 2）。
@@ -645,6 +641,21 @@ func cmdProviderAdd(e *Env, fs *leafFlags, args []string) error {
 	return nil
 }
 
+// defaultChatRoutes 在仅提供 --base-url 时自动生成三条核心对话协议路由；
+// 若 baseURL 已以 /v1 结尾，去掉重复的 /v1 前缀。
+func defaultChatRoutes(provider, baseURL string) []store.ProviderRoute {
+	trimmed := strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	prefix := "/v1"
+	if strings.HasSuffix(trimmed, "/v1") {
+		prefix = ""
+	}
+	return []store.ProviderRoute{
+		{Provider: provider, Protocol: gateway.ProtocolChat, Path: prefix + "/chat/completions"},
+		{Provider: provider, Protocol: gateway.ProtocolResponses, Path: prefix + "/responses"},
+		{Provider: provider, Protocol: gateway.ProtocolAnthropic, Path: prefix + "/messages"},
+	}
+}
+
 // cmdProviderSet 只设值：传了的字段改成新值，没传的字段一律保留。
 // 删除一条路由、清掉覆盖或备注走 `provider unset`：只设值不删值，一个写错的空参数不会抹掉已有配置。
 func cmdProviderSet(e *Env, fs *leafFlags, args []string) error {
@@ -653,9 +664,8 @@ func cmdProviderSet(e *Env, fs *leafFlags, args []string) error {
 	modelsPath := fs.String("models-path", "", "厂商级模型列表路径覆盖（相对路径或完整 URL）")
 	authHeader := fs.String("auth-header", "", "更新凭据头名称（如 X-Api-Key）")
 	authScheme := fs.String("auth-scheme", "", "更新凭据头格式：raw | bearer | bearer-semicolon")
-	defProtocol := fs.String("default-protocol", "", "默认协议（须属于已声明的路由）")
 	note := fs.String("note", "", "更新备注")
-	fs.flagGroup("基础与鉴权", "base-url", "default-protocol", "models-path", "auth-header", "auth-scheme")
+	fs.flagGroup("基础与鉴权", "base-url", "models-path", "auth-header", "auth-scheme")
 	fs.flagGroup("协议路由", "anthropic", "openai", "responses", "gemini", "systemone", "embeddings", "speech", "transcriptions")
 	fs.flagGroup("通用", "note")
 	fs.setExamples(
@@ -712,17 +722,6 @@ func cmdProviderSet(e *Env, fs *leafFlags, args []string) error {
 		patch.AuthScheme = &scheme
 		changed = append(changed, "auth-scheme")
 	}
-	if flagWasSet(fs, "default-protocol") {
-		if strings.TrimSpace(*defProtocol) == "" {
-			return emptyValueError(true, "default-protocol", providerSetUsage)
-		}
-		def, err := protocolFromCLI(*defProtocol)
-		if err != nil {
-			return err
-		}
-		patch.DefaultProtocol = &def
-		changed = append(changed, "default-protocol")
-	}
 	if flagWasSet(fs, "note") {
 		if strings.TrimSpace(*note) == "" {
 			return emptyValueError(true, "note", providerSetUsage)
@@ -742,7 +741,7 @@ func cmdProviderSet(e *Env, fs *leafFlags, args []string) error {
 		changed = append(changed, f.flagName)
 	}
 	if len(changed) == 0 {
-		return usagef("没有要改的字段：至少给一个参数，比如 --base-url、--openai、--gemini、--systemone、--models-path、--default-protocol 或 --note\n%s", providerSetUsage)
+		return usagef("没有要改的字段：至少给一个参数，比如 --base-url、--openai、--gemini、--systemone、--models-path 或 --note\n%s", providerSetUsage)
 	}
 
 	a, err := openApp(e, true)
