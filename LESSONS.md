@@ -35,3 +35,4 @@ commit in the row so a later reader can tell whether the note still applies.
 | 2026-11-01 | Follow mode must page by cursor, and every time filter must survive into the follow loop | [lessons/2026-11-01-follow-cursor-window.md](lessons/2026-11-01-follow-cursor-window.md) | fixed in ad03c2b |
 | 2026-11-14 | GORM's default logger writes record-not-found to stdout and can prefix `--json` | [lessons/2026-11-14-gorm-logger-stdout.md](lessons/2026-11-14-gorm-logger-stdout.md) | fixed in 07a662c |
 | 2026-11-17 | A billing 400 is a failed account, not a client error | [lessons/2026-11-17-billing-400-not-account-failure.md](lessons/2026-11-17-billing-400-not-account-failure.md) | fix in progress |
+| 2026-11-20 | Usage `--by day` tests fail in the first hour after local midnight | [lessons/2026-11-20-usage-by-day-midnight-test-flake.md](lessons/2026-11-20-usage-by-day-midnight-test-flake.md) | fix in progress |

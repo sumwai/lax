@@ -199,14 +199,20 @@ func TestUsageCacheTotalsPerDimension(t *testing.T) {
 	}
 	id := accountID(t, "ds1")
 
+	// 两条记录锚定在同一个本地自然日且均在 --since 1d 窗口内，避免跨午夜时拆成两天。
+	now := time.Now()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	t1 := max(dayStart.Unix(), now.Add(-time.Hour).Unix())
+	t2 := now.Unix()
+
 	addRecord(t, store.RequestRecord{
-		TS: time.Now().Add(-time.Hour).Unix(), Inbound: "anthropic", Outbound: "anthropic",
+		TS: t1, Inbound: "anthropic", Outbound: "anthropic",
 		ModelRequested: "m-a", ModelUsed: "m-a", AccountID: id,
 		HTTPStatus: 200, OK: true, InTokens: 100, OutTokens: 20,
 		CacheRead: 1000, CacheWrite: 200, LatencyMS: 300,
 	})
 	addRecord(t, store.RequestRecord{
-		TS: time.Now().Unix(), Inbound: "anthropic", Outbound: "anthropic",
+		TS: t2, Inbound: "anthropic", Outbound: "anthropic",
 		ModelRequested: "m-b", ModelUsed: "m-b", AccountID: id,
 		HTTPStatus: 200, OK: true, InTokens: 50, OutTokens: 10,
 		CacheRead: 500, CacheWrite: 100, LatencyMS: 200,
