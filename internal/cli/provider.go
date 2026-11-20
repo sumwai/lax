@@ -36,9 +36,14 @@ var providerSubs = []groupItem{
 // `--base-url` 在 add 里是可选的：每条路由与 models_path 都写成整条地址时，它拼不进任何地址，
 // 这一项确实无处可用，给了也只过一遍本机校验、不参与拼地址。
 const (
-	providerAddUsage   = "用法：lax provider add <名称> [--base-url <地址>] [--auth-header <头名>] [--auth-scheme raw|bearer|bearer-semicolon] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--embeddings <路径>] [--speech <路径>] [--transcriptions <路径>] [--default-protocol <协议>] [--models-path <路径>] [--note <备注>]"
-	providerSetUsage   = "用法：lax provider set <名称> [--base-url <地址>] [--auth-header <头名>] [--auth-scheme raw|bearer|bearer-semicolon] [--anthropic <路径>] [--openai <路径>] [--responses <路径>] [--gemini <路径>] [--systemone <路径>] [--embeddings <路径>] [--speech <路径>] [--transcriptions <路径>] [--models-path <路径>] [--default-protocol <协议>] [--note <备注>]"
-	providerUnsetUsage = "用法：lax provider unset <名称> <字段> [<字段>...]\n可用字段：anthropic、openai、responses、gemini、systemone、embeddings、speech、transcriptions、auth-header、auth-scheme、models-path、default-protocol、note"
+	providerAddUsage = "用法：lax provider add <名称> [--base-url <地址>] [--auth-header <头名>] " +
+		"[--auth-scheme raw|bearer|bearer-semicolon] [协议路径...] [--models-path <路径>] [--note <备注>]\n" +
+		"完整参数与示例：lax provider add --help"
+	providerSetUsage = "用法：lax provider set <名称> [--base-url <地址>] [--auth-header <头名>] " +
+		"[--auth-scheme raw|bearer|bearer-semicolon] [协议路径...] [--models-path <路径>] [--note <备注>]\n" +
+		"完整参数与示例：lax provider set --help"
+	providerUnsetUsage = "用法：lax provider unset <名称> <字段> [<字段>...]\n" +
+		"完整字段与示例：lax provider unset --help"
 )
 
 // providerUnsetField 是一个可以被 `provider unset` 清掉的字段。字段名用 flag 名，

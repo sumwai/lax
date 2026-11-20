@@ -416,7 +416,8 @@ func cmdModelSync(e *Env, fs *leafFlags, args []string) error {
 }
 
 // modelProbeUsage 是 model probe 的用法行，--protocol 的空值与不识协议时都打出来。
-const modelProbeUsage = "用法：lax model probe [--provider 厂商] [--account 账号] [--sync] [--model 模型] [--protocol 协议] [--limit N] [--concurrency N] [--max-age 时长] [--refresh]"
+const modelProbeUsage = "用法：lax model probe [--provider 厂商] [--account 账号] [--model 模型] [--protocol 协议]\n" +
+	"完整参数与示例：lax model probe --help"
 
 // cmdModelProbe 逐个模型探活。按 --provider / --account 选账号，不给就全选。
 // --protocol 把候选收窄到一条：只验一条路时不读已发现协议、不读目录声明、不取厂商默认协议。

@@ -360,8 +360,9 @@ func TestModelProbeProtocolOnly(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("--protocol cohere 退出码 = %d，期望 2（用法错误）；stderr = %s", code, stderr)
 	}
-	if !strings.Contains(stderr, "用法：lax model probe") {
-		t.Fatalf("用法错误应打出用法行: %s", stderr)
+	if !strings.Contains(stderr, "用法：lax model probe") ||
+		!strings.Contains(stderr, "完整参数与示例：lax model probe --help") {
+		t.Fatalf("用法错误应打出用法行与 --help 提示: %s", stderr)
 	}
 	if after := len(up.postCalls()); after != before {
 		t.Fatalf("协议写歪时不该发上游请求：%d -> %d", before, after)

@@ -272,7 +272,7 @@ func TestGroupWithoutSubcommandPrintsHelp(t *testing.T) {
 		{"plugin config", []string{"plugin", "config"}, "unset"},
 		{"log", []string{"log"}, "tail"},
 		{"model alias", []string{"model", "alias"}, "unset"},
-		{"model price", []string{"model", "price"}, "cache-read"},
+		{"model price", []string{"model", "price"}, "configure/pricing"},
 		{"model capability", []string{"model", "capability"}, "add"},
 		{"model dialect", []string{"model", "dialect"}, "set"},
 	}

@@ -190,8 +190,11 @@ type groupSpec struct {
 	name    string
 	purpose string
 	items   []groupItem
-	// help 非空时用它代替 printGroupHelp（alias、price 这类需要额外说明的组）。
-	help func(io.Writer)
+	// notes、docs、examples、hint 是组级帮助的可选附加内容，见 groupHelpOptions。
+	notes    []string
+	docs     string
+	examples []string
+	hint     string
 	// unknown 是未知子命令的完整文案，含一个留给 %q 的位置。
 	unknown string
 }
@@ -242,11 +245,12 @@ func newGroupCommand(e *Env, spec groupSpec, children ...*cobra.Command) *cobra.
 		use = use[i+1:]
 	}
 	printHelp := func(w io.Writer) {
-		if spec.help != nil {
-			spec.help(w)
-			return
-		}
-		printGroupHelp(w, spec.name, spec.purpose, spec.items)
+		printGroupHelpWith(w, spec.name, spec.purpose, spec.items, groupHelpOptions{
+			notes:    spec.notes,
+			docs:     spec.docs,
+			examples: spec.examples,
+			hint:     spec.hint,
+		})
 	}
 	cmd := &cobra.Command{
 		Use:                use,

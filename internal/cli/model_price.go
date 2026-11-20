@@ -3,7 +3,6 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"io"
 	"sort"
 	"strings"
 
@@ -17,37 +16,22 @@ import (
 // 价格属于「供应商 × 模型」，不在账号上：账号只在套餐不同时覆盖。
 // 因此这里有两个作用域——厂商级标价写 provider_models，账号覆盖写 account_models。
 
-// 这一组的 --help 不走 printGroupHelp：光列子命令说不清价格挂在谁身上。
-// 三条用法、一个示例与两段说明都写在 printModelPriceHelp 里。
-
-const (
-	modelPriceSetUsage = "用法：lax model price set <模型> [--provider 供应商] [--account 账号] " +
-		"[--in N] [--out N] [--cache-read N] [--cache-write N] [--tts-char N] [--audio-second N]"
-	modelPriceUnsetUsage = "用法：lax model price unset <模型> [--provider 供应商] [--account 账号] " +
-		"<字段> [<字段>...]"
-	modelPriceLsUsage = "用法：lax model price ls [<模型>] [--provider 供应商] [--account 账号]"
-	modelPriceUsage   = "用法：\n" +
-		"  lax model price set <模型> [--provider 供应商] [--account 账号] [--in N] [--out N] [--cache-read N] [--cache-write N] [--tts-char N] [--audio-second N]\n" +
-		"  lax model price unset <模型> [--provider 供应商] [--account 账号] <字段> [<字段>...]\n" +
-		"  lax model price ls [<模型>] [--provider 供应商] [--account 账号]"
-)
-
-// printModelPriceHelp 是 `model price --help` 的输出：三条用法、一个示例与两段说明。
-// 光列子命令说不清价格挂在谁身上，所以不走 printGroupHelp。
-func printModelPriceHelp(w io.Writer) {
-	var b strings.Builder
-	b.WriteString(appName + " model price — 模型单价（每百万 token），挂在「供应商 × 模型」上\n\n")
-	b.WriteString(modelPriceUsage + "\n\n")
-	b.WriteString("价格属于模型，不属于账号：同一家上游的同一个模型只有一份标价，model sync 或 model probe\n")
-	b.WriteString("把模型写进目录之后用 model price set 定它的价，usage 与 model ls 都读这一份。\n\n")
-	b.WriteString("账号级价格只在套餐不同时覆盖：给 --account 写的价只作用于那一个账号，不影响同厂商的\n")
-	b.WriteString("其它账号，也不改厂商级标价。清掉账号覆盖（model price unset --account）表示回到厂商级\n")
-	b.WriteString("标价，不是「免费」；缓存读写没定价时按输入价算。\n\n")
-	b.WriteString("示例：\n")
-	b.WriteString("  lax model price set glm-4.6 --in 0.6 --out 2.2\n\n")
-	b.WriteString("查看某个子命令的参数：lax model price <子命令> --help\n")
-	_, _ = io.WriteString(w, b.String())
+// modelPriceSubs 是 model price 一组的子命令清单，组级帮助与错误提示都读它。
+var modelPriceSubs = []groupItem{
+	{"set", "写模型单价（每百万 token）"},
+	{"unset", "清掉模型单价的一项或几项"},
+	{"ls", "列目录里的模型单价"},
 }
+
+// 三份用法行，所有用法错误都把它打出来；完整参数与示例指向各自子命令的 --help。
+const (
+	modelPriceSetUsage = "用法：lax model price set <模型> [--provider 供应商|--account 账号] " +
+		"[--in N] [--out N] [其它单价参数]\n" +
+		"完整参数与示例：lax model price set --help"
+	modelPriceUnsetUsage = "用法：lax model price unset <模型> <字段> [<字段>...] [--provider 供应商|--account 账号]\n" +
+		"完整参数与示例：lax model price unset --help"
+	modelPriceLsUsage = "用法：lax model price ls [<模型>] [--provider 供应商] [--account 账号]"
+)
 
 // priceFieldLabels 是四个字段在人读输出里的名字。字段名本身（in / out / cache-read /
 // cache-write）只由 store.PriceFieldNames 给，这里只负责翻译成中文，不另存一份字段清单。

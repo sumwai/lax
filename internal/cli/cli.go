@@ -141,7 +141,7 @@ func RunWithInput(args []string, stdin io.Reader, stdout, stderr io.Writer) int 
 	if isHint {
 		fmt.Fprintf(stderr, "%s: %s\n", ui.err(name), he.formatWithUI(ui))
 	} else {
-		fmt.Fprintf(stderr, "%s: %v\n", ui.err(name), err)
+		fmt.Fprintf(stderr, "%s: %s\n", ui.err(name), ui.dimSecondaryLines(err.Error()))
 	}
 	return code
 }
@@ -261,11 +261,29 @@ func isHelpRequest(args []string) bool {
 	return len(args) > 0 && (args[0] == "-h" || args[0] == "--help" || args[0] == "help")
 }
 
+// groupHelpOptions 是组级帮助里子命令表之后的附加内容。四个字段都可省：
+// notes 是「说明:」下的要点（尽量不超过一行），docs 是一行着灰的官方文档
+// 链接，examples 是「示例:」下的命令，hint 是最后一条着灰的下一步
+// （通常指向某个子命令的 --help）。
+type groupHelpOptions struct {
+	notes    []string
+	docs     string
+	examples []string
+	hint     string
+}
+
 // printGroupHelp 把组的用途与子命令清单打到 stdout：这是用户要看的结果，不是错误。
 // 组子命令不带参数时也走这里（与 --help 同一个分支），所以退出码 0、内容进 stdout；
 // 只留一条「未知子命令」算用法错误。名字列宽按最长的那几个（capability、transcribe、
 // transcriptions 一类）留到 11 列。
 func printGroupHelp(w io.Writer, name, purpose string, items []groupItem) {
+	printGroupHelpWith(w, name, purpose, items, groupHelpOptions{})
+}
+
+// printGroupHelpWith 与 printGroupHelp 同一版式，额外输出可选的说明、文档链接、
+// 示例与提示。说明用普通颜色，文档链接、示例命令与最后的提示着灰：命令是给人抄的，
+// 解释与下一步是辅助。
+func printGroupHelpWith(w io.Writer, name, purpose string, items []groupItem, opt groupHelpOptions) {
 	u := newUI(w)
 	fmt.Fprintf(w, "%s %s — %s\n\n", u.bold(appName), u.bold(name), purpose)
 	fmt.Fprintf(w, "%s\n  %s %s <命令> [选项]\n\n", u.bold("用法:"), appName, name)
@@ -273,11 +291,30 @@ func printGroupHelp(w io.Writer, name, purpose string, items []groupItem) {
 	for _, it := range items {
 		fmt.Fprintf(w, "  %-11s %s\n", it.name, it.summary)
 	}
+	if len(opt.notes) > 0 {
+		fmt.Fprintf(w, "\n%s\n", u.bold("说明:"))
+		for _, note := range opt.notes {
+			fmt.Fprintln(w, "  "+note)
+		}
+	}
+	if opt.docs != "" {
+		fmt.Fprintf(w, "\n%s\n", u.muted("文档："+opt.docs))
+	}
+	examples := opt.examples
+	if len(examples) == 0 {
+		if len(items) > 0 {
+			examples = []string{fmt.Sprintf("%s %s %s --help", appName, name, items[0].name)}
+		} else {
+			examples = []string{fmt.Sprintf("%s %s --help", appName, name)}
+		}
+	}
 	fmt.Fprintf(w, "\n%s\n", u.bold("示例:"))
-	if len(items) > 0 {
-		fmt.Fprintln(w, u.dim(fmt.Sprintf("  %s %s %s --help", appName, name, items[0].name)))
-	} else {
-		fmt.Fprintln(w, u.dim(fmt.Sprintf("  %s %s --help", appName, name)))
+	for _, ex := range examples {
+		fmt.Fprintln(w, u.muted("  "+ex))
+	}
+	if opt.hint != "" {
+		fmt.Fprintln(w)
+		fmt.Fprintln(w, u.muted(opt.hint))
 	}
 }
 

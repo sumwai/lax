@@ -3,7 +3,6 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 
 	"lax/internal/store"
@@ -25,10 +24,6 @@ const (
 	providerHeaderSetUsage   = "用法：lax provider header set <厂商> <头名> <值> [--protocol <协议>]"
 	providerHeaderUnsetUsage = "用法：lax provider header unset <厂商> <头名> [--protocol <协议>]"
 	providerHeaderLsUsage    = "用法：lax provider header ls [<厂商>]"
-	providerHeaderUsageText  = "用法：\n" +
-		"  lax provider header set <厂商> <头名> <值> [--protocol <协议>]\n" +
-		"  lax provider header unset <厂商> <头名> [--protocol <协议>]\n" +
-		"  lax provider header ls [<厂商>]"
 )
 
 // providerHeaderJSON 是 provider header ls 的一项，也是 set 的 --json 输出。
@@ -74,28 +69,6 @@ func headerScopeCell(protocol string) string {
 		return "-"
 	}
 	return protocol
-}
-
-// printProviderHeaderHelp 是 `provider header --help` 的输出：三条用法、一个示例，
-// 以及三种占位符写法与「厂商级 vs 协议级、协议级覆盖厂商级」两段说明。
-// 这段说明比组级帮助长，所以不走 printGroupHelp：光列子命令说清不了值怎么展开。
-func printProviderHeaderHelp(w io.Writer) {
-	var b strings.Builder
-	b.WriteString(appName + " provider header — 厂商附加请求头：有些上游除凭据头之外还要额外的头才路由\n\n")
-	b.WriteString(providerHeaderUsageText + "\n\n")
-	b.WriteString("可用的 --protocol：anthropic | openai | responses | gemini（也认报文协议全名 openai-chat、openai-responses）。\n")
-	b.WriteString("不给 --protocol 就是厂商级：这家厂商的每条路由都带上这条头；给了协议就是协议级：只加给这条协议。\n")
-	b.WriteString("同名头两边都有时协议级覆盖厂商级，删掉协议级那行就回退到厂商级。\n\n")
-	b.WriteString("值的写法（转发前才展开，展开后为空则这条头不发）：\n")
-	b.WriteString("  字面量      原样发出，例如 api-version 这类固定值\n")
-	b.WriteString("  {env:NAME}  取进程环境变量 NAME 的值，适合不该落库的会话 token\n")
-	b.WriteString("  {session}   本次请求的会话键（x-lax-session 或 metadata.user_id），都没有时每次新生成一个 UUID\n")
-	b.WriteString("  {model}     本次请求的模型名（裸名，不转义）\n\n")
-	b.WriteString("值可能是密钥，ls 与 --json 只输出脱敏后的前四位，完整值不打印。\n\n")
-	b.WriteString("示例：\n")
-	b.WriteString("  lax provider header set opencode x-opencode-session '{session}' --protocol openai-chat\n\n")
-	b.WriteString("查看某个子命令的参数：lax provider header <子命令> --help\n")
-	_, _ = w.Write([]byte(b.String()))
 }
 
 // headerProtocolFlag 把 --protocol 的取值换成报文协议，不给（或没出现在命令行上）就是厂商级（空串）。

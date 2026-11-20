@@ -106,3 +106,42 @@ func TestDimPlaceholdersInTableAndKV(t *testing.T) {
 		t.Fatalf("非 TTY 模式不应包含 ANSI 转义序列:\n%q", plain)
 	}
 }
+
+// TestDimSecondaryLines 钉住错误正文里的次要提示：失败原因与「用法：」行保持原样，
+// 用法行之后的解释与下一步着灰；非 TTY（color=false）时整段原样返回。
+func TestDimSecondaryLines(t *testing.T) {
+	text := "模型名不能为空\n用法：lax model price set <模型>\n一次写一个模型，模型名要写全\n完整参数与示例：lax model price set --help"
+
+	plain := uiStyle{}
+	if got := plain.dimSecondaryLines(text); got != text {
+		t.Fatalf("非 TTY 下不该加 ANSI: %q", got)
+	}
+
+	colored := uiStyle{color: true}.dimSecondaryLines(text)
+	lines := strings.Split(colored, "\n")
+	if lines[0] != "模型名不能为空" {
+		t.Fatalf("失败原因不该着灰: %q", lines[0])
+	}
+	if lines[1] != "用法：lax model price set <模型>" {
+		t.Fatalf("用法行不该着灰: %q", lines[1])
+	}
+	for _, want := range []string{
+		"\x1b[90m一次写一个模型，模型名要写全\x1b[0m",
+		"\x1b[90m完整参数与示例：lax model price set --help\x1b[0m",
+	} {
+		if !strings.Contains(colored, want) {
+			t.Fatalf("次要提示应着灰，缺少 %q:\n%q", want, colored)
+		}
+	}
+
+	// 文档链接也是次要行：没有用法行时按「文档：」前缀认。
+	docs := "参数写错了\n文档：https://docs.larkax.com/self-hosted/configure/pricing"
+	colorUI := uiStyle{color: true}
+	if got := colorUI.dimSecondaryLines(docs); !strings.Contains(
+		got, "\x1b[90m文档：https://docs.larkax.com/self-hosted/configure/pricing\x1b[0m") {
+		t.Fatalf("文档行应着灰: %q", got)
+	}
+	if got := plain.dimSecondaryLines(docs); got != docs {
+		t.Fatalf("非 TTY 下文档行应保持纯文本: %q", got)
+	}
+}

@@ -86,11 +86,13 @@ func newModelCommand(e *Env) *cobra.Command {
 
 func newModelAliasCommand(e *Env) *cobra.Command {
 	return newGroupCommand(e, groupSpec{
-		name:    "model alias",
-		purpose: "配置模型别名映射",
-		items:   modelAliasSubs,
-		help:    printModelAliasHelp,
-		unknown: "未知子命令 %q，可用：set | unset | ls\n用 lax model alias --help 查看用法",
+		name:     "model alias",
+		purpose:  "客户端写死的模型名指到一个真实模型名上",
+		items:    modelAliasSubs,
+		docs:     "https://docs.larkax.com/self-hosted/configure/models",
+		examples: []string{"lax model alias set fast glm-4.6"},
+		hint:     "完整参数与示例：lax model alias set --help",
+		unknown:  "未知子命令 %q，可用：set | unset | ls\n用 lax model alias --help 查看用法",
 	},
 		newLeafCommand(e, "model alias set", "配置模型别名映射", cmdModelAliasSet),
 		newLeafCommand(e, "model alias unset", "删掉一条别名", cmdModelAliasUnset),
@@ -100,10 +102,13 @@ func newModelAliasCommand(e *Env) *cobra.Command {
 
 func newModelPriceCommand(e *Env) *cobra.Command {
 	return newGroupCommand(e, groupSpec{
-		name:    "model price",
-		purpose: "模型单价（每百万 token）",
-		help:    printModelPriceHelp,
-		unknown: "未知子命令 %q，可用：set | unset | ls\n用 lax model price --help 查看用法",
+		name:     "model price",
+		purpose:  "模型单价，挂在「供应商 × 模型」上",
+		items:    modelPriceSubs,
+		docs:     "https://docs.larkax.com/self-hosted/configure/pricing",
+		examples: []string{"lax model price set glm-4.6 --in 0.6 --out 2.2"},
+		hint:     "完整参数与示例：lax model price set --help",
+		unknown:  "未知子命令 %q，可用：set | unset | ls\n用 lax model price --help 查看用法",
 	},
 		newLeafCommand(e, "model price set", "写模型单价（每百万 token）", cmdModelPriceSet),
 		newLeafCommand(e, "model price unset", "清掉模型单价的一项或几项", cmdModelPriceUnset),
@@ -219,10 +224,15 @@ func newProviderCommand(e *Env) *cobra.Command {
 func newProviderHeaderCommand(e *Env) *cobra.Command {
 	return newGroupCommand(e, groupSpec{
 		name:    "provider header",
-		purpose: "管理上游附加请求头",
+		purpose: "厂商附加请求头：有些上游除凭据头之外还要额外的头才路由",
 		items:   providerHeaderSubs,
-		help:    printProviderHeaderHelp,
-		unknown: "未知子命令 %q，可用：set | unset | ls\n用 lax provider header --help 查看用法",
+		notes: []string{
+			"值可写 {session} / {env:NAME} / {model}；协议级覆盖厂商级，ls 与 --json 脱敏。",
+		},
+		docs:     "https://docs.larkax.com/self-hosted/gateway/conversion",
+		examples: []string{"lax provider header set opencode x-opencode-session '{session}' --protocol openai-chat"},
+		hint:     "完整参数与示例：lax provider header set --help",
+		unknown:  "未知子命令 %q，可用：set | unset | ls\n用 lax provider header --help 查看用法",
 	},
 		newLeafCommand(e, "provider header set", "声明或覆盖一家厂商的一条附加请求头", cmdProviderHeaderSet),
 		newLeafCommand(e, "provider header unset", "删掉一条声明过的附加请求头", cmdProviderHeaderUnset),

@@ -395,8 +395,8 @@ func TestProviderHeaderUnknownProvider(t *testing.T) {
 	}
 }
 
-// TestProviderHeaderHelp 覆盖 provider header --help：三条用法、一个示例，
-// 以及三种占位符写法与「协议级覆盖厂商级」的说明；组级帮助与顶层帮助都要提到 header。
+// TestProviderHeaderHelp 覆盖 provider header --help 的标准版式：对齐的命令表、
+// 一行占位符提示、一行文档链接；组级帮助与顶层帮助都要提到 header。
 func TestProviderHeaderHelp(t *testing.T) {
 	sandbox(t)
 	mustInit(t)
@@ -406,17 +406,25 @@ func TestProviderHeaderHelp(t *testing.T) {
 		t.Fatalf("provider header --help 退出码 = %d，stderr = %q", code, stderr)
 	}
 	for _, want := range []string{
-		"lax provider header set <厂商> <头名> <值> [--protocol <协议>]",
-		"lax provider header unset <厂商> <头名> [--protocol <协议>]",
-		"lax provider header ls [<厂商>]",
+		"lax provider header — 厂商附加请求头",
+		"set", "unset", "ls",
+		"声明或覆盖一家厂商的一条附加请求头",
+		"删掉一条声明过的附加请求头",
+		"列已声明的附加请求头（值脱敏）",
 		"lax provider header set opencode x-opencode-session '{session}' --protocol openai-chat",
 		"{session}", "{env:NAME}", "{model}",
 		"协议级覆盖厂商级",
 		"脱敏",
+		"文档：https://docs.larkax.com/self-hosted/gateway/conversion",
+		"完整参数与示例：lax provider header set --help",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("provider header --help 缺 %q:\n%s", want, out)
 		}
+	}
+	// 标准组帮助不再平铺三条用法行。
+	if strings.Contains(out, "用法：") {
+		t.Fatalf("组级帮助应使用「用法:」标题，不混入子命令的用法行:\n%s", out)
 	}
 
 	// 子命令自己的 --help 仍打印参数清单，退出码 0。

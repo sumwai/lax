@@ -385,9 +385,10 @@ func TestDecideUsageErrors(t *testing.T) {
 					t.Fatalf("stderr 应提到 %q: %s", want, stderr)
 				}
 			}
-			// 用法错误要打印用法行，不能只给一句「参数错误」。
-			if !strings.Contains(stderr, "用法：lax model decide") {
-				t.Fatalf("用法错误应打印用法行: %s", stderr)
+			// 用法错误要打印用法行，不能只给一句「参数错误」；完整参数指向 --help。
+			if !strings.Contains(stderr, "用法：lax model decide") ||
+				!strings.Contains(stderr, "完整参数与示例：lax model decide --help") {
+				t.Fatalf("用法错误应打印用法行与 --help 提示: %s", stderr)
 			}
 		})
 	}

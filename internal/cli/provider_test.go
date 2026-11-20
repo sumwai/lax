@@ -1381,7 +1381,7 @@ func TestProviderUnsetErrors(t *testing.T) {
 		{"大小写不符", []string{"OpenAI"}, []string{"大小写不符", "openai"}},
 		{"base-url", []string{"base-url"}, []string{"不能 unset", "--base-url"}},
 		{"厂商名", []string{"name"}, []string{"不能 unset", "lax provider rm"}},
-		{"没有字段", nil, []string{"用法：lax provider unset <名称> <字段>"}},
+		{"没有字段", nil, []string{"用法：lax provider unset <名称> <字段>", "完整字段与示例：lax provider unset --help"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

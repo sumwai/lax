@@ -22,12 +22,11 @@ import (
 // 网关注册的入站路径也必须与它一致，否则命令行能发出去、网关却回 404。
 const systemOnePath = "/v1/systemone"
 
-// decideUsage 是所有用法错误都会打出来的那一行：参数形状、三种拼问题的写法与整块 JSON 的写法。
-// 用法错误只说「参数错误」等于让人去猜语法（见 AGENTS.md）。
+// decideUsage 是所有用法错误都会打出来的用法行：参数形状与两种问题来源。
+// 各 flag 的写法与示例见 `lax model decide --help`；用法错误只说「参数错误」等于让人去猜语法。
 const decideUsage = "用法：lax model decide --model <模型> --state <文本或 JSON> " +
-	"[--noul <名>=<问句>] [--choice <名>=<问句> --choice <名>:<选项>[,<选项>...]] " +
-	"[--score <名>=<问句> --score <名>:<级别>[,<级别>...]] [--questions <整块 JSON>] [--json]\n" +
-	"  --questions 与 --noul/--choice/--score 二选一：前者给整块 questions 对象，后者按问题逐条拼"
+	"(--noul|--choice|--score ... | --questions <整块 JSON>)\n" +
+	"完整参数与示例：lax model decide --help"
 
 // repeatedFlag 收集同一个参数在命令行上出现的每一次取值，保持出现顺序。
 // flag 包对同一个 Var 按顺序调 Set，重复写同一个 flag 因此不需要自己扫 argv。

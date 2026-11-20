@@ -543,8 +543,8 @@ func TestModelLsPricesComeFromMergedCatalog(t *testing.T) {
 	}
 }
 
-// TestModelPriceHelp 钉住 model price --help 的形状：三条用法、一个示例与两段说明。
-// 光列子命令说不清价格挂在谁身上。
+// TestModelPriceHelp 钉住 model price --help 的标准组帮助版式：对齐的命令表、
+// 一行文档链接、一个示例与指向子命令 --help 的灰色提示。
 func TestModelPriceHelp(t *testing.T) {
 	sandbox(t)
 
@@ -553,16 +553,22 @@ func TestModelPriceHelp(t *testing.T) {
 		t.Fatalf("model price --help 退出码 = %d，stderr = %s", code, stderr)
 	}
 	for _, want := range []string{
-		"lax model price set <模型>",
-		"lax model price unset <模型>",
-		"lax model price ls [<模型>]",
+		"lax model price — 模型单价",
+		"set", "unset", "ls",
+		"写模型单价（每百万 token）",
+		"清掉模型单价的一项或几项",
+		"列目录里的模型单价",
 		"lax model price set glm-4.6 --in 0.6 --out 2.2",
-		"价格属于模型，不属于账号",
-		"账号级价格只在套餐不同时覆盖",
+		"文档：https://docs.larkax.com/self-hosted/configure/pricing",
+		"完整参数与示例：lax model price set --help",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("model price --help 应包含 %q:\n%s", want, out)
 		}
+	}
+	// 标准组帮助不再把三条用法和全部单价参数平铺在帮助里。
+	if strings.Contains(out, "用法：") {
+		t.Fatalf("组级帮助应使用「用法:」标题，不混入子命令的用法行:\n%s", out)
 	}
 
 	// model --help 的子命令清单里要有 price。

@@ -3,7 +3,6 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 
 	"lax/internal/store"
@@ -25,10 +24,6 @@ const (
 	modelAliasSetUsage   = "用法：lax model alias set <别名> <目标>"
 	modelAliasUnsetUsage = "用法：lax model alias unset <别名>"
 	modelAliasLsUsage    = "用法：lax model alias ls [<别名>]"
-	modelAliasUsageText  = "用法：\n" +
-		"  lax model alias set <别名> <目标>\n" +
-		"  lax model alias unset <别名>\n" +
-		"  lax model alias ls [<别名>]"
 )
 
 // modelAliasJSON 是 alias ls 的一项，也是 set 的 --json 输出。
@@ -54,26 +49,6 @@ func (r modelAliasRow) ok() bool { return r.resolveErr == nil }
 
 func (r modelAliasRow) toJSON() modelAliasJSON {
 	return modelAliasJSON{Alias: r.alias, Target: r.target, Resolved: r.resolved, OK: r.ok()}
-}
-
-// printModelAliasHelp 是 `model alias --help` 的输出：三条用法、一个示例，
-// 以及「只影响请求方向」「请求记录里两个模型名会不同」两段说明。
-// 光列子命令说不清别名改的是什么、不改的是什么，所以不走 printGroupHelp。
-func printModelAliasHelp(w io.Writer) {
-	var b strings.Builder
-	b.WriteString(appName + " model alias — 客户端写死的模型名指到一个真实模型名上\n\n")
-	b.WriteString(modelAliasUsageText + "\n\n")
-	b.WriteString("别名只影响请求方向：网关按解析出的真实名字选号、改请求体与路径，响应不重写，\n")
-	b.WriteString("响应里的模型名仍是上游的真实名字。\n")
-	b.WriteString("客户端请求别名时，请求记录里的请求模型名与使用模型名会不同：log tail 的模型列\n")
-	b.WriteString("写成「别名 → 真名」，一次别名命中因此一眼能看出实际打了哪个模型。\n\n")
-	b.WriteString("别名精确匹配、区分大小写，可以指向另一个别名（链最长 8 跳）；名字已经被某个账号\n")
-	b.WriteString("或模型目录当成真实模型时写入会被拒绝，否则别名会遮蔽真名。目标眼下没有账号提供\n")
-	b.WriteString("也能先写，之后加账号即生效；解析不了时这条别名不参与选号。\n\n")
-	b.WriteString("示例：\n")
-	b.WriteString("  lax model alias set fast glm-4.6\n\n")
-	b.WriteString("查看某个子命令的参数：lax model alias <子命令> --help\n")
-	_, _ = io.WriteString(w, b.String())
 }
 
 // checkAliasName 在做任何事之前判一遍别名：空值（含只有空白）算用法错误、退出码 2。

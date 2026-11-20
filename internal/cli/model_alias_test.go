@@ -351,8 +351,8 @@ func TestModelAliasCycleRejected(t *testing.T) {
 	}
 }
 
-// TestModelAliasGroupHelp 钉住组级帮助：三条用法、一个示例，以及只影响请求方向、
-// 请求记录里两个模型名会不同这两段说明；结果打 stdout、退出码 0、不读数据库。
+// TestModelAliasGroupHelp 钉住组级帮助的标准版式：对齐的命令表、一行文档链接、
+// 一个示例与指向子命令 --help 的灰色提示；结果打 stdout、退出码 0、不读数据库。
 func TestModelAliasGroupHelp(t *testing.T) {
 	sandbox(t)
 
@@ -365,16 +365,22 @@ func TestModelAliasGroupHelp(t *testing.T) {
 			t.Fatalf("组级帮助不该写 stderr: %s", stderr)
 		}
 		for _, want := range []string{
-			"lax model alias set <别名> <目标>",
-			"lax model alias unset <别名>",
-			"lax model alias ls [<别名>]",
+			"lax model alias — 客户端写死的模型名指到一个真实模型名上",
+			"set", "unset", "ls",
+			"配置模型别名映射（同名覆盖目标）",
+			"删掉一条别名",
+			"列别名、目标与能否解析（不给别名就列全部）",
 			"lax model alias set fast glm-4.6",
-			"只影响请求方向",
-			"log tail",
+			"文档：https://docs.larkax.com/self-hosted/configure/models",
+			"完整参数与示例：lax model alias set --help",
 		} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("model alias %s 的帮助缺 %q:\n%s", arg, want, out)
 			}
+		}
+		// 标准组帮助不再平铺三条用法行。
+		if strings.Contains(out, "用法：") {
+			t.Fatalf("组级帮助应使用「用法:」标题，不混入子命令的用法行:\n%s", out)
 		}
 	}
 }

@@ -35,12 +35,56 @@ func (u uiStyle) paint(code, s string) string {
 	return "\x1b[" + code + "m" + s + "\x1b[0m"
 }
 
-func (u uiStyle) ok(s string) string   { return u.paint("32", s) }
-func (u uiStyle) warn(s string) string { return u.paint("33", s) }
-func (u uiStyle) err(s string) string  { return u.paint("31", s) }
-func (u uiStyle) dim(s string) string  { return u.paint("90", s) }
-func (u uiStyle) bold(s string) string { return u.paint("1", s) }
-func (u uiStyle) info(s string) string { return u.paint("36", s) }
+func (u uiStyle) ok(s string) string    { return u.paint("32", s) }
+func (u uiStyle) warn(s string) string  { return u.paint("33", s) }
+func (u uiStyle) err(s string) string   { return u.paint("31", s) }
+func (u uiStyle) dim(s string) string   { return u.paint("90", s) }
+func (u uiStyle) muted(s string) string { return u.dim(s) }
+func (u uiStyle) bold(s string) string  { return u.paint("1", s) }
+func (u uiStyle) info(s string) string  { return u.paint("36", s) }
+
+// secondaryLinePrefixes 是错误正文里属于「下一步」的行：完整参数、可用字段、
+// 后续命令一类。它们整行着灰，主因仍是正常颜色；非 TTY 与 NO_COLOR 下
+// dim 原样返回，输出保持纯文本。
+var secondaryLinePrefixes = []string{
+	"完整参数与示例：",
+	"完整字段与示例：",
+	"查看某个子命令的参数：",
+	"下一步:",
+	"下一步：",
+	"可用字段：",
+	"文档：",
+}
+
+// dimSecondaryLines 只给次要提示行着灰：失败原因与「用法：」行保持原样，
+// 用法行之后的解释、示例与下一步一律弱化；没有用法行的错误只按前缀认。
+func (u uiStyle) dimSecondaryLines(text string) string {
+	if !u.color {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	seenUsage := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "用法：") || strings.HasPrefix(trimmed, "用法:") {
+			seenUsage = true
+			continue
+		}
+		if seenUsage || hasSecondaryLinePrefix(trimmed) {
+			lines[i] = u.muted(line)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func hasSecondaryLinePrefix(trimmed string) bool {
+	for _, prefix := range secondaryLinePrefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			return true
+		}
+	}
+	return false
+}
 
 // isWide 判断字符在终端里占两列。
 func isWide(r rune) bool {
