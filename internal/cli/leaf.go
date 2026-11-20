@@ -24,13 +24,26 @@ var errFlagsDeclared = errors.New("leaf flags declared")
 //     Parse 只收下位置参数。
 //
 // 这样做的好处是命令体只需要声明参数并 Parse，业务逻辑按旧写法原样保留。
+type flagGroupSpec struct {
+	title string
+	names []string
+}
+
+type leafHelpOptions struct {
+	examples []string
+	groups   []flagGroupSpec
+	aliases  map[string][]string
+}
+
 type leafFlags struct {
 	cmd     *cobra.Command
 	vals    map[string]any
 	pos     []string
 	running bool
-	// examples 由声明遍收集，帮助输出读它。
+	// examples、groups、aliases 由声明遍收集，帮助输出读它们。
 	examples []string
+	groups   []flagGroupSpec
+	aliases  map[string][]string
 }
 
 // laxStringValues 让可重复参数在声明遍与执行遍之间传递取值：
@@ -159,6 +172,26 @@ func (f *leafFlags) setExamples(lines ...string) {
 	f.examples = append(f.examples, lines...)
 }
 
+func (f *leafFlags) aliasFlag(primary string, aliases ...string) {
+	if f.running || len(aliases) == 0 {
+		return
+	}
+	if f.aliases == nil {
+		f.aliases = map[string][]string{}
+	}
+	f.aliases[primary] = append(f.aliases[primary], aliases...)
+}
+
+func (f *leafFlags) flagGroup(title string, names ...string) {
+	if f.running {
+		return
+	}
+	f.groups = append(f.groups, flagGroupSpec{
+		title: title,
+		names: append([]string(nil), names...),
+	})
+}
+
 // newLeafCommand 把一个命令体接到原生 Cobra 命令上。name 是带父命令的完整名字
 // （例如 "account add"），used 只取最后一段；summary 是 --help 的标题。
 func newLeafCommand(e *Env, name, summary string, body func(*Env, *leafFlags, []string) error) *cobra.Command {
@@ -181,7 +214,11 @@ func newLeafCommand(e *Env, name, summary string, body func(*Env, *leafFlags, []
 		run := &leafFlags{cmd: c, vals: decl.vals, running: true}
 		return body(e, run, args)
 	}
-	finalizeLeafCommand(e, cmd, summary, decl.examples...)
+	finalizeLeafCommandWith(e, cmd, summary, leafHelpOptions{
+		examples: decl.examples,
+		groups:   decl.groups,
+		aliases:  decl.aliases,
+	})
 	return cmd
 }
 

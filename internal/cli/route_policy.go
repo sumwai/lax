@@ -222,6 +222,15 @@ func cmdRoutePolicyAdd(e *Env, fs *leafFlags, args []string) error {
 	disable := fs.Bool("disable", false, "永久停用整个账号，需要手工 lax account enable 恢复")
 	nextRoute := fs.Bool("next_route", false, "处理完重试与状态动作后换下一个候选")
 	returnError := fs.Bool("return", false, "把上游错误返回客户端")
+	fs.flagGroup("匹配范围", "provider", "account", "model")
+	fs.flagGroup("错误条件", "status", "error-contains", "error-regex", "all-errors")
+	fs.flagGroup("重试与状态动作", "retry", "retry-base", "cooldown", "disable")
+	fs.flagGroup("流转动作", "next_route", "return")
+	fs.flagGroup("规则信息", "priority", "note")
+	fs.setExamples(
+		"lax route policy add --status 429 --retry 2 --next_route",
+		"lax route policy add --provider anthropic --status 5xx --cooldown 30s --next_route",
+	)
 	usage := "用法：lax route policy add (--all-errors | --status/--error-contains/--error-regex) [条件 ...] [动作 ...] [--json]"
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -319,6 +328,15 @@ func cmdRoutePolicySet(e *Env, fs *leafFlags, args []string) error {
 	disable := fs.Bool("disable", false, "永久停用整个账号；设置它时会清掉冷却")
 	nextRoute := fs.Bool("next_route", false, "换下一个候选；设置它时会清掉 --return")
 	returnError := fs.Bool("return", false, "返回上游错误；设置它时会清掉 --next_route")
+	fs.flagGroup("匹配范围", "provider", "account", "model")
+	fs.flagGroup("错误条件", "status", "error-contains", "error-regex", "all-errors")
+	fs.flagGroup("重试与状态动作", "retry", "retry-base", "cooldown", "disable")
+	fs.flagGroup("流转动作", "next_route", "return")
+	fs.flagGroup("规则信息", "priority", "note")
+	fs.setExamples(
+		"lax route policy set 1 --cooldown 1m --priority 50",
+		"lax route policy set 2 --status 502,503 --retry 3 --next_route",
+	)
 	usage := "用法：lax route policy set <id> [要修改的字段 ...] [--json]"
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -468,6 +486,14 @@ func cmdRoutePolicyUnset(e *Env, fs *leafFlags, args []string) error {
 	cooldownFlag := fs.Bool("cooldown", false, "清除冷却")
 	disableFlag := fs.Bool("disable", false, "清除停用动作")
 	allErrors := fs.Bool("all-errors", false, "清空所有状态与错误条件后，确认改按“所有错误”匹配")
+	fs.flagGroup("清除匹配范围", "provider", "account", "model")
+	fs.flagGroup("清除错误条件", "status", "error-contains", "error-regex", "all-errors")
+	fs.flagGroup("清除重试与状态动作", "retry", "retry-base", "cooldown", "disable")
+	fs.flagGroup("重置规则信息", "priority", "note")
+	fs.setExamples(
+		"lax route policy unset 1 --cooldown --note",
+		"lax route policy unset 2 --status --all-errors",
+	)
 	usage := "用法：lax route policy unset <id> <要清掉的字段开关 ...> [--all-errors] [--json]"
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -780,6 +806,13 @@ func cmdRoutePolicyTest(e *Env, fs *leafFlags, args []string) error {
 	model := fs.String("model", "", "模型名；支持别名")
 	accountName := fs.String("account", "", "账号名；只校验存在，不写库")
 	explain := fs.Bool("explain", false, "逐条列出用户规则与内置兜底的命中或跳过原因")
+	fs.flagGroup("模拟错误", "status", "message")
+	fs.flagGroup("匹配上下文", "provider", "account", "model")
+	fs.flagGroup("输出控制", "explain")
+	fs.setExamples(
+		"lax route policy test --status 429 --provider openai --explain",
+		"lax route policy test --status 400 --message \"context length exceeded\" --model claude-sonnet-4",
+	)
 	usage := "用法：lax route policy test --status <码> [--message <文本>] [--provider <厂商>] [--model <模型>] [--account <账号>] [--explain] [--json]"
 	if err := fs.Parse(args); err != nil {
 		return err

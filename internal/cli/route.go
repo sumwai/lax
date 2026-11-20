@@ -146,6 +146,15 @@ func cmdRouteSet(e *Env, fs *leafFlags, args []string) error {
 	minSamples := fs.Int("min-samples", defaults.MinSamples, "成功率平滑的最小样本")
 	quotaOrder := fs.String("quota-order", defaults.QuotaOrder, "额度排序：off / expiry_asc / expiry_desc / ratio_desc / ratio_asc / usd_desc / usd_asc")
 	quotaMinUSD := fs.Float64("quota-min-usd", defaults.QuotaMinUSD, "已知折合余额低于这个 USD 值的账号不参与选号；0 表示关闭")
+	fs.flagGroup("目标与基础策略", "default", "strategy", "sticky")
+	fs.flagGroup("Softmax 评分与探索", "temperature", "explore", "score-priority", "score-success", "score-latency")
+	fs.flagGroup("成功率统计窗口", "window", "min-samples")
+	fs.flagGroup("额度调度", "quota-order", "quota-min-usd")
+	fs.setExamples(
+		"lax route set --default --strategy priority",
+		"lax route set claude-sonnet-4 --strategy softmax --temperature 0.5 --explore 5",
+		"lax route set glm-4.6 --strategy rotate --quota-order usd_desc --quota-min-usd 1",
+	)
 	usage := "用法：lax route set <模型> --strategy priority|rotate|weighted|success|softmax [参数]\n" +
 		"      lax route set --default --strategy <策略> [参数]"
 	if err := fs.Parse(args); err != nil {

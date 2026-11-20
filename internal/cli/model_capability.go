@@ -58,6 +58,19 @@ func cmdModelCapabilityWrite(e *Env, fs *leafFlags, args []string, additive bool
 	voices := fs.String("voices", "", "音色名，逗号分隔，例如 mimo_default,Mia,Chloe")
 	formats := fs.String("audio-formats", "", "音频格式，逗号分隔，例如 mp3,wav,pcm16")
 	dialect := fs.String("dialect", "", "把语音操作绑到这条方言，例如 lax/mimo-chat-speech@1")
+	fs.flagGroup("作用域与能力", "provider", "capability")
+	fs.flagGroup("语音扩展", "voices", "audio-formats", "dialect")
+	if additive {
+		fs.setExamples(
+			"lax model capability add mimo-v2-tts --provider xiaomi --capability speech --voices mimo_default,Mia",
+			"lax model capability add mimo-v2-tts --audio-formats mp3,wav --dialect lax/mimo-chat-speech@1",
+		)
+	} else {
+		fs.setExamples(
+			"lax model capability set mimo-v2-tts --provider xiaomi --capability chat,speech",
+			"lax model capability set mimo-v2-tts --voices Mia,Chloe --audio-formats mp3,pcm16",
+		)
+	}
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

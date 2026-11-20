@@ -431,6 +431,14 @@ func cmdModelProbe(e *Env, fs *leafFlags, args []string) error {
 	concurrency := fs.Int("concurrency", 4, "并发数")
 	maxAge := fs.Duration("max-age", 24*time.Hour, "已探过的结论新鲜多久，超期重探；0 与 --refresh 等价")
 	refresh := fs.Bool("refresh", false, "忽略新鲜度，全部重探")
+	fs.flagGroup("筛选范围", "provider", "account", "model", "protocol")
+	fs.flagGroup("同步与缓存", "sync", "refresh", "max-age")
+	fs.flagGroup("执行控制", "limit", "concurrency")
+	fs.setExamples(
+		"lax model probe --account anthropic-main",
+		"lax model probe --provider anthropic --sync --refresh",
+		"lax model probe --account ts --model typesafe/jev --protocol systemone",
+	)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

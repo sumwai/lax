@@ -1717,6 +1717,13 @@ func cmdPluginLogs(e *Env, fs *leafFlags, args []string) error {
 	timeRange := addTimeRangeFlags(fs, "")
 	limit := fs.Int("limit", 50, "最多显示多少条")
 	follow := fs.Bool("follow", false, "持续输出新日志，Ctrl-C 退出")
+	fs.flagGroup("过滤与时间范围", "level", "since", "from", "to")
+	fs.flagGroup("输出控制", "limit", "follow")
+	fs.setExamples(
+		"lax plugin logs my-plugin --limit 100",
+		"lax plugin logs my-plugin --level error --since 1h",
+		"lax plugin logs my-plugin --follow",
+	)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

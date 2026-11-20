@@ -522,6 +522,9 @@ func cmdProviderAdd(e *Env, fs *leafFlags, args []string) error {
 	authHeader := fs.String("auth-header", "", "自定义凭据头名称（如 X-Api-Key）")
 	authScheme := fs.String("auth-scheme", "", "凭据头格式：raw | bearer | bearer-semicolon")
 	note := fs.String("note", "", "备注")
+	fs.flagGroup("基础与鉴权", "base-url", "default-protocol", "models-path", "auth-header", "auth-scheme")
+	fs.flagGroup("协议路由", "anthropic", "openai", "responses", "gemini", "systemone", "embeddings", "speech", "transcriptions")
+	fs.flagGroup("通用", "note")
 	fs.setExamples(
 		"lax provider add acme --base-url https://api.example.com --openai /v1/chat/completions",
 		"lax provider add google-gemini --base-url https://generativelanguage.googleapis.com --gemini /v1beta/models/{model}:generateContent --default-protocol gemini",
@@ -652,6 +655,9 @@ func cmdProviderSet(e *Env, fs *leafFlags, args []string) error {
 	authScheme := fs.String("auth-scheme", "", "更新凭据头格式：raw | bearer | bearer-semicolon")
 	defProtocol := fs.String("default-protocol", "", "默认协议（须属于已声明的路由）")
 	note := fs.String("note", "", "更新备注")
+	fs.flagGroup("基础与鉴权", "base-url", "default-protocol", "models-path", "auth-header", "auth-scheme")
+	fs.flagGroup("协议路由", "anthropic", "openai", "responses", "gemini", "systemone", "embeddings", "speech", "transcriptions")
+	fs.flagGroup("通用", "note")
 	fs.setExamples(
 		"lax provider set openai --embeddings /v1/embeddings",
 		"lax provider set openai --speech /v1/audio/speech --transcriptions /v1/audio/transcriptions",

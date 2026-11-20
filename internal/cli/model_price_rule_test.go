@@ -538,3 +538,33 @@ func TestModelPriceTierMultipleAndMode(t *testing.T) {
 	}
 }
 
+func TestModelPriceSetHelpGroupsAndAliases(t *testing.T) {
+	sandbox(t)
+
+	code, _, stderr := run(t, "model", "price", "set", "--help")
+	if code != 0 {
+		t.Fatalf("model price set --help 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if !strings.Contains(stderr, "--multiplier, --multiple float") {
+		t.Fatalf("应将 --multiple 合并到 --multiplier 行:\n%s", stderr)
+	}
+	if strings.Contains(stderr, "\n  --multiple ") {
+		t.Fatalf("不应再出现单独的 --multiple 行:\n%s", stderr)
+	}
+	headers := []string{"作用域:", "Token 单价:", "语音单价:", "阶梯定价:", "分时窗口:", "通用:"}
+	lastIdx := -1
+	for _, h := range headers {
+		idx := strings.Index(stderr, h)
+		if idx < 0 {
+			t.Fatalf("帮助输出缺少分组 %q:\n%s", h, stderr)
+		}
+		if idx <= lastIdx {
+			t.Fatalf("分组 %q 顺序错误:\n%s", h, stderr)
+		}
+		lastIdx = idx
+	}
+	if !strings.Contains(stderr, "--json") {
+		t.Fatalf("通用分组应包含 --json:\n%s", stderr)
+	}
+}
+

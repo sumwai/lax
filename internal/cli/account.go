@@ -199,6 +199,12 @@ func cmdAccountAdd(e *Env, fs *leafFlags, args []string) error {
 	name := fs.String("name", "", "账号名称，也可以用位置参数给出")
 	models := fs.String("models", "", "该账号可用的模型，逗号分隔：名字进模型目录，账号侧记一条可用")
 	priority := fs.Int("priority", 100, "同模型多个账号时的优先级，小的先试")
+	fs.flagGroup("必填与身份", "provider", "key", "name")
+	fs.flagGroup("模型与调度", "models", "priority")
+	fs.setExamples(
+		"lax account add ds1 --provider deepseek --key sk-xxx --models deepseek-chat",
+		"lax account add claude-1 --provider anthropic --key - --priority 50 < key.txt",
+	)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

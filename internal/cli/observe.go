@@ -24,6 +24,14 @@ func cmdUsage(e *Env, fs *leafFlags, args []string) error {
 	account := fs.String("account", "", "只统计这个账号")
 	model := fs.String("model", "", "只统计这个真实模型（别名已解析）")
 	provider := fs.String("provider", "", "只统计这家厂商的账号")
+	fs.flagGroup("聚合维度", "by")
+	fs.flagGroup("过滤条件", "provider", "account", "model")
+	fs.flagGroup("时间范围", "since", "from", "to")
+	fs.setExamples(
+		"lax usage --by account --since 7d",
+		"lax usage --by model --provider anthropic --since 24h",
+		"lax usage --by day --from '-7d' --to '-1d'",
+	)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -198,6 +206,13 @@ func cmdLogTail(e *Env, fs *leafFlags, args []string) error {
 	n := fs.Int("n", 20, "条数")
 	follow := fs.Bool("follow", false, "持续输出新记录")
 	timeRange := addTimeRangeFlags(fs, "")
+	fs.flagGroup("输出控制", "n", "follow")
+	fs.flagGroup("时间范围", "since", "from", "to")
+	fs.setExamples(
+		"lax log tail -n 50",
+		"lax log tail --follow",
+		"lax log tail --since 1h",
+	)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -411,6 +426,14 @@ func cmdCall(e *Env, fs *leafFlags, args []string) error {
 	maxTokens := fs.Int("max-tokens", 256, "最大输出 token")
 	debug := fs.Bool("debug", false, "打印选号过程")
 	system := fs.String("system", "", "system 提示词")
+	fs.flagGroup("路由与协议", "model", "protocol")
+	fs.flagGroup("请求参数", "system", "max-tokens", "stream")
+	fs.flagGroup("通用", "debug")
+	fs.setExamples(
+		`lax model call "你好" --model claude-sonnet-4`,
+		`lax model call "写一首短诗" --protocol chat --stream`,
+		`lax model call "测试选号" --model gpt-4o --debug`,
+	)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

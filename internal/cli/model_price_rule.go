@@ -1217,6 +1217,14 @@ func cmdModelPriceTest(e *Env, fs *leafFlags, args []string) error {
 	ttsChar := fs.Int64("tts-char", 0, "语音合成字符数")
 	audioSec := fs.Int64("audio-second", 0, "语音转写秒数")
 	atRaw := fs.String("at", "", "模拟请求时间（RFC3339 或 YYYY-MM-DD HH:MM）")
+	fs.flagGroup("作用域", "provider", "account")
+	fs.flagGroup("Token 用量", "in", "out", "cache-read", "cache-write")
+	fs.flagGroup("语音用量", "tts-char", "audio-second")
+	fs.flagGroup("时间模拟", "at")
+	fs.setExamples(
+		"lax model price test claude-sonnet-4 --in 150000 --out 2000",
+		"lax model price test glm-4.6 --in 10000 --out 500 --at \"2026-11-20 02:00\"",
+	)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

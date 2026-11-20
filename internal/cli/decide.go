@@ -582,6 +582,14 @@ func cmdDecide(e *Env, fs *leafFlags, args []string) error {
 	fs.Var(&noul, "noul", "拼一个是非题：`名=问句`，可重复")
 	fs.Var(&choice, "choice", "选择题：`名=问句` 声明，再用 名:选项[,选项...] 追加选项（每个选项写 key 或 key=说明，至少两个），可重复")
 	fs.Var(&score, "score", "打分题：`名=问句` 声明，再用 名:级别[,级别...] 追加级别（至少两级，按从低到高写），可重复")
+	fs.flagGroup("基础输入", "model", "state")
+	fs.flagGroup("逐题拼接（可重复）", "noul", "choice", "score")
+	fs.flagGroup("整块导入（与逐题互斥）", "questions")
+	fs.setExamples(
+		`lax model decide --model typesafe/jev --state "用户请求退款" --noul approve="是否批准"`,
+		`lax model decide --model typesafe/jev --state '{"amount":99}' --choice risk="风险等级" --choice risk:low,medium,high`,
+		`lax model decide --model typesafe/jev --state "文本材料" --questions '{"q1":{"type":"noul","prompt":"是否通过"}}'`,
+	)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

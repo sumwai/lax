@@ -231,6 +231,18 @@ func cmdModelPriceSet(e *Env, fs *leafFlags, args []string) error {
 	daysRaw := fs.String("days", "", "分时窗口生效星期，逗号分隔如 sun,mon,sat（留空表示每天）")
 	multiplier := fs.Float64("multiplier", 0, "分时窗口或阶梯档位价格倍率，如 0.5 或 2")
 	multiple := fs.Float64("multiple", 0, "--multiplier 的别名，如 2")
+	fs.aliasFlag("multiplier", "multiple")
+	fs.flagGroup("作用域", "provider", "account")
+	fs.flagGroup("Token 单价", "in", "out", "cache-read", "cache-write")
+	fs.flagGroup("语音单价", "tts-char", "audio-second")
+	fs.flagGroup("阶梯定价", "tier", "tier-mode")
+	fs.flagGroup("分时窗口", "window", "start", "end", "tz", "days")
+	fs.flagGroup("通用", "multiplier")
+	fs.setExamples(
+		"lax model price set claude-sonnet-4 --provider anthropic --in 2 --out 4",
+		"lax model price set claude-sonnet-4 --provider anthropic --tier 200k --multiple 2",
+		"lax model price set glm-4.6 --window off-peak --start 00:00 --end 08:00 --multiple 0.5",
+	)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
