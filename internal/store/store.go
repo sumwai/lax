@@ -124,6 +124,7 @@ type RequestRecord struct {
 	TTSChars     int64
 	AudioSeconds int64
 	LatencyMS    int64
+	Cost         *float64
 	Error        string
 }
 
@@ -626,6 +627,23 @@ func (s *Store) InsertRequest(r *RequestRecord) error {
 }
 
 func insertRequestTx(tx *gorm.DB, r *RequestRecord) error {
+	cost := r.Cost
+	if cost == nil && r.ModelUsed != "" && r.AccountID > 0 {
+		if base, rule, _, _, _, err := effectivePricingForAccountTx(tx, r.AccountID, "", r.ModelUsed); err == nil {
+			if bd, calcErr := CalculateCost(base, rule, CostInput{
+				TS:                   r.TS,
+				InTokensUncached:     r.InTokensUncached,
+				CacheRead:            r.CacheRead,
+				CacheWrite:           r.CacheWrite,
+				OutTokens:            r.OutTokens,
+				ReasoningTokensExtra: r.ReasoningTokensExtra,
+				TTSChars:             r.TTSChars,
+				AudioSeconds:         r.AudioSeconds,
+			}); calcErr == nil && bd != nil {
+				cost = bd.TotalCost
+			}
+		}
+	}
 	row := requestRow{
 		TS:                   r.TS,
 		Inbound:              r.Inbound,
@@ -645,12 +663,14 @@ func insertRequestTx(tx *gorm.DB, r *RequestRecord) error {
 		TTSChars:             r.TTSChars,
 		AudioSeconds:         r.AudioSeconds,
 		LatencyMS:            r.LatencyMS,
+		Cost:                 cost,
 		Error:                ptrStr(r.Error),
 	}
 	if err := tx.Create(&row).Error; err != nil {
 		return err
 	}
 	r.ID = row.ID
+	r.Cost = cost
 	return nil
 }
 
@@ -727,6 +747,7 @@ func requestRecordsFromRows(rows []requestRow) []RequestRecord {
 			TTSChars:             r.TTSChars,
 			AudioSeconds:         r.AudioSeconds,
 			LatencyMS:            r.LatencyMS,
+			Cost:                 r.Cost,
 			Error:                derefStr(r.Error),
 		})
 	}
@@ -883,23 +904,23 @@ func (s *Store) Usage(dimension string, since, until int64, filters ...UsageFilt
 		args = append(args, filter.Provider)
 	}
 
-	// 单价按行现算：账号覆盖 → 目录标价（见 usagePriceIn 与 usagePriceJoin）。
-	// 不把单价快照进 requests：改价之后历史行按新价重算，与账号级价格时的行为一致。
+	// 优先使用落库时快照的 r.cost；历史老行（r.cost IS NULL）回退到按当前单价动态计算。
 	q := fmt.Sprintf(`SELECT k, COUNT(*), COALESCE(SUM(in_tokens),0), COALESCE(SUM(out_tokens),0),
 		COALESCE(SUM(reasoning_tokens),0),
 		COALESCE(SUM(cache_read),0), COALESCE(SUM(cache_write),0),
 		COALESCE(SUM(tts_chars),0), COALESCE(SUM(audio_seconds),0),
-		CASE WHEN SUM(CASE WHEN c_in IS NOT NULL THEN 1 ELSE 0 END
-		              + CASE WHEN c_cache_read IS NOT NULL THEN 1 ELSE 0 END
-		              + CASE WHEN c_cache_write IS NOT NULL THEN 1 ELSE 0 END
-		              + CASE WHEN c_out IS NOT NULL THEN 1 ELSE 0 END
-		              + CASE WHEN c_reasoning IS NOT NULL THEN 1 ELSE 0 END
-		              + CASE WHEN c_tts IS NOT NULL THEN 1 ELSE 0 END
-		              + CASE WHEN c_audio IS NOT NULL THEN 1 ELSE 0 END) = 0
+		CASE WHEN SUM(CASE WHEN snap_cost IS NOT NULL
+		                   OR c_in IS NOT NULL OR c_cache_read IS NOT NULL
+		                   OR c_cache_write IS NOT NULL OR c_out IS NOT NULL
+		                   OR c_reasoning IS NOT NULL OR c_tts IS NOT NULL
+		                   OR c_audio IS NOT NULL
+		              THEN 1 ELSE 0 END) = 0
 		     THEN NULL
-		     ELSE SUM(COALESCE(c_in,0) + COALESCE(c_cache_read,0) + COALESCE(c_cache_write,0)
-		              + COALESCE(c_out,0) + COALESCE(c_reasoning,0)
-		              + COALESCE(c_tts,0) + COALESCE(c_audio,0))
+		     ELSE SUM(CASE WHEN snap_cost IS NOT NULL THEN snap_cost
+		                   ELSE COALESCE(c_in,0) + COALESCE(c_cache_read,0) + COALESCE(c_cache_write,0)
+		                        + COALESCE(c_out,0) + COALESCE(c_reasoning,0)
+		                        + COALESCE(c_tts,0) + COALESCE(c_audio,0)
+		              END)
 		END
 		FROM (
 			SELECT %s AS k,
@@ -907,6 +928,7 @@ func (s *Store) Usage(dimension string, since, until int64, filters ...UsageFilt
 				r.reasoning_tokens AS reasoning_tokens,
 				r.cache_read AS cache_read, r.cache_write AS cache_write,
 				r.tts_chars AS tts_chars, r.audio_seconds AS audio_seconds,
+				r.cost AS snap_cost,
 				r.in_tokens_uncached * (%s) / 1e6 AS c_in,
 				r.cache_read * (%s) / 1e6 AS c_cache_read,
 				r.cache_write * (%s) / 1e6 AS c_cache_write,

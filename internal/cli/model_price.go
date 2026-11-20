@@ -21,6 +21,10 @@ var modelPriceSubs = []groupItem{
 	{"set", "写模型单价（每百万 token）"},
 	{"unset", "清掉模型单价的一项或几项"},
 	{"ls", "列目录里的模型单价"},
+	{"tier", "管理模型的阶梯定价档位"},
+	{"window", "管理模型的分时计费窗口"},
+	{"rule", "查看或整条导入/清除计费规则"},
+	{"test", "本地试算模型单次请求花费"},
 }
 
 // 三份用法行，所有用法错误都把它打出来；完整参数与示例指向各自子命令的 --help。
@@ -502,12 +506,13 @@ func cmdModelPriceUnset(e *Env, fs *leafFlags, args []string) error {
 // modelPriceEffectiveJSON 是 model price ls --json 里的 effective：账号覆盖之后的合并结果，
 // 合并规则只在 store.EffectiveModels 一处，cli 不重算。
 type modelPriceEffectiveJSON struct {
-	PriceIn         *float64 `json:"price_in"`
-	PriceOut        *float64 `json:"price_out"`
-	PriceCacheRead  *float64 `json:"price_cache_read"`
-	PriceCacheWrite *float64 `json:"price_cache_write"`
-	PriceTTSChar    *float64 `json:"price_tts_char"`
-	PriceAudioSec   *float64 `json:"price_audio_second"`
+	PriceIn         *float64           `json:"price_in"`
+	PriceOut        *float64           `json:"price_out"`
+	PriceCacheRead  *float64           `json:"price_cache_read"`
+	PriceCacheWrite *float64           `json:"price_cache_write"`
+	PriceTTSChar    *float64           `json:"price_tts_char"`
+	PriceAudioSec   *float64           `json:"price_audio_second"`
+	PricingRule     *store.PricingRule `json:"pricing_rule,omitempty"`
 }
 
 // modelPriceLsJSON 是 model price ls --json 的一项。Effective 只在给了 --account 时有值。
@@ -520,16 +525,19 @@ type modelPriceLsJSON struct {
 	PriceCacheWrite *float64                 `json:"price_cache_write"`
 	PriceTTSChar    *float64                 `json:"price_tts_char"`
 	PriceAudioSec   *float64                 `json:"price_audio_second"`
+	PricingRule     *store.PricingRule       `json:"pricing_rule,omitempty"`
 	Effective       *modelPriceEffectiveJSON `json:"effective,omitempty"`
 }
 
 // priceRow 是 model price ls 的一行：目录那一份价，加上（给了 --account 时）账号的有效价。
 type priceRow struct {
-	model    string
-	provider string
-	catalog  priceValues
+	model       string
+	provider    string
+	catalog     priceValues
+	catalogRule *store.PricingRule
 	// account 是账号合并之后的值；账号上没有这个模型的行时四项都是 nil（显示成 -）。
-	account priceValues
+	account     priceValues
+	accountRule *store.PricingRule
 }
 
 // cmdModelPriceLs 列目录里的模型单价：不给模型就列所有有价格的目录行（按模型名升序），
@@ -590,11 +598,11 @@ func cmdModelPriceLs(e *Env, fs *leafFlags, args []string) error {
 			}
 			inCatalog = inCatalog || m.Model == want || want == ""
 			values := providerPriceValues(m)
-			// 不给模型时只列有价的行：一份没有价格的目录行不回答「单价是多少」。
-			if want == "" && values.count() == 0 {
+			// 不给模型时只列有价或有计费规则的行：一份没有价格也没有规则的目录行不回答「单价是多少」。
+			if want == "" && values.count() == 0 && m.PricingRule == nil {
 				continue
 			}
-			rows = append(rows, priceRow{model: m.Model, provider: name, catalog: values})
+			rows = append(rows, priceRow{model: m.Model, provider: name, catalog: values, catalogRule: m.PricingRule})
 		}
 	}
 	if want != "" && !inCatalog {
@@ -624,6 +632,9 @@ func cmdModelPriceLs(e *Env, fs *leafFlags, args []string) error {
 			byModel[info.Model] = info
 		}
 		for i := range rows {
+			if rows[i].provider != acc.Provider {
+				continue
+			}
 			info, ok := byModel[rows[i].model]
 			if !ok {
 				continue
@@ -633,6 +644,7 @@ func cmdModelPriceLs(e *Env, fs *leafFlags, args []string) error {
 				cacheRead: info.PriceCacheRead, cacheWrite: info.PriceCacheWrite,
 				ttsChar: info.PriceTTSChar, audioSec: info.PriceAudioSec,
 			}
+			rows[i].accountRule = info.PricingRule
 		}
 	}
 
@@ -648,6 +660,7 @@ func cmdModelPriceLs(e *Env, fs *leafFlags, args []string) error {
 				PriceCacheWrite: r.catalog.cacheWrite,
 				PriceTTSChar:    r.catalog.ttsChar,
 				PriceAudioSec:   r.catalog.audioSec,
+				PricingRule:     r.catalogRule,
 			}
 			if account != "" {
 				item.Effective = &modelPriceEffectiveJSON{
@@ -657,6 +670,7 @@ func cmdModelPriceLs(e *Env, fs *leafFlags, args []string) error {
 					PriceCacheWrite: r.account.cacheWrite,
 					PriceTTSChar:    r.account.ttsChar,
 					PriceAudioSec:   r.account.audioSec,
+					PricingRule:     r.accountRule,
 				}
 			}
 			out = append(out, item)
@@ -671,9 +685,9 @@ func cmdModelPriceLs(e *Env, fs *leafFlags, args []string) error {
 
 	// 给了 --account 时每个价格格子里并排两段：目录价 | 有效价。两段之间用 |，缓存那一格
 	// 自己还要用 / 分读写，两种斜杠混在一起就分不清哪一段是哪一段。
-	header := []string{"模型", "供应商", "输入价", "输出价", "缓存读 / 缓存写", "合成价 / 百万字符", "转写价 / 秒"}
+	header := []string{"模型", "供应商", "输入价", "输出价", "缓存读 / 缓存写", "合成价 / 百万字符", "转写价 / 秒", "RULES"}
 	if account != "" {
-		header = []string{"模型", "供应商", "输入价（目录 | 有效）", "输出价（目录 | 有效）", "缓存读 / 缓存写（目录 | 有效）", "合成价 / 百万字符（目录 | 有效）", "转写价 / 秒（目录 | 有效）"}
+		header = []string{"模型", "供应商", "输入价（目录 | 有效）", "输出价（目录 | 有效）", "缓存读 / 缓存写（目录 | 有效）", "合成价 / 百万字符（目录 | 有效）", "转写价 / 秒（目录 | 有效）", "RULES"}
 	}
 	table := make([][]string, 0, len(rows))
 	for _, r := range rows {
@@ -685,16 +699,27 @@ func cmdModelPriceLs(e *Env, fs *leafFlags, args []string) error {
 			cacheColumnCell(r.catalog, r.account, account != ""),
 			priceColumnCell(r.catalog.ttsChar, r.account.ttsChar, account != ""),
 			priceColumnCell(r.catalog.audioSec, r.account.audioSec, account != ""),
+			rulesColumnCell(r.catalogRule, r.accountRule, account != ""),
 		})
 	}
 	fmt.Fprint(e.Stdout, renderTableWithSpec(tableSpec{
 		Header:    header,
-		Align:     []tableAlign{alignLeft, alignLeft, alignRight, alignRight, alignRight, alignRight, alignRight},
+		Align:     []tableAlign{alignLeft, alignLeft, alignRight, alignRight, alignRight, alignRight, alignRight, alignLeft},
 		Rows:      table,
 		Style:     newUI(e.Stdout),
 		HeaderSep: true,
 	}))
 	return nil
+}
+
+func rulesColumnCell(catalogRule, effectiveRule *store.PricingRule, withAccount bool) string {
+	if !withAccount {
+		return formatPricingRuleSummary(catalogRule)
+	}
+	if catalogRule == nil && effectiveRule == nil {
+		return "-"
+	}
+	return formatPricingRuleSummary(catalogRule) + " | " + formatPricingRuleSummary(effectiveRule)
 }
 
 // priceColumnCell 是一个价格单元格：没填写 -；给了 --account 时写成「目录 | 有效」两列并排。

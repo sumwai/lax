@@ -89,6 +89,7 @@ type ProviderModel struct {
 	// PriceTTSChar 是 TTS 单价（每百万字符），PriceAudioSec 是 ASR 单价（每秒）。
 	PriceTTSChar  *float64
 	PriceAudioSec *float64
+	PricingRule   *PricingRule
 	// UpdatedAt 是这一行最后一次写入的 Unix 秒。迁移回填的行是 0：旧表没有时间可用。
 	UpdatedAt int64
 }
@@ -122,6 +123,7 @@ type AccountModel struct {
 	// PriceTTSChar 与 PriceAudioSec 是语音两项单价的覆盖值，nil 表示继承目录。
 	PriceTTSChar  *float64
 	PriceAudioSec *float64
+	PricingRule   *PricingRule
 	Status        string
 }
 
@@ -141,6 +143,7 @@ type ModelInfo struct {
 	PriceCacheWrite *float64
 	PriceTTSChar    *float64
 	PriceAudioSec   *float64
+	PricingRule     *PricingRule
 }
 
 // accessValues 是 access 列的取值白名单，校验与错误文案都读它。
@@ -555,6 +558,7 @@ func providerModelsFromRows(rows []providerModelRow) []ProviderModel {
 			PriceCacheWrite: r.PriceCacheWrite,
 			PriceTTSChar:    r.PriceTTSChar,
 			PriceAudioSec:   r.PriceAudioSec,
+			PricingRule:     unmarshalPricingRule(r.PricingRuleJSON),
 			UpdatedAt:       r.UpdatedAt,
 		})
 	}
@@ -639,6 +643,7 @@ func scanAccountModels(rows []accountModelRow) []AccountModel {
 			PriceCacheWrite: r.PriceCacheWrite,
 			PriceTTSChar:    r.PriceTTSChar,
 			PriceAudioSec:   r.PriceAudioSec,
+			PricingRule:     unmarshalPricingRule(r.PricingRuleJSON),
 		}
 		m.Status = LegacyStatus(m.Access, m.CheckedAt)
 		out = append(out, m)
@@ -769,6 +774,7 @@ func (s *Store) EffectiveModels(accountID int64) ([]ModelInfo, error) {
 			PriceCacheWrite: firstOfFloat(row.PriceCacheWrite, pm.PriceCacheWrite),
 			PriceTTSChar:    firstOfFloat(row.PriceTTSChar, pm.PriceTTSChar),
 			PriceAudioSec:   firstOfFloat(row.PriceAudioSec, pm.PriceAudioSec),
+			PricingRule:     firstOfPricingRule(row.PricingRule, pm.PricingRule),
 		})
 	}
 	return out, nil
@@ -821,6 +827,13 @@ func firstOfInt(override, catalog *int64) *int64 {
 
 // firstOfFloat 同 firstOfInt，只是值的类型是价格。
 func firstOfFloat(override, catalog *float64) *float64 {
+	if override != nil {
+		return override
+	}
+	return catalog
+}
+
+func firstOfPricingRule(override, catalog *PricingRule) *PricingRule {
 	if override != nil {
 		return override
 	}

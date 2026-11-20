@@ -403,11 +403,17 @@ func TestUsageCostAccountOverrideWins(t *testing.T) {
 
 	wantCost(t, oneUsage(t, st, "model", "m1").Cost, 7.5)
 
-	// 清掉覆盖之后回到厂商级：6.5，与只有厂商级价时一致。
+	// 清掉覆盖之后，已快照的历史请求仍保持 7.5；新写入的请求回到厂商级 6.5（合计 14）。
 	if err := st.ClearAccountModelPrices("a1", "m1", []string{"in", "out"}); err != nil {
 		t.Fatalf("清账号覆盖价: %v", err)
 	}
-	wantCost(t, oneUsage(t, st, "model", "m1").Cost, 6.5)
+	wantCost(t, oneUsage(t, st, "model", "m1").Cost, 7.5)
+	insertUsageRow(t, st, acc.ID, "m1")
+	rows, err := st.Usage("model", time.Now().Add(-time.Hour).Unix(), 0)
+	if err != nil || len(rows) != 1 || rows[0].Requests != 2 {
+		t.Fatalf("Usage = %+v, err=%v; 期望 1 行 2 条请求", rows, err)
+	}
+	wantCost(t, rows[0].Cost, 14)
 }
 
 // TestUsageCostWithoutAnyPriceStayNull 钉住「缺价记 null」：目录与账号都没有这个模型的价、

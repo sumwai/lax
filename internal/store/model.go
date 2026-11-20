@@ -67,10 +67,11 @@ type requestRow struct {
 	CacheWrite           int64   `gorm:"column:cache_write;not null;default:0"`
 	ReasoningTokens      int64   `gorm:"column:reasoning_tokens;not null;default:0"`
 	ReasoningTokensExtra int64   `gorm:"column:reasoning_tokens_extra;not null;default:0"`
-	TTSChars             int64   `gorm:"column:tts_chars;not null;default:0"`
-	AudioSeconds         int64   `gorm:"column:audio_seconds;not null;default:0"`
-	LatencyMS            int64   `gorm:"column:latency_ms;not null;default:0"`
-	Error                *string `gorm:"column:error"`
+	TTSChars             int64    `gorm:"column:tts_chars;not null;default:0"`
+	AudioSeconds         int64    `gorm:"column:audio_seconds;not null;default:0"`
+	LatencyMS            int64    `gorm:"column:latency_ms;not null;default:0"`
+	Cost                 *float64 `gorm:"column:cost"`
+	Error                *string  `gorm:"column:error"`
 }
 
 func (requestRow) TableName() string { return "requests" }
@@ -139,6 +140,7 @@ type providerModelRow struct {
 	PriceCacheWrite *float64 `gorm:"column:price_cache_write"`
 	PriceTTSChar    *float64 `gorm:"column:price_tts_char"`
 	PriceAudioSec   *float64 `gorm:"column:price_audio_second"`
+	PricingRuleJSON *string  `gorm:"column:pricing_rule;type:text"`
 	UpdatedAt       int64    `gorm:"column:updated_at;not null;default:0"`
 }
 
@@ -163,6 +165,7 @@ type accountModelRow struct {
 	PriceCacheWrite *float64 `gorm:"column:price_cache_write"`
 	PriceTTSChar    *float64 `gorm:"column:price_tts_char"`
 	PriceAudioSec   *float64 `gorm:"column:price_audio_second"`
+	PricingRuleJSON *string  `gorm:"column:pricing_rule;type:text"`
 }
 
 func (accountModelRow) TableName() string { return "account_models" }

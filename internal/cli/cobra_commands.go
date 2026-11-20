@@ -108,11 +108,55 @@ func newModelPriceCommand(e *Env) *cobra.Command {
 		docs:     "https://docs.larkax.com/self-hosted/configure/pricing",
 		examples: []string{"lax model price set glm-4.6 --in 0.6 --out 2.2"},
 		hint:     "完整参数与示例：lax model price set --help",
-		unknown:  "未知子命令 %q，可用：set | unset | ls\n用 lax model price --help 查看用法",
+		unknown:  "未知子命令 %q，可用：set | unset | ls | tier | window | rule | test\n用 lax model price --help 查看用法",
 	},
 		newLeafCommand(e, "model price set", "写模型单价（每百万 token）", cmdModelPriceSet),
 		newLeafCommand(e, "model price unset", "清掉模型单价的一项或几项", cmdModelPriceUnset),
 		newLeafCommand(e, "model price ls", "列目录里的模型单价", cmdModelPriceLs),
+		newModelPriceTierCommand(e),
+		newModelPriceWindowCommand(e),
+		newModelPriceRuleCommand(e),
+		newLeafCommand(e, "model price test", "本地试算模型单次请求花费", cmdModelPriceTest),
+	)
+}
+
+func newModelPriceTierCommand(e *Env) *cobra.Command {
+	return newGroupCommand(e, groupSpec{
+		name:    "model price tier",
+		purpose: "管理模型的阶梯定价档位",
+		items:   modelPriceTierSubs,
+		unknown: "未知子命令 %q，可用：set | config | unset | clear\n用 lax model price tier --help 查看用法",
+	},
+		newLeafCommand(e, "model price tier set", "新增或更新一个阶梯档位", cmdModelPriceTierSet),
+		newLeafCommand(e, "model price tier config", "配置阶梯模式（all_in / progressive）与判定基数", cmdModelPriceTierConfig),
+		newLeafCommand(e, "model price tier unset", "删除指定上限的阶梯档位", cmdModelPriceTierUnset),
+		newLeafCommand(e, "model price tier clear", "清空全部阶梯档位", cmdModelPriceTierClear),
+	)
+}
+
+func newModelPriceWindowCommand(e *Env) *cobra.Command {
+	return newGroupCommand(e, groupSpec{
+		name:    "model price window",
+		purpose: "管理模型的分时计费窗口",
+		items:   modelPriceWindowSubs,
+		unknown: "未知子命令 %q，可用：set | unset | clear\n用 lax model price window --help 查看用法",
+	},
+		newLeafCommand(e, "model price window set", "新增或更新一个分时计费窗口", cmdModelPriceWindowSet),
+		newLeafCommand(e, "model price window unset", "删除指定名称的分时窗口", cmdModelPriceWindowUnset),
+		newLeafCommand(e, "model price window clear", "清空全部分时窗口", cmdModelPriceWindowClear),
+	)
+}
+
+func newModelPriceRuleCommand(e *Env) *cobra.Command {
+	return newGroupCommand(e, groupSpec{
+		name:    "model price rule",
+		purpose: "查看或整条导入/清除计费规则",
+		items:   modelPriceRuleSubs,
+		unknown: "未知子命令 %q，可用：show | set | unset\n用 lax model price rule --help 查看用法",
+	},
+		newLeafCommand(e, "model price rule show", "查看模型当前生效的计费规则与来源", cmdModelPriceRuleShow),
+		newLeafCommand(e, "model price rule set", "从文件或 JSON 字符串写入完整计费规则", cmdModelPriceRuleSet),
+		newLeafCommand(e, "model price rule unset", "清除计费规则", cmdModelPriceRuleUnset),
 	)
 }
 

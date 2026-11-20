@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -403,3 +404,231 @@ const (
 const usagePriceJoin = `LEFT JOIN accounts a ON a.id = r.account_id
 	LEFT JOIN account_models am ON am.account_id = r.account_id AND am.model = r.model_used
 	LEFT JOIN provider_models pm ON pm.provider = a.provider AND pm.model = r.model_used`
+
+// SetProviderPricingRule 为目录里 (厂商, 模型) 写入阶梯/分时计费规则。
+func (s *Store) SetProviderPricingRule(provider, model string, rule *PricingRule) error {
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if provider == "" || model == "" {
+		return fmt.Errorf("写计费规则需要厂商名与模型名：两者都不能为空")
+	}
+	if err := ValidatePricingRule(rule); err != nil {
+		return err
+	}
+	raw, err := marshalPricingRule(rule)
+	if err != nil {
+		return err
+	}
+	return s.withTx(func(tx *gorm.DB) error {
+		if err := requireProviderModelTx(tx, provider, model); err != nil {
+			return err
+		}
+		return tx.Model(&providerModelRow{}).
+			Where("provider = ? AND model = ?", provider, model).
+			Updates(map[string]any{
+				"pricing_rule": raw,
+				"updated_at":   time.Now().Unix(),
+			}).Error
+	})
+}
+
+// SetAccountPricingRule 为指定账号的模型覆盖行写入阶梯/分时计费规则。
+func (s *Store) SetAccountPricingRule(account, model string, rule *PricingRule) error {
+	account = strings.TrimSpace(account)
+	model = strings.TrimSpace(model)
+	if account == "" || model == "" {
+		return fmt.Errorf("写账号计费规则需要账号名与模型名：两者都不能为空")
+	}
+	if err := ValidatePricingRule(rule); err != nil {
+		return err
+	}
+	raw, err := marshalPricingRule(rule)
+	if err != nil {
+		return err
+	}
+	return s.withTx(func(tx *gorm.DB) error {
+		accountID, err := accountIDByNameTx(tx, account)
+		if err != nil {
+			return err
+		}
+		if err := requireAccountModelTx(tx, accountID, account, model); err != nil {
+			return err
+		}
+		return tx.Model(&accountModelRow{}).
+			Where("account_id = ? AND model = ?", accountID, model).
+			Update("pricing_rule", raw).Error
+	})
+}
+
+// ClearProviderPricingRule 清空目录里 (厂商, 模型) 的计费规则。
+func (s *Store) ClearProviderPricingRule(provider, model string) error {
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if provider == "" || model == "" {
+		return fmt.Errorf("清计费规则需要厂商名与模型名：两者都不能为空")
+	}
+	return s.withTx(func(tx *gorm.DB) error {
+		if err := requireProviderModelTx(tx, provider, model); err != nil {
+			return err
+		}
+		return tx.Model(&providerModelRow{}).
+			Where("provider = ? AND model = ?", provider, model).
+			Updates(map[string]any{
+				"pricing_rule": nil,
+				"updated_at":   time.Now().Unix(),
+			}).Error
+	})
+}
+
+// ClearAccountPricingRule 清空账号在指定模型上的计费规则覆盖（幂等）。
+func (s *Store) ClearAccountPricingRule(account, model string) error {
+	account = strings.TrimSpace(account)
+	model = strings.TrimSpace(model)
+	if account == "" || model == "" {
+		return fmt.Errorf("清账号计费规则需要账号名与模型名：两者都不能为空")
+	}
+	return s.withTx(func(tx *gorm.DB) error {
+		accountID, err := accountIDByNameTx(tx, account)
+		if err != nil {
+			return err
+		}
+		var exists int64
+		if err := tx.Model(&accountModelRow{}).
+			Where("account_id = ? AND model = ?", accountID, model).
+			Count(&exists).Error; err != nil {
+			return err
+		}
+		if exists == 0 {
+			return nil
+		}
+		return tx.Model(&accountModelRow{}).
+			Where("account_id = ? AND model = ?", accountID, model).
+			Update("pricing_rule", nil).Error
+	})
+}
+
+// EffectivePricing 查询指定账号或厂商下模型的有效基础单价、计费规则及来源。
+func (s *Store) EffectivePricing(accountNameOrID, provider, model string) (base ModelPrices, rule *PricingRule, baseSource string, ruleSource string, resolvedProvider string, err error) {
+	accountNameOrID = strings.TrimSpace(accountNameOrID)
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return ModelPrices{}, nil, "", "", "", fmt.Errorf("查询有效定价需要模型名")
+	}
+
+	if accountNameOrID != "" {
+		var acc accountRow
+		if err := s.gorm.Where("name = ?", accountNameOrID).Limit(1).Find(&acc).Error; err != nil {
+			return ModelPrices{}, nil, "", "", "", err
+		}
+		if acc.ID == 0 {
+			if id, convErr := strconv.ParseInt(accountNameOrID, 10, 64); convErr == nil && id > 0 {
+				if err := s.gorm.Where("id = ?", id).Limit(1).Find(&acc).Error; err != nil {
+					return ModelPrices{}, nil, "", "", "", err
+				}
+			}
+		}
+		if acc.ID == 0 {
+			return ModelPrices{}, nil, "", "", "", fmt.Errorf("账号 %q 不存在", accountNameOrID)
+		}
+		if provider != "" && provider != acc.Provider {
+			return ModelPrices{}, nil, "", "", "", fmt.Errorf("账号 %q 属于厂商 %q，与指定厂商 %q 不一致", accountNameOrID, acc.Provider, provider)
+		}
+		base, rule, baseSource, ruleSource, resolvedProvider, err = effectivePricingForAccountTx(s.gorm, acc.ID, acc.Provider, model)
+		return base, rule, baseSource, ruleSource, resolvedProvider, err
+	}
+
+	if provider == "" {
+		return ModelPrices{}, nil, "", "", "", fmt.Errorf("查询有效定价需要指定账号或厂商")
+	}
+	var pm providerModelRow
+	if err := s.gorm.Where("provider = ? AND model = ?", provider, model).Limit(1).Find(&pm).Error; err != nil {
+		return ModelPrices{}, nil, "", "", "", err
+	}
+	if pm.Provider == "" {
+		return ModelPrices{}, nil, "", "", "", fmt.Errorf("厂商 %q 的目录里没有模型 %q：%w", provider, model, ErrModelNotInCatalog)
+	}
+	base = ModelPrices{
+		In:         pm.PriceIn,
+		Out:        pm.PriceOut,
+		CacheRead:  pm.PriceCacheRead,
+		CacheWrite: pm.PriceCacheWrite,
+		TTSChar:    pm.PriceTTSChar,
+		AudioSec:   pm.PriceAudioSec,
+	}
+	if hasAnyModelPrice(base) {
+		baseSource = "provider"
+	}
+	rule = unmarshalPricingRule(pm.PricingRuleJSON)
+	if rule != nil {
+		ruleSource = "provider"
+	}
+	return base, rule, baseSource, ruleSource, provider, nil
+}
+
+// SimulateModelCost 按有效基础单价与计费规则试算一次请求花费。
+func (s *Store) SimulateModelCost(accountNameOrID, provider, model string, in CostInput) (*CostBreakdown, string, string, string, error) {
+	base, rule, baseSource, ruleSource, resolvedProvider, err := s.EffectivePricing(accountNameOrID, provider, model)
+	if err != nil {
+		return nil, "", "", "", err
+	}
+	bd, err := CalculateCost(base, rule, in)
+	if err != nil {
+		return nil, baseSource, ruleSource, resolvedProvider, err
+	}
+	return bd, baseSource, ruleSource, resolvedProvider, nil
+}
+
+func effectivePricingForAccountTx(tx *gorm.DB, accountID int64, provider, model string) (base ModelPrices, rule *PricingRule, baseSource string, ruleSource string, resolvedProvider string, err error) {
+	if provider == "" && accountID > 0 {
+		var acc accountRow
+		if err := tx.Select("id, provider").Where("id = ?", accountID).Limit(1).Find(&acc).Error; err != nil {
+			return ModelPrices{}, nil, "", "", "", err
+		}
+		provider = acc.Provider
+	}
+	resolvedProvider = provider
+
+	var am accountModelRow
+	if accountID > 0 {
+		if err := tx.Where("account_id = ? AND model = ?", accountID, model).Limit(1).Find(&am).Error; err != nil {
+			return ModelPrices{}, nil, "", "", "", err
+		}
+	}
+
+	var pm providerModelRow
+	if provider != "" {
+		if err := tx.Where("provider = ? AND model = ?", provider, model).Limit(1).Find(&pm).Error; err != nil {
+			return ModelPrices{}, nil, "", "", "", err
+		}
+	}
+
+	base = ModelPrices{
+		In:         firstOfFloat(am.PriceIn, pm.PriceIn),
+		Out:        firstOfFloat(am.PriceOut, pm.PriceOut),
+		CacheRead:  firstOfFloat(am.PriceCacheRead, pm.PriceCacheRead),
+		CacheWrite: firstOfFloat(am.PriceCacheWrite, pm.PriceCacheWrite),
+		TTSChar:    firstOfFloat(am.PriceTTSChar, pm.PriceTTSChar),
+		AudioSec:   firstOfFloat(am.PriceAudioSec, pm.PriceAudioSec),
+	}
+
+	amHasPrice := am.PriceIn != nil || am.PriceOut != nil || am.PriceCacheRead != nil ||
+		am.PriceCacheWrite != nil || am.PriceTTSChar != nil || am.PriceAudioSec != nil
+	pmHasPrice := pm.PriceIn != nil || pm.PriceOut != nil || pm.PriceCacheRead != nil ||
+		pm.PriceCacheWrite != nil || pm.PriceTTSChar != nil || pm.PriceAudioSec != nil
+	if amHasPrice {
+		baseSource = "account"
+	} else if pmHasPrice {
+		baseSource = "provider"
+	}
+
+	if amRule := unmarshalPricingRule(am.PricingRuleJSON); amRule != nil {
+		rule = amRule
+		ruleSource = "account"
+	} else if pmRule := unmarshalPricingRule(pm.PricingRuleJSON); pmRule != nil {
+		rule = pmRule
+		ruleSource = "provider"
+	}
+
+	return base, rule, baseSource, ruleSource, resolvedProvider, nil
+}
