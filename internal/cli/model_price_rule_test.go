@@ -21,18 +21,18 @@ func TestModelPriceTierCommands(t *testing.T) {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	// 1. tier set 添加两档（乱序添加也应按 max_tokens 升序，inf 在最后）
-	code, out, stderr := run(t, "model", "price", "tier", "set", "m1", "--max", "inf", "--in", "2.0", "--out", "8.0")
+	// 1. model price set --tier 添加多档（乱序添加也应按 max_tokens 升序，inf 在最后，支持 k/m/纯数字/unlimited）
+	code, out, stderr := run(t, "model", "price", "set", "m1", "--tier", "inf", "--in", "2.0", "--out", "8.0")
 	if code != 0 {
-		t.Fatalf("tier set inf 退出码 = %d，stderr = %s", code, stderr)
+		t.Fatalf("model price set --tier inf 退出码 = %d，stderr = %s", code, stderr)
 	}
 	if !strings.Contains(out, "已写入阶梯档位") || !strings.Contains(out, "inf") {
-		t.Fatalf("tier set 输出不符合预期:\n%s", out)
+		t.Fatalf("model price set --tier 输出不符合预期:\n%s", out)
 	}
 
-	code, out, stderr = run(t, "model", "price", "tier", "set", "m1", "--max", "32000", "--in", "1.0", "--out", "4.0", "--json")
+	code, out, stderr = run(t, "model", "price", "set", "m1", "--tier", "200k", "--in", "1.0", "--out", "4.0", "--json")
 	if code != 0 {
-		t.Fatalf("tier set 32000 退出码 = %d，stderr = %s", code, stderr)
+		t.Fatalf("model price set --tier 200k 退出码 = %d，stderr = %s", code, stderr)
 	}
 	var setResp struct {
 		Model    string             `json:"model"`
@@ -41,38 +41,39 @@ func TestModelPriceTierCommands(t *testing.T) {
 	}
 	mustJSON(t, out, &setResp)
 	if setResp.Rule == nil || setResp.Rule.Tiers == nil || len(setResp.Rule.Tiers.Brackets) != 2 {
-		t.Fatalf("tier set --json 应返回 2 个档位: %+v", setResp)
+		t.Fatalf("model price set --tier --json 应返回 2 个档位: %+v", setResp)
 	}
-	if setResp.Rule.Tiers.Brackets[0].MaxTokens == nil || *setResp.Rule.Tiers.Brackets[0].MaxTokens != 32000 {
-		t.Fatalf("第一档应为 32000，实际 %+v", setResp.Rule.Tiers.Brackets[0])
+	if setResp.Rule.Tiers.Mode != store.TierModeAllIn || setResp.Rule.Tiers.Basis != store.TierBasisTotalInput {
+		t.Fatalf("默认应为 all_in + total_input，实际 %+v", setResp.Rule.Tiers)
+	}
+	if setResp.Rule.Tiers.Brackets[0].MaxTokens == nil || *setResp.Rule.Tiers.Brackets[0].MaxTokens != 200000 {
+		t.Fatalf("第一档应为 200000，实际 %+v", setResp.Rule.Tiers.Brackets[0])
 	}
 	if setResp.Rule.Tiers.Brackets[1].MaxTokens != nil {
 		t.Fatalf("第二档应为 inf (nil)，实际 %+v", setResp.Rule.Tiers.Brackets[1])
 	}
 
-	// 2. tier config 修改 mode 与 basis
-	code, out, stderr = run(t, "model", "price", "tier", "config", "m1", "--mode", "progressive", "--basis", "uncached_input", "--json")
-	if code != 0 {
-		t.Fatalf("tier config 退出码 = %d，stderr = %s", code, stderr)
+	// 支持 1m / 1.5m / 纯数字，且保留已有自定义 Mode/Basis
+	if code, _, stderr := run(t, "model", "price", "set", "m1", "--tier", "1m", "--in", "1.5", "--out", "6.0"); code != 0 {
+		t.Fatalf("model price set --tier 1m 退出码 = %d，stderr = %s", code, stderr)
 	}
-	mustJSON(t, out, &setResp)
-	if setResp.Rule.Tiers.Mode != store.TierModeProgressive || setResp.Rule.Tiers.Basis != store.TierBasisUncachedInput {
-		t.Fatalf("tier config 未生效: %+v", setResp.Rule.Tiers)
+	if pm := providerPrice(t, "mine", "m1"); pm.PricingRule == nil || pm.PricingRule.Tiers == nil || len(pm.PricingRule.Tiers.Brackets) != 3 || *pm.PricingRule.Tiers.Brackets[1].MaxTokens != 1000000 {
+		t.Fatalf("--tier 1m 应解析为 1000000: %+v", pm.PricingRule)
 	}
 
-	// 3. tier unset 删除一档
-	code, out, stderr = run(t, "model", "price", "tier", "unset", "m1", "--max", "32000")
+	// 2. tier unset 删除一档（支持 200k 写法）
+	code, out, stderr = run(t, "model", "price", "tier", "unset", "m1", "--tier", "200k")
 	if code != 0 {
 		t.Fatalf("tier unset 退出码 = %d，stderr = %s", code, stderr)
 	}
 	if !strings.Contains(out, "已删除阶梯档位") {
 		t.Fatalf("tier unset 输出不符合预期:\n%s", out)
 	}
-	if pm := providerPrice(t, "mine", "m1"); pm.PricingRule == nil || pm.PricingRule.Tiers == nil || len(pm.PricingRule.Tiers.Brackets) != 1 {
-		t.Fatalf("tier unset 后应剩 1 档: %+v", pm.PricingRule)
+	if pm := providerPrice(t, "mine", "m1"); pm.PricingRule == nil || pm.PricingRule.Tiers == nil || len(pm.PricingRule.Tiers.Brackets) != 2 {
+		t.Fatalf("tier unset 后应剩 2 档: %+v", pm.PricingRule)
 	}
 
-	// 4. tier clear 清空全部档位（无 schedule 时应把 pricing_rule 置空）
+	// 3. tier clear 清空全部档位（无 schedule 时应把 pricing_rule 置空）
 	code, _, stderr = run(t, "model", "price", "tier", "clear", "m1", "--json")
 	if code != 0 {
 		t.Fatalf("tier clear 退出码 = %d，stderr = %s", code, stderr)
@@ -81,18 +82,36 @@ func TestModelPriceTierCommands(t *testing.T) {
 		t.Fatalf("tier clear 后 pricing_rule 应为空: %+v", pm.PricingRule)
 	}
 
-	// 5. 错误参数校验
-	if code, _, _ := run(t, "model", "price", "tier", "set", "m1", "--max", "0", "--in", "1"); code != 2 {
-		t.Fatalf("--max 0 应返回退出码 2，实际 %d", code)
+	// 4. 已有自定义 progressive/uncached_input 时，--tier 应保留原配置
+	if code, _, stderr := run(t, "model", "price", "rule", "set", "m1", "--rule-json", `{"version":1,"tiers":{"mode":"progressive","basis":"uncached_input","brackets":[{"max_tokens":32768,"prices":{"in":1.0}}]}}`); code != 0 {
+		t.Fatalf("rule set 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if code, _, _ := run(t, "model", "price", "tier", "set", "m1", "--max", "1000"); code != 2 {
+	if code, _, stderr := run(t, "model", "price", "set", "m1", "--tier", "unlimited", "--in", "2.0"); code != 0 {
+		t.Fatalf("model price set --tier unlimited 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if pm := providerPrice(t, "mine", "m1"); pm.PricingRule == nil || pm.PricingRule.Tiers == nil ||
+		pm.PricingRule.Tiers.Mode != store.TierModeProgressive || pm.PricingRule.Tiers.Basis != store.TierBasisUncachedInput ||
+		len(pm.PricingRule.Tiers.Brackets) != 2 {
+		t.Fatalf("已有自定义配置应被保留: %+v", pm.PricingRule)
+	}
+
+	// 5. 错误参数校验
+	for _, bad := range []string{"0", "-100k", "abc", "200g", "1.5x"} {
+		if code, _, _ := run(t, "model", "price", "set", "m1", "--tier", bad, "--in", "1"); code != 2 {
+			t.Fatalf("--tier %q 应返回退出码 2，实际 %d", bad, code)
+		}
+	}
+	if code, _, _ := run(t, "model", "price", "set", "m1", "--tier", "1000"); code != 2 {
 		t.Fatalf("未给单价应返回退出码 2，实际 %d", code)
 	}
-	if code, _, _ := run(t, "model", "price", "tier", "config", "m1", "--mode", "bad"); code != 2 {
-		t.Fatalf("非法 mode 应返回退出码 2，实际 %d", code)
+	if code, _, _ := run(t, "model", "price", "set", "m1", "--tier", "200k", "--in", "1", "--window", "off-peak", "--start", "00:00", "--end", "08:00", "--multiplier", "0.5"); code != 2 {
+		t.Fatalf("--tier 与 --window 混用应返回退出码 2，实际 %d", code)
 	}
-	if code, _, _ := run(t, "model", "price", "tier", "config", "m1", "--mode", "all_in"); code != 1 {
-		t.Fatalf("无档位时 tier config 应返回退出码 1，实际 %d", code)
+	if code, _, _ := run(t, "model", "price", "set", "m1", "--tier", "200k", "--in", "1", "--tts-char", "1.0"); code != 2 {
+		t.Fatalf("--tier 搭配 --tts-char 应返回退出码 2，实际 %d", code)
+	}
+	if code, _, _ := run(t, "model", "price", "set", "m1", "--tier", "200k", "--in", "1", "--audio-second", "0.1"); code != 2 {
+		t.Fatalf("--tier 搭配 --audio-second 应返回退出码 2，实际 %d", code)
 	}
 }
 
@@ -103,18 +122,18 @@ func TestModelPriceWindowCommands(t *testing.T) {
 		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
 	}
 
-	code, out, stderr := run(t, "model", "price", "window", "set", "m1",
-		"--name", "off-peak", "--tz", "Asia/Shanghai", "--start", "00:00", "--end", "08:00",
+	code, out, stderr := run(t, "model", "price", "set", "m1",
+		"--window", "off-peak", "--tz", "Asia/Shanghai", "--start", "00:00", "--end", "08:00",
 		"--days", "sat,sun", "--multiplier", "0.5", "--json")
 	if code != 0 {
-		t.Fatalf("window set 退出码 = %d，stderr = %s", code, stderr)
+		t.Fatalf("model price set --window 退出码 = %d，stderr = %s", code, stderr)
 	}
 	var resp struct {
 		Rule *store.PricingRule `json:"rule"`
 	}
 	mustJSON(t, out, &resp)
 	if resp.Rule == nil || resp.Rule.Schedule == nil || len(resp.Rule.Schedule.Windows) != 1 {
-		t.Fatalf("window set --json 应返回 1 个窗口: %+v", resp)
+		t.Fatalf("model price set --window --json 应返回 1 个窗口: %+v", resp)
 	}
 	w := resp.Rule.Schedule.Windows[0]
 	if w.Name != "off-peak" || resp.Rule.Schedule.Timezone != "Asia/Shanghai" || len(w.Days) != 2 || w.Days[0] != 0 || w.Days[1] != 6 {
@@ -122,10 +141,10 @@ func TestModelPriceWindowCommands(t *testing.T) {
 	}
 
 	// 同名更新
-	code, _, stderr = run(t, "model", "price", "window", "set", "m1",
-		"--name", "off-peak", "--start", "01:00", "--end", "07:00", "--in", "0.3")
+	code, _, stderr = run(t, "model", "price", "set", "m1",
+		"--window", "off-peak", "--start", "01:00", "--end", "07:00", "--in", "0.3")
 	if code != 0 {
-		t.Fatalf("window set 更新退出码 = %d，stderr = %s", code, stderr)
+		t.Fatalf("model price set --window 更新退出码 = %d，stderr = %s", code, stderr)
 	}
 	pm := providerPrice(t, "mine", "m1")
 	if len(pm.PricingRule.Schedule.Windows) != 1 || pm.PricingRule.Schedule.Windows[0].Start != "01:00" {
@@ -147,11 +166,23 @@ func TestModelPriceWindowCommands(t *testing.T) {
 	}
 
 	// 错误参数校验
-	if code, _, _ := run(t, "model", "price", "window", "set", "m1", "--name", "x", "--start", "00:00", "--end", "08:00"); code != 2 {
+	if code, _, _ := run(t, "model", "price", "set", "m1", "--window", "x", "--start", "00:00", "--end", "08:00"); code != 2 {
 		t.Fatalf("未给 multiplier/override 应返回退出码 2，实际 %d", code)
 	}
-	if code, _, _ := run(t, "model", "price", "window", "set", "m1", "--name", "x", "--start", "00:00", "--end", "08:00", "--days", "funday", "--multiplier", "0.5"); code != 2 {
+	if code, _, _ := run(t, "model", "price", "set", "m1", "--window", "x", "--start", "00:00", "--end", "08:00", "--days", "funday", "--multiplier", "0.5"); code != 2 {
 		t.Fatalf("非法 days 应返回退出码 2，实际 %d", code)
+	}
+	if code, _, _ := run(t, "model", "price", "set", "m1", "--start", "00:00", "--end", "08:00", "--multiplier", "0.5"); code != 2 {
+		t.Fatalf("--start 未带 --window 应返回退出码 2，实际 %d", code)
+	}
+	if code, _, _ := run(t, "model", "price", "set", "m1", "--window", "x", "--start", "00:00", "--multiplier", "0.5"); code != 2 {
+		t.Fatalf("缺少 --end 应返回退出码 2，实际 %d", code)
+	}
+	if code, _, _ := run(t, "model", "price", "set", "m1", "--window", "x", "--start", "00:00", "--end", "08:00", "--multiplier", "0.5", "--tts-char", "1.0"); code != 2 {
+		t.Fatalf("--window 搭配 --tts-char 应返回退出码 2，实际 %d", code)
+	}
+	if code, _, _ := run(t, "model", "price", "set", "m1", "--window", "x", "--start", "00:00", "--end", "08:00", "--multiplier", "0.5", "--audio-second", "0.1"); code != 2 {
+		t.Fatalf("--window 搭配 --audio-second 应返回退出码 2，实际 %d", code)
 	}
 }
 
@@ -271,13 +302,13 @@ func TestModelPriceRuleShowSetUnsetAndLsSummary(t *testing.T) {
 	if code, _, _ := run(t, "model", "price", "rule", "set", "m1", "--rule-json", `{"tiers":{"brackets":[]}}`); code != 2 {
 		t.Fatalf("非法规则结构应返回退出码 2，实际 %d", code)
 	}
-	if code, _, _ := run(t, "model", "price", "window", "set", "m1", "--name", "badtz", "--tz", "Invalid/Zone", "--start", "00:00", "--end", "08:00", "--multiplier", "0.5"); code != 2 {
+	if code, _, _ := run(t, "model", "price", "set", "m1", "--window", "badtz", "--tz", "Invalid/Zone", "--start", "00:00", "--end", "08:00", "--multiplier", "0.5"); code != 2 {
 		t.Fatalf("非法时区应返回退出码 2，实际 %d", code)
 	}
-	if code, _, _ := run(t, "model", "price", "window", "set", "m1", "--name", "same", "--start", "08:00", "--end", "08:00", "--multiplier", "0.5"); code != 2 {
+	if code, _, _ := run(t, "model", "price", "set", "m1", "--window", "same", "--start", "08:00", "--end", "08:00", "--multiplier", "0.5"); code != 2 {
 		t.Fatalf("起止时间相同应返回退出码 2，实际 %d", code)
 	}
-	if code, _, _ := run(t, "model", "price", "window", "set", "m1", "--name", "neg", "--start", "00:00", "--end", "08:00", "--multiplier", "-0.5"); code != 2 {
+	if code, _, _ := run(t, "model", "price", "set", "m1", "--window", "neg", "--start", "00:00", "--end", "08:00", "--multiplier", "-0.5"); code != 2 {
 		t.Fatalf("负倍率应返回退出码 2，实际 %d", code)
 	}
 }
@@ -291,18 +322,18 @@ func TestModelPriceTestCommand(t *testing.T) {
 	if code, _, stderr := run(t, "model", "price", "set", "m1", "--in", "1.0", "--out", "2.0"); code != 0 {
 		t.Fatalf("price set 退出码 = %d，stderr = %s", code, stderr)
 	}
-	// 阶梯（progressive）：<=10000 按 $1.0，>10000 按 $2.0；分时：UTC 00:00-08:00 0.5x
-	if code, _, stderr := run(t, "model", "price", "tier", "set", "m1", "--max", "10000", "--in", "1.0", "--out", "2.0"); code != 0 {
-		t.Fatalf("tier set 10000: %s", stderr)
+	// 阶梯（all_in + total_input）：<=10000 按 $1.0，>10000 按 $2.0；再通过 rule set 切换为 progressive，分时：UTC 00:00-08:00 0.5x
+	if code, _, stderr := run(t, "model", "price", "set", "m1", "--tier", "10k", "--in", "1.0", "--out", "2.0"); code != 0 {
+		t.Fatalf("model price set --tier 10k: %s", stderr)
 	}
-	if code, _, stderr := run(t, "model", "price", "tier", "set", "m1", "--max", "inf", "--in", "2.0", "--out", "4.0"); code != 0 {
-		t.Fatalf("tier set inf: %s", stderr)
+	if code, _, stderr := run(t, "model", "price", "set", "m1", "--tier", "inf", "--in", "2.0", "--out", "4.0"); code != 0 {
+		t.Fatalf("model price set --tier inf: %s", stderr)
 	}
-	if code, _, stderr := run(t, "model", "price", "tier", "config", "m1", "--mode", "progressive"); code != 0 {
-		t.Fatalf("tier config: %s", stderr)
+	if code, _, stderr := run(t, "model", "price", "rule", "set", "m1", "--rule-json", `{"version":1,"tiers":{"mode":"progressive","basis":"total_input","brackets":[{"max_tokens":10000,"prices":{"in":1.0,"out":2.0}},{"prices":{"in":2.0,"out":4.0}}]}}`); code != 0 {
+		t.Fatalf("model price rule set progressive: %s", stderr)
 	}
-	if code, _, stderr := run(t, "model", "price", "window", "set", "m1", "--name", "off-peak", "--tz", "UTC", "--start", "00:00", "--end", "08:00", "--multiplier", "0.5"); code != 0 {
-		t.Fatalf("window set: %s", stderr)
+	if code, _, stderr := run(t, "model", "price", "set", "m1", "--window", "off-peak", "--tz", "UTC", "--start", "00:00", "--end", "08:00", "--multiplier", "0.5"); code != 0 {
+		t.Fatalf("model price set --window: %s", stderr)
 	}
 
 	// 命中 off-peak (02:00 UTC)，in=15000 (10000*1.0 + 5000*2.0)/1e6 * 0.5 = 0.01，out=1000*4.0/1e6 * 0.5 = 0.002 => total 0.012
@@ -371,8 +402,8 @@ func TestModelPriceLsMultiProviderAccountIsolation(t *testing.T) {
 	if code, _, stderr := run(t, "model", "price", "set", "m1", "--account", "ds1", "--in", "0.5"); code != 0 {
 		t.Fatalf("set ds1 退出码 = %d，stderr = %s", code, stderr)
 	}
-	if code, _, stderr := run(t, "model", "price", "window", "set", "m1", "--account", "ds1", "--name", "off", "--start", "00:00", "--end", "08:00", "--multiplier", "0.5"); code != 0 {
-		t.Fatalf("window set ds1 退出码 = %d，stderr = %s", code, stderr)
+	if code, _, stderr := run(t, "model", "price", "set", "m1", "--account", "ds1", "--window", "off", "--start", "00:00", "--end", "08:00", "--multiplier", "0.5"); code != 0 {
+		t.Fatalf("model price set --window ds1 退出码 = %d，stderr = %s", code, stderr)
 	}
 
 	code, out, stderr := run(t, "model", "price", "ls", "m1", "--account", "ds1", "--json")
@@ -404,6 +435,106 @@ func TestModelPriceLsMultiProviderAccountIsolation(t *testing.T) {
 		default:
 			t.Fatalf("未知 provider %q", r.Provider)
 		}
+	}
+}
+
+func TestModelPriceTierMultipleAndMode(t *testing.T) {
+	sandbox(t)
+	mustInit(t)
+	if code, _, stderr := addAccount(t, "a1", "anthropic", "http://127.0.0.1:9", "anthropic", "--key", "sk-1", "--models", "claude-sonnet-4"); code != 0 {
+		t.Fatalf("account add 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	// 1. 先设基础单价 in=2, out=4，再设 --tier 200k --multiple 2
+	if code, _, stderr := run(t, "model", "price", "set", "claude-sonnet-4", "--provider", "anthropic", "--in", "2", "--out", "4"); code != 0 {
+		t.Fatalf("base price set 退出码 = %d，stderr = %s", code, stderr)
+	}
+	code, out, stderr := run(t, "model", "price", "set", "claude-sonnet-4", "--provider", "anthropic", "--tier", "200k", "--multiple", "2")
+	if code != 0 {
+		t.Fatalf("tier multiple set 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if !strings.Contains(out, "2x") {
+		t.Fatalf("set 输出应包含 2x:\n%s", out)
+	}
+
+	// rule show 应展示 full (all_in) 与 2x
+	code, out, stderr = run(t, "model", "price", "rule", "show", "claude-sonnet-4", "--provider", "anthropic")
+	if code != 0 {
+		t.Fatalf("rule show 退出码 = %d，stderr = %s", code, stderr)
+	}
+	for _, want := range []string{"full (all_in)", "2x", "继承基础单价"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("rule show 输出应包含 %q:\n%s", want, out)
+		}
+	}
+
+	// 试算 <=200k：in=100k (0.2) + out=10k (0.04) = 0.24
+	code, out, stderr = run(t, "model", "price", "test", "claude-sonnet-4", "--provider", "anthropic", "--in", "100000", "--out", "10000", "--json")
+	if code != 0 {
+		t.Fatalf("test <=200k 退出码 = %d，stderr = %s", code, stderr)
+	}
+	var testResp struct {
+		Breakdown *store.CostBreakdown `json:"breakdown"`
+	}
+	mustJSON(t, out, &testResp)
+	if testResp.Breakdown == nil || testResp.Breakdown.TotalCost == nil || !almostEqual(*testResp.Breakdown.TotalCost, 0.24) {
+		t.Fatalf("<=200k 试算期望 0.24，实际 %+v", testResp.Breakdown)
+	}
+
+	// 试算 >200k（all_in）：in=300k * 4/1e6 (1.2) + out=10k * 8/1e6 (0.08) = 1.28
+	code, out, stderr = run(t, "model", "price", "test", "claude-sonnet-4", "--provider", "anthropic", "--in", "300000", "--out", "10000", "--json")
+	if code != 0 {
+		t.Fatalf("test >200k 退出码 = %d，stderr = %s", code, stderr)
+	}
+	mustJSON(t, out, &testResp)
+	if testResp.Breakdown == nil || testResp.Breakdown.TotalCost == nil || !almostEqual(*testResp.Breakdown.TotalCost, 1.28) {
+		t.Fatalf(">200k 试算期望 1.28，实际 %+v", testResp.Breakdown)
+	}
+
+	// 2. 单独传 --tier-mode split 切换为分段累计
+	if code, out, stderr := run(t, "model", "price", "set", "claude-sonnet-4", "--provider", "anthropic", "--tier-mode", "split"); code != 0 {
+		t.Fatalf("--tier-mode split 退出码 = %d，stderr = %s", code, stderr)
+	} else if !strings.Contains(out, "split (progressive)") {
+		t.Fatalf("--tier-mode split 输出应包含 split (progressive):\n%s", out)
+	}
+	if pm := providerPrice(t, "anthropic", "claude-sonnet-4"); pm.PricingRule == nil || pm.PricingRule.Tiers == nil || pm.PricingRule.Tiers.Mode != store.TierModeProgressive {
+		t.Fatalf("--tier-mode split 未生效: %+v", pm.PricingRule)
+	}
+
+	// 3. --tier 200k+ 与 --tier >200k 显式超阈值语法 + --window 搭配 --multiple 别名
+	if code, _, stderr := run(t, "model", "price", "tier", "clear", "claude-sonnet-4", "--provider", "anthropic"); code != 0 {
+		t.Fatalf("tier clear 退出码 = %d，stderr = %s", code, stderr)
+	}
+	// 无阶梯时单独传 --tier-mode 应返回退出码 1
+	if code, _, _ := run(t, "model", "price", "set", "claude-sonnet-4", "--provider", "anthropic", "--tier-mode", "split"); code != 1 {
+		t.Fatalf("无阶梯时传 --tier-mode 应返回退出码 1，实际 %d", code)
+	}
+	if code, _, stderr := run(t, "model", "price", "set", "claude-sonnet-4", "--provider", "anthropic", "--tier", "200k+", "--multiple", "2", "--tier-mode", "full"); code != 0 {
+		t.Fatalf("--tier 200k+ 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if pm := providerPrice(t, "anthropic", "claude-sonnet-4"); pm.PricingRule == nil || pm.PricingRule.Tiers == nil ||
+		len(pm.PricingRule.Tiers.Brackets) != 2 ||
+		*pm.PricingRule.Tiers.Brackets[0].MaxTokens != 200000 ||
+		pm.PricingRule.Tiers.Brackets[1].MaxTokens != nil ||
+		pm.PricingRule.Tiers.Brackets[1].Multiplier == nil || *pm.PricingRule.Tiers.Brackets[1].Multiplier != 2 {
+		t.Fatalf("--tier 200k+ 落库不符合预期: %+v", pm.PricingRule)
+	}
+	if code, _, stderr := run(t, "model", "price", "set", "claude-sonnet-4", "--provider", "anthropic", "--tier", ">200k", "--in", "4", "--out", "8"); code != 0 {
+		t.Fatalf("--tier >200k 退出码 = %d，stderr = %s", code, stderr)
+	}
+	if code, _, stderr := run(t, "model", "price", "set", "claude-sonnet-4", "--provider", "anthropic", "--window", "night", "--start", "00:00", "--end", "06:00", "--multiple", "0.5"); code != 0 {
+		t.Fatalf("--window 搭配 --multiple 退出码 = %d，stderr = %s", code, stderr)
+	}
+
+	// 错误校验：非法 --tier-mode、单独传 --multiple、>inf
+	if code, _, _ := run(t, "model", "price", "set", "claude-sonnet-4", "--provider", "anthropic", "--tier-mode", "invalid"); code != 2 {
+		t.Fatalf("非法 --tier-mode 应返回退出码 2，实际 %d", code)
+	}
+	if code, _, _ := run(t, "model", "price", "set", "claude-sonnet-4", "--provider", "anthropic", "--multiple", "2"); code != 2 {
+		t.Fatalf("单独传 --multiple 应返回退出码 2，实际 %d", code)
+	}
+	if code, _, _ := run(t, "model", "price", "set", "claude-sonnet-4", "--provider", "anthropic", "--tier", ">inf", "--multiple", "2"); code != 2 {
+		t.Fatalf("--tier >inf 应返回退出码 2，实际 %d", code)
 	}
 }
 

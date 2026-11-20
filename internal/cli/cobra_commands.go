@@ -122,13 +122,12 @@ func newModelPriceCommand(e *Env) *cobra.Command {
 
 func newModelPriceTierCommand(e *Env) *cobra.Command {
 	return newGroupCommand(e, groupSpec{
-		name:    "model price tier",
-		purpose: "管理模型的阶梯定价档位",
-		items:   modelPriceTierSubs,
-		unknown: "未知子命令 %q，可用：set | config | unset | clear\n用 lax model price tier --help 查看用法",
+		name:     "model price tier",
+		purpose:  "管理模型的阶梯定价档位（新增或更新档位请用 lax model price set ... --tier）",
+		items:    modelPriceTierSubs,
+		examples: []string{"lax model price set glm-4.6 --tier 200k --in 1.0 --out 4.0"},
+		unknown:  "未知子命令 %q，可用：unset | clear\n用 lax model price tier --help 查看用法",
 	},
-		newLeafCommand(e, "model price tier set", "新增或更新一个阶梯档位", cmdModelPriceTierSet),
-		newLeafCommand(e, "model price tier config", "配置阶梯模式（all_in / progressive）与判定基数", cmdModelPriceTierConfig),
 		newLeafCommand(e, "model price tier unset", "删除指定上限的阶梯档位", cmdModelPriceTierUnset),
 		newLeafCommand(e, "model price tier clear", "清空全部阶梯档位", cmdModelPriceTierClear),
 	)
@@ -136,12 +135,12 @@ func newModelPriceTierCommand(e *Env) *cobra.Command {
 
 func newModelPriceWindowCommand(e *Env) *cobra.Command {
 	return newGroupCommand(e, groupSpec{
-		name:    "model price window",
-		purpose: "管理模型的分时计费窗口",
-		items:   modelPriceWindowSubs,
-		unknown: "未知子命令 %q，可用：set | unset | clear\n用 lax model price window --help 查看用法",
+		name:     "model price window",
+		purpose:  "管理模型的分时计费窗口（新增或更新窗口请用 lax model price set ... --window）",
+		items:    modelPriceWindowSubs,
+		examples: []string{"lax model price set glm-4.6 --window off-peak --start 00:00 --end 08:00 --multiplier 0.5"},
+		unknown:  "未知子命令 %q，可用：unset | clear\n用 lax model price window --help 查看用法",
 	},
-		newLeafCommand(e, "model price window set", "新增或更新一个分时计费窗口", cmdModelPriceWindowSet),
 		newLeafCommand(e, "model price window unset", "删除指定名称的分时窗口", cmdModelPriceWindowUnset),
 		newLeafCommand(e, "model price window clear", "清空全部分时窗口", cmdModelPriceWindowClear),
 	)

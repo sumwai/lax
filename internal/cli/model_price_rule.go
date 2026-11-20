@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"sort"
 	"strconv"
@@ -14,14 +15,11 @@ import (
 )
 
 var modelPriceTierSubs = []groupItem{
-	{"set", "新增或更新一个阶梯档位"},
-	{"config", "配置阶梯模式（all_in / progressive）与判定基数"},
 	{"unset", "删除指定上限的阶梯档位"},
 	{"clear", "清空全部阶梯档位"},
 }
 
 var modelPriceWindowSubs = []groupItem{
-	{"set", "新增或更新一个分时计费窗口"},
 	{"unset", "删除指定名称的分时窗口"},
 	{"clear", "清空全部分时窗口"},
 }
@@ -33,16 +31,9 @@ var modelPriceRuleSubs = []groupItem{
 }
 
 const (
-	modelPriceTierSetUsage = "用法：lax model price tier set <模型> [--provider 供应商|--account 账号] " +
-		"--max <N|inf> [--in X] [--out X] [--cache-read X] [--cache-write X]"
-	modelPriceTierConfigUsage = "用法：lax model price tier config <模型> [--provider 供应商|--account 账号] " +
-		"[--mode all_in|progressive] [--basis total_input|uncached_input]"
-	modelPriceTierUnsetUsage = "用法：lax model price tier unset <模型> [--provider 供应商|--account 账号] --max <N|inf>"
+	modelPriceTierUnsetUsage = "用法：lax model price tier unset <模型> [--provider 供应商|--account 账号] --tier <200k|1m|inf>"
 	modelPriceTierClearUsage = "用法：lax model price tier clear <模型> [--provider 供应商|--account 账号]"
 
-	modelPriceWindowSetUsage = "用法：lax model price window set <模型> [--provider 供应商|--account 账号] " +
-		"--name <名称> [--tz <IANA>] --start <HH:MM> --end <HH:MM> [--days sun,mon,...] " +
-		"[--multiplier X] [--in X] [--out X] [--cache-read X] [--cache-write X]"
 	modelPriceWindowUnsetUsage = "用法：lax model price window unset <模型> [--provider 供应商|--account 账号] --name <名称>"
 	modelPriceWindowClearUsage = "用法：lax model price window clear <模型> [--provider 供应商|--account 账号]"
 
@@ -157,20 +148,104 @@ func cloneRuleOrInit(r *store.PricingRule) *store.PricingRule {
 	return &out
 }
 
-func parseTierMax(raw string, usageLine string) (*int64, error) {
+func parseTierThreshold(raw string) (*int64, error) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
-		return nil, usagef("必须指定 --max <N|inf>\n%s", usageLine)
+		return nil, fmt.Errorf("必须指定 --tier <阈值|inf>，如 200k、1m、32768 或 inf")
 	}
 	lower := strings.ToLower(s)
-	if lower == "inf" || lower == "+inf" || s == "∞" {
+	if lower == "inf" || lower == "+inf" || lower == "unlimited" || s == "+" || s == "∞" {
 		return nil, nil
 	}
-	n, err := strconv.ParseInt(s, 10, 64)
-	if err != nil || n <= 0 {
-		return nil, usagef("--max 值 %q 无效：必须是正整数或 inf\n%s", raw, usageLine)
+	var mult float64
+	switch {
+	case strings.HasSuffix(lower, "k"):
+		mult = 1000
+		lower = lower[:len(lower)-1]
+	case strings.HasSuffix(lower, "m"):
+		mult = 1000000
+		lower = lower[:len(lower)-1]
+	default:
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || n <= 0 {
+			return nil, fmt.Errorf("--tier 值 %q 无效：必须是正整数（支持 k/m 后缀，如 200k、1.5m）或 inf", raw)
+		}
+		return &n, nil
+	}
+	f, err := strconv.ParseFloat(lower, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f <= 0 {
+		return nil, fmt.Errorf("--tier 值 %q 无效：必须是正整数（支持 k/m 后缀，如 200k、1.5m）或 inf", raw)
+	}
+	n := int64(math.Round(f * mult))
+	if n <= 0 {
+		return nil, fmt.Errorf("--tier 值 %q 无效：必须是正整数（支持 k/m 后缀，如 200k、1.5m）或 inf", raw)
 	}
 	return &n, nil
+}
+
+func parseTierArg(raw string) (threshold *int64, isAbove bool, err error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return nil, false, fmt.Errorf("必须指定 --tier <阈值|inf>，如 200k、200k+、>200k、1m 或 inf")
+	}
+	if strings.HasPrefix(s, ">") {
+		inner := strings.TrimSpace(s[1:])
+		n, err := parseTierThreshold(inner)
+		if err != nil {
+			return nil, false, err
+		}
+		if n == nil {
+			return nil, false, fmt.Errorf("--tier %q 无效：> 后必须是具体的 token 阈值，如 >200k 或 200k+", raw)
+		}
+		return n, true, nil
+	}
+	if strings.HasSuffix(s, "+") && len(s) > 1 {
+		inner := strings.TrimSpace(s[:len(s)-1])
+		n, err := parseTierThreshold(inner)
+		if err != nil {
+			return nil, false, err
+		}
+		if n == nil {
+			return nil, false, fmt.Errorf("--tier %q 无效：+ 前必须是具体的 token 阈值，如 200k+ 或 >200k", raw)
+		}
+		return n, true, nil
+	}
+	n, err := parseTierThreshold(s)
+	return n, false, err
+}
+
+func parseTierMode(raw string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "full", store.TierModeAllIn:
+		return store.TierModeAllIn, nil
+	case "split", "graduated", store.TierModeProgressive:
+		return store.TierModeProgressive, nil
+	default:
+		return "", fmt.Errorf("未知的阶梯模式 %q，可用 full（全量）或 split（分段）", raw)
+	}
+}
+
+func formatTierModeLabel(mode string) string {
+	switch emptyDefault(mode, store.TierModeAllIn) {
+	case store.TierModeProgressive:
+		return "split (" + store.TierModeProgressive + ")"
+	default:
+		return "full (" + store.TierModeAllIn + ")"
+	}
+}
+
+func formatTierDetail(u uiStyle, t store.PriceTier) string {
+	var parts []string
+	if t.Multiplier != nil {
+		parts = append(parts, u.warn(fmt.Sprintf("%gx", *t.Multiplier)))
+	}
+	if t.Prices.In != nil || t.Prices.Out != nil || t.Prices.CacheRead != nil || t.Prices.CacheWrite != nil {
+		parts = append(parts, formatPriceSetInline(u, t.Prices))
+	}
+	if len(parts) == 0 {
+		return u.dim("继承基础单价 (1x)")
+	}
+	return strings.Join(parts, "  ")
 }
 
 func sameTierMax(a, b *int64) bool {
@@ -230,36 +305,94 @@ func formatScopeValue(u uiStyle, sc ruleScope) string {
 	return fmt.Sprintf("%s %s", u.dim("厂商"), u.info(sc.provider))
 }
 
-func cmdModelPriceTierSet(e *Env, fs *leafFlags, args []string) error {
-	provider := fs.String("provider", "", "厂商；与 --account 互斥，不给时按模型名唯一确定")
-	accountName := fs.String("account", "", "账号名；给定时写该账号的覆盖规则")
-	maxRaw := fs.String("max", "", "档位上限 token 数（正整数）或 inf（无上限）")
-	in := fs.Float64("in", 0, "输入价，每百万 token")
-	out := fs.Float64("out", 0, "输出价，每百万 token")
-	cacheRead := fs.Float64("cache-read", 0, "缓存读价，每百万 token")
-	cacheWrite := fs.Float64("cache-write", 0, "缓存写价，每百万 token")
-	if err := fs.Parse(args); err != nil {
-		return err
+type tierSetInput struct {
+	model      string
+	provider   string
+	account    string
+	tierRaw    string
+	tierMode   string
+	multiplier *float64
+	in         *float64
+	out        *float64
+	cacheRead  *float64
+	cacheWrite *float64
+}
+
+func ensureTierBaseBracket(tp *store.TieredPricing, n int64) {
+	for _, b := range tp.Brackets {
+		if b.MaxTokens != nil && *b.MaxTokens == n {
+			return
+		}
 	}
-	if fs.NArg() != 1 {
-		return usagef("%s", modelPriceTierSetUsage)
+	tp.Brackets = append(tp.Brackets, store.PriceTier{
+		MaxTokens: &n,
+		Prices:    store.PriceSet{},
+	})
+}
+
+func upsertTierBracket(tp *store.TieredPricing, targetMax *int64, ps store.PriceSet, mult *float64) {
+	for i := range tp.Brackets {
+		if sameTierMax(tp.Brackets[i].MaxTokens, targetMax) {
+			if ps.In != nil {
+				tp.Brackets[i].Prices.In = ps.In
+			}
+			if ps.Out != nil {
+				tp.Brackets[i].Prices.Out = ps.Out
+			}
+			if ps.CacheRead != nil {
+				tp.Brackets[i].Prices.CacheRead = ps.CacheRead
+			}
+			if ps.CacheWrite != nil {
+				tp.Brackets[i].Prices.CacheWrite = ps.CacheWrite
+			}
+			if mult != nil {
+				tp.Brackets[i].Multiplier = mult
+			}
+			return
+		}
 	}
-	model, err := checkPriceModel(fs.Arg(0), modelPriceTierSetUsage)
-	if err != nil {
-		return err
+	tp.Brackets = append(tp.Brackets, store.PriceTier{
+		MaxTokens:  targetMax,
+		Prices:     ps,
+		Multiplier: mult,
+	})
+}
+
+func applyModelPriceTierSet(e *Env, fs *leafFlags, in tierSetInput) error {
+	hasTier := flagWasSet(fs, "tier")
+	hasMode := flagWasSet(fs, "tier-mode")
+
+	var mappedMode string
+	if hasMode {
+		var err error
+		mappedMode, err = parseTierMode(in.tierMode)
+		if err != nil {
+			return usagef("%v\n%s", err, modelPriceSetUsage)
+		}
 	}
-	maxPtr, err := parseTierMax(*maxRaw, modelPriceTierSetUsage)
-	if err != nil {
-		return err
-	}
+
 	ps := store.PriceSet{
-		In:         priceFlagValue(fs, "in", in),
-		Out:        priceFlagValue(fs, "out", out),
-		CacheRead:  priceFlagValue(fs, "cache-read", cacheRead),
-		CacheWrite: priceFlagValue(fs, "cache-write", cacheWrite),
+		In:         priceFlagValue(fs, "in", in.in),
+		Out:        priceFlagValue(fs, "out", in.out),
+		CacheRead:  priceFlagValue(fs, "cache-read", in.cacheRead),
+		CacheWrite: priceFlagValue(fs, "cache-write", in.cacheWrite),
 	}
-	if ps.In == nil && ps.Out == nil && ps.CacheRead == nil && ps.CacheWrite == nil {
-		return usagef("至少需要指定一项单价（--in / --out / --cache-read / --cache-write）\n%s", modelPriceTierSetUsage)
+	hasPrice := ps.In != nil || ps.Out != nil || ps.CacheRead != nil || ps.CacheWrite != nil
+	hasMult := in.multiplier != nil
+
+	var threshold *int64
+	var isAbove bool
+	if hasTier {
+		var err error
+		threshold, isAbove, err = parseTierArg(in.tierRaw)
+		if err != nil {
+			return usagef("%v\n%s", err, modelPriceSetUsage)
+		}
+		if !hasPrice && !hasMult {
+			return usagef("必须至少指定一项单价（--in / --out / --cache-read / --cache-write）或倍率（--multiple / --multiplier）\n%s", modelPriceSetUsage)
+		}
+	} else if hasPrice || hasMult {
+		return usagef("设置阶梯档位单价或倍率必须指定 --tier <200k|200k+|inf>\n%s", modelPriceSetUsage)
 	}
 
 	a, err := openApp(e, true)
@@ -268,7 +401,7 @@ func cmdModelPriceTierSet(e *Env, fs *leafFlags, args []string) error {
 	}
 	defer a.Close()
 
-	sc, err := resolveRuleScope(a.st, model, *provider, *accountName, modelPriceTierSetUsage)
+	sc, err := resolveRuleScope(a.st, in.model, in.provider, in.account, modelPriceSetUsage)
 	if err != nil {
 		return err
 	}
@@ -276,6 +409,32 @@ func cmdModelPriceTierSet(e *Env, fs *leafFlags, args []string) error {
 	if err != nil {
 		return err
 	}
+
+	if !hasTier {
+		if cur == nil || cur.Tiers == nil || len(cur.Tiers.Brackets) == 0 {
+			return fmt.Errorf("模型 %q 尚未配置任何阶梯档位，请先用 lax model price set %s --tier <200k|inf> ... 添加档位", in.model, in.model)
+		}
+		next := cloneRuleOrInit(cur)
+		next.Tiers.Mode = mappedMode
+		if err := saveScopeRule(a.st, sc, next, modelPriceSetUsage); err != nil {
+			return err
+		}
+		if e.JSON {
+			return e.printJSON(map[string]any{
+				"model":    sc.model,
+				"provider": sc.provider,
+				"account":  sc.account,
+				"rule":     next,
+			})
+		}
+		u := newUI(e.Stdout)
+		fmt.Fprintf(e.Stdout, "%s 已更新阶梯模式\n", u.ok("✓"))
+		fmt.Fprintf(e.Stdout, "  %s  %s\n", u.dim(pad("作用域", 8)), formatScopeValue(u, sc))
+		fmt.Fprintf(e.Stdout, "  %s  %s\n", u.dim(pad("模型", 8)), u.info(sc.model))
+		fmt.Fprintf(e.Stdout, "  %s  %s\n", u.dim(pad("模式", 8)), u.paint("35", formatTierModeLabel(next.Tiers.Mode)))
+		return nil
+	}
+
 	next := cloneRuleOrInit(cur)
 	if next.Tiers == nil {
 		next.Tiers = &store.TieredPricing{
@@ -283,35 +442,28 @@ func cmdModelPriceTierSet(e *Env, fs *leafFlags, args []string) error {
 			Basis: store.TierBasisTotalInput,
 		}
 	}
-
-	updated := false
-	for i := range next.Tiers.Brackets {
-		if sameTierMax(next.Tiers.Brackets[i].MaxTokens, maxPtr) {
-			if ps.In != nil {
-				next.Tiers.Brackets[i].Prices.In = ps.In
-			}
-			if ps.Out != nil {
-				next.Tiers.Brackets[i].Prices.Out = ps.Out
-			}
-			if ps.CacheRead != nil {
-				next.Tiers.Brackets[i].Prices.CacheRead = ps.CacheRead
-			}
-			if ps.CacheWrite != nil {
-				next.Tiers.Brackets[i].Prices.CacheWrite = ps.CacheWrite
-			}
-			updated = true
-			break
-		}
-	}
-	if !updated {
-		next.Tiers.Brackets = append(next.Tiers.Brackets, store.PriceTier{
-			MaxTokens: maxPtr,
-			Prices:    ps,
-		})
-		sortTierBrackets(next.Tiers.Brackets)
+	if hasMode {
+		next.Tiers.Mode = mappedMode
 	}
 
-	if err := saveScopeRule(a.st, sc, next, modelPriceTierSetUsage); err != nil {
+	var displayRange string
+	switch {
+	case isAbove:
+		ensureTierBaseBracket(next.Tiers, *threshold)
+		upsertTierBracket(next.Tiers, nil, ps, in.multiplier)
+		displayRange = fmt.Sprintf(">%s (inf)", formatTierMax(threshold))
+	case threshold != nil && hasMult && !hasPrice:
+		// 直观语义：--tier 200k --multiple 2 表示 <=200k 按基础价 1x，>200k 按倍率 M。
+		ensureTierBaseBracket(next.Tiers, *threshold)
+		upsertTierBracket(next.Tiers, nil, store.PriceSet{}, in.multiplier)
+		displayRange = fmt.Sprintf(">%s (inf)", formatTierMax(threshold))
+	default:
+		upsertTierBracket(next.Tiers, threshold, ps, in.multiplier)
+		displayRange = formatTierMax(threshold)
+	}
+	sortTierBrackets(next.Tiers.Brackets)
+
+	if err := saveScopeRule(a.st, sc, next, modelPriceSetUsage); err != nil {
 		return err
 	}
 
@@ -328,92 +480,23 @@ func cmdModelPriceTierSet(e *Env, fs *leafFlags, args []string) error {
 	fmt.Fprintf(e.Stdout, "%s 已写入阶梯档位\n", u.ok("✓"))
 	fmt.Fprintf(e.Stdout, "  %s  %s\n", u.dim(pad("作用域", 8)), formatScopeValue(u, sc))
 	fmt.Fprintf(e.Stdout, "  %s  %s\n", u.dim(pad("模型", 8)), u.info(sc.model))
-	fmt.Fprintf(e.Stdout, "  %s  %s\n", u.dim(pad("档位上限", 8)), u.paint("35", formatTierMax(maxPtr)))
-	fmt.Fprintf(e.Stdout, "  %s  %s\n", u.dim(pad("单价", 8)), formatPriceSetInline(u, ps))
-	return nil
-}
-
-func cmdModelPriceTierConfig(e *Env, fs *leafFlags, args []string) error {
-	provider := fs.String("provider", "", "厂商；与 --account 互斥，不给时按模型名唯一确定")
-	accountName := fs.String("account", "", "账号名；给定时写该账号的覆盖规则")
-	mode := fs.String("mode", "", "阶梯模式：all_in 或 progressive")
-	basis := fs.String("basis", "", "判定基数：total_input 或 uncached_input")
-	if err := fs.Parse(args); err != nil {
-		return err
+	fmt.Fprintf(e.Stdout, "  %s  %s\n", u.dim(pad("档位", 8)), u.paint("35", displayRange))
+	if in.multiplier != nil {
+		fmt.Fprintf(e.Stdout, "  %s  %s\n", u.dim(pad("倍率", 8)), u.warn(fmt.Sprintf("%gx", *in.multiplier)))
 	}
-	if fs.NArg() != 1 {
-		return usagef("%s", modelPriceTierConfigUsage)
+	if hasPrice {
+		fmt.Fprintf(e.Stdout, "  %s  %s\n", u.dim(pad("单价", 8)), formatPriceSetInline(u, ps))
 	}
-	model, err := checkPriceModel(fs.Arg(0), modelPriceTierConfigUsage)
-	if err != nil {
-		return err
-	}
-	hasMode := flagWasSet(fs, "mode")
-	hasBasis := flagWasSet(fs, "basis")
-	if !hasMode && !hasBasis {
-		return usagef("至少需要指定 --mode 或 --basis\n%s", modelPriceTierConfigUsage)
-	}
-	mVal := strings.TrimSpace(*mode)
-	if hasMode && mVal != store.TierModeAllIn && mVal != store.TierModeProgressive {
-		return usagef("未知的阶梯模式 %q，可用 all_in、progressive\n%s", mVal, modelPriceTierConfigUsage)
-	}
-	bVal := strings.TrimSpace(*basis)
-	if hasBasis && bVal != store.TierBasisTotalInput && bVal != store.TierBasisUncachedInput {
-		return usagef("未知的阶梯基数 %q，可用 total_input、uncached_input\n%s", bVal, modelPriceTierConfigUsage)
-	}
-
-	a, err := openApp(e, true)
-	if err != nil {
-		return err
-	}
-	defer a.Close()
-
-	sc, err := resolveRuleScope(a.st, model, *provider, *accountName, modelPriceTierConfigUsage)
-	if err != nil {
-		return err
-	}
-	cur, err := loadScopeRule(a.st, sc)
-	if err != nil {
-		return err
-	}
-	if cur == nil || cur.Tiers == nil || len(cur.Tiers.Brackets) == 0 {
-		return fmt.Errorf("模型 %q 尚未配置任何阶梯档位，请先用 lax model price tier set %s --max <N|inf> ... 添加档位", model, model)
-	}
-	next := cloneRuleOrInit(cur)
 	if hasMode {
-		next.Tiers.Mode = mVal
+		fmt.Fprintf(e.Stdout, "  %s  %s\n", u.dim(pad("模式", 8)), u.paint("35", formatTierModeLabel(next.Tiers.Mode)))
 	}
-	if hasBasis {
-		next.Tiers.Basis = bVal
-	}
-	if err := saveScopeRule(a.st, sc, next, modelPriceTierConfigUsage); err != nil {
-		return err
-	}
-
-	if e.JSON {
-		return e.printJSON(map[string]any{
-			"model":    sc.model,
-			"provider": sc.provider,
-			"account":  sc.account,
-			"rule":     next,
-		})
-	}
-
-	u := newUI(e.Stdout)
-	fmt.Fprintf(e.Stdout, "%s 已更新阶梯配置\n", u.ok("✓"))
-	fmt.Fprintf(e.Stdout, "  %s  %s\n", u.dim(pad("作用域", 8)), formatScopeValue(u, sc))
-	fmt.Fprintf(e.Stdout, "  %s  %s\n", u.dim(pad("模型", 8)), u.info(sc.model))
-	fmt.Fprintf(e.Stdout, "  %s  %s  %s\n",
-		u.dim(pad("配置", 8)),
-		u.dim("mode=")+u.paint("35", emptyDefault(next.Tiers.Mode, store.TierModeAllIn)),
-		u.dim("basis=")+u.paint("35", emptyDefault(next.Tiers.Basis, store.TierBasisTotalInput)))
 	return nil
 }
 
 func cmdModelPriceTierUnset(e *Env, fs *leafFlags, args []string) error {
 	provider := fs.String("provider", "", "厂商；与 --account 互斥，不给时按模型名唯一确定")
 	accountName := fs.String("account", "", "账号名；给定时清该账号的覆盖规则")
-	maxRaw := fs.String("max", "", "要删除的档位上限（正整数或 inf）")
+	tierRaw := fs.String("tier", "", "要删除的档位上限（如 200k、1m、32768 或 inf）")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -424,9 +507,9 @@ func cmdModelPriceTierUnset(e *Env, fs *leafFlags, args []string) error {
 	if err != nil {
 		return err
 	}
-	maxPtr, err := parseTierMax(*maxRaw, modelPriceTierUnsetUsage)
+	maxPtr, err := parseTierThreshold(*tierRaw)
 	if err != nil {
-		return err
+		return usagef("%v\n%s", err, modelPriceTierUnsetUsage)
 	}
 
 	a, err := openApp(e, true)
@@ -601,55 +684,49 @@ func formatDaysList(days []int) string {
 	return strings.Join(out, ",")
 }
 
-func cmdModelPriceWindowSet(e *Env, fs *leafFlags, args []string) error {
-	provider := fs.String("provider", "", "厂商；与 --account 互斥，不给时按模型名唯一确定")
-	accountName := fs.String("account", "", "账号名；给定时写该账号的覆盖规则")
-	name := fs.String("name", "", "分时窗口名称")
-	tz := fs.String("tz", "", "IANA 时区，例如 Asia/Shanghai 或 UTC")
-	start := fs.String("start", "", "开始时间 HH:MM")
-	end := fs.String("end", "", "结束时间 HH:MM（支持 24:00）")
-	daysRaw := fs.String("days", "", "生效星期，逗号分隔如 sun,mon,sat（留空表示每天）")
-	multiplier := fs.Float64("multiplier", 0, "价格倍率，如 0.5")
-	in := fs.Float64("in", 0, "覆盖输入价，每百万 token")
-	out := fs.Float64("out", 0, "覆盖输出价，每百万 token")
-	cacheRead := fs.Float64("cache-read", 0, "覆盖缓存读价，每百万 token")
-	cacheWrite := fs.Float64("cache-write", 0, "覆盖缓存写价，每百万 token")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 1 {
-		return usagef("%s", modelPriceWindowSetUsage)
-	}
-	model, err := checkPriceModel(fs.Arg(0), modelPriceWindowSetUsage)
-	if err != nil {
-		return err
-	}
-	wName := strings.TrimSpace(*name)
+type windowSetInput struct {
+	model      string
+	provider   string
+	account    string
+	windowName string
+	tz         string
+	start      string
+	end        string
+	daysRaw    string
+	multiplier *float64
+	in         *float64
+	out        *float64
+	cacheRead  *float64
+	cacheWrite *float64
+}
+
+func applyModelPriceWindowSet(e *Env, fs *leafFlags, in windowSetInput) error {
+	wName := strings.TrimSpace(in.windowName)
 	if wName == "" {
-		return usagef("必须指定 --name <名称>\n%s", modelPriceWindowSetUsage)
+		return usagef("必须指定 --window <名称>\n%s", modelPriceSetUsage)
 	}
-	wStart := strings.TrimSpace(*start)
-	wEnd := strings.TrimSpace(*end)
+	wStart := strings.TrimSpace(in.start)
+	wEnd := strings.TrimSpace(in.end)
 	if wStart == "" || wEnd == "" {
-		return usagef("必须指定 --start <HH:MM> 与 --end <HH:MM>\n%s", modelPriceWindowSetUsage)
+		return usagef("必须指定 --start <HH:MM> 与 --end <HH:MM>\n%s", modelPriceSetUsage)
 	}
-	days, err := parseDaysList(*daysRaw, modelPriceWindowSetUsage)
+	days, err := parseDaysList(in.daysRaw, modelPriceSetUsage)
 	if err != nil {
 		return err
 	}
-	multPtr := priceFlagValue(fs, "multiplier", multiplier)
+	multPtr := in.multiplier
 	override := &store.PriceSet{
-		In:         priceFlagValue(fs, "in", in),
-		Out:        priceFlagValue(fs, "out", out),
-		CacheRead:  priceFlagValue(fs, "cache-read", cacheRead),
-		CacheWrite: priceFlagValue(fs, "cache-write", cacheWrite),
+		In:         priceFlagValue(fs, "in", in.in),
+		Out:        priceFlagValue(fs, "out", in.out),
+		CacheRead:  priceFlagValue(fs, "cache-read", in.cacheRead),
+		CacheWrite: priceFlagValue(fs, "cache-write", in.cacheWrite),
 	}
 	hasOverride := override.In != nil || override.Out != nil || override.CacheRead != nil || override.CacheWrite != nil
 	if !hasOverride {
 		override = nil
 	}
 	if multPtr == nil && override == nil {
-		return usagef("必须至少设置 --multiplier 或一项覆盖单价（--in / --out / --cache-read / --cache-write）\n%s", modelPriceWindowSetUsage)
+		return usagef("必须至少设置 --multiplier 或一项覆盖单价（--in / --out / --cache-read / --cache-write）\n%s", modelPriceSetUsage)
 	}
 
 	a, err := openApp(e, true)
@@ -658,7 +735,7 @@ func cmdModelPriceWindowSet(e *Env, fs *leafFlags, args []string) error {
 	}
 	defer a.Close()
 
-	sc, err := resolveRuleScope(a.st, model, *provider, *accountName, modelPriceWindowSetUsage)
+	sc, err := resolveRuleScope(a.st, in.model, in.provider, in.account, modelPriceSetUsage)
 	if err != nil {
 		return err
 	}
@@ -671,7 +748,7 @@ func cmdModelPriceWindowSet(e *Env, fs *leafFlags, args []string) error {
 		next.Schedule = &store.TimeSchedulePricing{}
 	}
 	if flagWasSet(fs, "tz") {
-		next.Schedule.Timezone = strings.TrimSpace(*tz)
+		next.Schedule.Timezone = strings.TrimSpace(in.tz)
 	}
 
 	win := store.TimeWindow{
@@ -694,7 +771,7 @@ func cmdModelPriceWindowSet(e *Env, fs *leafFlags, args []string) error {
 		next.Schedule.Windows = append(next.Schedule.Windows, win)
 	}
 
-	if err := saveScopeRule(a.st, sc, next, modelPriceWindowSetUsage); err != nil {
+	if err := saveScopeRule(a.st, sc, next, modelPriceSetUsage); err != nil {
 		return err
 	}
 
@@ -931,7 +1008,7 @@ func cmdModelPriceRuleShow(e *Env, fs *leafFlags, args []string) error {
 	fmt.Fprintf(e.Stdout, "  %s\n", u.dim(ruleLabel))
 
 	if rule.Tiers != nil {
-		mode := emptyDefault(rule.Tiers.Mode, store.TierModeAllIn)
+		mode := formatTierModeLabel(rule.Tiers.Mode)
 		basis := emptyDefault(rule.Tiers.Basis, store.TierBasisTotalInput)
 		fmt.Fprintf(e.Stdout, "    %s  %s  %s\n",
 			u.paint("35", "阶梯定价"),
@@ -941,7 +1018,7 @@ func cmdModelPriceRuleShow(e *Env, fs *leafFlags, args []string) error {
 			lbl := formatBracketRange(i, rule.Tiers.Brackets)
 			fmt.Fprintf(e.Stdout, "      %s  %s\n",
 				u.paint("35", pad(lbl, 18)),
-				formatPriceSetInline(u, b.Prices))
+				formatTierDetail(u, b))
 		}
 	}
 	if rule.Schedule != nil {

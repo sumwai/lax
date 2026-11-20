@@ -30,7 +30,7 @@ var modelPriceSubs = []groupItem{
 // 三份用法行，所有用法错误都把它打出来；完整参数与示例指向各自子命令的 --help。
 const (
 	modelPriceSetUsage = "用法：lax model price set <模型> [--provider 供应商|--account 账号] " +
-		"[--in N] [--out N] [其它单价参数]\n" +
+		"[--in N] [--out N] [其它单价 / --tier 阶梯 / --window 分时参数]\n" +
 		"完整参数与示例：lax model price set --help"
 	modelPriceUnsetUsage = "用法：lax model price unset <模型> <字段> [<字段>...] [--provider 供应商|--account 账号]\n" +
 		"完整参数与示例：lax model price unset --help"
@@ -210,6 +210,9 @@ type modelPriceSetJSON struct {
 
 // cmdModelPriceSet 写模型单价：给 --account 写该账号的覆盖价，否则写厂商级标价。
 // 只写命令行上给过的那几项，没给的留空（表示继承），不做「一次写四个」。
+// 若传入了分时窗口参数（--window / --tz / --start / --end / --days / --multiplier），
+// 则转为新增或更新对应分时计费窗口；
+// 若传入了阶梯定价参数（--tier），则转为新增或更新阶梯档位（默认 all_in + total_input，已有配置则保留）。
 func cmdModelPriceSet(e *Env, fs *leafFlags, args []string) error {
 	provider := fs.String("provider", "", "厂商；与 --account 互斥，不给时按模型名唯一确定")
 	accountName := fs.String("account", "", "账号名；给定时写该账号在这个模型上的覆盖价")
@@ -219,6 +222,15 @@ func cmdModelPriceSet(e *Env, fs *leafFlags, args []string) error {
 	cacheWrite := fs.Float64("cache-write", 0, "缓存写价，每百万 token；留空表示回退到输入价")
 	ttsChar := fs.Float64("tts-char", 0, "语音合成价，每百万字符")
 	audioSecond := fs.Float64("audio-second", 0, "语音转写价，每秒")
+	tierRaw := fs.String("tier", "", "阶梯档位阈值（如 200k、200k+、>200k、1m 或 inf）")
+	tierMode := fs.String("tier-mode", "", "阶梯计费模式：full（全量按命中档位，默认）或 split（分段累计）")
+	windowName := fs.String("window", "", "分时窗口名称，如 off-peak（传入任意分时参数时必填）")
+	tz := fs.String("tz", "", "分时窗口 IANA 时区，例如 Asia/Shanghai 或 UTC")
+	start := fs.String("start", "", "分时窗口开始时间 HH:MM")
+	end := fs.String("end", "", "分时窗口结束时间 HH:MM（支持 24:00）")
+	daysRaw := fs.String("days", "", "分时窗口生效星期，逗号分隔如 sun,mon,sat（留空表示每天）")
+	multiplier := fs.Float64("multiplier", 0, "分时窗口或阶梯档位价格倍率，如 0.5 或 2")
+	multiple := fs.Float64("multiple", 0, "--multiplier 的别名，如 2")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -233,6 +245,65 @@ func cmdModelPriceSet(e *Env, fs *leafFlags, args []string) error {
 	account := strings.TrimSpace(*accountName)
 	if prov != "" && account != "" {
 		return usagef("--provider 与 --account 只能给一个：厂商级标价用 --provider（或让它按模型名唯一确定），某个账号的覆盖价用 --account\n%s", modelPriceSetUsage)
+	}
+
+	var multPtr *float64
+	hasMult := flagWasSet(fs, "multiplier") || flagWasSet(fs, "multiple")
+	if flagWasSet(fs, "multiplier") && flagWasSet(fs, "multiple") && *multiplier != *multiple {
+		return usagef("--multiplier 与 --multiple 不能同时指定不同的值\n%s", modelPriceSetUsage)
+	}
+	if flagWasSet(fs, "multiple") {
+		multPtr = priceFlagValue(fs, "multiple", multiple)
+	} else if flagWasSet(fs, "multiplier") {
+		multPtr = priceFlagValue(fs, "multiplier", multiplier)
+	}
+
+	hasWindowFlag := flagWasSet(fs, "window") || flagWasSet(fs, "tz") ||
+		flagWasSet(fs, "start") || flagWasSet(fs, "end") ||
+		flagWasSet(fs, "days")
+	hasTierFlag := flagWasSet(fs, "tier") || flagWasSet(fs, "tier-mode")
+	if hasWindowFlag && hasTierFlag {
+		return usagef("分时窗口参数（--window / --tz / --start / --end / --days）与阶梯参数（--tier / --tier-mode）不能同时使用\n%s", modelPriceSetUsage)
+	}
+	if hasWindowFlag {
+		if flagWasSet(fs, "tts-char") || flagWasSet(fs, "audio-second") {
+			return usagef("分时窗口不支持覆盖语音单价（--tts-char / --audio-second）\n%s", modelPriceSetUsage)
+		}
+		return applyModelPriceWindowSet(e, fs, windowSetInput{
+			model:      model,
+			provider:   prov,
+			account:    account,
+			windowName: *windowName,
+			tz:         *tz,
+			start:      *start,
+			end:        *end,
+			daysRaw:    *daysRaw,
+			multiplier: multPtr,
+			in:         in,
+			out:        out,
+			cacheRead:  cacheRead,
+			cacheWrite: cacheWrite,
+		})
+	}
+	if hasTierFlag {
+		if flagWasSet(fs, "tts-char") || flagWasSet(fs, "audio-second") {
+			return usagef("阶梯定价不支持覆盖语音单价（--tts-char / --audio-second）\n%s", modelPriceSetUsage)
+		}
+		return applyModelPriceTierSet(e, fs, tierSetInput{
+			model:      model,
+			provider:   prov,
+			account:    account,
+			tierRaw:    *tierRaw,
+			tierMode:   *tierMode,
+			multiplier: multPtr,
+			in:         in,
+			out:        out,
+			cacheRead:  cacheRead,
+			cacheWrite: cacheWrite,
+		})
+	}
+	if hasMult {
+		return usagef("使用 --multiple / --multiplier 时必须同时指定 --window（分时窗口）或 --tier（阶梯档位）\n%s", modelPriceSetUsage)
 	}
 
 	prices := store.ModelPrices{

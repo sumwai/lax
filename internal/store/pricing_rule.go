@@ -75,8 +75,9 @@ type TieredPricing struct {
 
 // PriceTier 描述阶梯中的单个档位。MaxTokens 为 nil 表示无上限（仅允许出现在最后一档）。
 type PriceTier struct {
-	MaxTokens *int64   `json:"max_tokens,omitempty"`
-	Prices    PriceSet `json:"prices"`
+	MaxTokens  *int64   `json:"max_tokens,omitempty"`
+	Prices     PriceSet `json:"prices"`
+	Multiplier *float64 `json:"multiplier,omitempty"`
 }
 
 // TimeSchedulePricing 描述按本地时间窗口的分时计费。
@@ -168,6 +169,14 @@ func ValidatePricingRule(r *PricingRule) error {
 			}
 			if err := b.Prices.validate(fmt.Sprintf("阶梯第 %d 档", i+1)); err != nil {
 				return err
+			}
+			if b.Multiplier != nil {
+				if math.IsNaN(*b.Multiplier) || math.IsInf(*b.Multiplier, 0) {
+					return fmt.Errorf("阶梯第 %d 档的倍率无效（不能为 NaN 或 Inf）", i+1)
+				}
+				if *b.Multiplier < 0 {
+					return fmt.Errorf("阶梯第 %d 档的倍率是 %v：%w", i+1, *b.Multiplier, ErrNegativePrice)
+				}
 			}
 		}
 	}
@@ -267,6 +276,23 @@ func applyPriceSet(eff *ModelPrices, cacheReadExplicit, cacheWriteExplicit *bool
 	}
 }
 
+func applyTierMultiplier(eff *ModelPrices, cacheReadExplicit, cacheWriteExplicit bool, multiplier *float64) {
+	if multiplier == nil {
+		return
+	}
+	if !cacheReadExplicit && eff.CacheRead == nil && eff.In != nil {
+		eff.CacheRead = cloneFloatPtr(eff.In)
+	}
+	if !cacheWriteExplicit && eff.CacheWrite == nil && eff.In != nil {
+		eff.CacheWrite = cloneFloatPtr(eff.In)
+	}
+	m := *multiplier
+	scaleFloatPtr(&eff.In, m)
+	scaleFloatPtr(&eff.Out, m)
+	scaleFloatPtr(&eff.CacheRead, m)
+	scaleFloatPtr(&eff.CacheWrite, m)
+}
+
 // CalculateCost 根据基础单价、计费规则与请求用量计算总花费及明细。
 func CalculateCost(base ModelPrices, rule *PricingRule, in CostInput) (*CostBreakdown, error) {
 	if rule != nil {
@@ -315,6 +341,7 @@ func CalculateCost(base ModelPrices, rule *PricingRule, in CostInput) (*CostBrea
 					bd.TierIndex = i
 					bd.TierLabel = formatTierLabel(i, brackets)
 					applyPriceSet(&eff, &cacheReadExplicit, &cacheWriteExplicit, b.Prices)
+					applyTierMultiplier(&eff, cacheReadExplicit, cacheWriteExplicit, b.Multiplier)
 					break
 				}
 			}
@@ -344,6 +371,9 @@ func CalculateCost(base ModelPrices, rule *PricingRule, in CostInput) (*CostBrea
 					if up == nil {
 						up = cloneFloatPtr(base.In)
 					}
+					if b.Multiplier != nil {
+						scaleFloatPtr(&up, *b.Multiplier)
+					}
 					segments = append(segments, inputSegment{
 						tierIndex: i,
 						qty:       hi - lo,
@@ -371,6 +401,7 @@ func CalculateCost(base ModelPrices, rule *PricingRule, in CostInput) (*CostBrea
 				bd.TierIndex = hitIdx
 				bd.TierLabel = formatTierLabel(hitIdx, brackets)
 				applyPriceSet(&eff, &cacheReadExplicit, &cacheWriteExplicit, brackets[hitIdx].Prices)
+				applyTierMultiplier(&eff, cacheReadExplicit, cacheWriteExplicit, brackets[hitIdx].Multiplier)
 			}
 		}
 	}

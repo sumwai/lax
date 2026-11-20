@@ -185,6 +185,25 @@ func TestValidatePricingRule(t *testing.T) {
 				Windows: []store.TimeWindow{{Name: "w1", Start: "00:00", End: "01:00", Multiplier: floatPtr(math.Inf(-1))}},
 			}},
 		},
+		{
+			name: "negative tier multiplier",
+			rule: &store.PricingRule{Tiers: &store.TieredPricing{
+				Brackets: []store.PriceTier{{Multiplier: floatPtr(-2)}},
+			}},
+			wantErr: store.ErrNegativePrice,
+		},
+		{
+			name: "NaN tier multiplier",
+			rule: &store.PricingRule{Tiers: &store.TieredPricing{
+				Brackets: []store.PriceTier{{Multiplier: floatPtr(math.NaN())}},
+			}},
+		},
+		{
+			name: "Inf tier multiplier",
+			rule: &store.PricingRule{Tiers: &store.TieredPricing{
+				Brackets: []store.PriceTier{{Multiplier: floatPtr(math.Inf(1))}},
+			}},
+		},
 	}
 
 	for _, tc := range cases {
@@ -353,6 +372,106 @@ func TestCalculateCost_ProgressiveCacheFallbackAndFiniteOverflow(t *testing.T) {
 		t.Fatalf("TierIndex=%d TierLabel=%q, want -1 and empty", bdOver.TierIndex, bdOver.TierLabel)
 	}
 	approxEqual(t, bdOver.TotalCost, 0.75, "progressive finite overflow")
+}
+
+func TestCalculateCost_TierMultiplier_AllInAndProgressive(t *testing.T) {
+	base := store.ModelPrices{In: floatPtr(2.0), Out: floatPtr(4.0)}
+
+	// all_in: <=200k no multiplier (2/4), >200k multiplier=2 (4/8)
+	allInRule := &store.PricingRule{
+		Version: 1,
+		Tiers: &store.TieredPricing{
+			Mode:  store.TierModeAllIn,
+			Basis: store.TierBasisTotalInput,
+			Brackets: []store.PriceTier{
+				{MaxTokens: int64Ptr(200_000)},
+				{MaxTokens: nil, Multiplier: floatPtr(2.0)},
+			},
+		},
+	}
+
+	// <= 200k -> 2/4
+	bdLow, err := store.CalculateCost(base, allInRule, store.CostInput{
+		InTokensUncached: 100_000,
+		CacheRead:        50_000,
+		OutTokens:        50_000,
+	})
+	if err != nil {
+		t.Fatalf("allIn low: %v", err)
+	}
+	approxEqual(t, bdLow.EffectivePrices.In, 2.0, "allIn low eff.In")
+	approxEqual(t, bdLow.EffectivePrices.CacheRead, 2.0, "allIn low eff.CacheRead")
+	approxEqual(t, bdLow.EffectivePrices.Out, 4.0, "allIn low eff.Out")
+	// 100k*2 + 50k*2 + 50k*4 = 0.2 + 0.1 + 0.2 = 0.5
+	approxEqual(t, bdLow.TotalCost, 0.5, "allIn low total")
+
+	// > 200k -> 4/8
+	bdHigh, err := store.CalculateCost(base, allInRule, store.CostInput{
+		InTokensUncached: 200_000,
+		CacheRead:        50_000,
+		OutTokens:        50_000,
+	})
+	if err != nil {
+		t.Fatalf("allIn high: %v", err)
+	}
+	approxEqual(t, bdHigh.EffectivePrices.In, 4.0, "allIn high eff.In")
+	approxEqual(t, bdHigh.EffectivePrices.CacheRead, 4.0, "allIn high eff.CacheRead")
+	approxEqual(t, bdHigh.EffectivePrices.Out, 8.0, "allIn high eff.Out")
+	// 200k*4 + 50k*4 + 50k*8 = 0.8 + 0.2 + 0.4 = 1.4
+	approxEqual(t, bdHigh.TotalCost, 1.4, "allIn high total")
+
+	// Combined with 0.5x schedule -> stacks back to 2/4
+	combinedRule := &store.PricingRule{
+		Version: 1,
+		Tiers:   allInRule.Tiers,
+		Schedule: &store.TimeSchedulePricing{
+			Timezone: "UTC",
+			Windows: []store.TimeWindow{
+				{Name: "half", Start: "00:00", End: "24:00", Multiplier: floatPtr(0.5)},
+			},
+		},
+	}
+	bdStack, err := store.CalculateCost(base, combinedRule, store.CostInput{
+		TS:               1795186800,
+		InTokensUncached: 200_000,
+		CacheRead:        50_000,
+		OutTokens:        50_000,
+	})
+	if err != nil {
+		t.Fatalf("allIn + schedule: %v", err)
+	}
+	approxEqual(t, bdStack.EffectivePrices.In, 2.0, "stacked eff.In")
+	approxEqual(t, bdStack.EffectivePrices.Out, 4.0, "stacked eff.Out")
+	approxEqual(t, bdStack.TotalCost, 0.7, "stacked total")
+
+	// progressive: <=200k @ 2.0, >200k @ 2.0*2 = 4.0; Out @ 4.0*2 = 8.0; then 0.5x schedule -> 1.0 / 2.0 / 4.0
+	progRule := &store.PricingRule{
+		Version: 1,
+		Tiers: &store.TieredPricing{
+			Mode:  store.TierModeProgressive,
+			Basis: store.TierBasisUncachedInput,
+			Brackets: []store.PriceTier{
+				{MaxTokens: int64Ptr(200_000)},
+				{MaxTokens: nil, Multiplier: floatPtr(2.0)},
+			},
+		},
+		Schedule: combinedRule.Schedule,
+	}
+	// Uncached=300k:
+	//   [0, 200k): 200k @ 2.0 * 0.5 = 1.0 -> 0.20
+	//   [200k, 300k): 100k @ 2.0 * 2.0 * 0.5 = 2.0 -> 0.20
+	//   Out=100k @ 4.0 * 2.0 * 0.5 = 4.0 -> 0.40
+	//   Total = 0.80
+	bdProg, err := store.CalculateCost(base, progRule, store.CostInput{
+		TS:               1795186800,
+		InTokensUncached: 300_000,
+		OutTokens:        100_000,
+	})
+	if err != nil {
+		t.Fatalf("progressive + tier multiplier + schedule: %v", err)
+	}
+	approxEqual(t, bdProg.EffectivePrices.Out, 4.0, "prog stacked eff.Out")
+	approxEqual(t, bdProg.TotalCost, 0.80, "prog stacked total")
 }
 
 func TestCalculateCost_ScheduleCrossMidnightAndCombined(t *testing.T) {
